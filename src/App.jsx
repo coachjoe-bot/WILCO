@@ -957,7 +957,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           )}
           <textarea value={input} onChange={e=>setInput(e.target.value)}
             onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey&&!sessionCheckPending){e.preventDefault();send();}}}
-            placeholder={sessionCheckPending?"Tap Same workout or New session above..."`Tell Coach Joe about your workout, ${athlete.name}...`} rows={2}
+            placeholder={sessionCheckPending?"Tap Same workout or New session above...":`Tell Coach Joe about your workout, ${athlete.name}...`} rows={2}
             disabled={!!sessionCheckPending}
             style={{flex:1,background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:"10px 14px",color:C.text,fontSize:14,outline:"none",resize:"none",lineHeight:1.5,opacity:sessionCheckPending?0.4:1}}/>
           <button onClick={send} disabled={loading||videoLoading||!input.trim()||!historyLoaded||!!sessionCheckPending}
