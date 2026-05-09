@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from "react";
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const ANTHROPIC_KEY = import.meta.env.VITE_ANTHROPIC_KEY;
-const GEMINI_KEY    = import.meta.env.VITE_GEMINI_KEY;
 const SUPABASE_URL  = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY  = import.meta.env.VITE_SUPABASE_KEY;
 const MASTER_CODE   = "FORTIS-MASTER"; // keep for backward compat
@@ -629,6 +628,67 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     setLoading(false);
   };
 
+  // ── Frame extraction: pull N evenly-spaced frames from a video file ──────────
+  const extractFrames = (file, numFrames=4) => new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "auto";
+    video.src = url;
+
+    const frames = [];
+    let frameIdx = 0;
+    let seekTimes = [];
+
+    const cleanup = () => { URL.revokeObjectURL(url); };
+
+    const captureFrame = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 320; canvas.height = 180;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0, 320, 180);
+      return canvas.toDataURL("image/jpeg", 0.6).split(",")[1]; // base64 only
+    };
+
+    const seekToNext = () => {
+      if(frameIdx >= seekTimes.length){ cleanup(); resolve(frames); return; }
+
+      let settled = false;
+      const frameTimeout = setTimeout(()=>{
+        // Frame seek timed out — skip this frame and move on
+        if(!settled){ settled=true; frameIdx++; seekToNext(); }
+      }, 5000);
+
+      video.onseeked = () => {
+        if(settled) return;
+        settled = true;
+        clearTimeout(frameTimeout);
+        try { frames.push(captureFrame()); } catch(_){}
+        frameIdx++;
+        seekToNext();
+      };
+
+      video.currentTime = seekTimes[frameIdx];
+    };
+
+    // Wait until enough data is buffered before seeking
+    video.oncanplaythrough = () => {
+      video.oncanplaythrough = null;
+      const dur = video.duration;
+      if(!dur || !isFinite(dur)){ cleanup(); resolve([]); return; }
+      // Space frames evenly, avoiding the very start/end
+      const step = dur / (numFrames + 1);
+      seekTimes = Array.from({length: numFrames}, (_, i) => step * (i + 1));
+      seekToNext();
+    };
+
+    video.onerror = () => { cleanup(); resolve(frames); };
+
+    // Timeout for the whole extraction in case canplaythrough never fires
+    setTimeout(()=>{ if(frames.length===0){ cleanup(); resolve([]); } }, 20000);
+  });
+
   const handleVideoUpload = async (e) => {
     const file = e.target.files?.[0];
     if(!file) return;
@@ -638,68 +698,49 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     const sizeMB = (file.size/1024/1024).toFixed(1);
     setMessages(prev=>[...prev,
       {role:"user",content:`[Form review video: ${file.name} — ${sizeMB}MB]`},
-      {role:"assistant",content:`Uploading video to Google (${sizeMB}MB)...`}
+      {role:"assistant",content:`Reading your video...`}
     ]);
 
     const updateMsg = (text) => setMessages(prev=>{const u=[...prev];u[u.length-1]={role:"assistant",content:text};return u;});
 
     try {
-      // ── Step 1: Get a Gemini upload URL from our server ──────────────────────
-      const initRes = await fetch(
-        `/api/gemini-init?type=${encodeURIComponent(file.type)}&size=${file.size}&name=${encodeURIComponent(file.name)}`
-      );
-      if(!initRes.ok){
-        const e = await initRes.json().catch(()=>({error:initRes.statusText}));
-        throw new Error(e.error||"Could not get upload URL");
+      updateMsg("Extracting frames from your video...");
+      const frames = await extractFrames(file, 4);
+
+      if(frames.length === 0){
+        throw new Error("Couldn't read that video. Try a shorter clip or a different format (MP4 works best).");
       }
-      const {uploadUrl} = await initRes.json();
 
-      // ── Step 2: Upload video directly to Google ───────────────────────────────
-      const uploadRes = await fetch(uploadUrl, {
-        method: "PUT",
-        headers: {
-          "Content-Length": String(file.size),
-          "X-Goog-Upload-Offset": "0",
-          "X-Goog-Upload-Command": "upload, finalize",
-        },
-        body: file,
-      });
-      if(!uploadRes.ok) throw new Error(`Upload to Google failed (${uploadRes.status})`);
-      const {file: geminiFile} = await uploadRes.json();
+      updateMsg(`Analyzing your form (${frames.length} frames)...`);
 
-      updateMsg("Video uploaded. Waiting for Google to process it...");
+      const sportFocusMap = {
+        Football:"hip hinge depth, knee tracking over toes, bar path, core bracing, shoulder position on pressing",
+        Basketball:"landing mechanics, knee valgus on jumps, hip loading on deceleration",
+        Volleyball:"shoulder position on overhead movements, jump mechanics and landing",
+        Soccer:"single-leg stability, hip alignment, ankle position",
+        Baseball:"rotational mechanics, shoulder/hip separation, arm path",
+        Archery:"stance width, draw arm position, bow shoulder, anchor point consistency",
+        "Olympic Weightlifting":"bar path, receiving position, catch depth, overhead stability",
+        Running:"foot strike relative to hips, hip extension at push-off, arm drive, forward lean",
+        "General Fitness":"joint alignment, bracing, range of motion, symmetry",
+      };
+      const focus = sportFocusMap[athlete.sport] || "joint alignment, bracing, range of motion";
 
-      // ── Step 3: Poll for ACTIVE state (client-side, no Vercel timeout risk) ───
-      let activeFile = geminiFile;
-      for(let i=0;i<40;i++){
-        if(activeFile.state==="ACTIVE") break;
-        if(activeFile.state==="FAILED") throw new Error("Google could not process that video");
-        await new Promise(r=>setTimeout(r,2000));
-        const pollRes = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/${geminiFile.name}?key=${GEMINI_KEY}`
-        );
-        activeFile = await pollRes.json();
-      }
-      if(activeFile.state!=="ACTIVE") throw new Error("Video processing timed out — try a shorter clip");
+      const sys = `You are Coach Joe Thomas — high school strength coach, 20+ years military S&C. You are reviewing still frames from a workout video of ${athlete.name} (sport: ${athlete.sport}).
 
-      updateMsg("Analyzing your form...");
+Give direct, specific coaching feedback on their form. Focus on: ${focus}.
 
-      // ── Step 4: Generate coaching feedback via our server ─────────────────────
-      const analyzeRes = await fetch("/api/gemini-analyze", {
-        method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({
-          fileUri: activeFile.uri,
-          mimeType: activeFile.mimeType || file.type,
-          sport: athlete.sport,
-          athleteName: athlete.name,
-        }),
-      });
-      if(!analyzeRes.ok){
-        const e = await analyzeRes.json().catch(()=>({error:analyzeRes.statusText}));
-        throw new Error(e.error||"Analysis failed");
-      }
-      const {analysis} = await analyzeRes.json();
+Format your response exactly like this:
+Movement: [name what you see them doing]
+What's solid: [1-2 things done well]
+Fix these:
+1. [Most important cue — be specific, e.g. "Drive knees out at the bottom, not in"]
+2. [Second cue]
+3. [Third cue if applicable]
+
+Keep it under 200 words. No fluff. If the frames are unclear or show multiple reps, use the clearest frame. If you can't identify the movement, say so.`;
+
+      const analysis = await askClaude(sys, `Here are ${frames.length} frames from ${athlete.name}'s workout video. Analyze their form.`, 400, frames);
 
       updateMsg(analysis);
       await sbInsert("workouts",{
@@ -709,7 +750,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         parsed_data:{exercises:[],pain_flags:[],equipment_issues:[],questions:[],session_feel:null,general_notes:"Video form review"}
       });
     } catch(err){
-      updateMsg(`Couldn't analyze that video. ${err.message||"Try a shorter clip and try again."}`);
+      updateMsg(`Couldn't analyze that video. ${err.message||"Try a shorter clip (MP4 works best)."}`);
     }
     setVideoLoading(false);
   };
@@ -787,7 +828,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             →
           </button>
         </div>
-        <div style={{color:C.muted,fontSize:10,marginTop:6,textAlign:"center"}}>Type naturally to log workouts · 🎬 upload a video for form review (30–60 sec clips work best)</div>
+        <div style={{color:C.muted,fontSize:10,marginTop:6,textAlign:"center"}}>Type naturally to log workouts · 🎬 upload a video for form review (MP4 works best)</div>
       </div>
     </div>
   );
