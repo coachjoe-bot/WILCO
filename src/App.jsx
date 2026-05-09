@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const ANTHROPIC_KEY = import.meta.env.VITE_ANTHROPIC_KEY;
+const GEMINI_KEY    = import.meta.env.VITE_GEMINI_KEY;
 const SUPABASE_URL  = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY  = import.meta.env.VITE_SUPABASE_KEY;
 const MASTER_CODE   = "FORTIS-MASTER"; // keep for backward compat
@@ -632,54 +633,83 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     const file = e.target.files?.[0];
     if(!file) return;
     e.target.value="";
+    setVideoLoading(true);
 
     const sizeMB = (file.size/1024/1024).toFixed(1);
-    if(file.size > 48*1024*1024){
-      setMessages(prev=>[...prev,
-        {role:"user",content:`[Form review video: ${file.name} — ${sizeMB}MB]`},
-        {role:"assistant",content:`That video is ${sizeMB}MB — too large to upload. Record a shorter clip (15–30 seconds works best) and try again.`}
-      ]);
-      return;
-    }
-
-    setVideoLoading(true);
     setMessages(prev=>[...prev,
       {role:"user",content:`[Form review video: ${file.name} — ${sizeMB}MB]`},
-      {role:"assistant",content:`Uploading and analyzing your video...`}
+      {role:"assistant",content:`Uploading video to Google (${sizeMB}MB)...`}
     ]);
 
+    const updateMsg = (text) => setMessages(prev=>{const u=[...prev];u[u.length-1]={role:"assistant",content:text};return u;});
+
     try {
-      const res = await fetch("/api/analyze-video", {
-        method: "POST",
+      // ── Step 1: Get a Gemini upload URL from our server ──────────────────────
+      const initRes = await fetch(
+        `/api/gemini-init?type=${encodeURIComponent(file.type)}&size=${file.size}&name=${encodeURIComponent(file.name)}`
+      );
+      if(!initRes.ok){
+        const e = await initRes.json().catch(()=>({error:initRes.statusText}));
+        throw new Error(e.error||"Could not get upload URL");
+      }
+      const {uploadUrl} = await initRes.json();
+
+      // ── Step 2: Upload video directly to Google ───────────────────────────────
+      const uploadRes = await fetch(uploadUrl, {
+        method: "PUT",
         headers: {
-          "Content-Type": file.type,
-          "X-File-Name": file.name,
-          "X-Sport": athlete.sport,
-          "X-Athlete-Name": athlete.name,
+          "Content-Length": String(file.size),
+          "X-Goog-Upload-Offset": "0",
+          "X-Goog-Upload-Command": "upload, finalize",
         },
         body: file,
       });
+      if(!uploadRes.ok) throw new Error(`Upload to Google failed (${uploadRes.status})`);
+      const {file: geminiFile} = await uploadRes.json();
 
-      if(!res.ok){
-        const err = await res.json().catch(()=>({error:res.statusText}));
-        throw new Error(err.error||"Server error");
+      updateMsg("Video uploaded. Waiting for Google to process it...");
+
+      // ── Step 3: Poll for ACTIVE state (client-side, no Vercel timeout risk) ───
+      let activeFile = geminiFile;
+      for(let i=0;i<40;i++){
+        if(activeFile.state==="ACTIVE") break;
+        if(activeFile.state==="FAILED") throw new Error("Google could not process that video");
+        await new Promise(r=>setTimeout(r,2000));
+        const pollRes = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/${geminiFile.name}?key=${GEMINI_KEY}`
+        );
+        activeFile = await pollRes.json();
       }
+      if(activeFile.state!=="ACTIVE") throw new Error("Video processing timed out — try a shorter clip");
 
-      const {analysis} = await res.json();
-      setMessages(prev=>{const u=[...prev];u[u.length-1]={role:"assistant",content:analysis};return u;});
+      updateMsg("Analyzing your form...");
 
+      // ── Step 4: Generate coaching feedback via our server ─────────────────────
+      const analyzeRes = await fetch("/api/gemini-analyze", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({
+          fileUri: activeFile.uri,
+          mimeType: activeFile.mimeType || file.type,
+          sport: athlete.sport,
+          athleteName: athlete.name,
+        }),
+      });
+      if(!analyzeRes.ok){
+        const e = await analyzeRes.json().catch(()=>({error:analyzeRes.statusText}));
+        throw new Error(e.error||"Analysis failed");
+      }
+      const {analysis} = await analyzeRes.json();
+
+      updateMsg(analysis);
       await sbInsert("workouts",{
         athlete_id:athlete.id,
         raw_message:`[Form review: ${file.name}]`,
         bot_reply:analysis,
         parsed_data:{exercises:[],pain_flags:[],equipment_issues:[],questions:[],session_feel:null,general_notes:"Video form review"}
       });
-    } catch(e){
-      setMessages(prev=>{
-        const u=[...prev];
-        u[u.length-1]={role:"assistant",content:`Couldn't analyze that video. ${e.message||"Try a shorter clip and try again."}`};
-        return u;
-      });
+    } catch(err){
+      updateMsg(`Couldn't analyze that video. ${err.message||"Try a shorter clip and try again."}`);
     }
     setVideoLoading(false);
   };
