@@ -22,6 +22,9 @@ const sbUpdate = async (table,id,data) => {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`,{method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},body:JSON.stringify(data)});
   return r.json();
 };
+const sbDelete = async (table,params="") => {
+  await fetch(`${SUPABASE_URL}/rest/v1/${table}${params}`,{method:"DELETE",headers:sbH});
+};
 
 // ─── UTILITIES ────────────────────────────────────────────────────────────────
 // Compare dates at midnight local time — fixes the "-1d" timezone bug
@@ -981,6 +984,7 @@ function CoachDashboard({coach,onLogout}) {
   const [search,setSearch] = useState("");
   const [filterPain,setFilterPain] = useState(false);
   const [filterInactive,setFilterInactive] = useState(false);
+  const [recalcStatus,setRecalcStatus] = useState(null); // null | "running" | "done" | "error" | "X/Y
 
   useEffect(()=>{loadAll();},[]);
 
@@ -1004,6 +1008,45 @@ function CoachDashboard({coach,onLogout}) {
       setAllCoaches(Array.isArray(c)?c:[]);
     } catch(e){console.error(e);}
     setLoading(false);
+  };
+
+  const recalcAllPRs = async () => {
+    setRecalcStatus("running");
+    try {
+      // Fetch every workout ever logged (need all history, not just what's loaded)
+      const allWorkouts = await sbGet("workouts","?select=*&order=created_at.asc");
+      if(!Array.isArray(allWorkouts)) throw new Error("Could not load workouts");
+      let done = 0;
+      for(const ath of athletes){
+        const athWorkouts = allWorkouts.filter(w=>w.athlete_id===ath.id);
+        // Find best estimated 1RM per exercise across all sessions
+        const best = {};
+        for(const w of athWorkouts){
+          for(const ex of (w.parsed_data?.exercises||[])){
+            if(!ex.name||!ex.weight||ex.unit==="bodyweight") continue;
+            const k = ex.name.toLowerCase().trim();
+            const e1rm = epley1RM(ex.weight, ex.reps||1);
+            if(!best[k]||e1rm>best[k].e1rm){
+              best[k] = {exercise:ex.name,weight:ex.weight,reps:ex.reps||1,e1rm};
+            }
+          }
+        }
+        // Wipe old PRs for this athlete and re-insert correct ones
+        await sbDelete("prs",`?athlete_id=eq.${ath.id}`);
+        for(const {exercise,weight,reps,e1rm} of Object.values(best)){
+          await sbInsert("prs",{athlete_id:ath.id,exercise,weight,reps,estimated_1rm:e1rm});
+        }
+        done++;
+        setRecalcStatus(`${done} / ${athletes.length} athletes done`);
+      }
+      setRecalcStatus("done");
+      await loadAll();
+      setTimeout(()=>setRecalcStatus(null),4000);
+    } catch(e){
+      console.error(e);
+      setRecalcStatus("error");
+      setTimeout(()=>setRecalcStatus(null),4000);
+    }
   };
 
   const lastActive = (id) => {
@@ -1133,6 +1176,30 @@ function CoachDashboard({coach,onLogout}) {
                 <div style={{marginBottom:16,color:C.muted2,fontSize:13,lineHeight:1.6,background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16}}>
                   To add a new coach: Supabase dashboard → Table Editor → coaches → Insert row.<br/>
                   Set name, email, sports (array e.g. {"{Football}"}), access_code, and role ("coach" or "master").
+                </div>
+
+                {/* ── PR Recalculation ── */}
+                <div style={{marginBottom:16,background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16}}>
+                  <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:6}}>DATA MAINTENANCE</div>
+                  <div style={{color:C.muted2,fontSize:13,lineHeight:1.6,marginBottom:14}}>
+                    Recalculates every athlete's PRs from their full workout history using the Epley estimated 1RM formula.
+                    Run this once to correct records that were saved before the 1RM update. Takes a few seconds per athlete.
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:14}}>
+                    <button
+                      onClick={recalcAllPRs}
+                      disabled={!!recalcStatus}
+                      style={{background:recalcStatus?C.navy3:C.gold,color:recalcStatus?C.muted:"#000",border:`1px solid ${recalcStatus?C.border:C.gold}`,borderRadius:10,padding:"10px 22px",cursor:recalcStatus?"not-allowed":"pointer",fontSize:13,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,transition:"all 0.2s"}}>
+                      {recalcStatus&&recalcStatus!=="done"&&recalcStatus!=="error"?"Recalculating...":"Recalculate All PRs"}
+                    </button>
+                    {recalcStatus&&(
+                      <div style={{fontSize:13,color:recalcStatus==="done"?C.green:recalcStatus==="error"?C.red:C.muted2,fontWeight:recalcStatus==="done"||recalcStatus==="error"?600:400}}>
+                        {recalcStatus==="done"?"✓ Done — all PRs updated"
+                          :recalcStatus==="error"?"✗ Something went wrong — check console"
+                          :recalcStatus}
+                      </div>
+                    )}
+                  </div>
                 </div>
                 <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden"}}>
                   <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>ALL COACHES</div>
