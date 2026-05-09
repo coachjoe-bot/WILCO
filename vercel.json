@@ -1,13 +1,5 @@
 {
   "buildCommand": "npm install && npx vite build",
   "outputDirectory": "dist",
-  "functions": {
-    "api/analyze-video.js": {
-      "maxDuration": 60
-    }
-  },
-  "routes": [
-    { "src": "/api/(.*)", "dest": "/api/$1" },
-    { "src": "/(.*)", "dest": "/index.html" }
-  ]
+  "framework": "vite"
 }
