@@ -496,6 +496,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [saved,setSaved] = useState(false);
   const [workoutHistory,setWorkoutHistory] = useState([]);
   const [historyLoaded,setHistoryLoaded] = useState(false);
+  const [movementPrompt,setMovementPrompt] = useState(false);
+  const [movementLabel,setMovementLabel] = useState("");
   const bottomRef = useRef(null);
   const videoInputRef = useRef(null);
 
@@ -740,19 +742,24 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       };
       const focus = sportFocusMap[athlete.sport] || "joint alignment, bracing, range of motion";
 
+      const movementCtx = movementLabel.trim()
+        ? `The athlete says they are performing: ${movementLabel.trim()}. Use this as the movement label — do not second-guess it.`
+        : `Identify the movement from the frames.`;
+
       const sys = `You are Coach Joe Thomas — high school strength coach, 20+ years military S&C. You are reviewing still frames from a workout video of ${athlete.name} (sport: ${athlete.sport}).
 
+${movementCtx}
 Give direct, specific coaching feedback on their form. Focus on: ${focus}.
 
 Format your response exactly like this:
-Movement: [name what you see them doing]
+Movement: [name the movement — use the athlete's label if provided]
 What's solid: [1-2 things done well]
 Fix these:
 1. [Most important cue — be specific, e.g. "Drive knees out at the bottom, not in"]
 2. [Second cue]
 3. [Third cue if applicable]
 
-Keep it under 200 words. No fluff. If the frames are unclear or show multiple reps, use the clearest frame. If you can't identify the movement, say so.`;
+Keep it under 200 words. No fluff. If the frames are unclear, use the clearest one.`;
 
       const analysis = await askClaude(sys, `Here are ${frames.length} frames from ${athlete.name}'s workout video. Analyze their form.`, 400, frames);
 
@@ -827,12 +834,39 @@ Keep it under 200 words. No fluff. If the frames are unclear or show multiple re
           {/* Video upload button */}
           <input ref={videoInputRef} type="file" accept="video/*" style={{display:"none"}} onChange={handleVideoUpload}/>
           <button
-            onClick={()=>videoInputRef.current?.click()}
+            onClick={()=>{ setMovementLabel(""); setMovementPrompt(true); }}
             disabled={loading||videoLoading||!historyLoaded}
             title="Upload video for form review"
             style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,width:44,height:44,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontSize:18,opacity:(loading||videoLoading)?0.4:1}}>
             🎬
           </button>
+
+          {/* Movement label modal */}
+          {movementPrompt&&(
+            <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:24}}>
+              <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:360}}>
+                <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:C.gold,letterSpacing:2,marginBottom:4}}>FORM REVIEW</div>
+                <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>What movement are you filming? <span style={{color:C.muted,fontSize:12}}>(optional but helps)</span></div>
+                <input
+                  autoFocus
+                  value={movementLabel}
+                  onChange={e=>setMovementLabel(e.target.value)}
+                  onKeyDown={e=>{ if(e.key==="Enter"){ setMovementPrompt(false); videoInputRef.current?.click(); }}}
+                  placeholder="e.g. snatch, back squat, deadlift..."
+                  style={{width:"100%",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"11px 14px",color:C.text,fontSize:15,outline:"none",marginBottom:14}}/>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>setMovementPrompt(false)}
+                    style={{flex:1,background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14,fontFamily:"'DM Sans'"}}>
+                    Cancel
+                  </button>
+                  <button onClick={()=>{ setMovementPrompt(false); videoInputRef.current?.click(); }}
+                    style={{flex:2,background:C.gold,border:"none",color:"#000",borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>
+                    Choose Video →
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
           <textarea value={input} onChange={e=>setInput(e.target.value)}
             onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
             placeholder={`Tell Coach Joe about your workout, ${athlete.name}...`} rows={2}
