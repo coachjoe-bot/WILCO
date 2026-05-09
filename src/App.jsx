@@ -629,64 +629,78 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   };
 
   // ── Frame extraction: pull N evenly-spaced frames from a video file ──────────
+  // Approach: attach to DOM with real dimensions (iOS requirement), prime with
+  // muted play() before seeking (iOS seeking requires prior playback), filter
+  // blank frames by checking base64 length.
   const extractFrames = (file, numFrames=4) => new Promise((resolve) => {
     const url = URL.createObjectURL(file);
     const video = document.createElement("video");
     video.muted = true;
     video.playsInline = true;
-    video.preload = "auto";
-    video.src = url;
+    video.setAttribute("playsinline","");
+    video.setAttribute("webkit-playsinline","");
+    video.width  = 320;
+    video.height = 240;
+    // opacity:0.01 not 0 — iOS skips rendering fully invisible elements
+    video.style.cssText = "position:fixed;top:0;left:0;width:320px;height:240px;opacity:0.01;pointer-events:none;z-index:-9999;";
+    document.body.appendChild(video);
 
     const frames = [];
-    let frameIdx = 0;
-    let seekTimes = [];
+    const times  = [];
+    let ti = 0;
+    let started = false;
+    let done    = false;
 
-    const cleanup = () => { URL.revokeObjectURL(url); };
-
-    const captureFrame = () => {
-      const canvas = document.createElement("canvas");
-      canvas.width = 320; canvas.height = 180;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(video, 0, 0, 320, 180);
-      return canvas.toDataURL("image/jpeg", 0.6).split(",")[1]; // base64 only
+    const finish = () => {
+      if(done) return; done = true;
+      try { document.body.removeChild(video); } catch(_){}
+      try { URL.revokeObjectURL(url); } catch(_){}
+      resolve(frames);
     };
 
-    const seekToNext = () => {
-      if(frameIdx >= seekTimes.length){ cleanup(); resolve(frames); return; }
+    const snap = () => {
+      try {
+        const c = document.createElement("canvas");
+        c.width = 320; c.height = 240;
+        c.getContext("2d").drawImage(video, 0, 0, 320, 240);
+        const d = c.toDataURL("image/jpeg", 0.65).split(",")[1];
+        if(d && d.length > 500) frames.push(d); // blank frames are tiny — skip them
+      } catch(_){}
+    };
 
-      let settled = false;
-      const frameTimeout = setTimeout(()=>{
-        // Frame seek timed out — skip this frame and move on
-        if(!settled){ settled=true; frameIdx++; seekToNext(); }
-      }, 5000);
-
+    const seekNext = () => {
+      if(ti >= times.length){ finish(); return; }
+      let ok = false;
+      const t = setTimeout(()=>{ if(!ok){ ok=true; ti++; seekNext(); }}, 5000);
       video.onseeked = () => {
-        if(settled) return;
-        settled = true;
-        clearTimeout(frameTimeout);
-        try { frames.push(captureFrame()); } catch(_){}
-        frameIdx++;
-        seekToNext();
+        if(ok) return; ok=true; clearTimeout(t);
+        snap(); ti++;
+        setTimeout(seekNext, 100);
       };
-
-      video.currentTime = seekTimes[frameIdx];
+      video.currentTime = times[ti];
     };
 
-    // Wait until enough data is buffered before seeking
-    video.oncanplaythrough = () => {
-      video.oncanplaythrough = null;
+    const begin = async () => {
+      if(started) return; started = true;
+      // Prime the iOS video player: muted autoplay is allowed and unlocks seeking
+      try { await video.play(); video.pause(); } catch(_){}
       const dur = video.duration;
-      if(!dur || !isFinite(dur)){ cleanup(); resolve([]); return; }
-      // Space frames evenly, avoiding the very start/end
-      const step = dur / (numFrames + 1);
-      seekTimes = Array.from({length: numFrames}, (_, i) => step * (i + 1));
-      seekToNext();
+      if(!dur || !isFinite(dur) || dur <= 0){
+        snap(); finish(); return; // grab whatever frame is available
+      }
+      const safe = Math.min(dur, 90); // cap at 90s
+      const step = safe / (numFrames + 1);
+      for(let i=0; i<numFrames; i++) times.push(Math.min(step*(i+1), safe - 0.3));
+      seekNext();
     };
 
-    video.onerror = () => { cleanup(); resolve(frames); };
+    video.onloadedmetadata = begin;
+    video.onloadeddata     = begin;
+    video.onerror          = () => finish();
+    setTimeout(finish, 30000);
 
-    // Timeout for the whole extraction in case canplaythrough never fires
-    setTimeout(()=>{ if(frames.length===0){ cleanup(); resolve([]); } }, 20000);
+    video.src = url;
+    video.load();
   });
 
   const handleVideoUpload = async (e) => {
