@@ -3,8 +3,7 @@
   "outputDirectory": "dist",
   "framework": "vite",
   "functions": {
-    "api/analyze-video.js": {
-      "maxDuration": 60
-    }
+    "api/gemini-init.js": { "maxDuration": 10 },
+    "api/gemini-analyze.js": { "maxDuration": 15 }
   }
 }
