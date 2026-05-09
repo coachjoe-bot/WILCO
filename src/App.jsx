@@ -37,6 +37,41 @@ const daysBetween = (date) => {
 const fmtDate = (d) => new Date(d).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
 const fmtDateShort = (d) => new Date(d).toLocaleDateString("en-US",{month:"short",day:"numeric"});
 
+// Epley estimated 1-rep max: weight × (1 + reps/30)
+// Lets us compare e.g. 225×5 vs 225×3 — more reps at same weight = more strength.
+const epley1RM = (weight, reps) => {
+  if(!weight||weight<=0) return 0;
+  if(!reps||reps<=1) return weight;
+  return Math.round(weight * (1 + reps / 30));
+};
+
+// A "real session" has at least one parsed exercise (filters out pure Q&A messages)
+const isRealSession = (w) => w?.parsed_data?.exercises?.length > 0;
+
+// Groups workout entries into sessions using time-gap logic.
+// Entries within gapMs of each other (same athlete) = same session.
+// new_session:true in parsed_data forces a split even within the gap window.
+const groupIntoSessions = (workouts, gapMs = 3*60*60*1000) => {
+  const byAthlete = {};
+  workouts.filter(isRealSession).forEach(w => {
+    if(!byAthlete[w.athlete_id]) byAthlete[w.athlete_id] = [];
+    byAthlete[w.athlete_id].push(w);
+  });
+  const sessions = [];
+  Object.values(byAthlete).forEach(entries => {
+    const sorted = [...entries].sort((a,b)=>new Date(a.created_at)-new Date(b.created_at));
+    let lastTime = null; let cur = null;
+    sorted.forEach(w => {
+      const t = new Date(w.created_at).getTime();
+      if(!lastTime || w.parsed_data?.new_session===true || t-lastTime>gapMs){
+        cur = {entries:[w],athleteId:w.athlete_id}; sessions.push(cur);
+      } else { cur.entries.push(w); }
+      lastTime = t;
+    });
+  });
+  return sessions;
+};
+
 
 // ─── CLAUDE ──────────────────────────────────────────────────────────────────
 const askClaude = async (system, user, maxTokens=600, images=[]) => {
@@ -498,6 +533,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [historyLoaded,setHistoryLoaded] = useState(false);
   const [movementPrompt,setMovementPrompt] = useState(false);
   const [movementLabel,setMovementLabel] = useState("");
+  const [sessionCheckPending,setSessionCheckPending] = useState(null);
   const bottomRef = useRef(null);
   const videoInputRef = useRef(null);
 
@@ -538,6 +574,66 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       setHistoryLoaded(true);
     })();
   },[]);
+
+  const finalizeWorkout = async (parsed, msg, reply, updatedAthlete, isNewSession, addReply) => {
+    try {
+      const parsedFinal = isNewSession ? {...parsed,new_session:true} : parsed;
+      await sbInsert("workouts",{athlete_id:updatedAthlete.id,raw_message:msg,bot_reply:reply,parsed_data:parsedFinal});
+      setSaved(true); setTimeout(()=>setSaved(false),3000);
+
+      // Auto PR detection
+      const newPRs = [];
+      if(parsed.exercises?.length>0){
+        const existingPRs = await sbGet("prs",`?athlete_id=eq.${updatedAthlete.id}`);
+        const prMap = {};
+        if(Array.isArray(existingPRs)){
+          existingPRs.forEach(pr=>{
+            const k = pr.exercise?.toLowerCase().trim();
+            if(!prMap[k]||epley1RM(pr.weight,pr.reps)>epley1RM(prMap[k].weight,prMap[k].reps)) prMap[k]=pr;
+          });
+        }
+        for(const ex of parsed.exercises){
+          if(!ex.name||!ex.weight||ex.unit==="bodyweight") continue;
+          const k = ex.name.toLowerCase().trim();
+          const exE1RM = epley1RM(ex.weight, ex.reps||1);
+          if(!prMap[k]){
+            await sbInsert("prs",{athlete_id:updatedAthlete.id,exercise:ex.name,weight:ex.weight,reps:ex.reps||1,estimated_1rm:exE1RM});
+          } else if(exE1RM > epley1RM(prMap[k].weight, prMap[k].reps||1)){
+            const prevE1RM = epley1RM(prMap[k].weight, prMap[k].reps||1);
+            await sbInsert("prs",{athlete_id:updatedAthlete.id,exercise:ex.name,weight:ex.weight,reps:ex.reps||1,estimated_1rm:exE1RM});
+            newPRs.push({exercise:ex.name,weight:ex.weight,reps:ex.reps||1,e1rm:exE1RM,prevE1RM,diff:exE1RM-prevE1RM});
+          }
+        }
+      }
+
+      if(addReply) setMessages(prev=>[...prev,{role:"assistant",content:reply}]);
+      setWorkoutHistory(prev=>[{raw_message:msg,parsed_data:parsedFinal,created_at:new Date().toISOString()},...prev]);
+
+      if(newPRs.length>0){
+        try {
+          const prCallout = newPRs.map(pr=>`${pr.exercise}: ${pr.weight}lbs x${pr.reps} reps (est. 1RM: ${pr.e1rm}lbs, +${pr.diff}lbs over prev est. 1RM)`).join("\n");
+          const prReply = await askClaude(
+            "You are Coach Joe Thomas. An athlete just hit a new PR. Acknowledge it directly -- short, punchy, in Coach Joe's voice. Atta boy/girl is appropriate here.",
+            `Athlete: ${updatedAthlete.name} (${updatedAthlete.sport})\nNew PRs:\n${prCallout}`,150
+          );
+          setMessages(prev=>[...prev,{role:"assistant",content:prReply}]);
+        } catch(e){
+          setMessages(prev=>[...prev,{role:"assistant",content:newPRs.map(pr=>`New PR -- ${pr.exercise} at ${pr.weight}lbs x${pr.reps} (est. 1RM: ${pr.e1rm}lbs). +${pr.diff}lbs over previous best. That's what the work is for.`).join("\n")}]);
+        }
+      }
+    } catch(e){
+      setMessages(prev=>[...prev,{role:"assistant",content:"Hit a snag saving that. Try again."}]);
+    }
+  };
+
+  const confirmSession = async (isNew) => {
+    if(!sessionCheckPending) return;
+    const {parsed,msg,reply,updatedAthlete} = sessionCheckPending;
+    setSessionCheckPending(null);
+    setLoading(true);
+    await finalizeWorkout(parsed,msg,reply,updatedAthlete,isNew,false);
+    setLoading(false);
+  };
 
   const send = async () => {
     const msg = input.trim();
@@ -583,47 +679,22 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         } catch(e){}
       }
 
-      await sbInsert("workouts",{athlete_id:athlete.id,raw_message:msg,bot_reply:reply,parsed_data:parsed});
-      setSaved(true); setTimeout(()=>setSaved(false),3000);
-
-      // Auto PR detection
-      const newPRs = [];
+      // Gap check: 1–3 hrs since last real entry → ask same workout or new session
       if(parsed.exercises?.length>0){
-        const existingPRs = await sbGet("prs",`?athlete_id=eq.${athlete.id}`);
-        const prMap = {};
-        if(Array.isArray(existingPRs)){
-          existingPRs.forEach(pr=>{
-            const k = pr.exercise?.toLowerCase().trim();
-            if(!prMap[k]||pr.weight>prMap[k].weight) prMap[k]=pr;
-          });
-        }
-        for(const ex of parsed.exercises){
-          if(!ex.name||!ex.weight||ex.unit==="bodyweight") continue;
-          const k = ex.name.toLowerCase().trim();
-          if(!prMap[k]){
-            await sbInsert("prs",{athlete_id:athlete.id,exercise:ex.name,weight:ex.weight,reps:ex.reps||1});
-          } else if(ex.weight>prMap[k].weight){
-            await sbInsert("prs",{athlete_id:athlete.id,exercise:ex.name,weight:ex.weight,reps:ex.reps||1});
-            newPRs.push({exercise:ex.name,weight:ex.weight,prev:prMap[k].weight,diff:ex.weight-prMap[k].weight});
+        const lastReal = workoutHistory.find(w=>isRealSession(w));
+        if(lastReal){
+          const gapMin = Math.round((Date.now()-new Date(lastReal.created_at))/60000);
+          if(gapMin>=60&&gapMin<180){
+            const sessionQ = `\n\nAlso — it's been ${gapMin} minutes since your last log. Same workout still, or is this a new session?`;
+            setMessages(prev=>[...prev,{role:"assistant",content:reply+sessionQ}]);
+            setSessionCheckPending({parsed,msg,reply,updatedAthlete});
+            setLoading(false);
+            return;
           }
         }
       }
 
-      setMessages(prev=>[...prev,{role:"assistant",content:reply}]);
-      setWorkoutHistory(prev=>[{raw_message:msg,parsed_data:parsed,created_at:new Date().toISOString()},...prev]);
-
-      if(newPRs.length>0){
-        try {
-          const prCallout = newPRs.map(pr=>`${pr.exercise}: ${pr.weight}lbs (+${pr.diff}lbs)`).join("\n");
-          const prReply = await askClaude(
-            "You are Coach Joe Thomas. An athlete just hit a new PR. Acknowledge it directly -- short, punchy, in Coach Joe's voice. Atta boy/girl is appropriate here.",
-            `Athlete: ${athlete.name} (${athlete.sport})\nNew PRs:\n${prCallout}`,150
-          );
-          setMessages(prev=>[...prev,{role:"assistant",content:prReply}]);
-        } catch(e){
-          setMessages(prev=>[...prev,{role:"assistant",content:newPRs.map(pr=>`New PR -- ${pr.exercise} at ${pr.weight}lbs. +${pr.diff}lbs. That's what the work is for.`).join("\n")}]);
-        }
-      }
+      await finalizeWorkout(parsed,msg,reply,updatedAthlete,false,true);
     } catch(e){
       setMessages(prev=>[...prev,{role:"assistant",content:"Hit a snag. Try again."}]);
     }
@@ -821,11 +892,25 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         <div ref={bottomRef}/>
       </div>
 
-      {/* Quick replies */}
-      <div style={{padding:"0 16px 8px",display:"flex",gap:6,overflowX:"auto",flexShrink:0}}>
-        {quick.map(p=>(
-          <button key={p} onClick={()=>setInput(p)} style={{background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:20,padding:"6px 12px",cursor:"pointer",fontSize:12,whiteSpace:"nowrap",flexShrink:0}}>{p}</button>
-        ))}
+      {/* Quick replies / Session check prompt */}
+      <div style={{padding:"0 16px 8px",display:"flex",gap:6,overflowX:"auto",flexShrink:0,alignItems:"center"}}>
+        {sessionCheckPending?(
+          <>
+            <span style={{color:C.muted,fontSize:12,flexShrink:0}}>↑</span>
+            <button onClick={()=>confirmSession(false)}
+              style={{background:`${C.green}20`,border:`1px solid ${C.green}`,color:C.green,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+              Same workout
+            </button>
+            <button onClick={()=>confirmSession(true)}
+              style={{background:`${C.gold}20`,border:`1px solid ${C.gold}`,color:C.gold,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+              New session
+            </button>
+          </>
+        ):(
+          quick.map(p=>(
+            <button key={p} onClick={()=>setInput(p)} style={{background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:20,padding:"6px 12px",cursor:"pointer",fontSize:12,whiteSpace:"nowrap",flexShrink:0}}>{p}</button>
+          ))
+        )}
       </div>
 
       {/* Input area */}
@@ -868,11 +953,12 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             </div>
           )}
           <textarea value={input} onChange={e=>setInput(e.target.value)}
-            onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
-            placeholder={`Tell Coach Joe about your workout, ${athlete.name}...`} rows={2}
-            style={{flex:1,background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:"10px 14px",color:C.text,fontSize:14,outline:"none",resize:"none",lineHeight:1.5}}/>
-          <button onClick={send} disabled={loading||videoLoading||!input.trim()||!historyLoaded}
-            style={{background:C.gold,border:"none",borderRadius:12,width:44,height:44,cursor:(loading||!input.trim())?"not-allowed":"pointer",opacity:(loading||!input.trim())?0.5:1,fontSize:18,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,color:"#000",fontWeight:700}}>
+            onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey&&!sessionCheckPending){e.preventDefault();send();}}}
+            placeholder={sessionCheckPending?"Tap Same workout or New session above..."`Tell Coach Joe about your workout, ${athlete.name}...`} rows={2}
+            disabled={!!sessionCheckPending}
+            style={{flex:1,background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:"10px 14px",color:C.text,fontSize:14,outline:"none",resize:"none",lineHeight:1.5,opacity:sessionCheckPending?0.4:1}}/>
+          <button onClick={send} disabled={loading||videoLoading||!input.trim()||!historyLoaded||!!sessionCheckPending}
+            style={{background:C.gold,border:"none",borderRadius:12,width:44,height:44,cursor:(loading||!input.trim()||sessionCheckPending)?"not-allowed":"pointer",opacity:(loading||!input.trim()||sessionCheckPending)?0.5:1,fontSize:18,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,color:"#000",fontWeight:700}}>
             →
           </button>
         </div>
@@ -1001,7 +1087,7 @@ function CoachDashboard({coach,onLogout}) {
                           <div style={{width:34,height:34,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:15,color:"#000",flexShrink:0}}>{a.name[0].toUpperCase()}</div>
                           <div style={{flex:1,minWidth:0}}>
                             <div style={{color:C.text,fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.name}</div>
-                            <div style={{color:C.muted,fontSize:11}}>{a.sport} · {workouts.filter(w=>w.athlete_id===a.id).length} sessions</div>
+                            <div style={{color:C.muted,fontSize:11}}>{a.sport} · {groupIntoSessions(workouts.filter(w=>w.athlete_id===a.id)).length} sessions</div>
                           </div>
                           <div style={{textAlign:"right",flexShrink:0}}>
                             {hasPain&&<div style={{color:C.red,fontSize:9,marginBottom:2}}>⚠ pain</div>}
@@ -1080,9 +1166,9 @@ function GroupStats({athletes,workouts,prs}) {
   const now = new Date();
   const weekAgo = new Date(now-7*24*60*60*1000);
 
-  const weekWorkouts = workouts.filter(w=>new Date(w.created_at)>=weekAgo);
+  const weekWorkouts = workouts.filter(w=>new Date(w.created_at)>=weekAgo&&isRealSession(w));
   const weekPRs = prs.filter(p=>new Date(p.created_at||0)>=weekAgo);
-  const weekPain = weekWorkouts.filter(w=>w.parsed_data?.pain_flags?.length>0);
+  const weekPain = weekWorkouts.filter(w=>w.parsed_data?.pain_flags?.length>0); // weekWorkouts already filtered to real sessions
 
   const activeIds = new Set(weekWorkouts.map(w=>w.athlete_id));
   const inactiveAthletes = athletes.filter(a=>!activeIds.has(a.id));
@@ -1097,7 +1183,7 @@ function GroupStats({athletes,workouts,prs}) {
     d.setHours(0,0,0,0);
     const next = new Date(d); next.setDate(next.getDate()+1);
     dayLabels.push(d.toLocaleDateString("en-US",{weekday:"short"}));
-    dayCounts.push(workouts.filter(w=>{const wd=new Date(w.created_at);return wd>=d&&wd<next;}).length);
+    dayCounts.push(groupIntoSessions(workouts.filter(w=>{const wd=new Date(w.created_at);return wd>=d&&wd<next;})).length);
   }
 
   // Sport breakdown
@@ -1111,7 +1197,7 @@ function GroupStats({athletes,workouts,prs}) {
         {[
           {label:"Total Athletes",val:athletes.length,color:C.gold},
           {label:"Active This Week",val:activeAthletes.length,color:C.green},
-          {label:"Sessions This Week",val:weekWorkouts.length,color:C.green},
+          {label:"Sessions This Week",val:groupIntoSessions(weekWorkouts).length,color:C.green},
           {label:"Pain Flags This Week",val:weekPain.length,color:C.red},
           {label:"New PRs This Week",val:weekPRs.length,color:C.blue},
         ].map(s=>(
@@ -1182,15 +1268,16 @@ function GroupStats({athletes,workouts,prs}) {
         </div>
       )}
 
+
       {/* Sport breakdown */}
       {Object.keys(bySport).length>0&&(
         <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
-          <div style={{color:C.muted2,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>ACTIVE ATHLETES BY SPORT</div>
+          <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>ACTIVE ATHLETES BY SPORT</div>
           <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-            {Object.entries(bySport).sort((a,b)=>b[1]-a[1]).map(([sport,count])=>(
-              <div key={sport} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 14px",display:"flex",gap:8,alignItems:"center"}}>
-                <span style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:20}}>{count}</span>
-                <span style={{color:C.muted2,fontSize:12}}>{sport}</span>
+            {Object.entries(bySport).map(([sport,count])=>(
+              <div key={sport} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 14px"}}>
+                <div style={{color:C.text,fontWeight:600,fontSize:13}}>{sport}</div>
+                <div style={{color:C.muted,fontSize:11}}>{count} active this week</div>
               </div>
             ))}
           </div>
@@ -1200,251 +1287,226 @@ function GroupStats({athletes,workouts,prs}) {
   );
 }
 
-// ─── ATHLETE DETAIL ───────────────────────────────────────────────────────────
-function AthleteDetail({athlete, workouts, prs, onProgramSave}) {
-  const [subTab,setSubTab] = useState("general");
-  const [showCharts,setShowCharts] = useState(false);
-  const [editingProgram,setEditingProgram] = useState(false);
+// ─── ATHLETE DETAIL (Coach Dashboard) ────────────────────────────────────────
+function AthleteDetail({athlete,workouts,prs,onProgramSave}) {
+  const [tab,setTab] = useState("overview");
   const [programText,setProgramText] = useState(athlete.program_text||"");
-  const [savingProgram,setSavingProgram] = useState(false);
-  const [programErr,setProgramErr] = useState("");
+  const [programSaving,setProgramSaving] = useState(false);
+  const [programSaved,setProgramSaved] = useState(false);
 
-  const now = new Date();
-  const weekAgo = new Date(now-7*24*60*60*1000);
-  const weekWorkouts = workouts.filter(w=>new Date(w.created_at)>=weekAgo);
+  useEffect(()=>{ setProgramText(athlete.program_text||""); },[athlete.id,athlete.program_text]);
 
-  // All pain flags across all sessions with dates
-  const allPainFlags = workouts.flatMap(w=>
-    (w.parsed_data?.pain_flags||[]).map(pf=>({...pf,date:w.created_at}))
-  );
-
-  // Progress chart data per lift (top 6 by frequency)
-  const liftHistory = {};
-  [...workouts].reverse().forEach(w=>{
-    (w.parsed_data?.exercises||[]).forEach(ex=>{
-      if(!ex.name||!ex.weight||ex.unit==="bodyweight") return;
-      const k = ex.name.toLowerCase().trim();
-      if(!liftHistory[k]) liftHistory[k]={name:ex.name,points:[]};
-      liftHistory[k].points.push({date:w.created_at,weight:ex.weight});
-    });
-  });
-  const topLifts = Object.values(liftHistory).sort((a,b)=>b.points.length-a.points.length).slice(0,6);
-
-  // Workouts per week chart (last 8 weeks)
-  const weeklyData = [];
-  for(let i=7;i>=0;i--){
-    const start = new Date(now); start.setDate(start.getDate()-i*7-daysBetween(now)%7); start.setHours(0,0,0,0);
-    const end = new Date(start); end.setDate(end.getDate()+7);
-    const count = workouts.filter(w=>{const d=new Date(w.created_at);return d>=start&&d<end;}).length;
-    const label = `W${8-i}`;
-    weeklyData.push({label,y:count});
-  }
-
-  const saveProgram = async () => {
-    setSavingProgram(true); setProgramErr("");
+  const handleProgramSave = async () => {
+    setProgramSaving(true);
     try {
       await onProgramSave(programText);
-      setEditingProgram(false);
-    } catch(e){
-      setProgramErr("Save failed. Make sure the athletes table has a program_text column in Supabase.");
-    }
-    setSavingProgram(false);
+      setProgramSaved(true);
+      setTimeout(()=>setProgramSaved(false),3000);
+    } catch(e){}
+    setProgramSaving(false);
   };
 
+  const lastWorkout = workouts[0];
+  const hasPain = workouts.some(w=>w.parsed_data?.pain_flags?.length>0);
+  const tabs = ["overview","workouts","prs","program"];
+
   return (
-    <div>
-      {/* Athlete header card */}
-      <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:20,marginBottom:16}}>
-        <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:16,flexWrap:"wrap"}}>
-          <div style={{width:52,height:52,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:24,color:"#000",flexShrink:0}}>{athlete.name[0].toUpperCase()}</div>
-          <div style={{flex:1}}>
-            <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:C.text,letterSpacing:1}}>{athlete.name}</div>
-            <div style={{color:C.muted,fontSize:12}}>{athlete.sport} · Joined {fmtDate(athlete.created_at)}</div>
-            {athlete.season_date&&<div style={{color:C.gold,fontSize:11,marginTop:2}}>Season: {fmtDate(athlete.season_date)}</div>}
-          </div>
-          <a href={`mailto:joe.thomas@commandengineering.com?subject=Feedback for ${athlete.name}`}
-            style={{background:C.gold,color:"#000",borderRadius:8,padding:"8px 14px",fontSize:12,fontWeight:700,textDecoration:"none",flexShrink:0}}>
-            Email Coach Joe
-          </a>
+    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden"}}>
+      {/* Athlete header */}
+      <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,background:C.navy3,display:"flex",alignItems:"center",gap:14}}>
+        <div style={{width:48,height:48,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:22,color:"#000",flexShrink:0}}>
+          {athlete.name[0].toUpperCase()}
         </div>
-        {/* Quick stats */}
-        <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
-          {[
-            {l:"Total Sessions",v:workouts.length,c:C.gold},
-            {l:"This Week",v:weekWorkouts.length,c:C.green},
-            {l:"PRs Logged",v:prs.length,c:C.blue},
-            {l:"Pain Flags",v:allPainFlags.length,c:allPainFlags.length>0?C.red:C.muted},
-          ].map(s=>(
-            <div key={s.l} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"8px 14px",minWidth:90}}>
-              <div style={{fontFamily:"'Bebas Neue'",fontSize:24,color:s.c}}>{s.v}</div>
-              <div style={{color:C.muted,fontSize:10}}>{s.l}</div>
-            </div>
-          ))}
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.text,letterSpacing:1}}>{athlete.name}</div>
+          <div style={{color:C.muted,fontSize:12}}>{athlete.sport} · {groupIntoSessions(workouts).length} sessions · {prs.length} PRs</div>
+          {athlete.season_date&&<div style={{color:C.gold,fontSize:11}}>Season: {fmtDate(athlete.season_date)}</div>}
+        </div>
+        <div style={{display:"flex",gap:8,flexShrink:0}}>
+          {hasPain&&<div style={{background:`${C.red}20`,border:`1px solid ${C.red}`,borderRadius:8,padding:"4px 10px",color:C.red,fontSize:11}}>⚠ Pain</div>}
+          {athlete.program_text&&<div style={{background:"#0a0e1e",border:`1px solid ${C.blue}`,borderRadius:8,padding:"4px 10px",color:C.blue,fontSize:11}}>Program set</div>}
         </div>
       </div>
 
-      {/* Sub-tabs */}
-      <div style={{display:"flex",gap:8,marginBottom:16}}>
-        {["general","chat","program"].map(t=>(
-          <button key={t} onClick={()=>setSubTab(t)}
-            style={{padding:"8px 18px",borderRadius:10,border:`1px solid ${subTab===t?C.gold:C.border}`,background:subTab===t?`${C.gold}15`:"transparent",color:subTab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"all 0.15s"}}>
-            {t}
+      {/* Tabs */}
+      <div style={{display:"flex",borderBottom:`1px solid ${C.border}`}}>
+        {tabs.map(t=>(
+          <button key={t} onClick={()=>setTab(t)}
+            style={{padding:"10px 16px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?C.gold:"transparent"}`,color:tab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"color 0.15s"}}>
+            {t==="prs"?"PRs":t}
           </button>
         ))}
       </div>
 
-      {/* ── GENERAL SUB-TAB ── */}
-      {subTab==="general"&&(
-        <div>
-          {/* PRs */}
-          {prs.length>0&&(
-            <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16,marginBottom:16}}>
-              <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>PERSONAL RECORDS</div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))",gap:8}}>
-                {prs.map((pr,i)=>(
-                  <div key={i} style={{background:C.navy3,border:`1px solid ${C.gold}30`,borderRadius:10,padding:"10px 14px"}}>
-                    <div style={{color:C.muted2,fontSize:11,marginBottom:2}}>{pr.exercise}</div>
-                    <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:24}}>{pr.weight} lbs</div>
-                    <div style={{color:C.muted,fontSize:10}}>{pr.reps} rep{pr.reps!==1?"s":""} · {pr.created_at?fmtDate(pr.created_at):"–"}</div>
+      <div style={{padding:20,maxHeight:"calc(100vh - 320px)",overflowY:"auto"}}>
+
+        {/* ── OVERVIEW TAB ── */}
+        {tab==="overview"&&(
+          <div>
+            {lastWorkout?(
+              <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:16}}>
+                <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:8}}>LAST SESSION — {fmtDateShort(lastWorkout.created_at)}</div>
+                {lastWorkout.parsed_data?.exercises?.length>0?(
+                  <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                    {lastWorkout.parsed_data.exercises.map((e,i)=>(
+                      <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 10px"}}>
+                        <div style={{color:C.text,fontSize:12,fontWeight:600}}>{e.name}</div>
+                        <div style={{color:C.muted,fontSize:11}}>
+                          {e.sets&&e.reps?`${e.sets}×${e.reps}`:""}{e.weight?` @ ${e.weight}lbs`:""}
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Pain flags */}
-          {allPainFlags.length>0&&(
-            <div style={{background:C.navy2,border:`1px solid ${C.red}40`,borderRadius:14,padding:16,marginBottom:16}}>
-              <div style={{color:C.red,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>PAIN FLAGS</div>
-              {allPainFlags.map((pf,i)=>(
-                <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:`1px solid ${C.border}20`,fontSize:13}}>
-                  <div>
-                    <span style={{color:C.text,fontWeight:600}}>{pf.area}</span>
-                    {pf.description&&<span style={{color:C.muted,marginLeft:8,fontSize:12}}>{pf.description}</span>}
+                ):(
+                  <div style={{color:C.muted2,fontSize:13}}>{lastWorkout.raw_message?.slice(0,200)}</div>
+                )}
+                {lastWorkout.parsed_data?.session_feel&&(
+                  <div style={{marginTop:8,color:C.muted,fontSize:11}}>
+                    Feel: <span style={{color:lastWorkout.parsed_data.session_feel==="great"||lastWorkout.parsed_data.session_feel==="good"?C.green:lastWorkout.parsed_data.session_feel==="rough"?C.red:C.gold}}>
+                      {lastWorkout.parsed_data.session_feel}
+                    </span>
                   </div>
-                  <span style={{color:C.muted,fontSize:11,flexShrink:0,marginLeft:12}}>{fmtDate(pf.date)}</span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Progress charts */}
-          <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden"}}>
-            <button onClick={()=>setShowCharts(p=>!p)}
-              style={{width:"100%",padding:"14px 16px",background:"none",border:"none",color:C.muted2,cursor:"pointer",fontSize:13,fontWeight:600,display:"flex",justifyContent:"space-between",alignItems:"center",fontFamily:"'DM Sans'"}}>
-              <span style={{color:C.text}}>Progress Charts</span>
-              <span style={{color:C.muted}}>{showCharts?"▲ Hide":"▼ Show"}</span>
-            </button>
-            {showCharts&&(
-              <div style={{padding:"0 16px 16px"}}>
-                {/* Workouts per week */}
-                <div style={{marginBottom:20}}>
-                  <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>WORKOUTS PER WEEK</div>
-                  <LineChart data={weeklyData} color={C.green} unit=""/>
-                </div>
-                {/* Per-lift charts */}
-                {topLifts.length===0?(
-                  <div style={{color:C.muted,fontSize:12}}>No weighted exercise data yet.</div>
-                ):topLifts.map(lift=>(
-                  <div key={lift.name} style={{marginBottom:20}}>
-                    <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>{lift.name.toUpperCase()} (lbs)</div>
-                    <LineChart
-                      data={lift.points.map(p=>({label:fmtDateShort(p.date),y:p.weight}))}
-                      color={C.gold}
-                      unit="lbs"
-                    />
-                  </div>
-                ))}
+                )}
               </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ── CHAT SUB-TAB ── */}
-      {subTab==="chat"&&(
-        <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden"}}>
-          {workouts.length===0?(
-            <div style={{padding:24,textAlign:"center",color:C.muted}}>No sessions logged yet.</div>
-          ):workouts.map((w,i)=>(
-            <div key={i} style={{padding:16,borderBottom:`1px solid ${C.border}`}}>
-              <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginBottom:10}}>{new Date(w.created_at).toLocaleString()}</div>
-              <div style={{display:"flex",justifyContent:"flex-end",marginBottom:8}}>
-                <div style={{maxWidth:"85%",background:C.gold,borderRadius:"12px 12px 4px 12px",padding:"10px 14px",fontSize:13,color:"#000",lineHeight:1.6,whiteSpace:"pre-wrap"}}>{w.raw_message}</div>
-              </div>
-              {w.bot_reply&&(
-                <div style={{display:"flex",gap:8,marginBottom:8,alignItems:"flex-start"}}>
-                  <div style={{width:26,height:26,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:"#000",flexShrink:0}}>J</div>
-                  <div style={{maxWidth:"85%",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:"12px 12px 12px 4px",padding:"10px 14px",fontSize:13,color:C.text,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{w.bot_reply}</div>
-                </div>
-              )}
-              <div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:4}}>
-                {w.parsed_data?.exercises?.map((ex,j)=>(
-                  <div key={j} style={{background:"#0a1e14",border:`1px solid ${C.green}30`,borderRadius:6,padding:"2px 8px",fontSize:11,color:C.green}}>
-                    {ex.name}{ex.weight?` ${ex.weight}lbs`:""}{ex.sets&&ex.reps?` ${ex.sets}x${ex.reps}`:""}
-                  </div>
-                ))}
-                {w.parsed_data?.pain_flags?.map((pf,j)=>(
-                  <div key={j} style={{background:"#1e0a0a",border:`1px solid ${C.red}30`,borderRadius:6,padding:"2px 8px",fontSize:11,color:C.red}}>pain: {pf.area}</div>
-                ))}
-                {w.parsed_data?.questions?.map((q,j)=>(
-                  <div key={j} style={{background:"#0a0e1e",border:`1px solid ${C.blue}30`,borderRadius:6,padding:"2px 8px",fontSize:11,color:C.blue}}>Q: {q.length>50?q.slice(0,50)+"...":q}</div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* ── PROGRAM SUB-TAB ── */}
-      {subTab==="program"&&(
-        <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:20}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-            <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700}}>CURRENT PROGRAM</div>
-            {!editingProgram&&(
-              <button onClick={()=>{setEditingProgram(true);setProgramText(athlete.program_text||"");}}
-                style={{background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:8,padding:"5px 12px",cursor:"pointer",fontSize:12,fontFamily:"'DM Sans'"}}>
-                {athlete.program_text?"Edit Program":"Add Program"}
-              </button>
-            )}
-          </div>
-
-          {editingProgram?(
-            <>
-              <div style={{color:C.muted2,fontSize:12,marginBottom:10,lineHeight:1.6}}>
-                Write or paste the athlete's program here. This will be referenced by Joe-bot in every conversation.
-                <br/><span style={{color:C.gold,fontSize:11}}>Note: requires a <code>program_text</code> column in your Supabase athletes table.</span>
-              </div>
-              <textarea
-                value={programText}
-                onChange={e=>setProgramText(e.target.value)}
-                rows={12}
-                placeholder="e.g. Monday: Squat 5x5, Bench 4x8, Row 4x10&#10;Wednesday: Deadlift 3x5, Press 4x8&#10;Friday: Squat 4x4, Bench 5x5, Chin-ups 4x8"
-                style={{...inp(),resize:"vertical",lineHeight:1.6,fontSize:13}}/>
-              {programErr&&<div style={{color:C.red,fontSize:12,marginTop:8}}>{programErr}</div>}
-              <div style={{display:"flex",gap:8,marginTop:12}}>
-                <button onClick={saveProgram} disabled={savingProgram}
-                  style={{flex:1,background:C.gold,color:"#000",border:"none",borderRadius:10,padding:"11px",fontWeight:700,fontSize:14,cursor:"pointer",fontFamily:"'Bebas Neue'",letterSpacing:1,opacity:savingProgram?0.7:1}}>
-                  {savingProgram?"Saving...":"Save Program"}
-                </button>
-                <button onClick={()=>setEditingProgram(false)}
-                  style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:10,padding:"11px 18px",cursor:"pointer",fontSize:13,fontFamily:"'DM Sans'"}}>
-                  Cancel
-                </button>
-              </div>
-            </>
-          ):(
-            athlete.program_text?(
-              <pre style={{color:C.text,fontSize:13,lineHeight:1.8,whiteSpace:"pre-wrap",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:16}}>{athlete.program_text}</pre>
             ):(
-              <div style={{color:C.muted,fontSize:13,textAlign:"center",padding:32,background:C.navy3,borderRadius:10,lineHeight:1.7}}>
-                No program set yet.<br/>
-                <span style={{fontSize:12}}>Athletes can say "my program is..." in chat, or you can add it directly above.</span>
+              <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:16,color:C.muted,fontSize:13}}>No sessions logged yet.</div>
+            )}
+
+            {(()=>{
+              const painLogs = workouts.filter(w=>w.parsed_data?.pain_flags?.length>0);
+              if(!painLogs.length) return null;
+              const areaCounts = {};
+              painLogs.flatMap(w=>w.parsed_data.pain_flags.map(p=>p.area)).forEach(a=>areaCounts[a]=(areaCounts[a]||0)+1);
+              return (
+                <div style={{background:`${C.red}10`,border:`1px solid ${C.red}40`,borderRadius:12,padding:16,marginBottom:16}}>
+                  <div style={{color:C.red,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:8}}>PAIN HISTORY ({painLogs.length} sessions flagged)</div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                    {Object.entries(areaCounts).map(([area,count])=>(
+                      <div key={area} style={{background:`${C.red}20`,border:`1px solid ${C.red}40`,borderRadius:8,padding:"4px 10px",fontSize:12,color:C.red}}>
+                        {area} ×{count}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {prs.length>0&&(
+              <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:16}}>
+                <div style={{color:C.blue,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>TOP PRs</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                  {prs.slice(0,6).map((p,i)=>(
+                    <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 12px"}}>
+                      <div style={{color:C.text,fontSize:12,fontWeight:600}}>{p.exercise}</div>
+                      <div style={{color:C.blue,fontSize:13,fontWeight:700}}>{p.weight}lbs</div>
+                    </div>
+                  ))}
+                </div>
               </div>
-            )
-          )}
-        </div>
-      )}
+            )}
+          </div>
+        )}
+
+        {/* ── WORKOUTS TAB ── */}
+        {tab==="workouts"&&(
+          <div>
+            {workouts.length===0?(
+              <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No workouts logged yet.</div>
+            ):workouts.slice(0,30).map((w,i)=>(
+              <div key={i} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:14,marginBottom:10}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                  <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1}}>{fmtDate(w.created_at)}</div>
+                  {w.parsed_data?.session_feel&&<div style={{fontSize:11,color:w.parsed_data.session_feel==="great"||w.parsed_data.session_feel==="good"?C.green:w.parsed_data.session_feel==="rough"?C.red:C.gold}}>{w.parsed_data.session_feel}</div>}
+                </div>
+                {w.parsed_data?.exercises?.length>0?(
+                  <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:6}}>
+                    {w.parsed_data.exercises.map((e,j)=>(
+                      <div key={j} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:6,padding:"4px 8px",fontSize:11}}>
+                        <span style={{color:C.text,fontWeight:600}}>{e.name}</span>
+                        {e.sets&&e.reps&&<span style={{color:C.muted}}> {e.sets}×{e.reps}</span>}
+                        {e.weight&&<span style={{color:C.muted2}}> @{e.weight}lbs</span>}
+                      </div>
+                    ))}
+                  </div>
+                ):(
+                  <div style={{color:C.muted2,fontSize:12,marginBottom:6}}>{w.raw_message?.slice(0,150)}</div>
+                )}
+                {w.parsed_data?.pain_flags?.length>0&&(
+                  <div style={{color:C.red,fontSize:11,marginBottom:4}}>⚠ {w.parsed_data.pain_flags.map(p=>p.area).join(", ")}</div>
+                )}
+                {w.bot_reply&&(
+                  <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.muted2,fontStyle:"italic",marginTop:6}}>
+                    "{w.bot_reply.slice(0,200)}{w.bot_reply.length>200?"...":""}"
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ── PRs TAB ── */}
+        {tab==="prs"&&(
+          <div>
+            {prs.length===0?(
+              <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No PRs recorded yet.</div>
+            ):(
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                {prs.map((p,i)=>(
+                  <div key={i} style={{background:C.navy3,border:`1px solid ${C.blue}40`,borderRadius:12,padding:"12px 16px"}}>
+                    <div style={{color:C.text,fontWeight:600,fontSize:14}}>{p.exercise}</div>
+                    <div style={{fontFamily:"'Bebas Neue'",fontSize:28,color:C.blue,letterSpacing:1}}>
+                      {p.weight}<span style={{fontSize:14,color:C.muted,fontFamily:"'DM Sans'"}}>lbs</span>
+                    </div>
+                    {p.reps&&p.reps>1&&<div style={{color:C.muted,fontSize:11}}>{p.weight}lbs × {p.reps} reps</div>}
+                    <div style={{color:C.blue,fontSize:11,fontWeight:600,marginTop:2}}>est. 1RM: {epley1RM(p.weight,p.reps||1)}lbs</div>
+                    {p.created_at&&<div style={{color:C.muted,fontSize:10,marginTop:3}}>{fmtDateShort(p.created_at)}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── PROGRAM TAB ── */}
+        {tab==="program"&&(
+          <div>
+            <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:14,marginBottom:16,color:C.muted2,fontSize:13,lineHeight:1.65}}>
+              {athlete.program_text
+                ? <><span style={{color:C.blue,fontWeight:600}}>Program active.</span> This was set via the Coach Joe-bot conversation or submitted by a coach. Joe-bot references it whenever making recommendations or logging workouts. You can edit or replace it below.</>
+                : <>No program set yet. You can paste or write a program here and Joe-bot will reference it going forward. Alternatively, the athlete can describe their program to Joe-bot ("my program is...") and it will be saved automatically.</>
+              }
+            </div>
+
+            {athlete.program_text&&(
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
+                <div style={{width:8,height:8,borderRadius:"50%",background:C.blue,flexShrink:0}}/>
+                <div style={{color:C.blue,fontSize:12}}>Coach Joe-bot references this program in every conversation with {athlete.name}</div>
+              </div>
+            )}
+
+            <textarea
+              value={programText}
+              onChange={e=>setProgramText(e.target.value)}
+              placeholder={"Paste or write the athlete's training program here...\n\nExamples:\n  Week 1: Squat 3×5, Bench 3×5, Deadlift 1×5\n  Week 2: Squat 3×5 +5lbs, Bench 3×5 +5lbs\n\nOr paste a full multi-week periodization plan — Joe-bot will read the whole thing."}
+              rows={14}
+              style={{width:"100%",background:C.navy3,border:`1px solid ${programText!==(athlete.program_text||"")?C.gold:C.border}`,borderRadius:12,padding:"12px 14px",color:C.text,fontSize:13,outline:"none",resize:"vertical",lineHeight:1.6,fontFamily:"'DM Sans'",transition:"border-color 0.15s"}}
+            />
+
+            <div style={{display:"flex",gap:10,marginTop:12,alignItems:"center"}}>
+              <button
+                onClick={handleProgramSave}
+                disabled={programSaving||programText===(athlete.program_text||"")}
+                style={{background:programSaving||programText===(athlete.program_text||"")?C.navy3:C.gold,color:programSaving||programText===(athlete.program_text||"")?C.muted:"#000",border:`1px solid ${programSaving||programText===(athlete.program_text||"")?C.border:C.gold}`,borderRadius:10,padding:"10px 24px",cursor:programSaving||programText===(athlete.program_text||"")?"not-allowed":"pointer",fontSize:13,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,transition:"all 0.15s"}}>
+                {programSaving?"Saving...":"Save Program"}
+              </button>
+              {programSaved&&<div style={{color:C.green,fontSize:13,fontWeight:600}}>✓ Saved — Joe-bot will reference this program</div>}
+              {!programSaved&&programText!==(athlete.program_text||"")&&!programSaving&&(
+                <div style={{color:C.muted,fontSize:12}}>Unsaved changes</div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
