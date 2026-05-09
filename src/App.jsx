@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from "react";
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const ANTHROPIC_KEY = import.meta.env.VITE_ANTHROPIC_KEY;
-const GEMINI_KEY    = import.meta.env.VITE_GEMINI_KEY;
 const SUPABASE_URL  = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY  = import.meta.env.VITE_SUPABASE_KEY;
 const MASTER_CODE   = "FORTIS-MASTER"; // keep for backward compat
@@ -38,76 +37,6 @@ const daysBetween = (date) => {
 const fmtDate = (d) => new Date(d).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
 const fmtDateShort = (d) => new Date(d).toLocaleDateString("en-US",{month:"short",day:"numeric"});
 
-// ─── GEMINI VIDEO ANALYSIS ────────────────────────────────────────────────────
-// Step 1: Upload video to Gemini File API (resumable upload)
-const uploadToGemini = async (file) => {
-  // Initiate resumable upload
-  const initRes = await fetch(
-    `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${GEMINI_KEY}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Upload-Protocol": "resumable",
-        "X-Goog-Upload-Command": "start",
-        "X-Goog-Upload-Header-Content-Length": String(file.size),
-        "X-Goog-Upload-Header-Content-Type": file.type,
-      },
-      body: JSON.stringify({ file: { display_name: file.name } })
-    }
-  );
-  if(!initRes.ok) throw new Error(`Upload init failed: ${initRes.status}`);
-  const uploadUrl = initRes.headers.get("X-Goog-Upload-URL");
-  if(!uploadUrl) throw new Error("No upload URL returned");
-
-  // Upload the actual file bytes
-  const uploadRes = await fetch(uploadUrl, {
-    method: "PUT",
-    headers: {
-      "Content-Length": String(file.size),
-      "X-Goog-Upload-Offset": "0",
-      "X-Goog-Upload-Command": "upload, finalize",
-    },
-    body: file
-  });
-  if(!uploadRes.ok) throw new Error(`Upload failed: ${uploadRes.status}`);
-  const data = await uploadRes.json();
-  return data.file; // { name, uri, mimeType, state, ... }
-};
-
-// Step 2: Poll until Gemini finishes processing the video
-const waitForGeminiFile = async (fileName) => {
-  for(let i=0;i<40;i++){
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${GEMINI_KEY}`
-    );
-    const file = await res.json();
-    if(file.state==="ACTIVE") return file;
-    if(file.state==="FAILED") throw new Error("Gemini file processing failed");
-    await new Promise(r=>setTimeout(r,1500));
-  }
-  throw new Error("Video processing timed out. Try a shorter clip.");
-};
-
-// Step 3: Run analysis against the processed video
-const analyzeVideoWithGemini = async (fileUri, mimeType, prompt) => {
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [
-          { fileData: { mimeType, fileUri } },
-          { text: prompt }
-        ]}]
-      })
-    }
-  );
-  const d = await res.json();
-  if(d.error) throw new Error(d.error.message);
-  return d.candidates?.[0]?.content?.parts?.[0]?.text || "No analysis returned.";
-};
 
 // ─── CLAUDE ──────────────────────────────────────────────────────────────────
 const askClaude = async (system, user, maxTokens=600, images=[]) => {
@@ -703,65 +632,52 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     const file = e.target.files?.[0];
     if(!file) return;
     e.target.value="";
-    setVideoLoading(true);
 
     const sizeMB = (file.size/1024/1024).toFixed(1);
+    if(file.size > 48*1024*1024){
+      setMessages(prev=>[...prev,
+        {role:"user",content:`[Form review video: ${file.name} — ${sizeMB}MB]`},
+        {role:"assistant",content:`That video is ${sizeMB}MB — too large to upload. Record a shorter clip (15–30 seconds works best) and try again.`}
+      ]);
+      return;
+    }
+
+    setVideoLoading(true);
     setMessages(prev=>[...prev,
       {role:"user",content:`[Form review video: ${file.name} — ${sizeMB}MB]`},
-      {role:"assistant",content:`Uploading your video (${sizeMB}MB)...`}
+      {role:"assistant",content:`Uploading and analyzing your video...`}
     ]);
 
     try {
-      // Upload to Gemini
-      const fileData = await uploadToGemini(file);
+      const res = await fetch("/api/analyze-video", {
+        method: "POST",
+        headers: {
+          "Content-Type": file.type,
+          "X-File-Name": file.name,
+          "X-Sport": athlete.sport,
+          "X-Athlete-Name": athlete.name,
+        },
+        body: file,
+      });
 
-      setMessages(prev=>{const u=[...prev];u[u.length-1]={role:"assistant",content:"Video uploaded. Waiting for Gemini to process it..."};return u;});
+      if(!res.ok){
+        const err = await res.json().catch(()=>({error:res.statusText}));
+        throw new Error(err.error||"Server error");
+      }
 
-      // Wait for processing
-      const activeFile = await waitForGeminiFile(fileData.name);
-
-      setMessages(prev=>{const u=[...prev];u[u.length-1]={role:"assistant",content:"Analyzing your form..."};return u;});
-
-      const sportFocus = {
-        "Football":"hip hinge depth, knee tracking over toes, bar path on squats/deadlifts, core bracing, shoulder position on pressing",
-        "Basketball":"landing mechanics, knee valgus on jumps, hip loading on deceleration",
-        "Volleyball":"shoulder position on overhead movements, jump mechanics and landing",
-        "Soccer":"single-leg stability, hip alignment, ankle position",
-        "Baseball":"rotational mechanics, shoulder/hip separation, arm path",
-        "Archery":"stance width, draw arm position, bow shoulder, anchor point consistency",
-        "Olympic Weightlifting":"bar path, receiving position, catch depth, overhead stability",
-        "Running":"foot strike relative to hips, hip extension at push-off, arm drive, forward lean",
-        "General Fitness":"joint alignment, bracing, range of motion, symmetry"
-      }[athlete.sport]||"joint alignment, bracing, range of motion";
-
-      const prompt = `You are Coach Joe Thomas -- high school strength coach, 20+ years military S&C. You are watching a workout video of ${athlete.name} (sport: ${athlete.sport}).
-
-Give direct, specific coaching feedback on their form. Focus on: ${sportFocus}.
-
-Format your response exactly like this:
-Movement: [name what you see them doing]
-What's solid: [1-2 things done well]
-Fix these:
-1. [Most important cue — be specific, e.g. "Drive knees out at the bottom, not in"]
-2. [Second cue]
-3. [Third cue if applicable]
-
-Keep it under 200 words. No fluff. If the video is unclear, describe what you can see and flag it.`;
-
-      const formReply = await analyzeVideoWithGemini(activeFile.uri, file.type, prompt);
-
-      setMessages(prev=>{const u=[...prev];u[u.length-1]={role:"assistant",content:formReply};return u;});
+      const {analysis} = await res.json();
+      setMessages(prev=>{const u=[...prev];u[u.length-1]={role:"assistant",content:analysis};return u;});
 
       await sbInsert("workouts",{
         athlete_id:athlete.id,
         raw_message:`[Form review: ${file.name}]`,
-        bot_reply:formReply,
+        bot_reply:analysis,
         parsed_data:{exercises:[],pain_flags:[],equipment_issues:[],questions:[],session_feel:null,general_notes:"Video form review"}
       });
     } catch(e){
       setMessages(prev=>{
         const u=[...prev];
-        u[u.length-1]={role:"assistant",content:`Couldn't analyze that video. ${e.message||"Try a shorter clip (under 60 seconds works best) and make sure VITE_GEMINI_KEY is set."}`};
+        u[u.length-1]={role:"assistant",content:`Couldn't analyze that video. ${e.message||"Try a shorter clip and try again."}`};
         return u;
       });
     }
