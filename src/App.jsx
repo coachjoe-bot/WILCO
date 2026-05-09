@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const ANTHROPIC_KEY = import.meta.env.VITE_ANTHROPIC_KEY;
+const GEMINI_KEY    = import.meta.env.VITE_GEMINI_KEY;
 const SUPABASE_URL  = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY  = import.meta.env.VITE_SUPABASE_KEY;
 const MASTER_CODE   = "FORTIS-MASTER"; // keep for backward compat
@@ -37,34 +38,76 @@ const daysBetween = (date) => {
 const fmtDate = (d) => new Date(d).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
 const fmtDateShort = (d) => new Date(d).toLocaleDateString("en-US",{month:"short",day:"numeric"});
 
-// ─── VIDEO FRAME EXTRACTION ───────────────────────────────────────────────────
-const extractVideoFrames = (file, numFrames=4) => new Promise((resolve,reject) => {
-  const url = URL.createObjectURL(file);
-  const video = document.createElement("video");
-  video.src = url; video.muted = true; video.playsInline = true;
-  video.onloadedmetadata = async () => {
-    const dur = video.duration;
-    if(!isFinite(dur)||dur===0){URL.revokeObjectURL(url);reject(new Error("Cannot read video duration"));return;}
-    const canvas = document.createElement("canvas");
-    canvas.width = 640; canvas.height = 360;
-    const ctx = canvas.getContext("2d");
-    const frames = [];
-    for(let i=0;i<numFrames;i++){
-      const t = Math.min((dur/(numFrames+1))*(i+1), dur-0.1);
-      await new Promise(res=>{
-        video.currentTime = t;
-        video.onseeked = () => {
-          ctx.drawImage(video,0,0,640,360);
-          frames.push(canvas.toDataURL("image/jpeg",0.7).split(",")[1]);
-          res();
-        };
-      });
+// ─── GEMINI VIDEO ANALYSIS ────────────────────────────────────────────────────
+// Step 1: Upload video to Gemini File API (resumable upload)
+const uploadToGemini = async (file) => {
+  // Initiate resumable upload
+  const initRes = await fetch(
+    `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${GEMINI_KEY}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Upload-Protocol": "resumable",
+        "X-Goog-Upload-Command": "start",
+        "X-Goog-Upload-Header-Content-Length": String(file.size),
+        "X-Goog-Upload-Header-Content-Type": file.type,
+      },
+      body: JSON.stringify({ file: { display_name: file.name } })
     }
-    URL.revokeObjectURL(url);
-    resolve(frames);
-  };
-  video.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Video load error")); };
-});
+  );
+  if(!initRes.ok) throw new Error(`Upload init failed: ${initRes.status}`);
+  const uploadUrl = initRes.headers.get("X-Goog-Upload-URL");
+  if(!uploadUrl) throw new Error("No upload URL returned");
+
+  // Upload the actual file bytes
+  const uploadRes = await fetch(uploadUrl, {
+    method: "PUT",
+    headers: {
+      "Content-Length": String(file.size),
+      "X-Goog-Upload-Offset": "0",
+      "X-Goog-Upload-Command": "upload, finalize",
+    },
+    body: file
+  });
+  if(!uploadRes.ok) throw new Error(`Upload failed: ${uploadRes.status}`);
+  const data = await uploadRes.json();
+  return data.file; // { name, uri, mimeType, state, ... }
+};
+
+// Step 2: Poll until Gemini finishes processing the video
+const waitForGeminiFile = async (fileName) => {
+  for(let i=0;i<40;i++){
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${GEMINI_KEY}`
+    );
+    const file = await res.json();
+    if(file.state==="ACTIVE") return file;
+    if(file.state==="FAILED") throw new Error("Gemini file processing failed");
+    await new Promise(r=>setTimeout(r,1500));
+  }
+  throw new Error("Video processing timed out. Try a shorter clip.");
+};
+
+// Step 3: Run analysis against the processed video
+const analyzeVideoWithGemini = async (fileUri, mimeType, prompt) => {
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [
+          { fileData: { mimeType, fileUri } },
+          { text: prompt }
+        ]}]
+      })
+    }
+  );
+  const d = await res.json();
+  if(d.error) throw new Error(d.error.message);
+  return d.candidates?.[0]?.content?.parts?.[0]?.text || "No analysis returned.";
+};
 
 // ─── CLAUDE ──────────────────────────────────────────────────────────────────
 const askClaude = async (system, user, maxTokens=600, images=[]) => {
@@ -662,58 +705,64 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     e.target.value="";
     setVideoLoading(true);
 
-    // Show placeholder message while analyzing
+    const sizeMB = (file.size/1024/1024).toFixed(1);
     setMessages(prev=>[...prev,
-      {role:"user",content:`[Video uploaded: ${file.name}]`},
-      {role:"assistant",content:"Pulling frames from your video now — give me a sec..."}
+      {role:"user",content:`[Form review video: ${file.name} — ${sizeMB}MB]`},
+      {role:"assistant",content:`Uploading your video (${sizeMB}MB)...`}
     ]);
 
     try {
-      const frames = await extractVideoFrames(file,4);
+      // Upload to Gemini
+      const fileData = await uploadToGemini(file);
+
+      setMessages(prev=>{const u=[...prev];u[u.length-1]={role:"assistant",content:"Video uploaded. Waiting for Gemini to process it..."};return u;});
+
+      // Wait for processing
+      const activeFile = await waitForGeminiFile(fileData.name);
+
+      setMessages(prev=>{const u=[...prev];u[u.length-1]={role:"assistant",content:"Analyzing your form..."};return u;});
+
       const sportFocus = {
-        "Football":"hip hinge, knee tracking, bar path on squats/deadlifts, core bracing",
-        "Basketball":"landing mechanics, knee valgus on jumps, hip loading",
-        "Volleyball":"shoulder position on overhead movements, jump landing",
-        "Soccer":"single-leg stability, hip alignment",
-        "Baseball":"rotational mechanics, shoulder/hip separation",
-        "Archery":"stance, draw arm position, anchor point",
-        "Olympic Weightlifting":"bar path, receiving position, overhead stability",
-        "Running":"foot strike, hip extension, arm drive",
-        "General Fitness":"joint alignment, bracing, range of motion"
-      }[athlete.sport]||"joint alignment, bracing, form consistency";
+        "Football":"hip hinge depth, knee tracking over toes, bar path on squats/deadlifts, core bracing, shoulder position on pressing",
+        "Basketball":"landing mechanics, knee valgus on jumps, hip loading on deceleration",
+        "Volleyball":"shoulder position on overhead movements, jump mechanics and landing",
+        "Soccer":"single-leg stability, hip alignment, ankle position",
+        "Baseball":"rotational mechanics, shoulder/hip separation, arm path",
+        "Archery":"stance width, draw arm position, bow shoulder, anchor point consistency",
+        "Olympic Weightlifting":"bar path, receiving position, catch depth, overhead stability",
+        "Running":"foot strike relative to hips, hip extension at push-off, arm drive, forward lean",
+        "General Fitness":"joint alignment, bracing, range of motion, symmetry"
+      }[athlete.sport]||"joint alignment, bracing, range of motion";
 
-      const formReply = await askClaude(
-        `You are Coach Joe Thomas -- high school strength coach, 20+ years military S&C. You are reviewing video frames of ${athlete.name}'s workout (sport: ${athlete.sport}).
-Analyze the form and give direct, specific coaching feedback. Focus on: ${sportFocus}.
-Structure your response:
-1. What I see (brief)
-2. What's good
-3. What to fix (specific cues, numbered)
-Keep it under 250 words. No fluff. If you can't clearly see the movement, say so and describe what you can see.`,
-        `Review these ${frames.length} frames from ${athlete.name}'s video.`,
-        700,
-        frames
-      );
+      const prompt = `You are Coach Joe Thomas -- high school strength coach, 20+ years military S&C. You are watching a workout video of ${athlete.name} (sport: ${athlete.sport}).
 
-      setMessages(prev=>{
-        const updated = [...prev];
-        // Replace the placeholder "give me a sec" message
-        updated[updated.length-1] = {role:"assistant",content:formReply};
-        return updated;
-      });
+Give direct, specific coaching feedback on their form. Focus on: ${sportFocus}.
 
-      // Save video review as a workout log entry
+Format your response exactly like this:
+Movement: [name what you see them doing]
+What's solid: [1-2 things done well]
+Fix these:
+1. [Most important cue — be specific, e.g. "Drive knees out at the bottom, not in"]
+2. [Second cue]
+3. [Third cue if applicable]
+
+Keep it under 200 words. No fluff. If the video is unclear, describe what you can see and flag it.`;
+
+      const formReply = await analyzeVideoWithGemini(activeFile.uri, file.type, prompt);
+
+      setMessages(prev=>{const u=[...prev];u[u.length-1]={role:"assistant",content:formReply};return u;});
+
       await sbInsert("workouts",{
         athlete_id:athlete.id,
-        raw_message:`[Video form review: ${file.name}]`,
+        raw_message:`[Form review: ${file.name}]`,
         bot_reply:formReply,
         parsed_data:{exercises:[],pain_flags:[],equipment_issues:[],questions:[],session_feel:null,general_notes:"Video form review"}
       });
     } catch(e){
       setMessages(prev=>{
-        const updated = [...prev];
-        updated[updated.length-1] = {role:"assistant",content:`Couldn't analyze that video. ${e.message||"Make sure it's a standard video format (mp4, mov) and try again."}`};
-        return updated;
+        const u=[...prev];
+        u[u.length-1]={role:"assistant",content:`Couldn't analyze that video. ${e.message||"Try a shorter clip (under 60 seconds works best) and make sure VITE_GEMINI_KEY is set."}`};
+        return u;
       });
     }
     setVideoLoading(false);
@@ -792,7 +841,7 @@ Keep it under 250 words. No fluff. If you can't clearly see the movement, say so
             →
           </button>
         </div>
-        <div style={{color:C.muted,fontSize:10,marginTop:6,textAlign:"center"}}>Type naturally to log workouts · 🎬 to upload a video for form review</div>
+        <div style={{color:C.muted,fontSize:10,marginTop:6,textAlign:"center"}}>Type naturally to log workouts · 🎬 upload a video for form review (30–60 sec clips work best)</div>
       </div>
     </div>
   );
