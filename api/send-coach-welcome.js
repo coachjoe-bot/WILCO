@@ -1,54 +1,221 @@
-// Vercel serverless function — sends a welcome email to a coach when an athlete signs up.
-// Called from the client-side signup flow immediately after athlete creation.
+// Vercel serverless function — sends weekly progress reports to external coaches.
+// Triggered by Vercel Cron every Monday at 9 AM ET, or manually via GET.
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+  // Simple auth check for manual triggers — skip for cron (Vercel signs cron requests)
+  const cronSecret = process.env.CRON_SECRET;
+  if(cronSecret && req.headers["authorization"] !== `Bearer ${cronSecret}` && req.headers["x-vercel-cron"] !== "1") {
+    return res.status(401).json({error:"Unauthorized"});
   }
 
-  const RESEND_KEY  = process.env.RESEND_API_KEY;
-  const FROM_EMAIL  = process.env.FROM_EMAIL  || "WILCO <reports@wilco.app>";
-  const SIGNUP_URL  = process.env.TEAM_SIGNUP_URL || "https://wilco.app/coaches";
+  const SUPABASE_URL = process.env.VITE_SUPABASE_URL;
+  const SUPABASE_KEY = process.env.VITE_SUPABASE_KEY;
+  const RESEND_KEY   = process.env.RESEND_API_KEY;
+  const FROM_EMAIL   = process.env.FROM_EMAIL   || "WILCO <reports@wilco.app>";
+  const SIGNUP_URL   = process.env.TEAM_SIGNUP_URL || "https://wilco.app/coaches";
 
-  if (!RESEND_KEY) return res.status(500).json({ error: "Missing RESEND_API_KEY" });
+  if(!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({error:"Missing Supabase config"});
+  if(!RESEND_KEY)                    return res.status(500).json({error:"Missing RESEND_API_KEY"});
 
-  const { athleteName, athleteSport, coachName, coachEmail } = req.body || {};
+  const sbH = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": `Bearer ${SUPABASE_KEY}`,
+    "Content-Type": "application/json"
+  };
 
-  if (!coachEmail)   return res.status(400).json({ error: "coachEmail is required" });
-  if (!athleteName)  return res.status(400).json({ error: "athleteName is required" });
+  // Date range: past 7 days
+  const now     = new Date();
+  const weekAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
+  const weekAgoISO = weekAgo.toISOString();
+  const weekLabel  = weekAgo.toLocaleDateString("en-US", {month:"long", day:"numeric"});
 
-  const displayCoach   = coachName   || "Coach";
-  const displaySport   = athleteSport || "General Fitness";
-  const initial        = athleteName.trim()[0]?.toUpperCase() || "A";
-  const joinedDate     = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+  // ── Fetch all athletes with a coach email set ────────────────────────────
+  const athRes  = await fetch(`${SUPABASE_URL}/rest/v1/athletes?coach_email=not.is.null&select=*`, {headers:sbH});
+  const athletes = await athRes.json();
+  if(!Array.isArray(athletes) || athletes.length === 0) {
+    return res.status(200).json({message:"No athletes with coach emails set.", sent:0});
+  }
 
-  const html = buildWelcomeEmail({ athleteName, athleteSport: displaySport, coachName: displayCoach, initial, joinedDate, signupUrl: SIGNUP_URL });
-
-  const emailRes = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${RESEND_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      from:    FROM_EMAIL,
-      to:      [coachEmail.trim().toLowerCase()],
-      subject: `${athleteName} just joined WILCO — you're set as their coach`,
-      html
-    })
+  // ── Group athletes by coach email ────────────────────────────────────────
+  const byCoach = {};
+  athletes.forEach(a => {
+    const key = a.coach_email.trim().toLowerCase();
+    if(!byCoach[key]) byCoach[key] = {email:a.coach_email.trim(), name:a.coach_name||"Coach", athletes:[]};
+    byCoach[key].athletes.push(a);
   });
 
-  const emailData = await emailRes.json();
+  // ── Fetch all workouts + PRs from this week in one shot ──────────────────
+  const allIds = athletes.map(a => a.id);
+  const idList = allIds.map(id => `"${id}"`).join(",");
 
-  if (!emailRes.ok) {
-    return res.status(emailRes.status).json({ error: emailData.message || "Failed to send email" });
+  const [wRes, pRes] = await Promise.all([
+    fetch(`${SUPABASE_URL}/rest/v1/workouts?athlete_id=in.(${idList})&created_at=gte.${weekAgoISO}&select=*&order=created_at.asc`, {headers:sbH}),
+    fetch(`${SUPABASE_URL}/rest/v1/prs?athlete_id=in.(${idList})&created_at=gte.${weekAgoISO}&select=*`, {headers:sbH})
+  ]);
+  const allWorkouts = await wRes.json();
+  const allPRs      = await pRes.json();
+
+  // ── Send one email per coach ─────────────────────────────────────────────
+  const results = [];
+  for(const coach of Object.values(byCoach)) {
+    const athIds = new Set(coach.athletes.map(a => a.id));
+    const workouts = Array.isArray(allWorkouts) ? allWorkouts.filter(w => athIds.has(w.athlete_id)) : [];
+    const prs      = Array.isArray(allPRs)      ? allPRs.filter(p => athIds.has(p.athlete_id))      : [];
+
+    const html = buildEmail(coach, workouts, prs, weekLabel, SIGNUP_URL);
+
+    const emailRes = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {"Authorization":`Bearer ${RESEND_KEY}`, "Content-Type":"application/json"},
+      body: JSON.stringify({
+        from: FROM_EMAIL,
+        to:   [coach.email],
+        subject: `WILCO Weekly Progress Report — Week of ${weekLabel}`,
+        html
+      })
+    });
+    const emailData = await emailRes.json();
+    results.push({coach:coach.email, status:emailRes.status, id:emailData.id, error:emailData.message});
   }
 
-  return res.status(200).json({ sent: true, id: emailData.id });
+  return res.status(200).json({sent:results.length, results});
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+const getPD = (w) => {
+  if(typeof w.parsed_data === "string"){
+    try { return JSON.parse(w.parsed_data); } catch { return {}; }
+  }
+  return w.parsed_data || {};
+};
+
+// Groups workout entries within a 3-hour window into one session.
+// Respects new_session:true flag to force a split even within the window.
+const GAP_MS = 3 * 60 * 60 * 1000;
+function groupIntoSessions(workouts) {
+  const real = workouts.filter(w => getPD(w).exercises?.length > 0);
+  const sorted = [...real].sort((a,b) => new Date(a.created_at) - new Date(b.created_at));
+  const groups = [];
+  let cur = null, lastTime = null;
+  sorted.forEach(w => {
+    const t = new Date(w.created_at).getTime();
+    if(!lastTime || getPD(w).new_session === true || t - lastTime > GAP_MS) {
+      cur = [w]; groups.push(cur);
+    } else {
+      cur.push(w);
+    }
+    lastTime = t;
+  });
+  return groups;
+}
+
+// Merges entries in a session group into one display row.
+function mergeSession(entries) {
+  const date = new Date(entries[0].created_at).toLocaleDateString("en-US", {weekday:"short", month:"short", day:"numeric"});
+  const exercises = [];
+  const painAreas = [];
+  const feelRank  = {rough:0, average:1, good:2, great:3};
+  let feel = null;
+  entries.forEach(w => {
+    const pd = getPD(w);
+    (pd.exercises || []).forEach(e => { if(e.name) exercises.push(e); });
+    (pd.pain_flags || []).forEach(p => { if(!painAreas.includes(p.area)) painAreas.push(p.area); });
+    if(pd.session_feel && (feel === null || feelRank[pd.session_feel] < feelRank[feel])) {
+      feel = pd.session_feel; // surface the worst feel of the session
+    }
+  });
+  return { date, exercises, painAreas, feel };
 }
 
 // ── Email builder ──────────────────────────────────────────────────────────────
-function buildWelcomeEmail({ athleteName, athleteSport, coachName, initial, joinedDate, signupUrl }) {
+function buildEmail(coach, workouts, prs, weekLabel, signupUrl) {
+  const epley = (w, r) => (!w || w <= 0) ? 0 : Math.round(w * (1 + (r||1) / 30));
+
+  // ── Per-athlete sections ─────────────────────────────────────────────────
+  const athleteSections = coach.athletes.map(ath => {
+    const athWorkouts = workouts.filter(w => w.athlete_id === ath.id);
+    const athPRs      = prs.filter(p => p.athlete_id === ath.id);
+
+    // Group entries into sessions using the 3-hour rule
+    const sessionGroups = groupIntoSessions(athWorkouts);
+    const sessions      = sessionGroups.map(mergeSession);
+
+    // Collect all pain areas across the week (for the summary flag)
+    const painAreas = [];
+    athWorkouts.forEach(w => {
+      getPD(w).pain_flags?.forEach(p => { if(!painAreas.includes(p.area)) painAreas.push(p.area); });
+    });
+
+    // Build exercise rows — one row per merged session
+    const sessionRows = sessions.map(({ date, exercises, feel }) => {
+      const exList = exercises
+        .filter(e => e.name)
+        .map(e => {
+          let s = `<span style="color:#1a1a2e;font-weight:600">${e.name}</span>`;
+          if(e.sets && e.reps) s += ` <span style="color:#555">${e.sets}×${e.reps}</span>`;
+          if(e.weight)         s += ` <span style="color:#555">@ ${e.weight}lbs</span>`;
+          return s;
+        }).join(" &nbsp;·&nbsp; ");
+      const feelHtml = feel
+        ? `<span style="color:${feel==='rough'?'#c0392b':feel==='great'||feel==='good'?'#27ae60':'#888'};font-size:11px;margin-left:8px">${feel}</span>`
+        : "";
+      return `
+        <tr>
+          <td style="padding:7px 12px;border-bottom:1px solid #eaeaea;color:#888;font-size:12px;white-space:nowrap;vertical-align:top">${date}</td>
+          <td style="padding:7px 12px;border-bottom:1px solid #eaeaea;font-size:13px;line-height:1.6">${exList||"<span style='color:#aaa'>General training</span>"}${feelHtml}</td>
+        </tr>`;
+    }).join("");
+
+    const prRows = athPRs.map(p => {
+      const e1rm = p.estimated_1rm || epley(p.weight, p.reps||1);
+      return `<li style="margin:4px 0;font-size:13px"><strong>${p.exercise}</strong> — ${p.weight}lbs × ${p.reps||1} rep${(p.reps||1)>1?"s":""} <span style="color:#888">(est. 1RM: ${e1rm}lbs)</span></li>`;
+    }).join("");
+
+    const painHtml = painAreas.length > 0
+      ? `<div style="background:#fff5f5;border-left:3px solid #e74c3c;padding:8px 12px;margin:12px 0;border-radius:0 6px 6px 0;font-size:13px">
+           <strong style="color:#c0392b">⚠ Pain / discomfort flagged:</strong> ${painAreas.join(", ")}
+         </div>`
+      : "";
+
+    const prHtml = athPRs.length > 0
+      ? `<div style="background:#f0fff4;border-left:3px solid #27ae60;padding:8px 12px;margin:12px 0;border-radius:0 6px 6px 0">
+           <strong style="color:#27ae60;font-size:13px">🏆 New PRs this week:</strong>
+           <ul style="margin:6px 0 0 0;padding-left:16px">${prRows}</ul>
+         </div>`
+      : "";
+
+    const noActivity = sessions.length === 0
+      ? `<p style="color:#aaa;font-size:13px;margin:8px 0">No training sessions logged this week.</p>`
+      : "";
+
+    return `
+      <div style="margin-bottom:28px;border:1px solid #e0e0e0;border-radius:10px;overflow:hidden">
+        <div style="background:#0a1228;padding:12px 18px;display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <span style="color:#d4a017;font-family:Arial,sans-serif;font-size:16px;font-weight:700;letter-spacing:1px">${ath.name.toUpperCase()}</span>
+            <span style="color:#64748b;font-size:12px;margin-left:10px">${ath.sport}</span>
+          </div>
+          <span style="color:#e2e8f0;font-size:13px">${sessions.length} session${sessions.length!==1?"s":""} this week</span>
+        </div>
+        <div style="padding:14px 18px;background:#fff">
+          ${noActivity}
+          ${sessions.length > 0 ? `
+          <table style="width:100%;border-collapse:collapse;margin-bottom:8px">
+            <thead>
+              <tr style="background:#f8f8f8">
+                <th style="padding:6px 12px;text-align:left;font-size:11px;color:#999;letter-spacing:1px;border-bottom:2px solid #eaeaea;white-space:nowrap">DATE</th>
+                <th style="padding:6px 12px;text-align:left;font-size:11px;color:#999;letter-spacing:1px;border-bottom:2px solid #eaeaea">EXERCISES</th>
+              </tr>
+            </thead>
+            <tbody>${sessionRows}</tbody>
+          </table>` : ""}
+          ${painHtml}
+          ${prHtml}
+        </div>
+      </div>`;
+  }).join("");
+
+  // ── Full email HTML ──────────────────────────────────────────────────────
   return `<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -57,80 +224,33 @@ function buildWelcomeEmail({ athleteName, athleteSport, coachName, initial, join
 
     <!-- Header -->
     <div style="background:#060d1e;border-radius:12px 12px 0 0;padding:24px 28px;text-align:center">
-      <div style="font-size:42px;font-weight:900;color:#d4a017;letter-spacing:6px;line-height:1;font-family:Arial,sans-serif">WILCO</div>
-      <div style="color:#64748b;font-size:12px;letter-spacing:4px;margin-top:4px">COACH NOTIFICATION</div>
+      <div style="font-size:42px;font-weight:900;color:#d4a017;letter-spacing:6px;font-family:Arial,sans-serif">WILCO</div>
+      <div style="color:#64748b;font-size:12px;letter-spacing:4px;margin-top:4px">WEEKLY PROGRESS REPORT</div>
+      <div style="color:#94a3b8;font-size:13px;margin-top:8px">Week of ${weekLabel}</div>
     </div>
 
     <!-- Body -->
-    <div style="background:#fff;padding:32px 28px;border-left:1px solid #e0e0e0;border-right:1px solid #e0e0e0">
-
-      <p style="color:#1a1a2e;font-size:15px;margin:0 0 16px">Hi ${coachName},</p>
-      <p style="color:#444;font-size:14px;line-height:1.7;margin:0 0 24px">
-        One of your athletes, <strong>${athleteName}</strong>, just signed up for WILCO — an AI-powered strength and conditioning app that helps high school athletes log workouts, track PRs, and get real-time coaching feedback.
+    <div style="background:#fff;padding:28px;border-left:1px solid #e0e0e0;border-right:1px solid #e0e0e0">
+      <p style="color:#1a1a2e;font-size:15px;margin:0 0 20px">Hi ${coach.name},</p>
+      <p style="color:#444;font-size:14px;line-height:1.6;margin:0 0 24px">
+        Here's your weekly update from WILCO — a summary of what your athletes have been up to in the gym this week.
       </p>
 
-      <!-- Athlete card -->
-      <div style="background:#f8f9fc;border:1px solid #e0e0e0;border-radius:10px;padding:16px 20px;margin-bottom:24px;display:flex;align-items:center;gap:16px">
-        <div style="width:48px;height:48px;border-radius:50%;background:#0a1228;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:#d4a017;flex-shrink:0;text-align:center;line-height:48px">
-          ${initial}
-        </div>
-        <div style="margin-left:16px">
-          <div style="color:#1a1a2e;font-weight:700;font-size:15px;letter-spacing:0.5px">${athleteName.toUpperCase()}</div>
-          <div style="color:#64748b;font-size:12px;margin-top:3px">${athleteSport} &nbsp;·&nbsp; joined ${joinedDate}</div>
-        </div>
-      </div>
-
-      <!-- What you'll receive -->
-      <p style="color:#1a1a2e;font-size:11px;font-weight:700;letter-spacing:1.5px;margin:0 0 14px;text-transform:uppercase">What you'll receive every week</p>
-
-      <table style="width:100%;border-collapse:collapse;margin-bottom:24px">
-        <tr>
-          <td style="padding:10px 0;border-bottom:1px solid #f0f0f0;vertical-align:top;width:36px">
-            <div style="width:28px;height:28px;border-radius:50%;background:#f0fff4;border:1px solid #27ae60;display:flex;align-items:center;justify-content:center;font-size:13px;text-align:center;line-height:28px">📋</div>
-          </td>
-          <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top">
-            <div style="color:#1a1a2e;font-size:13px;font-weight:600;margin-bottom:3px">Full session log</div>
-            <div style="color:#888;font-size:12px;line-height:1.5">Every workout logged that week — date, exercises, sets, reps, and weight.</div>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:10px 0;border-bottom:1px solid #f0f0f0;vertical-align:top">
-            <div style="width:28px;height:28px;border-radius:50%;background:#f0fff4;border:1px solid #27ae60;display:flex;align-items:center;justify-content:center;font-size:13px;text-align:center;line-height:28px">🏆</div>
-          </td>
-          <td style="padding:10px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top">
-            <div style="color:#1a1a2e;font-size:13px;font-weight:600;margin-bottom:3px">New PRs</div>
-            <div style="color:#888;font-size:12px;line-height:1.5">Automatically flagged when ${athleteName.split(" ")[0]} hits a new personal record on any lift.</div>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:10px 0;vertical-align:top">
-            <div style="width:28px;height:28px;border-radius:50%;background:#fff5f5;border:1px solid #e74c3c;display:flex;align-items:center;justify-content:center;font-size:13px;text-align:center;line-height:28px">⚠️</div>
-          </td>
-          <td style="padding:10px 12px;vertical-align:top">
-            <div style="color:#1a1a2e;font-size:13px;font-weight:600;margin-bottom:3px">Pain &amp; injury flags</div>
-            <div style="color:#888;font-size:12px;line-height:1.5">If ${athleteName.split(" ")[0]} reports soreness or discomfort, it'll be highlighted in your report.</div>
-          </td>
-        </tr>
-      </table>
-
-      <p style="color:#888;font-size:13px;line-height:1.6;margin:0">
-        Reports go out every <strong>Monday morning</strong>. No account needed — they'll arrive right here in your inbox.
-      </p>
-
+      ${athleteSections}
     </div>
 
-    <!-- CTA -->
+    <!-- CTA / Pitch -->
     <div style="background:#0a1228;padding:28px;border-radius:0 0 12px 12px;text-align:center">
-      <div style="color:#d4a017;font-size:18px;font-weight:700;letter-spacing:1px;margin-bottom:10px">WANT THE FULL DASHBOARD?</div>
+      <div style="color:#d4a017;font-size:18px;font-weight:700;letter-spacing:1px;margin-bottom:10px">BRING WILCO TO YOUR TEAM</div>
       <p style="color:#94a3b8;font-size:13px;line-height:1.7;margin:0 0 18px">
-        Set up a coach account to view progress charts, log custom programs,
-        and manage all your athletes in one place. No tech setup required.
+        Get the full coaching dashboard — view every athlete's progress charts, log custom programs,
+        and brand the app with your school or team's logo and colors. No tech setup required.
       </p>
       <a href="${signupUrl}" style="display:inline-block;background:#d4a017;color:#000;font-weight:700;font-size:14px;letter-spacing:1px;padding:13px 32px;border-radius:8px;text-decoration:none">
-        SET UP YOUR COACH ACCOUNT →
+        SET UP YOUR TEAM ACCOUNT →
       </a>
       <p style="color:#475569;font-size:11px;margin:16px 0 0">
-        ${athleteName} added you as their coach in WILCO. To stop receiving these emails, reply and let us know.
+        This report was requested by one of your athletes via WILCO. To unsubscribe, reply to this email.
       </p>
     </div>
 
