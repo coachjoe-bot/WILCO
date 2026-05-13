@@ -266,7 +266,7 @@ function HomeScreen({setView}) {
 // ─── ATHLETE SIGNUP ───────────────────────────────────────────────────────────
 function SignupScreen({setView,setAthlete,setErr,err}) {
   const [step,setStep] = useState(1);
-  const [data,setData] = useState({name:"",sport:SPORTS[0],pin:"",confirmPin:"",seasonDate:"",noSeason:false});
+  const [data,setData] = useState({name:"",sport:SPORTS[0],pin:"",confirmPin:"",seasonDate:"",noSeason:false,coachName:"",coachEmail:""});
   const [loading,setLoading] = useState(false);
   const setD = (k,v) => setData(p=>({...p,[k]:v}));
 
@@ -284,6 +284,8 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
       if(data.pin!==data.confirmPin){setErr("PINs don't match.");return;}
       setStep(3);
     } else if(step===3){
+      setStep(4);
+    } else if(step===4){
       setLoading(true);
       try {
         const created = await sbInsert("athletes",{name:data.name.trim(),sport:data.sport,pin:data.pin});
@@ -293,8 +295,26 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
             const seasonDate = data.noSeason ? null : data.seasonDate||null;
             await fetch(`${SUPABASE_URL}/rest/v1/athletes?id=eq.${newAthlete.id}`,{
               method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},
-              body:JSON.stringify({season_date:seasonDate,no_season:data.noSeason})
+              body:JSON.stringify({
+                season_date:seasonDate,
+                no_season:data.noSeason,
+                coach_name:data.coachName.trim()||null,
+                coach_email:data.coachEmail.trim().toLowerCase()||null
+              })
             });
+            // Send welcome email to coach if one was provided
+            if(data.coachEmail.trim()){
+              fetch("/api/send-coach-welcome",{
+                method:"POST",
+                headers:{"Content-Type":"application/json"},
+                body:JSON.stringify({
+                  athleteName: data.name.trim(),
+                  athleteSport: data.sport,
+                  coachName: data.coachName.trim()||null,
+                  coachEmail: data.coachEmail.trim().toLowerCase()
+                })
+              }).catch(()=>{}); // fire-and-forget — don't block signup on email failure
+            }
           } catch(e){}
           setAthlete({...newAthlete,season_date:data.noSeason?null:data.seasonDate||null,no_season:data.noSeason});
           setView("athlete");
@@ -310,7 +330,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
     <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24}}>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
         <button onClick={()=>step>1?setStep(step-1):setView("home")} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:18}}>←</button>
-        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>NEW ATHLETE — STEP {step} OF 3</div>
+        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>NEW ATHLETE — STEP {step} OF 4</div>
       </div>
       {step===1&&<>
         <div style={{marginBottom:16}}>
@@ -352,10 +372,34 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
           <div style={{color:C.muted2,fontSize:13}}>I don't have a season / general fitness only</div>
         </div>
       </>}
+      {step===4&&<>
+        <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>
+          Optional: add a coach to receive a weekly progress report by email — a PE teacher, sport coach, AAU coach, or trainer.
+        </div>
+        <div style={{marginBottom:14}}>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH'S NAME <span style={{color:C.muted,fontWeight:400}}>(optional)</span></label>
+          <input value={data.coachName} onChange={e=>setD("coachName",e.target.value)}
+            placeholder="Coach Smith" style={inp()}/>
+        </div>
+        <div style={{marginBottom:20}}>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH'S EMAIL <span style={{color:C.muted,fontWeight:400}}>(optional)</span></label>
+          <input type="email" value={data.coachEmail} onChange={e=>setD("coachEmail",e.target.value)}
+            placeholder="coach@school.edu" style={inp()}/>
+          <div style={{color:C.muted,fontSize:11,marginTop:6,lineHeight:1.5}}>They'll get a weekly summary of your workouts, PRs, and any pain flags — no account needed.</div>
+        </div>
+      </>}
       {err&&<div style={{color:C.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
       <button onClick={nextStep} disabled={loading} style={btn(C.gold,"#000",{opacity:loading?0.7:1,cursor:loading?"not-allowed":"pointer"})}>
-        {loading?"Please wait...":(step===3?"Create Account →":"Next →")}
+        {loading?"Please wait...":(step===4?"Create Account →":"Next →")}
       </button>
+      {step===4&&(
+        <button onClick={()=>{
+          setD("coachName",""); setD("coachEmail","");
+          // Skip coach — create account without one
+          nextStep();
+        }} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer",width:"100%",textAlign:"center",marginTop:8,display:"none"}}>
+        </button>
+      )}
     </div>
   );
 }
@@ -537,6 +581,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [movementPrompt,setMovementPrompt] = useState(false);
   const [movementLabel,setMovementLabel] = useState("");
   const [sessionCheckPending,setSessionCheckPending] = useState(null);
+  const [showLog,setShowLog] = useState(false);
   const bottomRef = useRef(null);
   const videoInputRef = useRef(null);
 
@@ -545,7 +590,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   useEffect(()=>{
     (async()=>{
       try {
-        const logs = await sbGet("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=20&select=*`);
+        const logs = await sbGet("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=100&select=*`);
         if(logs&&logs.length>0) setWorkoutHistory(logs);
 
         const lastLog = logs?.[0];
@@ -641,6 +686,16 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const send = async () => {
     const msg = input.trim();
     if(!msg||loading||videoLoading||!historyLoaded) return;
+
+    // Intercept log-view requests — open the log modal instead of calling Claude
+    const logKeywords = ["show me my log","my log","my workout log","show my workouts","view my workouts","workout history","my history","show my history","see my log","all my workouts","see my workouts","show my log"];
+    if(logKeywords.some(kw=>msg.toLowerCase().includes(kw))){
+      setInput("");
+      setMessages(prev=>[...prev,{role:"user",content:msg},{role:"assistant",content:`Here's your full workout log, ${athlete.name}.`}]);
+      setShowLog(true);
+      return;
+    }
+
     setInput("");
     const newMsgs = [...messages,{role:"user",content:msg}];
     setMessages(newMsgs);
@@ -864,6 +919,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           {saved&&<div style={{background:"#0a1e0a",border:`1px solid ${C.green}`,borderRadius:8,padding:"4px 10px",color:C.green,fontSize:11,fontWeight:600}}>Saved</div>}
           {athlete.program_text&&<div style={{background:"#0a0e1e",border:`1px solid ${C.blue}`,borderRadius:8,padding:"4px 10px",color:C.blue,fontSize:11}}>Program set</div>}
+          <button onClick={()=>setShowLog(true)} style={{background:C.navy3,border:`1px solid ${C.gold}`,color:C.gold,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>MY LOG</button>
           <button onClick={onLogout} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12}}>Log Out</button>
         </div>
       </div>
@@ -966,6 +1022,157 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           </button>
         </div>
         <div style={{color:C.muted,fontSize:10,marginTop:6,textAlign:"center"}}>Type naturally to log workouts · 🎬 upload a video for form review (MP4 works best)</div>
+      </div>
+
+      {/* My Log Modal */}
+      {showLog&&<MyLogModal workoutHistory={workoutHistory} athlete={athlete} onClose={()=>setShowLog(false)}/>}
+    </div>
+  );
+}
+
+// ─── MY LOG MODAL ─────────────────────────────────────────────────────────────
+function MyLogModal({workoutHistory, athlete, onClose}) {
+  const [tab,setTab] = useState("workouts");
+  const sessionCount = groupIntoSessions(workoutHistory).length;
+  const realWorkouts = workoutHistory.filter(w=>w.parsed_data?.exercises?.length>0);
+
+  return (
+    <div style={{position:"fixed",inset:0,zIndex:300,background:C.navy,display:"flex",flexDirection:"column",maxWidth:600,margin:"0 auto"}}>
+      <style>{GS}</style>
+      {/* Header */}
+      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+        <div>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2}}>MY WORKOUT LOG</div>
+          <div style={{color:C.muted,fontSize:11}}>{athlete.name} · {athlete.sport} · {sessionCount} session{sessionCount!==1?"s":""}</div>
+        </div>
+        <button onClick={onClose} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:13}}>✕ Close</button>
+      </div>
+
+      {/* Tabs */}
+      <div style={{display:"flex",borderBottom:`1px solid ${C.border}`,flexShrink:0}}>
+        {["workouts","progress"].map(t=>(
+          <button key={t} onClick={()=>setTab(t)}
+            style={{padding:"10px 20px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?C.gold:"transparent"}`,color:tab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"color 0.15s"}}>
+            {t}
+          </button>
+        ))}
+      </div>
+
+      {/* Content */}
+      <div style={{flex:1,overflowY:"auto",padding:16}}>
+
+        {/* ── WORKOUTS TAB ── */}
+        {tab==="workouts"&&(
+          <div>
+            {workoutHistory.length===0?(
+              <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No activity logged yet.</div>
+            ):workoutHistory.map((w,i)=>{
+              const pd = typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return {};}})():(w.parsed_data||{});
+              const isWorkout = pd.exercises?.length>0;
+              const isFormCheck = w.raw_message?.startsWith("[Form review:");
+              if(isWorkout) return (
+                <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:14,marginBottom:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <div style={{width:6,height:6,borderRadius:"50%",background:C.green,flexShrink:0}}/>
+                      <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1}}>WORKOUT — {fmtDate(w.created_at)}</div>
+                    </div>
+                    {pd.session_feel&&<div style={{fontSize:11,color:pd.session_feel==="great"||pd.session_feel==="good"?C.green:pd.session_feel==="rough"?C.red:C.gold,fontWeight:600}}>{pd.session_feel}</div>}
+                  </div>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,marginBottom:pd.pain_flags?.length>0?8:0}}>
+                    <thead>
+                      <tr>
+                        {["Exercise","Sets","Reps","Weight","Feel"].map(h=>(
+                          <th key={h} style={{color:C.muted,fontWeight:600,fontSize:10,letterSpacing:1,textAlign:"left",paddingBottom:4,borderBottom:`1px solid ${C.border}`}}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pd.exercises.map((e,j)=>(
+                        <tr key={j}>
+                          <td style={{color:C.text,fontWeight:600,padding:"5px 8px 5px 0"}}>{e.name}</td>
+                          <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.sets||"—"}</td>
+                          <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.reps||"—"}</td>
+                          <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.weight?`${e.weight}lbs`:"—"}</td>
+                          <td style={{color:e.feel==="easy"?C.blue:e.feel==="hard"?C.red:C.muted,padding:"5px 0"}}>{e.feel||"—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {pd.pain_flags?.length>0&&<div style={{color:C.red,fontSize:11,marginTop:4}}>⚠ {pd.pain_flags.map(p=>p.area).join(", ")}</div>}
+                  {w.bot_reply&&<div style={{marginTop:8,borderTop:`1px solid ${C.border}`,paddingTop:8,color:C.muted2,fontSize:12,fontStyle:"italic"}}>Coach Joe: "{w.bot_reply.slice(0,200)}{w.bot_reply.length>200?"...":""}"</div>}
+                </div>
+              );
+              if(isFormCheck) return (
+                <div key={i} style={{background:C.navy2,border:`1px solid ${C.blue}30`,borderRadius:12,padding:14,marginBottom:10}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                    <div style={{width:6,height:6,borderRadius:"50%",background:C.blue,flexShrink:0}}/>
+                    <div style={{color:C.blue,fontSize:11,fontWeight:700,letterSpacing:1}}>FORM CHECK — {fmtDate(w.created_at)}</div>
+                  </div>
+                  <div style={{color:C.muted2,fontSize:12,marginBottom:6}}>{w.raw_message}</div>
+                  {w.bot_reply&&<div style={{color:C.text,fontSize:12,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{w.bot_reply}</div>}
+                </div>
+              );
+              // Q&A / chat entry — skip in athlete log view (keep it clean)
+              return null;
+            })}
+          </div>
+        )}
+
+        {/* ── PROGRESS TAB ── */}
+        {tab==="progress"&&(
+          <div>
+            {(()=>{
+              const byEx = {};
+              workoutHistory.forEach(w=>{
+                const pd = typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return {};}})():(w.parsed_data||{});
+                (pd.exercises||[]).forEach(ex=>{
+                  if(!ex.name||!ex.weight||ex.unit==="bodyweight") return;
+                  const k = ex.name.toLowerCase().trim();
+                  if(!byEx[k]) byEx[k]={name:ex.name,entries:[]};
+                  byEx[k].entries.push({date:new Date(w.created_at),weight:ex.weight,reps:ex.reps||1,e1rm:epley1RM(ex.weight,ex.reps||1)});
+                });
+              });
+              const exercises = Object.values(byEx)
+                .map(ex=>{
+                  const sorted=[...ex.entries].sort((a,b)=>a.date-b.date);
+                  const best=Math.max(...sorted.map(e=>e.e1rm));
+                  const bestEntry=sorted.reduce((a,b)=>b.e1rm>a.e1rm?b:a);
+                  return {...ex,entries:sorted,best,bestEntry};
+                })
+                .sort((a,b)=>b.best-a.best);
+
+              if(exercises.length===0) return (
+                <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No weighted exercises logged yet.</div>
+              );
+
+              return exercises.map((ex,i)=>(
+                <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+                    <div>
+                      <div style={{color:C.text,fontWeight:700,fontSize:14}}>{ex.name}</div>
+                      <div style={{color:C.muted,fontSize:11,marginTop:2}}>{ex.entries.length} logged set{ex.entries.length!==1?"s":""}</div>
+                    </div>
+                    <div style={{textAlign:"right"}}>
+                      <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>BEST EST. 1RM</div>
+                      <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>
+                        {ex.best}<span style={{fontSize:13,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span>
+                      </div>
+                      <div style={{color:C.muted,fontSize:10,marginTop:2}}>{ex.bestEntry.weight}lbs × {ex.bestEntry.reps} rep{ex.bestEntry.reps!==1?"s":""}</div>
+                    </div>
+                  </div>
+                  {ex.entries.length>=2?(
+                    <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={C.gold} unit="lbs"/>
+                  ):(
+                    <div style={{background:C.navy3,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.muted2}}>
+                      Logged once — log again to see a trend line.
+                    </div>
+                  )}
+                </div>
+              ));
+            })()}
+          </div>
+        )}
       </div>
     </div>
   );
