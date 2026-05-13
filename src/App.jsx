@@ -1062,62 +1062,98 @@ function MyLogModal({workoutHistory, athlete, onClose}) {
       <div style={{flex:1,overflowY:"auto",padding:16}}>
 
         {/* ── WORKOUTS TAB ── */}
-        {tab==="workouts"&&(
-          <div>
-            {workoutHistory.length===0?(
-              <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No activity logged yet.</div>
-            ):workoutHistory.map((w,i)=>{
-              const pd = typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return {};}})():(w.parsed_data||{});
-              const isWorkout = pd.exercises?.length>0;
-              const isFormCheck = w.raw_message?.startsWith("[Form review:");
-              if(isWorkout) return (
-                <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:14,marginBottom:10}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                    <div style={{display:"flex",alignItems:"center",gap:8}}>
-                      <div style={{width:6,height:6,borderRadius:"50%",background:C.green,flexShrink:0}}/>
-                      <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1}}>WORKOUT — {fmtDate(w.created_at)}</div>
+        {tab==="workouts"&&(()=>{
+          // Group entries into sessions (entries within 3hrs = same session)
+          const sessions = groupIntoSessions(workoutHistory)
+            .sort((a,b)=>new Date(b.entries[0].created_at)-new Date(a.entries[0].created_at));
+
+          // Separate form checks (not grouped into sessions)
+          const formChecks = workoutHistory.filter(w=>w.raw_message?.startsWith("[Form review:"));
+
+          // Merge form checks into a unified timeline item list with sessions
+          const timeline = [
+            ...sessions.map(s=>({type:"session",data:s,date:new Date(s.entries[s.entries.length-1].created_at)})),
+            ...formChecks.map(w=>({type:"formcheck",data:w,date:new Date(w.created_at)})),
+          ].sort((a,b)=>b.date-a.date);
+
+          if(timeline.length===0) return (
+            <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No activity logged yet.</div>
+          );
+
+          return (
+            <div>
+              {timeline.map((item,i)=>{
+                if(item.type==="session"){
+                  const session = item.data;
+                  // Merge all exercises and pain flags across entries in this session
+                  const allExercises = session.entries.flatMap(e=>{
+                    const pd = typeof e.parsed_data==="string"?(()=>{try{return JSON.parse(e.parsed_data);}catch{return {};}})():(e.parsed_data||{});
+                    return pd.exercises||[];
+                  });
+                  const allPainFlags = session.entries.flatMap(e=>{
+                    const pd = typeof e.parsed_data==="string"?(()=>{try{return JSON.parse(e.parsed_data);}catch{return {};}})():(e.parsed_data||{});
+                    return pd.pain_flags||[];
+                  });
+                  const sessionFeel = session.entries.slice().reverse().find(e=>{
+                    const pd = typeof e.parsed_data==="string"?(()=>{try{return JSON.parse(e.parsed_data);}catch{return {};}})():(e.parsed_data||{});
+                    return pd.session_feel;
+                  });
+                  const feelVal = sessionFeel?(typeof sessionFeel.parsed_data==="string"?JSON.parse(sessionFeel.parsed_data):sessionFeel.parsed_data)?.session_feel:null;
+                  const lastReply = [...session.entries].reverse().find(e=>e.bot_reply)?.bot_reply;
+                  const sessionDate = session.entries[0].created_at;
+
+                  return (
+                    <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:14,marginBottom:10}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <div style={{width:6,height:6,borderRadius:"50%",background:C.green,flexShrink:0}}/>
+                          <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1}}>WORKOUT — {fmtDate(sessionDate)}</div>
+                        </div>
+                        {feelVal&&<div style={{fontSize:11,color:feelVal==="great"||feelVal==="good"?C.green:feelVal==="rough"?C.red:C.gold,fontWeight:600}}>{feelVal}</div>}
+                      </div>
+                      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,marginBottom:allPainFlags.length>0?8:0}}>
+                        <thead>
+                          <tr>
+                            {["Exercise","Sets","Reps","Weight","Feel"].map(h=>(
+                              <th key={h} style={{color:C.muted,fontWeight:600,fontSize:10,letterSpacing:1,textAlign:"left",paddingBottom:4,borderBottom:`1px solid ${C.border}`}}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {allExercises.map((e,j)=>(
+                            <tr key={j}>
+                              <td style={{color:C.text,fontWeight:600,padding:"5px 8px 5px 0"}}>{e.name}</td>
+                              <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.sets||"—"}</td>
+                              <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.reps||"—"}</td>
+                              <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.weight?`${e.weight}lbs`:"—"}</td>
+                              <td style={{color:e.feel==="easy"?C.blue:e.feel==="hard"?C.red:C.muted,padding:"5px 0"}}>{e.feel||"—"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {allPainFlags.length>0&&<div style={{color:C.red,fontSize:11,marginTop:4}}>⚠ {allPainFlags.map(p=>p.area).join(", ")}</div>}
+                      {lastReply&&<div style={{marginTop:8,borderTop:`1px solid ${C.border}`,paddingTop:8,color:C.muted2,fontSize:12,fontStyle:"italic"}}>Coach Joe: "{lastReply.slice(0,200)}{lastReply.length>200?"...":""}"</div>}
                     </div>
-                    {pd.session_feel&&<div style={{fontSize:11,color:pd.session_feel==="great"||pd.session_feel==="good"?C.green:pd.session_feel==="rough"?C.red:C.gold,fontWeight:600}}>{pd.session_feel}</div>}
-                  </div>
-                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,marginBottom:pd.pain_flags?.length>0?8:0}}>
-                    <thead>
-                      <tr>
-                        {["Exercise","Sets","Reps","Weight","Feel"].map(h=>(
-                          <th key={h} style={{color:C.muted,fontWeight:600,fontSize:10,letterSpacing:1,textAlign:"left",paddingBottom:4,borderBottom:`1px solid ${C.border}`}}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pd.exercises.map((e,j)=>(
-                        <tr key={j}>
-                          <td style={{color:C.text,fontWeight:600,padding:"5px 8px 5px 0"}}>{e.name}</td>
-                          <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.sets||"—"}</td>
-                          <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.reps||"—"}</td>
-                          <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.weight?`${e.weight}lbs`:"—"}</td>
-                          <td style={{color:e.feel==="easy"?C.blue:e.feel==="hard"?C.red:C.muted,padding:"5px 0"}}>{e.feel||"—"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  {pd.pain_flags?.length>0&&<div style={{color:C.red,fontSize:11,marginTop:4}}>⚠ {pd.pain_flags.map(p=>p.area).join(", ")}</div>}
-                  {w.bot_reply&&<div style={{marginTop:8,borderTop:`1px solid ${C.border}`,paddingTop:8,color:C.muted2,fontSize:12,fontStyle:"italic"}}>Coach Joe: "{w.bot_reply.slice(0,200)}{w.bot_reply.length>200?"...":""}"</div>}
-                </div>
-              );
-              if(isFormCheck) return (
-                <div key={i} style={{background:C.navy2,border:`1px solid ${C.blue}30`,borderRadius:12,padding:14,marginBottom:10}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
-                    <div style={{width:6,height:6,borderRadius:"50%",background:C.blue,flexShrink:0}}/>
-                    <div style={{color:C.blue,fontSize:11,fontWeight:700,letterSpacing:1}}>FORM CHECK — {fmtDate(w.created_at)}</div>
-                  </div>
-                  <div style={{color:C.muted2,fontSize:12,marginBottom:6}}>{w.raw_message}</div>
-                  {w.bot_reply&&<div style={{color:C.text,fontSize:12,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{w.bot_reply}</div>}
-                </div>
-              );
-              // Q&A / chat entry — skip in athlete log view (keep it clean)
-              return null;
-            })}
-          </div>
-        )}
+                  );
+                }
+                if(item.type==="formcheck"){
+                  const w = item.data;
+                  return (
+                    <div key={i} style={{background:C.navy2,border:`1px solid ${C.blue}30`,borderRadius:12,padding:14,marginBottom:10}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                        <div style={{width:6,height:6,borderRadius:"50%",background:C.blue,flexShrink:0}}/>
+                        <div style={{color:C.blue,fontSize:11,fontWeight:700,letterSpacing:1}}>FORM CHECK — {fmtDate(w.created_at)}</div>
+                      </div>
+                      <div style={{color:C.muted2,fontSize:12,marginBottom:6}}>{w.raw_message}</div>
+                      {w.bot_reply&&<div style={{color:C.text,fontSize:12,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{w.bot_reply}</div>}
+                    </div>
+                  );
+                }
+                return null;
+              })}
+            </div>
+          );
+        })()}
 
         {/* ── PROGRESS TAB ── */}
         {tab==="progress"&&(
