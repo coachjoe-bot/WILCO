@@ -50,8 +50,18 @@ const epley1RM = (weight, reps) => {
   return Math.round(weight * (1 + reps / 30));
 };
 
-// A "real session" has at least one parsed exercise (filters out pure Q&A messages)
-const isRealSession = (w) => w?.parsed_data?.exercises?.length > 0;
+// Format weight with correct unit label. Falls back to "lbs" for legacy data.
+const fmtWeight = (weight, unit) => {
+  if(!weight) return "—";
+  const u = unit==="kg" ? "kg" : "lbs";
+  return `${weight}${u}`;
+};
+
+// Normalize any weight to lbs-equivalent for cross-unit comparison.
+const toLbs = (weight, unit) => (unit==="kg" ? weight*2.205 : weight);
+
+// A "real session" has at least one parsed exercise or run_data (filters out pure Q&A messages)
+const isRealSession = (w) => w?.parsed_data?.exercises?.length > 0 || !!w?.parsed_data?.run_data;
 
 // Groups workout entries into sessions using time-gap logic.
 // Entries within gapMs of each other (same athlete) = same session.
@@ -97,11 +107,26 @@ const askClaude = async (system, user, maxTokens=600, images=[]) => {
 
 const parseWorkout = async (message, name, sport) => {
   const sys = `Extract workout data from an athlete message. Return ONLY valid JSON, no markdown.
-{"exercises":[{"name":string,"sets":number|null,"reps":number|null,"weight":number|null,"unit":"lbs"|"kg"|"bodyweight","feel":"easy"|"good"|"hard"|null,"notes":string|null}],"pain_flags":[{"area":string,"description":string}],"equipment_issues":[string],"questions":[string],"pr_attempts":[{"exercise":string,"weight":number,"reps":number,"achieved":boolean}],"session_feel":"great"|"good"|"average"|"rough"|null,"general_notes":string|null,"is_program_update":boolean}
-Set is_program_update:true if the athlete is describing a training plan, program, or schedule (e.g. "my program is...", "here's my plan...", "my schedule this week is...").`;
-  const text = await askClaude(sys,`Athlete: ${name} (${sport})\nMessage: ${message}`,900);
+{
+  "exercises":[{"name":string,"sets":number|null,"reps":number|null,"weight":number|null,"unit":"lbs"|"kg"|"bodyweight","feel":"easy"|"good"|"hard"|null,"notes":string|null}],
+  "run_data":{"run_type":"easy"|"tempo"|"interval"|"long_run"|"race"|"recovery"|"fartlek"|null,"distance_miles":number|null,"distance_km":number|null,"duration_minutes":number|null,"pace_per_mile":string|null,"pace_per_km":string|null,"intervals":[{"repeat":number|null,"distance":string|null,"time":string|null,"pace":string|null,"rest":string|null}]|null,"notes":string|null}|null,
+  "pain_flags":[{"area":string,"description":string}],
+  "equipment_issues":[string],
+  "questions":[string],
+  "pr_attempts":[{"exercise":string,"weight":number,"reps":number,"achieved":boolean}],
+  "session_feel":"great"|"good"|"average"|"rough"|null,
+  "general_notes":string|null,
+  "is_program_update":boolean
+}
+Rules:
+- Populate "run_data" when the message describes any run, jog, cardio, or running workout. Set run_type to the best match. Calculate pace if distance and time are both given.
+- For interval runs, populate "intervals" array with one entry per repeat type.
+- Populate "exercises" for strength/lifting/conditioning work. Leave empty for pure runs.
+- Set is_program_update:true if the athlete is describing a training plan, program, or schedule.
+- If weight is given in kg (e.g. "100kg squat"), set unit:"kg".`;
+  const text = await askClaude(sys,`Athlete: ${name} (${sport})\nMessage: ${message}`,1000);
   try { return JSON.parse(text.replace(/```json|```/g,"").trim()); }
-  catch { return {exercises:[],pain_flags:[],equipment_issues:[],questions:[],pr_attempts:[],session_feel:null,general_notes:message,is_program_update:false}; }
+  catch { return {exercises:[],run_data:null,pain_flags:[],equipment_issues:[],questions:[],pr_attempts:[],session_feel:null,general_notes:message,is_program_update:false}; }
 };
 
 const getJoeBotReply = async (message, athlete, history, workoutHistory=[]) => {
@@ -113,7 +138,10 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[]) => {
     const recent = workoutHistory.slice(0,10).map(w=>{
       const d = new Date(w.created_at);
       const dateStr = d.toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric"});
-      const exs = w.parsed_data?.exercises?.map(e=>`${e.name}${e.weight?" "+e.weight+"lbs":""}${e.sets&&e.reps?" "+e.sets+"x"+e.reps:""}${e.feel?" ("+e.feel+")":""}`).join(", ")||"";
+      const runD = w.parsed_data?.run_data;
+      const exs = runD
+        ? `${runD.run_type||"run"}${runD.distance_miles?" "+runD.distance_miles+"mi":runD.distance_km?" "+runD.distance_km+"km":""}${runD.pace_per_mile?" @ "+runD.pace_per_mile+"/mi":runD.pace_per_km?" @ "+runD.pace_per_km+"/km":""}${runD.duration_minutes?" ("+runD.duration_minutes+"min)":""}`
+        : w.parsed_data?.exercises?.map(e=>`${e.name}${e.weight?" "+fmtWeight(e.weight,e.unit):""}${e.sets&&e.reps?" "+e.sets+"x"+e.reps:""}${e.feel?" ("+e.feel+")":""}`).join(", ")||"";
       const pain = w.parsed_data?.pain_flags?.map(p=>p.area).join(", ")||"";
       const feel = w.parsed_data?.session_feel?` | Session feel: ${w.parsed_data.session_feel}`:"";
       return `• ${dateStr}: ${exs||w.raw_message?.slice(0,120)}${pain?" | PAIN: "+pain:""}${feel}`;
@@ -219,6 +247,69 @@ function LineChart({data, color=C.gold, unit=""}) {
       <text x={pl-3} y={pt+6} textAnchor="end" fill={C.muted} fontSize={7}>{max}{unit}</text>
       <text x={pl-3} y={pt+ih+4} textAnchor="end" fill={C.muted} fontSize={7}>{min}{unit}</text>
     </svg>
+  );
+}
+
+// ─── RUN CARD ─────────────────────────────────────────────────────────────────
+// Reusable component for displaying a parsed run workout.
+const RUN_TYPE_LABELS = {
+  easy:"Easy Run", tempo:"Tempo", interval:"Intervals", long_run:"Long Run",
+  race:"Race", recovery:"Recovery", fartlek:"Fartlek", null:"Run"
+};
+function RunCard({runData, feel}) {
+  if(!runData) return null;
+  const typeLabel = RUN_TYPE_LABELS[runData.run_type] || "Run";
+  const dist = runData.distance_miles!=null
+    ? `${runData.distance_miles} mi`
+    : runData.distance_km!=null
+    ? `${runData.distance_km} km`
+    : null;
+  const pace = runData.pace_per_mile
+    ? `${runData.pace_per_mile}/mi`
+    : runData.pace_per_km
+    ? `${runData.pace_per_km}/km`
+    : null;
+  const dur = runData.duration_minutes!=null
+    ? runData.duration_minutes>=60
+      ? `${Math.floor(runData.duration_minutes/60)}h ${runData.duration_minutes%60}m`
+      : `${runData.duration_minutes}m`
+    : null;
+  const typeColor = {easy:C.green,tempo:C.gold,interval:C.blue,long_run:C.gold,race:C.red,recovery:C.green,fartlek:C.blue}[runData.run_type]||C.muted2;
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,flexWrap:"wrap"}}>
+        <div style={{background:`${typeColor}22`,border:`1px solid ${typeColor}`,borderRadius:6,padding:"2px 10px",color:typeColor,fontSize:11,fontWeight:700,letterSpacing:1}}>
+          {typeLabel.toUpperCase()}
+        </div>
+        {feel&&<div style={{fontSize:11,color:feel==="great"||feel==="good"?C.green:feel==="rough"?C.red:C.gold,fontWeight:600}}>{feel}</div>}
+      </div>
+      <div style={{display:"flex",gap:16,flexWrap:"wrap",marginBottom:runData.intervals?.length>0?10:0}}>
+        {dist&&<div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>DISTANCE</div><div style={{color:C.text,fontSize:15,fontWeight:700}}>{dist}</div></div>}
+        {dur&&<div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>TIME</div><div style={{color:C.text,fontSize:15,fontWeight:700}}>{dur}</div></div>}
+        {pace&&<div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>PACE</div><div style={{color:C.text,fontSize:15,fontWeight:700}}>{pace}</div></div>}
+      </div>
+      {runData.intervals?.length>0&&(
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,marginTop:6}}>
+          <thead>
+            <tr>{["Rep","Distance","Time","Pace","Rest"].map(h=>(
+              <th key={h} style={{color:C.muted,fontWeight:600,fontSize:10,letterSpacing:1,textAlign:"left",paddingBottom:4,borderBottom:`1px solid ${C.border}`}}>{h}</th>
+            ))}</tr>
+          </thead>
+          <tbody>
+            {runData.intervals.map((iv,j)=>(
+              <tr key={j}>
+                <td style={{color:C.muted2,padding:"4px 8px 4px 0"}}>{iv.repeat||"—"}</td>
+                <td style={{color:C.text,fontWeight:600,padding:"4px 8px 4px 0"}}>{iv.distance||"—"}</td>
+                <td style={{color:C.muted2,padding:"4px 8px 4px 0"}}>{iv.time||"—"}</td>
+                <td style={{color:C.muted2,padding:"4px 8px 4px 0"}}>{iv.pace||"—"}</td>
+                <td style={{color:C.muted2,padding:"4px 0"}}>{iv.rest||"—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {runData.notes&&<div style={{color:C.muted2,fontSize:12,marginTop:6,fontStyle:"italic"}}>{runData.notes}</div>}
+    </div>
   );
 }
 
@@ -602,7 +693,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
 
         const lastLog = logs?.[0];
         const dAgo = lastLog ? daysBetween(lastLog.created_at) : null;
-        const lastExs = lastLog?.parsed_data?.exercises?.map(e=>`${e.name}${e.weight?" "+e.weight+"lbs":""}${e.sets&&e.reps?" "+e.sets+"x"+e.reps:""}`).join(", ")||"";
+        const lastRunD = lastLog?.parsed_data?.run_data;
+        const lastExs = lastRunD
+          ? `${lastRunD.run_type||"run"}${lastRunD.distance_miles?" "+lastRunD.distance_miles+"mi":lastRunD.distance_km?" "+lastRunD.distance_km+"km":""}${lastRunD.duration_minutes?" ("+lastRunD.duration_minutes+"min)":""}`
+          : lastLog?.parsed_data?.exercises?.map(e=>`${e.name}${e.weight?" "+fmtWeight(e.weight,e.unit):""}${e.sets&&e.reps?" "+e.sets+"x"+e.reps:""}`).join(", ")||"";
         const lastDate = lastLog ? fmtDateShort(lastLog.created_at) : null;
         const summary = lastExs ? `Last session (${lastDate}): ${lastExs}.` : "";
 
@@ -650,13 +744,15 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         for(const ex of parsed.exercises){
           if(!ex.name||!ex.weight||ex.unit==="bodyweight") continue;
           const k = ex.name.toLowerCase().trim();
-          const exE1RM = epley1RM(ex.weight, ex.reps||1);
+          // Normalize to lbs-equivalent for cross-unit comparison
+          const exLbs = toLbs(ex.weight, ex.unit);
+          const exE1RM = epley1RM(exLbs, ex.reps||1);
+          const prE1RM = prMap[k] ? epley1RM(toLbs(prMap[k].weight, prMap[k].unit), prMap[k].reps||1) : 0;
           if(!prMap[k]){
-            await sbInsert("prs",{athlete_id:updatedAthlete.id,exercise:ex.name,weight:ex.weight,reps:ex.reps||1,estimated_1rm:exE1RM});
-          } else if(exE1RM > epley1RM(prMap[k].weight, prMap[k].reps||1)){
-            const prevE1RM = epley1RM(prMap[k].weight, prMap[k].reps||1);
-            await sbInsert("prs",{athlete_id:updatedAthlete.id,exercise:ex.name,weight:ex.weight,reps:ex.reps||1,estimated_1rm:exE1RM});
-            newPRs.push({exercise:ex.name,weight:ex.weight,reps:ex.reps||1,e1rm:exE1RM,prevE1RM,diff:exE1RM-prevE1RM});
+            await sbInsert("prs",{athlete_id:updatedAthlete.id,exercise:ex.name,weight:ex.weight,reps:ex.reps||1,estimated_1rm:exE1RM,unit:ex.unit||"lbs"});
+          } else if(exE1RM > prE1RM){
+            await sbInsert("prs",{athlete_id:updatedAthlete.id,exercise:ex.name,weight:ex.weight,reps:ex.reps||1,estimated_1rm:exE1RM,unit:ex.unit||"lbs"});
+            newPRs.push({exercise:ex.name,weight:ex.weight,unit:ex.unit||"lbs",reps:ex.reps||1,e1rm:exE1RM,prevE1RM:prE1RM,diff:exE1RM-prE1RM});
           }
         }
       }
@@ -666,14 +762,14 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
 
       if(newPRs.length>0){
         try {
-          const prCallout = newPRs.map(pr=>`${pr.exercise}: ${pr.weight}lbs x${pr.reps} reps (est. 1RM: ${pr.e1rm}lbs, +${pr.diff}lbs over prev est. 1RM)`).join("\n");
+          const prCallout = newPRs.map(pr=>`${pr.exercise}: ${fmtWeight(pr.weight,pr.unit)} x${pr.reps} reps (est. 1RM: ${Math.round(pr.e1rm)}lbs-equiv, +${Math.round(pr.diff)}lbs-equiv over prev)`).join("\n");
           const prReply = await askClaude(
             "You are Coach Joe Thomas. An athlete just hit a new PR. Acknowledge it directly -- short, punchy, in Coach Joe's voice. Atta boy/girl is appropriate here.",
             `Athlete: ${updatedAthlete.name} (${updatedAthlete.sport})\nNew PRs:\n${prCallout}`,150
           );
           setMessages(prev=>[...prev,{role:"assistant",content:prReply}]);
         } catch(e){
-          setMessages(prev=>[...prev,{role:"assistant",content:newPRs.map(pr=>`New PR -- ${pr.exercise} at ${pr.weight}lbs x${pr.reps} (est. 1RM: ${pr.e1rm}lbs). +${pr.diff}lbs over previous best. That's what the work is for.`).join("\n")}]);
+          setMessages(prev=>[...prev,{role:"assistant",content:newPRs.map(pr=>`New PR -- ${pr.exercise} at ${fmtWeight(pr.weight,pr.unit)} x${pr.reps} (est. 1RM: ${Math.round(pr.e1rm)}lbs-equiv). +${Math.round(pr.diff)}lbs-equiv over previous best. That's what the work is for.`).join("\n")}]);
         }
       }
     } catch(e){
@@ -1109,35 +1205,47 @@ function MyLogModal({workoutHistory, athlete, onClose}) {
                   const lastReply = [...session.entries].reverse().find(e=>e.bot_reply)?.bot_reply;
                   const sessionDate = session.entries[0].created_at;
 
+                  // Check if this is a run session
+                  const allRunData = session.entries.map(e=>{
+                    const pd = typeof e.parsed_data==="string"?(()=>{try{return JSON.parse(e.parsed_data);}catch{return {};}})():(e.parsed_data||{});
+                    return pd.run_data;
+                  }).filter(Boolean);
+                  const isRunSession = allRunData.length>0 && allExercises.length===0;
+                  const runDotColor = isRunSession ? C.blue : C.green;
+
                   return (
                     <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:14,marginBottom:10}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
-                          <div style={{width:6,height:6,borderRadius:"50%",background:C.green,flexShrink:0}}/>
-                          <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1}}>WORKOUT — {fmtDate(sessionDate)}</div>
+                          <div style={{width:6,height:6,borderRadius:"50%",background:runDotColor,flexShrink:0}}/>
+                          <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1}}>{isRunSession?"RUN":"WORKOUT"} — {fmtDate(sessionDate)}</div>
                         </div>
-                        {feelVal&&<div style={{fontSize:11,color:feelVal==="great"||feelVal==="good"?C.green:feelVal==="rough"?C.red:C.gold,fontWeight:600}}>{feelVal}</div>}
+                        {!isRunSession&&feelVal&&<div style={{fontSize:11,color:feelVal==="great"||feelVal==="good"?C.green:feelVal==="rough"?C.red:C.gold,fontWeight:600}}>{feelVal}</div>}
                       </div>
-                      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,marginBottom:allPainFlags.length>0?8:0}}>
-                        <thead>
-                          <tr>
-                            {["Exercise","Sets","Reps","Weight","Feel"].map(h=>(
-                              <th key={h} style={{color:C.muted,fontWeight:600,fontSize:10,letterSpacing:1,textAlign:"left",paddingBottom:4,borderBottom:`1px solid ${C.border}`}}>{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {allExercises.map((e,j)=>(
-                            <tr key={j}>
-                              <td style={{color:C.text,fontWeight:600,padding:"5px 8px 5px 0"}}>{e.name}</td>
-                              <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.sets||"—"}</td>
-                              <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.reps||"—"}</td>
-                              <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.weight?`${e.weight}lbs`:"—"}</td>
-                              <td style={{color:e.feel==="easy"?C.blue:e.feel==="hard"?C.red:C.muted,padding:"5px 0"}}>{e.feel||"—"}</td>
+                      {isRunSession?(
+                        <RunCard runData={allRunData[0]} feel={feelVal}/>
+                      ):(
+                        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,marginBottom:allPainFlags.length>0?8:0}}>
+                          <thead>
+                            <tr>
+                              {["Exercise","Sets","Reps","Weight","Feel"].map(h=>(
+                                <th key={h} style={{color:C.muted,fontWeight:600,fontSize:10,letterSpacing:1,textAlign:"left",paddingBottom:4,borderBottom:`1px solid ${C.border}`}}>{h}</th>
+                              ))}
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                          </thead>
+                          <tbody>
+                            {allExercises.map((e,j)=>(
+                              <tr key={j}>
+                                <td style={{color:C.text,fontWeight:600,padding:"5px 8px 5px 0"}}>{e.name}</td>
+                                <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.sets||"—"}</td>
+                                <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.reps||"—"}</td>
+                                <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{fmtWeight(e.weight,e.unit)}</td>
+                                <td style={{color:e.feel==="easy"?C.blue:e.feel==="hard"?C.red:C.muted,padding:"5px 0"}}>{e.feel||"—"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
                       {allPainFlags.length>0&&<div style={{color:C.red,fontSize:11,marginTop:4}}>⚠ {allPainFlags.map(p=>p.area).join(", ")}</div>}
                       {lastReply&&<div style={{marginTop:8,borderTop:`1px solid ${C.border}`,paddingTop:8,color:C.muted2,fontSize:12,fontStyle:"italic"}}>Coach Joe: "{lastReply.slice(0,200)}{lastReply.length>200?"...":""}"</div>}
                     </div>
@@ -1172,8 +1280,11 @@ function MyLogModal({workoutHistory, athlete, onClose}) {
                 (pd.exercises||[]).forEach(ex=>{
                   if(!ex.name||!ex.weight||ex.unit==="bodyweight") return;
                   const k = ex.name.toLowerCase().trim();
-                  if(!byEx[k]) byEx[k]={name:ex.name,entries:[]};
-                  byEx[k].entries.push({date:new Date(w.created_at),weight:ex.weight,reps:ex.reps||1,e1rm:epley1RM(ex.weight,ex.reps||1)});
+                  const unit = ex.unit||"lbs";
+                  if(!byEx[k]) byEx[k]={name:ex.name,unit,entries:[]};
+                  // Use lbs-normalized weight for E1RM so kg and lbs entries are comparable
+                  const lbsW = toLbs(ex.weight, unit);
+                  byEx[k].entries.push({date:new Date(w.created_at),weight:ex.weight,unit,reps:ex.reps||1,e1rm:epley1RM(lbsW,ex.reps||1)});
                 });
               });
               const exercises = Object.values(byEx)
@@ -1199,13 +1310,13 @@ function MyLogModal({workoutHistory, athlete, onClose}) {
                     <div style={{textAlign:"right"}}>
                       <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>BEST EST. 1RM</div>
                       <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>
-                        {ex.best}<span style={{fontSize:13,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span>
+                        {ex.best}<span style={{fontSize:13,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>{ex.unit==="kg"?"kg":"lbs"}</span>
                       </div>
-                      <div style={{color:C.muted,fontSize:10,marginTop:2}}>{ex.bestEntry.weight}lbs × {ex.bestEntry.reps} rep{ex.bestEntry.reps!==1?"s":""}</div>
+                      <div style={{color:C.muted,fontSize:10,marginTop:2}}>{fmtWeight(ex.bestEntry.weight,ex.unit)} × {ex.bestEntry.reps} rep{ex.bestEntry.reps!==1?"s":""}</div>
                     </div>
                   </div>
                   {ex.entries.length>=2?(
-                    <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={C.gold} unit="lbs"/>
+                    <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={C.gold} unit={ex.unit==="kg"?"kg":"lbs"}/>
                   ):(
                     <div style={{background:C.navy3,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.muted2}}>
                       Logged once — log again to see a trend line.
@@ -1580,7 +1691,7 @@ function GroupStats({athletes,workouts,prs}) {
               return (
                 <div key={i} style={{padding:"5px 0",borderBottom:`1px solid ${C.border}20`,fontSize:12}}>
                   <span style={{color:C.text,fontWeight:600}}>{a?.name||"Unknown"}</span>
-                  <span style={{color:C.muted}}> — {p.exercise} {p.weight}lbs</span>
+                  <span style={{color:C.muted}}> — {p.exercise} {fmtWeight(p.weight,p.unit)}</span>
                 </div>
               );
             })}
@@ -1708,13 +1819,15 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
             {lastWorkout?(
               <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:16}}>
                 <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:8}}>LAST SESSION — {fmtDateShort(lastWorkout.created_at)}</div>
-                {lastWorkout.parsed_data?.exercises?.length>0?(
+                {lastWorkout.parsed_data?.run_data?(
+                  <RunCard runData={lastWorkout.parsed_data.run_data} feel={lastWorkout.parsed_data.session_feel}/>
+                ):lastWorkout.parsed_data?.exercises?.length>0?(
                   <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
                     {lastWorkout.parsed_data.exercises.map((e,i)=>(
                       <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 10px"}}>
                         <div style={{color:C.text,fontSize:12,fontWeight:600}}>{e.name}</div>
                         <div style={{color:C.muted,fontSize:11}}>
-                          {e.sets&&e.reps?`${e.sets}×${e.reps}`:""}{e.weight?` @ ${e.weight}lbs`:""}
+                          {e.sets&&e.reps?`${e.sets}×${e.reps}`:""}{e.weight?` @ ${fmtWeight(e.weight,e.unit)}`:""}
                         </div>
                       </div>
                     ))}
@@ -1760,7 +1873,7 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
                   {prs.slice(0,6).map((p,i)=>(
                     <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 12px"}}>
                       <div style={{color:C.text,fontSize:12,fontWeight:600}}>{p.exercise}</div>
-                      <div style={{color:C.blue,fontSize:13,fontWeight:700}}>{p.weight}lbs</div>
+                      <div style={{color:C.blue,fontSize:13,fontWeight:700}}>{fmtWeight(p.weight,p.unit)}</div>
                     </div>
                   ))}
                 </div>
@@ -1776,38 +1889,43 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
               <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No activity logged yet.</div>
             ):workouts.slice(0,60).map((w,i)=>{
               const pd = typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return {};}})():(w.parsed_data||{});
-              const isWorkout = pd.exercises?.length>0;
+              const isRun = !!pd.run_data && !pd.exercises?.length;
+              const isWorkout = pd.exercises?.length>0 || isRun;
               const isFormCheck = w.raw_message?.startsWith("[Form review:");
               // ── Workout entry ──
               if(isWorkout) return (
                 <div key={i} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:14,marginBottom:10}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
                     <div style={{display:"flex",alignItems:"center",gap:8}}>
-                      <div style={{width:6,height:6,borderRadius:"50%",background:C.green,flexShrink:0}}/>
-                      <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1}}>WORKOUT — {fmtDate(w.created_at)}</div>
+                      <div style={{width:6,height:6,borderRadius:"50%",background:isRun?C.blue:C.green,flexShrink:0}}/>
+                      <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1}}>{isRun?"RUN":"WORKOUT"} — {fmtDate(w.created_at)}</div>
                     </div>
-                    {pd.session_feel&&<div style={{fontSize:11,color:pd.session_feel==="great"||pd.session_feel==="good"?C.green:pd.session_feel==="rough"?C.red:C.gold,fontWeight:600}}>{pd.session_feel}</div>}
+                    {!isRun&&pd.session_feel&&<div style={{fontSize:11,color:pd.session_feel==="great"||pd.session_feel==="good"?C.green:pd.session_feel==="rough"?C.red:C.gold,fontWeight:600}}>{pd.session_feel}</div>}
                   </div>
-                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,marginBottom:pd.pain_flags?.length>0?8:0}}>
-                    <thead>
-                      <tr>
-                        {["Exercise","Sets","Reps","Weight","Feel"].map(h=>(
-                          <th key={h} style={{color:C.muted,fontWeight:600,fontSize:10,letterSpacing:1,textAlign:"left",paddingBottom:4,borderBottom:`1px solid ${C.border}`}}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pd.exercises.map((e,j)=>(
-                        <tr key={j}>
-                          <td style={{color:C.text,fontWeight:600,padding:"5px 8px 5px 0"}}>{e.name}</td>
-                          <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.sets||"—"}</td>
-                          <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.reps||"—"}</td>
-                          <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.weight?`${e.weight}lbs`:"—"}</td>
-                          <td style={{color:e.feel==="easy"?C.blue:e.feel==="hard"?C.red:C.muted,padding:"5px 0"}}>{e.feel||"—"}</td>
+                  {isRun?(
+                    <RunCard runData={pd.run_data} feel={pd.session_feel}/>
+                  ):(
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,marginBottom:pd.pain_flags?.length>0?8:0}}>
+                      <thead>
+                        <tr>
+                          {["Exercise","Sets","Reps","Weight","Feel"].map(h=>(
+                            <th key={h} style={{color:C.muted,fontWeight:600,fontSize:10,letterSpacing:1,textAlign:"left",paddingBottom:4,borderBottom:`1px solid ${C.border}`}}>{h}</th>
+                          ))}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {pd.exercises.map((e,j)=>(
+                          <tr key={j}>
+                            <td style={{color:C.text,fontWeight:600,padding:"5px 8px 5px 0"}}>{e.name}</td>
+                            <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.sets||"—"}</td>
+                            <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.reps||"—"}</td>
+                            <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{fmtWeight(e.weight,e.unit)}</td>
+                            <td style={{color:e.feel==="easy"?C.blue:e.feel==="hard"?C.red:C.muted,padding:"5px 0"}}>{e.feel||"—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
                   {pd.pain_flags?.length>0&&<div style={{color:C.red,fontSize:11,marginTop:4}}>⚠ {pd.pain_flags.map(p=>p.area).join(", ")}</div>}
                   {w.bot_reply&&<div style={{marginTop:8,borderTop:`1px solid ${C.border}`,paddingTop:8,color:C.muted2,fontSize:12,fontStyle:"italic"}}>Coach Joe: "{w.bot_reply.slice(0,200)}{w.bot_reply.length>200?"...":""}"</div>}
                 </div>
@@ -1856,8 +1974,10 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
                 (pd.exercises||[]).forEach(ex=>{
                   if(!ex.name||!ex.weight||ex.unit==="bodyweight") return;
                   const k = ex.name.toLowerCase().trim();
-                  if(!byEx[k]) byEx[k]={name:ex.name,entries:[]};
-                  byEx[k].entries.push({date:new Date(w.created_at),weight:ex.weight,reps:ex.reps||1,e1rm:epley1RM(ex.weight,ex.reps||1)});
+                  const unit = ex.unit||"lbs";
+                  if(!byEx[k]) byEx[k]={name:ex.name,unit,entries:[]};
+                  const lbsW = toLbs(ex.weight, unit);
+                  byEx[k].entries.push({date:new Date(w.created_at),weight:ex.weight,unit,reps:ex.reps||1,e1rm:epley1RM(lbsW,ex.reps||1)});
                 });
               });
               const exercises = Object.values(byEx)
@@ -1884,14 +2004,14 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
                     <div style={{textAlign:"right"}}>
                       <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>LIFETIME BEST EST. 1RM</div>
                       <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>
-                        {ex.best}<span style={{fontSize:13,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span>
+                        {ex.best}<span style={{fontSize:13,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>{ex.unit==="kg"?"kg":"lbs"}</span>
                       </div>
-                      <div style={{color:C.muted,fontSize:10,marginTop:2}}>{ex.bestEntry.weight}lbs × {ex.bestEntry.reps} rep{ex.bestEntry.reps!==1?"s":""}</div>
+                      <div style={{color:C.muted,fontSize:10,marginTop:2}}>{fmtWeight(ex.bestEntry.weight,ex.unit)} × {ex.bestEntry.reps} rep{ex.bestEntry.reps!==1?"s":""}</div>
                     </div>
                   </div>
                   {/* Chart or single-entry note */}
                   {ex.entries.length>=2?(
-                    <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={C.gold} unit="lbs"/>
+                    <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={C.gold} unit={ex.unit==="kg"?"kg":"lbs"}/>
                   ):(
                     <div style={{background:C.navy2,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.muted2}}>
                       Logged once — log again to see a trend line.
