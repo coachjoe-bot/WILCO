@@ -81,6 +81,52 @@ export default async function handler(req, res) {
   return res.status(200).json({sent:results.length, results});
 }
 
+// ── Helpers ────────────────────────────────────────────────────────────────────
+const getPD = (w) => {
+  if(typeof w.parsed_data === "string"){
+    try { return JSON.parse(w.parsed_data); } catch { return {}; }
+  }
+  return w.parsed_data || {};
+};
+
+// Groups workout entries within a 3-hour window into one session.
+// Respects new_session:true flag to force a split even within the window.
+const GAP_MS = 3 * 60 * 60 * 1000;
+function groupIntoSessions(workouts) {
+  const real = workouts.filter(w => getPD(w).exercises?.length > 0);
+  const sorted = [...real].sort((a,b) => new Date(a.created_at) - new Date(b.created_at));
+  const groups = [];
+  let cur = null, lastTime = null;
+  sorted.forEach(w => {
+    const t = new Date(w.created_at).getTime();
+    if(!lastTime || getPD(w).new_session === true || t - lastTime > GAP_MS) {
+      cur = [w]; groups.push(cur);
+    } else {
+      cur.push(w);
+    }
+    lastTime = t;
+  });
+  return groups;
+}
+
+// Merges entries in a session group into one display row.
+function mergeSession(entries) {
+  const date = new Date(entries[0].created_at).toLocaleDateString("en-US", {weekday:"short", month:"short", day:"numeric"});
+  const exercises = [];
+  const painAreas = [];
+  const feelRank  = {rough:0, average:1, good:2, great:3};
+  let feel = null;
+  entries.forEach(w => {
+    const pd = getPD(w);
+    (pd.exercises || []).forEach(e => { if(e.name) exercises.push(e); });
+    (pd.pain_flags || []).forEach(p => { if(!painAreas.includes(p.area)) painAreas.push(p.area); });
+    if(pd.session_feel && (feel === null || feelRank[pd.session_feel] < feelRank[feel])) {
+      feel = pd.session_feel; // surface the worst feel of the session
+    }
+  });
+  return { date, exercises, painAreas, feel };
+}
+
 // ── Email builder ──────────────────────────────────────────────────────────────
 function buildEmail(coach, workouts, prs, weekLabel, signupUrl) {
   const epley = (w, r) => (!w || w <= 0) ? 0 : Math.round(w * (1 + (r||1) / 30));
@@ -90,30 +136,19 @@ function buildEmail(coach, workouts, prs, weekLabel, signupUrl) {
     const athWorkouts = workouts.filter(w => w.athlete_id === ath.id);
     const athPRs      = prs.filter(p => p.athlete_id === ath.id);
 
-    // Real sessions only (has at least one exercise)
-    const sessions = athWorkouts.filter(w => {
-      const pd = typeof w.parsed_data === "string"
-        ? (() => { try{return JSON.parse(w.parsed_data);}catch{return {};} })()
-        : (w.parsed_data || {});
-      return pd.exercises?.length > 0;
-    });
+    // Group entries into sessions using the 3-hour rule
+    const sessionGroups = groupIntoSessions(athWorkouts);
+    const sessions      = sessionGroups.map(mergeSession);
 
-    // Collect pain flags
+    // Collect all pain areas across the week (for the summary flag)
     const painAreas = [];
     athWorkouts.forEach(w => {
-      const pd = typeof w.parsed_data === "string"
-        ? (() => { try{return JSON.parse(w.parsed_data);}catch{return {};} })()
-        : (w.parsed_data || {});
-      (pd.pain_flags || []).forEach(p => { if(!painAreas.includes(p.area)) painAreas.push(p.area); });
+      getPD(w).pain_flags?.forEach(p => { if(!painAreas.includes(p.area)) painAreas.push(p.area); });
     });
 
-    // Build exercise rows grouped by session
-    const sessionRows = sessions.map(w => {
-      const pd = typeof w.parsed_data === "string"
-        ? (() => { try{return JSON.parse(w.parsed_data);}catch{return {};} })()
-        : (w.parsed_data || {});
-      const date = new Date(w.created_at).toLocaleDateString("en-US", {weekday:"short", month:"short", day:"numeric"});
-      const exList = (pd.exercises || [])
+    // Build exercise rows — one row per merged session
+    const sessionRows = sessions.map(({ date, exercises, feel }) => {
+      const exList = exercises
         .filter(e => e.name)
         .map(e => {
           let s = `<span style="color:#1a1a2e;font-weight:600">${e.name}</span>`;
@@ -121,11 +156,13 @@ function buildEmail(coach, workouts, prs, weekLabel, signupUrl) {
           if(e.weight)         s += ` <span style="color:#555">@ ${e.weight}lbs</span>`;
           return s;
         }).join(" &nbsp;·&nbsp; ");
-      const feel = pd.session_feel ? `<span style="color:${pd.session_feel==='rough'?'#c0392b':pd.session_feel==='great'||pd.session_feel==='good'?'#27ae60':'#888'};font-size:11px;margin-left:8px">${pd.session_feel}</span>` : "";
+      const feelHtml = feel
+        ? `<span style="color:${feel==='rough'?'#c0392b':feel==='great'||feel==='good'?'#27ae60':'#888'};font-size:11px;margin-left:8px">${feel}</span>`
+        : "";
       return `
         <tr>
           <td style="padding:7px 12px;border-bottom:1px solid #eaeaea;color:#888;font-size:12px;white-space:nowrap;vertical-align:top">${date}</td>
-          <td style="padding:7px 12px;border-bottom:1px solid #eaeaea;font-size:13px;line-height:1.6">${exList||"<span style='color:#aaa'>General training</span>"}${feel}</td>
+          <td style="padding:7px 12px;border-bottom:1px solid #eaeaea;font-size:13px;line-height:1.6">${exList||"<span style='color:#aaa'>General training</span>"}${feelHtml}</td>
         </tr>`;
     }).join("");
 
