@@ -20,7 +20,9 @@ const sbInsert = async (table,data) => {
 };
 const sbUpdate = async (table,id,data) => {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`,{method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},body:JSON.stringify(data)});
-  return r.json();
+  const json = await r.json();
+  if(!r.ok) throw new Error(json?.message||json?.error||`Update failed (${r.status})`);
+  return json;
 };
 const sbDelete = async (table,params="") => {
   await fetch(`${SUPABASE_URL}/rest/v1/${table}${params}`,{method:"DELETE",headers:sbH});
@@ -590,6 +592,11 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   useEffect(()=>{
     (async()=>{
       try {
+        // Re-fetch athlete from Supabase so JoBot has the latest program_text
+        // even if the coach set it after this athlete logged in
+        const freshAthlete = await sbGet("athletes",`?id=eq.${athlete.id}&select=*`);
+        if(freshAthlete?.length>0) setAthlete(freshAthlete[0]);
+
         const logs = await sbGet("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=100&select=*`);
         if(logs&&logs.length>0) setWorkoutHistory(logs);
 
@@ -1227,6 +1234,7 @@ function CoachDashboard({coach,onLogout}) {
   const [search,setSearch] = useState("");
   const [filterPain,setFilterPain] = useState(false);
   const [filterInactive,setFilterInactive] = useState(false);
+  const [sortBy,setSortBy] = useState("lastActive"); // "lastActive" | "name"
   const [recalcStatus,setRecalcStatus] = useState(null); // null | "running" | "done" | "error" | "X/Y
 
   useEffect(()=>{loadAll();},[]);
@@ -1309,6 +1317,14 @@ function CoachDashboard({coach,onLogout}) {
       if(d!==null&&d<=7) return false;
     }
     return true;
+  }).sort((a,b)=>{
+    if(sortBy==="name") return a.name.localeCompare(b.name);
+    // "lastActive": most recent first; athletes who've never logged go to the bottom
+    const la = lastActive(a.id), lb = lastActive(b.id);
+    if(!la&&!lb) return 0;
+    if(!la) return 1;
+    if(!lb) return -1;
+    return new Date(lb) - new Date(la);
   });
 
   const tabs = ["athletes","stats",...(isMaster?["coaches"]:[])];
@@ -1359,6 +1375,11 @@ function CoachDashboard({coach,onLogout}) {
                       <button onClick={()=>setFilterInactive(p=>!p)}
                         style={{flex:1,background:filterInactive?`${C.gold}20`:"transparent",border:`1px solid ${filterInactive?C.gold:C.border}`,color:filterInactive?C.gold:C.muted,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11,fontFamily:"'DM Sans'"}}>
                         Inactive 7d+
+                      </button>
+                      <button onClick={()=>setSortBy(s=>s==="lastActive"?"name":"lastActive")}
+                        style={{flex:1,background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11,fontFamily:"'DM Sans'",display:"flex",alignItems:"center",justifyContent:"center",gap:4}}>
+                        <span>{sortBy==="lastActive"?"⏱":"A–Z"}</span>
+                        <span>{sortBy==="lastActive"?"Active":"Name"}</span>
                       </button>
                     </div>
                   </div>
@@ -1611,6 +1632,7 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
   const [programText,setProgramText] = useState(athlete.program_text||"");
   const [programSaving,setProgramSaving] = useState(false);
   const [programSaved,setProgramSaved] = useState(false);
+  const [programError,setProgramError] = useState("");
   const [confirmDelete,setConfirmDelete] = useState(false);
 
   const handleDelete = async () => {
@@ -1626,11 +1648,14 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
 
   const handleProgramSave = async () => {
     setProgramSaving(true);
+    setProgramError("");
     try {
       await onProgramSave(programText);
       setProgramSaved(true);
       setTimeout(()=>setProgramSaved(false),3000);
-    } catch(e){}
+    } catch(e){
+      setProgramError("Save failed — " + (e?.message||"check your connection and try again."));
+    }
     setProgramSaving(false);
   };
 
@@ -1911,9 +1936,10 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
                 {programSaving?"Saving...":"Save Program"}
               </button>
               {programSaved&&<div style={{color:C.green,fontSize:13,fontWeight:600}}>✓ Saved — Joe-bot will reference this program</div>}
-              {!programSaved&&programText!==(athlete.program_text||"")&&!programSaving&&(
+              {!programSaved&&programText!==(athlete.program_text||"")&&!programSaving&&!programError&&(
                 <div style={{color:C.muted,fontSize:12}}>Unsaved changes</div>
               )}
+              {programError&&<div style={{color:C.red,fontSize:12,fontWeight:600}}>⚠ {programError}</div>}
             </div>
           </div>
         )}
