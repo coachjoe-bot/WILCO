@@ -1137,7 +1137,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         <SettingsModal
           athlete={athlete}
           onClose={()=>setShowSettings(false)}
-          onCoachSwitch={(coachId)=>setAthlete(prev=>({...prev,coach_id:coachId}))}
+          onCoachUpdate={(updates)=>setAthlete(prev=>({...prev,...updates}))}
         />
       )}
     </div>
@@ -1344,47 +1344,22 @@ function MyLogModal({workoutHistory, athlete, onClose}) {
 }
 
 // ─── SETTINGS MODAL ───────────────────────────────────────────────────────────
-function SettingsModal({athlete, onClose, onCoachSwitch}) {
-  const [coaches,setCoaches] = useState([]);
-  const [loading,setLoading] = useState(true);
+function SettingsModal({athlete, onClose, onCoachUpdate}) {
+  const [coachName,setCoachName] = useState(athlete.coach_name||"");
+  const [coachEmail,setCoachEmail] = useState(athlete.coach_email||"");
   const [saving,setSaving] = useState(false);
   const [savedMsg,setSavedMsg] = useState("");
-  const [currentCoachId,setCurrentCoachId] = useState(athlete.coach_id||null);
 
-  useEffect(()=>{
-    (async()=>{
-      try {
-        const all = await sbGet("coaches","?select=id,name,sports,role&order=name.asc");
-        // Exclude master-access accounts from the list
-        setCoaches(Array.isArray(all)?all.filter(c=>c.role!=="master"):[]);
-      } catch(e){ setCoaches([]); }
-      setLoading(false);
-    })();
-  },[]);
-
-  const switchCoach = async (coach) => {
-    if(saving||currentCoachId===coach.id) return;
-    setSaving(true); setSavedMsg("");
-    try {
-      await sbUpdate("athletes",athlete.id,{coach_id:coach.id});
-      setCurrentCoachId(coach.id);
-      onCoachSwitch(coach.id);
-      setSavedMsg(`Coach updated to ${coach.name}.`);
-    } catch(e){
-      setSavedMsg("Couldn't save. Try again.");
+  const save = async () => {
+    if(saving) return;
+    if(coachEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(coachEmail)){
+      setSavedMsg("Enter a valid email address."); return;
     }
-    setSaving(false);
-    setTimeout(()=>setSavedMsg(""),3000);
-  };
-
-  const clearCoach = async () => {
-    if(saving||!currentCoachId) return;
     setSaving(true); setSavedMsg("");
     try {
-      await sbUpdate("athletes",athlete.id,{coach_id:null});
-      setCurrentCoachId(null);
-      onCoachSwitch(null);
-      setSavedMsg("Coach assignment cleared.");
+      await sbUpdate("athletes",athlete.id,{coach_name:coachName.trim()||null, coach_email:coachEmail.trim()||null});
+      onCoachUpdate({coach_name:coachName.trim()||null, coach_email:coachEmail.trim()||null});
+      setSavedMsg("Saved.");
     } catch(e){
       setSavedMsg("Couldn't save. Try again.");
     }
@@ -1395,7 +1370,7 @@ function SettingsModal({athlete, onClose, onCoachSwitch}) {
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:400,padding:24}}>
       <style>{GS}</style>
-      <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:380,maxHeight:"80vh",display:"flex",flexDirection:"column",gap:0}}>
+      <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:380}}>
 
         {/* Header */}
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
@@ -1411,49 +1386,39 @@ function SettingsModal({athlete, onClose, onCoachSwitch}) {
         </div>
 
         {/* Coach section */}
-        <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:10}}>MY COACH</div>
-        <div style={{color:C.muted2,fontSize:12,marginBottom:14,lineHeight:1.5}}>
-          Select the coach you want to work with. They'll be able to see your logs and set your program.
+        <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:6}}>MY COACH</div>
+        <div style={{color:C.muted2,fontSize:12,marginBottom:16,lineHeight:1.5}}>
+          Progress reports will be sent to this coach.
         </div>
 
-        {loading?(
-          <div style={{color:C.muted,fontSize:13,textAlign:"center",padding:24}}>Loading coaches...</div>
-        ):coaches.length===0?(
-          <div style={{color:C.muted,fontSize:13,textAlign:"center",padding:24}}>No coaches available right now.</div>
-        ):(
-          <div style={{overflowY:"auto",flex:1,display:"flex",flexDirection:"column",gap:8}}>
-            {coaches.map(coach=>{
-              const isCurrent = currentCoachId===coach.id;
-              return (
-                <div key={coach.id} onClick={()=>switchCoach(coach)}
-                  style={{padding:"12px 14px",borderRadius:10,border:`1px solid ${isCurrent?C.gold:C.border}`,background:isCurrent?`${C.gold}18`:C.navy3,cursor:isCurrent||saving?"default":"pointer",display:"flex",alignItems:"center",gap:10,transition:"border-color 0.15s,background 0.15s"}}>
-                  <div style={{width:34,height:34,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:15,color:"#000",flexShrink:0}}>
-                    {coach.name?.[0]?.toUpperCase()||"?"}
-                  </div>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{color:isCurrent?C.gold:C.text,fontWeight:600,fontSize:14}}>{coach.name}</div>
-                    <div style={{color:C.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{coach.sports?.join(", ")||"All sports"}</div>
-                  </div>
-                  {isCurrent&&<div style={{color:C.gold,fontSize:10,fontWeight:700,letterSpacing:1,flexShrink:0}}>✓ CURRENT</div>}
-                </div>
-              );
-            })}
+        <div style={{marginBottom:14}}>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH NAME</label>
+          <input
+            value={coachName}
+            onChange={e=>setCoachName(e.target.value)}
+            placeholder="Coach's full name"
+            style={inp()}/>
+        </div>
 
-            {/* Clear assignment option */}
-            {currentCoachId&&(
-              <button onClick={clearCoach} disabled={saving}
-                style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:10,padding:"10px 14px",cursor:"pointer",fontSize:12,textAlign:"left",fontFamily:"'DM Sans'",marginTop:4}}>
-                Remove coach assignment
-              </button>
-            )}
-          </div>
-        )}
+        <div style={{marginBottom:20}}>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH EMAIL</label>
+          <input
+            type="email"
+            value={coachEmail}
+            onChange={e=>setCoachEmail(e.target.value)}
+            placeholder="coach@example.com"
+            style={inp()}/>
+        </div>
 
         {savedMsg&&(
-          <div style={{color:savedMsg.includes("Couldn't")?C.red:C.green,fontSize:12,textAlign:"center",marginTop:14,fontWeight:600}}>
+          <div style={{color:savedMsg==="Saved."?C.green:C.red,fontSize:12,textAlign:"center",marginBottom:12,fontWeight:600}}>
             {savedMsg}
           </div>
         )}
+
+        <button onClick={save} disabled={saving} style={btn(C.gold,"#000",{opacity:saving?0.7:1,cursor:saving?"not-allowed":"pointer"})}>
+          {saving?"Saving...":"Save Changes →"}
+        </button>
       </div>
     </div>
   );
