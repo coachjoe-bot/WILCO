@@ -675,6 +675,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [movementLabel,setMovementLabel] = useState("");
   const [sessionCheckPending,setSessionCheckPending] = useState(null);
   const [showLog,setShowLog] = useState(false);
+  const [showSettings,setShowSettings] = useState(false);
   const bottomRef = useRef(null);
   const videoInputRef = useRef(null);
 
@@ -1023,6 +1024,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           {saved&&<div style={{background:"#0a1e0a",border:`1px solid ${C.green}`,borderRadius:8,padding:"4px 10px",color:C.green,fontSize:11,fontWeight:600}}>Saved</div>}
           {athlete.program_text&&<div style={{background:"#0a0e1e",border:`1px solid ${C.blue}`,borderRadius:8,padding:"4px 10px",color:C.blue,fontSize:11}}>Program set</div>}
           <button onClick={()=>setShowLog(true)} style={{background:C.navy3,border:`1px solid ${C.gold}`,color:C.gold,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>MY LOG</button>
+          <button onClick={()=>setShowSettings(true)} title="Settings" style={{background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:14,lineHeight:1}}>⚙</button>
           <button onClick={onLogout} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12}}>Log Out</button>
         </div>
       </div>
@@ -1129,6 +1131,15 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
 
       {/* My Log Modal */}
       {showLog&&<MyLogModal workoutHistory={workoutHistory} athlete={athlete} onClose={()=>setShowLog(false)}/>}
+
+      {/* Settings Modal */}
+      {showSettings&&(
+        <SettingsModal
+          athlete={athlete}
+          onClose={()=>setShowSettings(false)}
+          onCoachSwitch={(coachId)=>setAthlete(prev=>({...prev,coach_id:coachId}))}
+        />
+      )}
     </div>
   );
 }
@@ -1325,6 +1336,122 @@ function MyLogModal({workoutHistory, athlete, onClose}) {
                 </div>
               ));
             })()}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── SETTINGS MODAL ───────────────────────────────────────────────────────────
+function SettingsModal({athlete, onClose, onCoachSwitch}) {
+  const [coaches,setCoaches] = useState([]);
+  const [loading,setLoading] = useState(true);
+  const [saving,setSaving] = useState(false);
+  const [savedMsg,setSavedMsg] = useState("");
+  const [currentCoachId,setCurrentCoachId] = useState(athlete.coach_id||null);
+
+  useEffect(()=>{
+    (async()=>{
+      try {
+        const all = await sbGet("coaches","?select=id,name,sports,role&order=name.asc");
+        // Exclude master-access accounts from the list
+        setCoaches(Array.isArray(all)?all.filter(c=>c.role!=="master"):[]);
+      } catch(e){ setCoaches([]); }
+      setLoading(false);
+    })();
+  },[]);
+
+  const switchCoach = async (coach) => {
+    if(saving||currentCoachId===coach.id) return;
+    setSaving(true); setSavedMsg("");
+    try {
+      await sbUpdate("athletes",athlete.id,{coach_id:coach.id});
+      setCurrentCoachId(coach.id);
+      onCoachSwitch(coach.id);
+      setSavedMsg(`Coach updated to ${coach.name}.`);
+    } catch(e){
+      setSavedMsg("Couldn't save. Try again.");
+    }
+    setSaving(false);
+    setTimeout(()=>setSavedMsg(""),3000);
+  };
+
+  const clearCoach = async () => {
+    if(saving||!currentCoachId) return;
+    setSaving(true); setSavedMsg("");
+    try {
+      await sbUpdate("athletes",athlete.id,{coach_id:null});
+      setCurrentCoachId(null);
+      onCoachSwitch(null);
+      setSavedMsg("Coach assignment cleared.");
+    } catch(e){
+      setSavedMsg("Couldn't save. Try again.");
+    }
+    setSaving(false);
+    setTimeout(()=>setSavedMsg(""),3000);
+  };
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:400,padding:24}}>
+      <style>{GS}</style>
+      <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:380,maxHeight:"80vh",display:"flex",flexDirection:"column",gap:0}}>
+
+        {/* Header */}
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:C.gold,letterSpacing:3}}>SETTINGS</div>
+          <button onClick={onClose} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"4px 12px",cursor:"pointer",fontSize:12}}>✕ Close</button>
+        </div>
+
+        {/* Athlete info */}
+        <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",marginBottom:20}}>
+          <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>LOGGED IN AS</div>
+          <div style={{color:C.text,fontWeight:600,fontSize:14}}>{athlete.name}</div>
+          <div style={{color:C.muted,fontSize:11}}>{athlete.sport}</div>
+        </div>
+
+        {/* Coach section */}
+        <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:10}}>MY COACH</div>
+        <div style={{color:C.muted2,fontSize:12,marginBottom:14,lineHeight:1.5}}>
+          Select the coach you want to work with. They'll be able to see your logs and set your program.
+        </div>
+
+        {loading?(
+          <div style={{color:C.muted,fontSize:13,textAlign:"center",padding:24}}>Loading coaches...</div>
+        ):coaches.length===0?(
+          <div style={{color:C.muted,fontSize:13,textAlign:"center",padding:24}}>No coaches available right now.</div>
+        ):(
+          <div style={{overflowY:"auto",flex:1,display:"flex",flexDirection:"column",gap:8}}>
+            {coaches.map(coach=>{
+              const isCurrent = currentCoachId===coach.id;
+              return (
+                <div key={coach.id} onClick={()=>switchCoach(coach)}
+                  style={{padding:"12px 14px",borderRadius:10,border:`1px solid ${isCurrent?C.gold:C.border}`,background:isCurrent?`${C.gold}18`:C.navy3,cursor:isCurrent||saving?"default":"pointer",display:"flex",alignItems:"center",gap:10,transition:"border-color 0.15s,background 0.15s"}}>
+                  <div style={{width:34,height:34,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:15,color:"#000",flexShrink:0}}>
+                    {coach.name?.[0]?.toUpperCase()||"?"}
+                  </div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{color:isCurrent?C.gold:C.text,fontWeight:600,fontSize:14}}>{coach.name}</div>
+                    <div style={{color:C.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{coach.sports?.join(", ")||"All sports"}</div>
+                  </div>
+                  {isCurrent&&<div style={{color:C.gold,fontSize:10,fontWeight:700,letterSpacing:1,flexShrink:0}}>✓ CURRENT</div>}
+                </div>
+              );
+            })}
+
+            {/* Clear assignment option */}
+            {currentCoachId&&(
+              <button onClick={clearCoach} disabled={saving}
+                style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:10,padding:"10px 14px",cursor:"pointer",fontSize:12,textAlign:"left",fontFamily:"'DM Sans'",marginTop:4}}>
+                Remove coach assignment
+              </button>
+            )}
+          </div>
+        )}
+
+        {savedMsg&&(
+          <div style={{color:savedMsg.includes("Couldn't")?C.red:C.green,fontSize:12,textAlign:"center",marginTop:14,fontWeight:600}}>
+            {savedMsg}
           </div>
         )}
       </div>
