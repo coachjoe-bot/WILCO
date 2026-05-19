@@ -14,8 +14,11 @@ export default async function handler(req, res) {
   const FROM_EMAIL   = process.env.FROM_EMAIL   || "WILCO <reports@wilco.app>";
   const SIGNUP_URL   = process.env.TEAM_SIGNUP_URL || "https://wilco.app/coaches";
 
+  console.log("[weekly-report] triggered —", new Date().toISOString());
+  console.log("[weekly-report] env check — SUPABASE_URL:", !!SUPABASE_URL, "| SUPABASE_KEY:", !!SUPABASE_KEY, "| RESEND_KEY:", !!RESEND_KEY, "| FROM_EMAIL:", FROM_EMAIL);
+
   if(!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({error:"Missing Supabase config"});
-  if(!RESEND_KEY)                    return res.status(500).json({error:"Missing RESEND_API_KEY"});
+  if(!RESEND_KEY)                    return res.status(500).json({error:"Missing RESEND_API_KEY — add this in Vercel → Settings → Environment Variables"});
 
   const sbH = {
     "apikey": SUPABASE_KEY,
@@ -76,9 +79,12 @@ export default async function handler(req, res) {
       })
     });
     const emailData = await emailRes.json();
-    results.push({coach:coach.email, status:emailRes.status, id:emailData.id, error:emailData.message});
+    const result = {coach:coach.email, athletes:coach.athletes.length, sessions:workouts.filter(isRealEntry).length, status:emailRes.status, id:emailData.id, error:emailData.message||emailData.error||null};
+    console.log("[weekly-report] email result:", JSON.stringify(result));
+    results.push(result);
   }
 
+  console.log("[weekly-report] done — sent:", results.length);
   return res.status(200).json({sent:results.length, results});
 }
 
@@ -90,17 +96,23 @@ const getPD = (w) => {
   return w.parsed_data || {};
 };
 
+// A real training session has exercises OR run data (filters out pure Q&A messages)
+const isRealEntry = (w) => {
+  const pd = getPD(w);
+  return pd.exercises?.length > 0 || !!pd.run_data;
+};
+
 // Groups workout entries within a 3-hour window into one session.
-// Respects new_session:true flag to force a split even within the window.
 const GAP_MS = 3 * 60 * 60 * 1000;
 function groupIntoSessions(workouts) {
-  const real = workouts.filter(w => getPD(w).exercises?.length > 0);
+  const real   = workouts.filter(isRealEntry);
   const sorted = [...real].sort((a,b) => new Date(a.created_at) - new Date(b.created_at));
   const groups = [];
   let cur = null, lastTime = null;
   sorted.forEach(w => {
-    const t = new Date(w.created_at).getTime();
-    if(!lastTime || getPD(w).new_session === true || t - lastTime > GAP_MS) {
+    const t  = new Date(w.created_at).getTime();
+    const pd = getPD(w);
+    if(!lastTime || pd.new_session === true || t - lastTime > GAP_MS) {
       cur = [w]; groups.push(cur);
     } else {
       cur.push(w);
@@ -112,20 +124,22 @@ function groupIntoSessions(workouts) {
 
 // Merges entries in a session group into one display row.
 function mergeSession(entries) {
-  const date = new Date(entries[0].created_at).toLocaleDateString("en-US", {weekday:"short", month:"short", day:"numeric"});
+  const date     = new Date(entries[0].created_at).toLocaleDateString("en-US", {weekday:"short", month:"short", day:"numeric"});
   const exercises = [];
   const painAreas = [];
   const feelRank  = {rough:0, average:1, good:2, great:3};
-  let feel = null;
+  let feel    = null;
+  let runData = null;
   entries.forEach(w => {
     const pd = getPD(w);
     (pd.exercises || []).forEach(e => { if(e.name) exercises.push(e); });
     (pd.pain_flags || []).forEach(p => { if(!painAreas.includes(p.area)) painAreas.push(p.area); });
     if(pd.session_feel && (feel === null || feelRank[pd.session_feel] < feelRank[feel])) {
-      feel = pd.session_feel; // surface the worst feel of the session
+      feel = pd.session_feel;
     }
+    if(pd.run_data && !runData) runData = pd.run_data; // take first run entry
   });
-  return { date, exercises, painAreas, feel };
+  return { date, exercises, painAreas, feel, runData };
 }
 
 // ── Email builder ──────────────────────────────────────────────────────────────
@@ -147,23 +161,40 @@ function buildEmail(coach, workouts, prs, weekLabel, signupUrl) {
       getPD(w).pain_flags?.forEach(p => { if(!painAreas.includes(p.area)) painAreas.push(p.area); });
     });
 
-    // Build exercise rows — one row per merged session
-    const sessionRows = sessions.map(({ date, exercises, feel }) => {
-      const exList = exercises
-        .filter(e => e.name)
-        .map(e => {
+    // Build session rows — one row per merged session (handles both strength and runs)
+    const sessionRows = sessions.map(({ date, exercises, runData, feel }) => {
+      let content = "";
+      if(runData) {
+        // Run session
+        const parts = [];
+        if(runData.run_type) parts.push(`<strong>${runData.run_type.replace("_"," ").replace(/\b\w/g,c=>c.toUpperCase())}</strong>`);
+        if(runData.distance_miles) parts.push(`${runData.distance_miles} mi`);
+        else if(runData.distance_km) parts.push(`${runData.distance_km} km`);
+        if(runData.duration_minutes) parts.push(`${runData.duration_minutes} min`);
+        if(runData.pace_per_mile) parts.push(`${runData.pace_per_mile}/mi`);
+        else if(runData.pace_per_km) parts.push(`${runData.pace_per_km}/km`);
+        if(runData.heart_rate_avg) parts.push(`avg HR ${runData.heart_rate_avg} bpm`);
+        content = parts.length ? parts.join(" &middot; ") : "<span style='color:#aaa'>Run</span>";
+        content = `<span style="color:#3b82f6;font-size:10px;font-weight:700;letter-spacing:1px">RUN &nbsp;</span>${content}`;
+      } else {
+        // Strength session
+        content = exercises.filter(e => e.name).map(e => {
           let s = `<span style="color:#1a1a2e;font-weight:600">${e.name}</span>`;
           if(e.sets && e.reps) s += ` <span style="color:#555">${e.sets}×${e.reps}</span>`;
-          if(e.weight)         s += ` <span style="color:#555">@ ${e.weight}lbs</span>`;
+          if(e.weight) {
+            const u = e.unit === "kg" ? "kg" : "lbs";
+            s += ` <span style="color:#555">@ ${e.weight}${u}</span>`;
+          }
           return s;
-        }).join(" &nbsp;·&nbsp; ");
+        }).join(" &nbsp;·&nbsp; ") || "<span style='color:#aaa'>General training</span>";
+      }
       const feelHtml = feel
         ? `<span style="color:${feel==='rough'?'#c0392b':feel==='great'||feel==='good'?'#27ae60':'#888'};font-size:11px;margin-left:8px">${feel}</span>`
         : "";
       return `
         <tr>
           <td style="padding:7px 12px;border-bottom:1px solid #eaeaea;color:#888;font-size:12px;white-space:nowrap;vertical-align:top">${date}</td>
-          <td style="padding:7px 12px;border-bottom:1px solid #eaeaea;font-size:13px;line-height:1.6">${exList||"<span style='color:#aaa'>General training</span>"}${feelHtml}</td>
+          <td style="padding:7px 12px;border-bottom:1px solid #eaeaea;font-size:13px;line-height:1.6">${content}${feelHtml}</td>
         </tr>`;
     }).join("");
 
