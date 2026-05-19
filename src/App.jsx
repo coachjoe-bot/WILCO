@@ -794,10 +794,44 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [showLog,setShowLog] = useState(false);
   const [showSettings,setShowSettings] = useState(false);
   const [showProgram,setShowProgram] = useState(false);
+  const [athleteProgramText,setAthleteProgramText] = useState(athlete.program_text||"");
+  const [athleteProgramSaving,setAthleteProgramSaving] = useState(false);
+  const [athleteProgramMsg,setAthleteProgramMsg] = useState("");
+  const [athletePhotoProcessing,setAthletePhotoProcessing] = useState(false);
   const bottomRef = useRef(null);
   const videoInputRef = useRef(null);
+  const athletePhotoRef = useRef(null);
   const isMobile = useIsMobile();
   const chatStorageKey = `wilco_chat_${athlete.id}_${new Date().toLocaleDateString()}`;
+
+  const saveAthleteProgram = async () => {
+    if(athleteProgramSaving) return;
+    setAthleteProgramSaving(true); setAthleteProgramMsg("");
+    try {
+      await sbUpdate("athletes",athlete.id,{program_text:athleteProgramText.trim()||null});
+      setAthlete(prev=>({...prev,program_text:athleteProgramText.trim()||null}));
+      setAthleteProgramMsg("Saved.");
+    } catch(e){ setAthleteProgramMsg("Couldn't save. Try again."); }
+    setAthleteProgramSaving(false);
+    setTimeout(()=>setAthleteProgramMsg(""),3000);
+  };
+
+  const handleAthletePhotoProgram = async (e) => {
+    const file = e.target.files?.[0];
+    if(!file) return;
+    e.target.value="";
+    setAthletePhotoProcessing(true); setAthleteProgramMsg("");
+    try {
+      const reader = new FileReader();
+      const b64 = await new Promise((res,rej)=>{reader.onload=()=>res(reader.result.split(",")[1]);reader.onerror=rej;reader.readAsDataURL(file);});
+      const extracted = await askClaude(
+        "You are reading a photo of an athlete's training program. Extract the full program text exactly as written. Preserve all structure — exercises, sets, reps, weights, days, weeks. Output plain text only, no commentary.",
+        "Extract the training program from this image.",600,[b64]
+      );
+      if(extracted) setAthleteProgramText(prev=>prev?prev+"\n\n"+extracted:extracted);
+    } catch(err){ setAthleteProgramMsg("Couldn't read that image. Try a clearer photo."); }
+    setAthletePhotoProcessing(false);
+  };
 
   useEffect(()=>{bottomRef.current?.scrollIntoView({behavior:"smooth"});},[messages,loading,videoLoading]);
 
@@ -845,13 +879,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // Free tier: always greet as fresh start (no memory between sessions)
         const isFree = tier==="free";
         if(!lastLog||isFree){
-          if(!athlete.season_date&&!athlete.no_season){
-            greeting = `Hey ${athlete.name}, welcome to WILCO. I'm Coach Joe-bot. Before we get started -- when does your ${athlete.sport} season begin? Give me a rough date like "September 1" or check the box below if you don't have one.`;
-          } else {
-            greeting = isFree&&lastLog
-              ? `What's up, ${athlete.name}. I'm starting fresh — Free tier doesn't store your history between sessions. What did you get after today?`
-              : `Welcome to WILCO, ${athlete.name}. Tell me about your first workout -- what you did, how it felt, any questions.`;
-          }
+          greeting = isFree&&lastLog
+            ? `What's up, ${athlete.name}. I'm starting fresh — Free tier doesn't store your history between sessions. What did you get after today?`
+            : `Welcome to WILCO, ${athlete.name}. Tell me about your first workout -- what you did, how it felt, any questions.`;
         } else if(dAgo>=7){
           greeting = `${athlete.name}. It's been ${dAgo} days since your last log. That's a week. What happened? We can't build anything on inconsistency. ${summary} What did you get after today?`;
         } else if(dAgo>=4){
@@ -961,25 +991,6 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
 
     try {
       let updatedAthlete = {...athlete};
-
-      // Season date detection for new athletes
-      if(!athlete.season_date&&!athlete.no_season){
-        const noSeasonPhrases = ["no season","don't have","dont have","general fitness","no date","not sure","unknown"];
-        const hasNoSeason = noSeasonPhrases.some(p=>msg.toLowerCase().includes(p));
-        if(hasNoSeason){
-          await sbUpdate("athletes",athlete.id,{no_season:true});
-          updatedAthlete.no_season = true;
-        } else {
-          try {
-            const dateStr = await askClaude("Extract a season start date from the message. Return ONLY YYYY-MM-DD format or null. Nothing else.",msg,50);
-            const cleaned = dateStr.trim().replace(/[^0-9-]/g,"");
-            if(cleaned.match(/^\d{4}-\d{2}-\d{2}$/)){
-              await sbUpdate("athletes",athlete.id,{season_date:cleaned});
-              updatedAthlete.season_date = cleaned;
-            }
-          } catch(e){}
-        }
-      }
 
       const [reply,parsed] = await Promise.all([
         getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory),
@@ -1179,10 +1190,10 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         </div>
         <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
           {saved&&<div style={{background:"#0a1e0a",border:`1px solid ${C.green}`,borderRadius:8,padding:"4px 8px",color:C.green,fontSize:11,fontWeight:600,flexShrink:0}}>✓</div>}
-          {(athlete.tier||"free")!=="free"&&athlete.program_text&&(
-            <button onClick={()=>setShowProgram(true)} title="View your training program"
-              style={{background:"#0a0e1e",border:`1px solid ${C.blue}`,borderRadius:8,padding:"4px 10px",color:C.blue,fontSize:11,cursor:"pointer",display:isMobile?"none":"flex",alignItems:"center",gap:4}}>
-              📋 Program
+          {(athlete.tier||"free")!=="free"&&(
+            <button onClick={()=>setShowProgram(true)} title="View or edit your training program"
+              style={{background:athlete.program_text?"#0a0e1e":C.navy3,border:`1px solid ${athlete.program_text?C.blue:C.border}`,borderRadius:8,padding:"4px 10px",color:athlete.program_text?C.blue:C.muted,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+              📋 {athlete.program_text?"Program":"Add Program"}
             </button>
           )}
           {(athlete.tier||"free")!=="free"&&<button onClick={()=>setShowLog(true)} style={{background:C.navy3,border:`1px solid ${C.gold}`,color:C.gold,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>MY LOG</button>}
@@ -1303,16 +1314,42 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
               <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2}}>MY PROGRAM</div>
               <button onClick={()=>setShowProgram(false)} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"4px 12px",cursor:"pointer",fontSize:12}}>✕ Close</button>
             </div>
-            {athlete.program_locked&&(
-              <div style={{background:`${C.gold}15`,border:`1px solid ${C.gold}40`,margin:"12px 16px 0",borderRadius:10,padding:"8px 14px",color:C.gold,fontSize:12}}>
-                🔒 Program locked by coach — contact your coach to make changes.
+            {athlete.program_locked?(
+              <>
+                <div style={{background:`${C.gold}15`,border:`1px solid ${C.gold}40`,margin:"12px 16px 0",borderRadius:10,padding:"8px 14px",color:C.gold,fontSize:12}}>
+                  🔒 Program locked by coach — contact your coach to make changes.
+                </div>
+                <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
+                  <pre style={{color:C.text,fontSize:13,lineHeight:1.7,fontFamily:"'DM Sans'",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>
+                    {athlete.program_text}
+                  </pre>
+                </div>
+              </>
+            ):(
+              <div style={{flex:1,overflowY:"auto",padding:"16px 20px",display:"flex",flexDirection:"column",gap:12}}>
+                <input ref={athletePhotoRef} type="file" accept="image/*" style={{display:"none"}} onChange={handleAthletePhotoProgram}/>
+                <button onClick={()=>athletePhotoRef.current?.click()} disabled={athletePhotoProcessing}
+                  style={{background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:10,padding:"9px 14px",cursor:"pointer",fontSize:13,textAlign:"left"}}>
+                  {athletePhotoProcessing?"📷 Reading photo...":"📷 Upload a photo of your program"}
+                </button>
+                <textarea
+                  value={athleteProgramText}
+                  onChange={e=>setAthleteProgramText(e.target.value)}
+                  placeholder="Paste or type your program here, or use the photo upload above..."
+                  rows={10}
+                  style={{background:C.navy3,border:`1px solid ${athleteProgramText!==(athlete.program_text||"")?C.gold:C.border}`,borderRadius:12,padding:"12px 14px",color:C.text,fontSize:13,outline:"none",resize:"vertical",lineHeight:1.6,fontFamily:"'DM Sans'",transition:"border-color 0.15s"}}
+                />
+                {athleteProgramMsg&&(
+                  <div style={{color:athleteProgramMsg==="Saved."?C.green:C.red,fontSize:12,fontWeight:600,textAlign:"center"}}>
+                    {athleteProgramMsg}
+                  </div>
+                )}
+                <button onClick={saveAthleteProgram} disabled={athleteProgramSaving||athleteProgramText===(athlete.program_text||"")}
+                  style={{background:athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?C.navy3:C.gold,color:athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?C.muted:"#000",border:`1px solid ${athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?C.border:C.gold}`,borderRadius:10,padding:"11px 20px",cursor:athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?"not-allowed":"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>
+                  {athleteProgramSaving?"Saving...":"Save Program →"}
+                </button>
               </div>
             )}
-            <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
-              <pre style={{color:C.text,fontSize:13,lineHeight:1.7,fontFamily:"'DM Sans'",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>
-                {athlete.program_text}
-              </pre>
-            </div>
           </div>
         </div>
       )}
