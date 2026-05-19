@@ -29,11 +29,12 @@ export default async function handler(req, res) {
   const weekAgoISO = weekAgo.toISOString();
   const weekLabel  = weekAgo.toLocaleDateString("en-US", {month:"long", day:"numeric"});
 
-  // ── Fetch all athletes with a coach email set ────────────────────────────
-  const athRes  = await fetch(`${SUPABASE_URL}/rest/v1/athletes?coach_email=not.is.null&select=*`, {headers:sbH});
+  // ── Fetch Pro/Elite athletes with a coach email set ─────────────────────
+  // Free tier does not receive weekly progress reports — only Pro and Elite
+  const athRes  = await fetch(`${SUPABASE_URL}/rest/v1/athletes?coach_email=not.is.null&tier=in.(pro,elite)&select=*`, {headers:sbH});
   const athletes = await athRes.json();
   if(!Array.isArray(athletes) || athletes.length === 0) {
-    return res.status(200).json({message:"No athletes with coach emails set.", sent:0});
+    return res.status(200).json({message:"No Pro/Elite athletes with coach emails set.", sent:0});
   }
 
   // ── Group athletes by coach email ────────────────────────────────────────
