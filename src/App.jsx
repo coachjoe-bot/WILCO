@@ -1588,6 +1588,27 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
   const [weightUnit,setWeightUnit] = useState(athlete.weight_unit||"lbs");
   const [saving,setSaving] = useState(false);
   const [savedMsg,setSavedMsg] = useState("");
+  const [selectedTier,setSelectedTier] = useState(athlete.tier||"free");
+  const [upgrading,setUpgrading] = useState(false);
+  const [upgradeMsg,setUpgradeMsg] = useState("");
+
+  const currentTier = athlete.tier||"free";
+  const tierOrder = {free:0,pro:1,elite:2};
+  const tierChanged = selectedTier !== currentTier;
+
+  const upgradeTier = async () => {
+    if(upgrading||!tierChanged) return;
+    setUpgrading(true); setUpgradeMsg("");
+    try {
+      await sbUpdate("athletes",athlete.id,{tier:selectedTier});
+      onCoachUpdate({tier:selectedTier});
+      setUpgradeMsg(tierOrder[selectedTier]>tierOrder[currentTier]?"Plan upgraded! Changes are live now.":"Plan updated.");
+    } catch(e){
+      setUpgradeMsg("Couldn't update plan. Try again.");
+    }
+    setUpgrading(false);
+    setTimeout(()=>setUpgradeMsg(""),4000);
+  };
 
   const save = async () => {
     if(saving) return;
@@ -1607,9 +1628,9 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
   };
 
   return (
-    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:400,padding:24}}>
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:400,padding:24,overflowY:"auto"}}>
       <style>{GS}</style>
-      <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:380}}>
+      <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:380,margin:"auto"}}>
 
         {/* Header */}
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
@@ -1617,38 +1638,68 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
           <button onClick={onClose} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"4px 12px",cursor:"pointer",fontSize:12}}>✕ Close</button>
         </div>
 
-        {/* Athlete info + tier */}
-        <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",marginBottom:12}}>
+        {/* Athlete info */}
+        <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",marginBottom:16}}>
           <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>LOGGED IN AS</div>
           <div style={{color:C.text,fontWeight:600,fontSize:14}}>{athlete.name}</div>
           <div style={{color:C.muted,fontSize:11}}>{athlete.sport}</div>
         </div>
 
-        {/* Tier badge */}
-        {(()=>{
-          const t = TIERS[athlete.tier||"free"];
-          const isFree = (athlete.tier||"free")==="free";
-          return (
-            <div style={{background:`${t.color}15`,border:`1px solid ${t.color}`,borderRadius:10,padding:"10px 14px",marginBottom:16}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <div>
-                  <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>CURRENT PLAN</div>
-                  <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:t.color,letterSpacing:2}}>{t.label} — {t.price}</div>
+        {/* Tier selector */}
+        <div style={{marginBottom:16}}>
+          <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>YOUR PLAN</div>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {Object.entries(TIERS).map(([key,t])=>{
+              const isCurrent = currentTier===key;
+              const isSelected = selectedTier===key;
+              const tierFeatures = {
+                free:"Chat with JoBot, log workouts",
+                pro:"Full history, progress charts, program assignments, weekly coach reports",
+                elite:"Everything in Pro + a WILCO Certified Coach assigned to you",
+              };
+              return (
+                <div key={key}
+                  onClick={()=>setSelectedTier(key)}
+                  style={{
+                    background:isSelected?`${t.color}20`:C.navy3,
+                    border:`2px solid ${isSelected?t.color:C.border}`,
+                    borderRadius:10,padding:"10px 14px",cursor:"pointer",
+                    transition:"all 0.15s",position:"relative"
+                  }}>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:2}}>
+                    <div style={{fontFamily:"'Bebas Neue'",fontSize:16,color:t.color,letterSpacing:2}}>{t.label}</div>
+                    <div style={{display:"flex",alignItems:"center",gap:6}}>
+                      <div style={{color:C.text,fontSize:13,fontWeight:700}}>{t.price}</div>
+                      {isCurrent&&(
+                        <span style={{background:t.color,color:"#000",fontSize:9,fontWeight:800,borderRadius:4,padding:"2px 6px",letterSpacing:1}}>CURRENT</span>
+                      )}
+                    </div>
+                  </div>
+                  <div style={{color:C.muted2,fontSize:11,lineHeight:1.4}}>{tierFeatures[key]}</div>
+                  {isSelected&&!isCurrent&&(
+                    <div style={{position:"absolute",top:8,right:8,width:16,height:16,borderRadius:"50%",background:t.color,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:"#000",fontWeight:800}}>✓</div>
+                  )}
                 </div>
-              </div>
-              {isFree&&(
-                <div style={{marginTop:8,color:C.muted2,fontSize:11,lineHeight:1.5}}>
-                  Upgrade to <strong style={{color:TIERS.pro.color}}>Pro</strong> to unlock workout history, progress tracking, programming, and weekly coach reports. Upgrade to <strong style={{color:TIERS.elite.color}}>Elite</strong> for an assigned WILCO Certified Coach.
-                </div>
-              )}
-              {athlete.tier==="elite"&&(
-                <div style={{marginTop:6,color:C.muted2,fontSize:11,lineHeight:1.5}}>
-                  A WILCO Certified Coach will be in touch within 24 hrs. Email joe.thomas@commandengineering.com with any questions.
-                </div>
-              )}
+              );
+            })}
+          </div>
+          {upgradeMsg&&(
+            <div style={{color:upgradeMsg.includes("upgraded")||upgradeMsg.includes("updated")?C.green:C.red,fontSize:12,textAlign:"center",marginTop:8,fontWeight:600}}>
+              {upgradeMsg}
             </div>
-          );
-        })()}
+          )}
+          {tierChanged&&(
+            <button onClick={upgradeTier} disabled={upgrading}
+              style={btn(TIERS[selectedTier].color,tierOrder[selectedTier]>0?"#000":C.text,{marginTop:10,opacity:upgrading?0.7:1,cursor:upgrading?"not-allowed":"pointer"})}>
+              {upgrading?"Updating...":`Switch to ${TIERS[selectedTier].label} →`}
+            </button>
+          )}
+          {currentTier==="elite"&&!tierChanged&&(
+            <div style={{marginTop:8,color:C.muted2,fontSize:11,lineHeight:1.5,textAlign:"center"}}>
+              A WILCO Certified Coach will be in touch within 24 hrs. Email joe.thomas@commandengineering.com with any questions.
+            </div>
+          )}
+        </div>
 
         {/* Weight unit preference */}
         <div style={{marginBottom:20}}>
