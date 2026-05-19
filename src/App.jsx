@@ -8,6 +8,13 @@ const MASTER_CODE   = "FORTIS-MASTER"; // keep for backward compat
 
 const SPORTS = ["Football","Basketball","Volleyball","Soccer","Baseball","Archery","Olympic Weightlifting","Running","General Fitness"];
 
+// ─── TIERS ────────────────────────────────────────────────────────────────────
+const TIERS = {
+  free:  { label:"FREE",  color:"#6b7280", price:"Free",        priceNote:"No credit card needed",            badge:"FREE"  },
+  pro:   { label:"PRO",   color:"#d4a017", price:"$9.99/mo",    priceNote:"or $100/yr · Cancel anytime",      badge:"PRO"   },
+  elite: { label:"ELITE", color:"#3b82f6", price:"$99.99/mo",   priceNote:"or $1,000/yr · Cancel anytime",    badge:"ELITE" },
+};
+
 // ─── SUPABASE ────────────────────────────────────────────────────────────────
 const sbH = {"Content-Type":"application/json","apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`};
 const sbGet = async (table,params="") => {
@@ -359,7 +366,7 @@ function HomeScreen({setView}) {
 // ─── ATHLETE SIGNUP ───────────────────────────────────────────────────────────
 function SignupScreen({setView,setAthlete,setErr,err}) {
   const [step,setStep] = useState(1);
-  const [data,setData] = useState({name:"",sport:SPORTS[0],pin:"",confirmPin:"",seasonDate:"",noSeason:false,coachName:"",coachEmail:""});
+  const [data,setData] = useState({name:"",sport:SPORTS[0],pin:"",confirmPin:"",seasonDate:"",noSeason:false,coachName:"",coachEmail:"",tier:"free",billing:"monthly"});
   const [loading,setLoading] = useState(false);
   const setD = (k,v) => setData(p=>({...p,[k]:v}));
 
@@ -379,9 +386,11 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
     } else if(step===3){
       setStep(4);
     } else if(step===4){
+      setStep(5);
+    } else if(step===5){
       setLoading(true);
       try {
-        const created = await sbInsert("athletes",{name:data.name.trim(),sport:data.sport,pin:data.pin});
+        const created = await sbInsert("athletes",{name:data.name.trim(),sport:data.sport,pin:data.pin,tier:data.tier,billing:data.billing});
         if(created?.length>0){
           const newAthlete = created[0];
           try {
@@ -395,7 +404,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
                 coach_email:data.coachEmail.trim().toLowerCase()||null
               })
             });
-            // Send welcome email to coach if one was provided
+            // Send welcome email to coach for all tiers
             if(data.coachEmail.trim()){
               fetch("/api/send-coach-welcome",{
                 method:"POST",
@@ -404,12 +413,28 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
                   athleteName: data.name.trim(),
                   athleteSport: data.sport,
                   coachName: data.coachName.trim()||null,
-                  coachEmail: data.coachEmail.trim().toLowerCase()
+                  coachEmail: data.coachEmail.trim().toLowerCase(),
+                  tier: data.tier
                 })
-              }).catch(()=>{}); // fire-and-forget — don't block signup on email failure
+              }).catch(()=>{});
+            }
+            // For Elite tier: notify admin to assign a Wilco Certified Coach
+            if(data.tier==="elite"){
+              fetch("/api/send-coach-welcome",{
+                method:"POST",
+                headers:{"Content-Type":"application/json"},
+                body:JSON.stringify({
+                  athleteName: data.name.trim(),
+                  athleteSport: data.sport,
+                  coachName: "WILCO Admin",
+                  coachEmail: "coachjoe@trainwilco.com",
+                  tier: "elite",
+                  isAdminAlert: true
+                })
+              }).catch(()=>{});
             }
           } catch(e){}
-          setAthlete({...newAthlete,season_date:data.noSeason?null:data.seasonDate||null,no_season:data.noSeason});
+          setAthlete({...newAthlete,season_date:data.noSeason?null:data.seasonDate||null,no_season:data.noSeason,tier:data.tier});
           setView("athlete");
         } else {
           setErr("Error: "+(created?.message||created?.error||JSON.stringify(created)));
@@ -419,11 +444,50 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
     }
   };
 
+  // Tier card component used in step 5
+  const TierCard = ({tierKey}) => {
+    const t = TIERS[tierKey];
+    const selected = data.tier===tierKey;
+    const annual = data.billing==="annual";
+    const pricing = {
+      free:  {monthly:"Free",        annual:"Free",       monthlyNote:"No credit card needed", annualNote:"No credit card needed"},
+      pro:   {monthly:"$9.99/mo",    annual:"$100/yr",    monthlyNote:"Billed monthly",        annualNote:"~$8.33/mo · Save $20"},
+      elite: {monthly:"$99.99/mo",   annual:"$1,000/yr",  monthlyNote:"Billed monthly",        annualNote:"~$83/mo · Save ~$200"},
+    };
+    const p = pricing[tierKey];
+    const features = {
+      free:  ["Full AI coaching chat","Form review (video upload)","Coach welcome email","No session memory (fresh start each login)"],
+      pro:   ["Everything in Free","Workout history saved","Progress tracking & PRs","Training program stored","Workout log viewable","Weekly coach progress reports"],
+      elite: ["Everything in Pro","Assigned WILCO Certified Coach","Guaranteed weekly check-in","Initial onboarding Zoom call"],
+    };
+    return (
+      <div onClick={()=>setD("tier",tierKey)} style={{background:selected?`${t.color}18`:C.navy3,border:`2px solid ${selected?t.color:C.border}`,borderRadius:12,padding:"14px 16px",marginBottom:10,cursor:"pointer",transition:"all 0.15s"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:t.color,letterSpacing:2}}>{t.label}</div>
+            {tierKey==="pro"&&<div style={{background:`${t.color}33`,color:t.color,fontSize:10,fontWeight:700,letterSpacing:1,padding:"2px 8px",borderRadius:4}}>POPULAR</div>}
+          </div>
+          <div style={{textAlign:"right"}}>
+            <div style={{color:t.color,fontWeight:700,fontSize:15}}>{annual?p.annual:p.monthly}</div>
+            <div style={{color:C.muted,fontSize:10}}>{annual?p.annualNote:p.monthlyNote}</div>
+          </div>
+        </div>
+        <ul style={{listStyle:"none",padding:0,margin:0}}>
+          {features[tierKey].map((f,i)=>(
+            <li key={i} style={{color:selected?C.text:C.muted2,fontSize:12,lineHeight:1.8,display:"flex",alignItems:"center",gap:6}}>
+              <span style={{color:t.color,fontSize:10}}>✓</span>{f}
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  };
+
   return (
     <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24}}>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
         <button onClick={()=>step>1?setStep(step-1):setView("home")} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:18}}>←</button>
-        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>NEW ATHLETE — STEP {step} OF 4</div>
+        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>NEW ATHLETE — STEP {step} OF 5</div>
       </div>
       {step===1&&<>
         <div style={{marginBottom:16}}>
@@ -467,7 +531,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
       </>}
       {step===4&&<>
         <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>
-          Optional: add a coach to receive a weekly progress report by email — a PE teacher, sport coach, AAU coach, or trainer.
+          Optional: add a coach to receive updates — a PE teacher, sport coach, AAU coach, or trainer.
         </div>
         <div style={{marginBottom:14}}>
           <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH'S NAME <span style={{color:C.muted,fontWeight:400}}>(optional)</span></label>
@@ -478,21 +542,36 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
           <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH'S EMAIL <span style={{color:C.muted,fontWeight:400}}>(optional)</span></label>
           <input type="email" value={data.coachEmail} onChange={e=>setD("coachEmail",e.target.value)}
             placeholder="coach@school.edu" style={inp()}/>
-          <div style={{color:C.muted,fontSize:11,marginTop:6,lineHeight:1.5}}>They'll get a weekly summary of your workouts, PRs, and any pain flags — no account needed.</div>
+          <div style={{color:C.muted,fontSize:11,marginTop:6,lineHeight:1.5}}>Pro/Elite: coach gets weekly progress reports. All tiers: coach gets a welcome email.</div>
         </div>
+      </>}
+      {step===5&&<>
+        <div style={{color:C.muted2,fontSize:13,marginBottom:12,lineHeight:1.6}}>Choose your plan. You can upgrade anytime from settings.</div>
+        {/* Billing toggle */}
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:0,marginBottom:14,background:C.navy3,borderRadius:10,padding:4,border:`1px solid ${C.border}`}}>
+          {["monthly","annual"].map(b=>(
+            <button key={b} onClick={()=>setD("billing",b)}
+              style={{flex:1,padding:"7px 0",borderRadius:8,border:"none",cursor:"pointer",fontSize:12,fontWeight:700,letterSpacing:1,fontFamily:"'Bebas Neue'",
+                background:data.billing===b?C.gold:"transparent",
+                color:data.billing===b?"#000":C.muted,transition:"all 0.15s"}}>
+              {b==="monthly"?"MONTHLY":"ANNUAL · SAVE ~17%"}
+            </button>
+          ))}
+        </div>
+        <TierCard tierKey="free"/>
+        <TierCard tierKey="pro"/>
+        <TierCard tierKey="elite"/>
+        {data.tier==="elite"&&(
+          <div style={{background:`${C.blue}18`,border:`1px solid ${C.blue}`,borderRadius:10,padding:"10px 14px",marginBottom:12,marginTop:-4}}>
+            <div style={{color:C.blue,fontSize:12,fontWeight:600,marginBottom:2}}>What happens next with Elite:</div>
+            <div style={{color:C.muted2,fontSize:11,lineHeight:1.6}}>After you create your account, a WILCO Certified Coach will reach out within 24 hours to schedule your initial Zoom call and get you paired up.</div>
+          </div>
+        )}
       </>}
       {err&&<div style={{color:C.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
       <button onClick={nextStep} disabled={loading} style={btn(C.gold,"#000",{opacity:loading?0.7:1,cursor:loading?"not-allowed":"pointer"})}>
-        {loading?"Please wait...":(step===4?"Create Account →":"Next →")}
+        {loading?"Please wait...":(step===5?"Create Account →":"Next →")}
       </button>
-      {step===4&&(
-        <button onClick={()=>{
-          setD("coachName",""); setD("coachEmail","");
-          // Skip coach — create account without one
-          nextStep();
-        }} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer",width:"100%",textAlign:"center",marginTop:8,display:"none"}}>
-        </button>
-      )}
     </div>
   );
 }
@@ -683,13 +762,15 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
 
   useEffect(()=>{
     (async()=>{
+      const tier = athlete.tier||"free";
       try {
         // Re-fetch athlete from Supabase so JoBot has the latest program_text
         // even if the coach set it after this athlete logged in
         const freshAthlete = await sbGet("athletes",`?id=eq.${athlete.id}&select=*`);
         if(freshAthlete?.length>0) setAthlete(freshAthlete[0]);
 
-        const logs = await sbGet("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=100&select=*`);
+        // Free tier: no session memory — skip loading workout history
+        const logs = tier!=="free" ? await sbGet("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=100&select=*`) : [];
         if(logs&&logs.length>0) setWorkoutHistory(logs);
 
         const lastLog = logs?.[0];
@@ -702,11 +783,15 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         const summary = lastExs ? `Last session (${lastDate}): ${lastExs}.` : "";
 
         let greeting;
-        if(!lastLog){
+        // Free tier: always greet as fresh start (no memory between sessions)
+        const isFree = tier==="free";
+        if(!lastLog||isFree){
           if(!athlete.season_date&&!athlete.no_season){
             greeting = `Hey ${athlete.name}, welcome to WILCO. I'm Coach Joe-bot. Before we get started -- when does your ${athlete.sport} season begin? Give me a rough date like "September 1" or check the box below if you don't have one.`;
           } else {
-            greeting = `Welcome to WILCO, ${athlete.name}. Tell me about your first workout -- what you did, how it felt, any questions.`;
+            greeting = isFree&&lastLog
+              ? `What's up, ${athlete.name}. I'm starting fresh — Free tier doesn't store your history between sessions. What did you get after today?`
+              : `Welcome to WILCO, ${athlete.name}. Tell me about your first workout -- what you did, how it felt, any questions.`;
           }
         } else if(dAgo>=7){
           greeting = `${athlete.name}. It's been ${dAgo} days since your last log. That's a week. What happened? We can't build anything on inconsistency. ${summary} What did you get after today?`;
@@ -726,8 +811,14 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   },[]);
 
   const finalizeWorkout = async (parsed, msg, reply, updatedAthlete, isNewSession, addReply) => {
+    const tier = updatedAthlete.tier||"free";
     try {
       const parsedFinal = isNewSession ? {...parsed,new_session:true} : parsed;
+      // Free tier: no memory — don't persist workouts or PRs
+      if(tier==="free"){
+        if(addReply) setMessages(prev=>[...prev,{role:"assistant",content:reply}]);
+        return;
+      }
       await sbInsert("workouts",{athlete_id:updatedAthlete.id,raw_message:msg,bot_reply:reply,parsed_data:parsedFinal});
       setSaved(true); setTimeout(()=>setSaved(false),3000);
 
@@ -791,12 +882,16 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     const msg = input.trim();
     if(!msg||loading||videoLoading||!historyLoaded) return;
 
-    // Intercept log-view requests — open the log modal instead of calling Claude
+    // Intercept log-view requests — open the log modal instead of calling Claude (Pro/Elite only)
     const logKeywords = ["show me my log","my log","my workout log","show my workouts","view my workouts","workout history","my history","show my history","see my log","all my workouts","see my workouts","show my log"];
     if(logKeywords.some(kw=>msg.toLowerCase().includes(kw))){
       setInput("");
-      setMessages(prev=>[...prev,{role:"user",content:msg},{role:"assistant",content:`Here's your full workout log, ${athlete.name}.`}]);
-      setShowLog(true);
+      if((athlete.tier||"free")==="free"){
+        setMessages(prev=>[...prev,{role:"user",content:msg},{role:"assistant",content:`Your workout log is a Pro feature, ${athlete.name}. Upgrade to Pro to save your history between sessions and view your full log.`}]);
+      } else {
+        setMessages(prev=>[...prev,{role:"user",content:msg},{role:"assistant",content:`Here's your full workout log, ${athlete.name}.`}]);
+        setShowLog(true);
+      }
       return;
     }
 
@@ -832,8 +927,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         parseWorkout(msg,athlete.name,athlete.sport)
       ]);
 
-      // Detect and save program updates
-      if(parsed.is_program_update){
+      // Detect and save program updates (Pro/Elite only)
+      if(parsed.is_program_update && (updatedAthlete.tier||"free")!=="free"){
         try {
           await sbUpdate("athletes",athlete.id,{program_text:msg});
           updatedAthlete.program_text = msg;
@@ -1018,12 +1113,15 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
       <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
         <div>
           <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2}}>COACH JOE-BOT</div>
-          <div style={{color:C.muted,fontSize:11}}>{athlete.name} · {athlete.sport}</div>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <div style={{color:C.muted,fontSize:11}}>{athlete.name} · {athlete.sport}</div>
+            {(()=>{const t=TIERS[athlete.tier||"free"];return(<span style={{background:`${t.color}22`,border:`1px solid ${t.color}`,borderRadius:4,padding:"1px 6px",color:t.color,fontSize:9,fontWeight:700,letterSpacing:1}}>{t.badge}</span>);})()}
+          </div>
         </div>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           {saved&&<div style={{background:"#0a1e0a",border:`1px solid ${C.green}`,borderRadius:8,padding:"4px 10px",color:C.green,fontSize:11,fontWeight:600}}>Saved</div>}
-          {athlete.program_text&&<div style={{background:"#0a0e1e",border:`1px solid ${C.blue}`,borderRadius:8,padding:"4px 10px",color:C.blue,fontSize:11}}>Program set</div>}
-          <button onClick={()=>setShowLog(true)} style={{background:C.navy3,border:`1px solid ${C.gold}`,color:C.gold,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>MY LOG</button>
+          {athlete.program_text&&(athlete.tier||"free")!=="free"&&<div style={{background:"#0a0e1e",border:`1px solid ${C.blue}`,borderRadius:8,padding:"4px 10px",color:C.blue,fontSize:11}}>Program set</div>}
+          {(athlete.tier||"free")!=="free"&&<button onClick={()=>setShowLog(true)} style={{background:C.navy3,border:`1px solid ${C.gold}`,color:C.gold,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>MY LOG</button>}
           <button onClick={()=>setShowSettings(true)} title="Settings" style={{background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:14,lineHeight:1}}>⚙</button>
           <button onClick={onLogout} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12}}>Log Out</button>
         </div>
@@ -1378,17 +1476,45 @@ function SettingsModal({athlete, onClose, onCoachUpdate}) {
           <button onClick={onClose} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"4px 12px",cursor:"pointer",fontSize:12}}>✕ Close</button>
         </div>
 
-        {/* Athlete info */}
-        <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",marginBottom:20}}>
+        {/* Athlete info + tier */}
+        <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",marginBottom:12}}>
           <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>LOGGED IN AS</div>
           <div style={{color:C.text,fontWeight:600,fontSize:14}}>{athlete.name}</div>
           <div style={{color:C.muted,fontSize:11}}>{athlete.sport}</div>
         </div>
 
+        {/* Tier badge */}
+        {(()=>{
+          const t = TIERS[athlete.tier||"free"];
+          const isFree = (athlete.tier||"free")==="free";
+          return (
+            <div style={{background:`${t.color}15`,border:`1px solid ${t.color}`,borderRadius:10,padding:"10px 14px",marginBottom:16}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>CURRENT PLAN</div>
+                  <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:t.color,letterSpacing:2}}>{t.label} — {t.price}</div>
+                </div>
+              </div>
+              {isFree&&(
+                <div style={{marginTop:8,color:C.muted2,fontSize:11,lineHeight:1.5}}>
+                  Upgrade to <strong style={{color:TIERS.pro.color}}>Pro</strong> to unlock workout history, progress tracking, programming, and weekly coach reports. Upgrade to <strong style={{color:TIERS.elite.color}}>Elite</strong> for an assigned WILCO Certified Coach.
+                </div>
+              )}
+              {athlete.tier==="elite"&&(
+                <div style={{marginTop:6,color:C.muted2,fontSize:11,lineHeight:1.5}}>
+                  A WILCO Certified Coach will be in touch within 24 hrs. Email joe.thomas@commandengineering.com with any questions.
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
         {/* Coach section */}
         <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:6}}>MY COACH</div>
         <div style={{color:C.muted2,fontSize:12,marginBottom:16,lineHeight:1.5}}>
-          Progress reports will be sent to this coach.
+          {(athlete.tier||"free")==="free"
+            ? "Your coach will receive a welcome email. Upgrade to Pro for weekly progress reports."
+            : "Your coach receives weekly progress reports every Monday."}
         </div>
 
         <div style={{marginBottom:14}}>
