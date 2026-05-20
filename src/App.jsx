@@ -1023,7 +1023,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
 
       await finalizeWorkout(parsed,msg,reply,updatedAthlete,false,true);
     } catch(e){
-      setMessages(prev=>[...prev,{role:"assistant",content:"Hit a snag. Try again."}]);
+      console.error("JoBot error:",e);
+      setMessages(prev=>[...prev,{role:"assistant",content:`Hit a snag. Try again. (${e?.message||"unknown error"})`}]);
     }
     setLoading(false);
   };
