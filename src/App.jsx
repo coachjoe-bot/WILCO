@@ -1375,10 +1375,11 @@ function MyLogModal({workoutHistory, athlete, onClose}) {
   const [resolvedPain,setResolvedPain] = useState(()=>{
     try{return JSON.parse(localStorage.getItem(painKey)||"[]");}catch{return[];}
   });
-  const resolvePain = (area) => {
+  const resolvePain = async (area) => {
     const updated=[...new Set([...resolvedPain,area.toLowerCase()])];
     setResolvedPain(updated);
     try{localStorage.setItem(painKey,JSON.stringify(updated));}catch(_){}
+    try{await sbUpdate("athletes",athlete.id,{resolved_pain:updated});}catch(_){}
   };
   const sessionCount = groupIntoSessions(workoutHistory).length;
   const realWorkouts = workoutHistory.filter(w=>w.parsed_data?.exercises?.length>0);
@@ -2002,7 +2003,8 @@ function CoachDashboard({coach,onLogout}) {
                     ):filtered.map(a=>{
                       const la = lastActive(a.id);
                       const d = daysBetween(la);
-                      const hasPain = workouts.filter(w=>w.athlete_id===a.id).some(w=>w.parsed_data?.pain_flags?.length>0);
+                      const aResolvedPain = (a.resolved_pain||[]).map(x=>x.toLowerCase());
+                      const hasPain = workouts.filter(w=>w.athlete_id===a.id).some(w=>w.parsed_data?.pain_flags?.some(p=>!aResolvedPain.includes(p.area.toLowerCase())));
                       const isSel = selected?.id===a.id;
                       const dot = d===null?C.muted:d===0?C.green:d<=3?C.green:d<=7?C.gold:C.red;
                       return (
@@ -2338,7 +2340,8 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
   };
 
   const lastWorkout = workouts[0];
-  const hasPain = workouts.some(w=>w.parsed_data?.pain_flags?.length>0);
+  const resolvedPainAreas = (athlete.resolved_pain||[]).map(a=>a.toLowerCase());
+  const hasPain = workouts.some(w=>w.parsed_data?.pain_flags?.some(p=>!resolvedPainAreas.includes(p.area.toLowerCase())));
   const tabs = ["overview","workouts","progress","program"];
 
   return (
@@ -2415,13 +2418,13 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
             )}
 
             {(()=>{
-              const painLogs = workouts.filter(w=>w.parsed_data?.pain_flags?.length>0);
+              const painLogs = workouts.filter(w=>w.parsed_data?.pain_flags?.some(p=>!resolvedPainAreas.includes(p.area.toLowerCase())));
               if(!painLogs.length) return null;
               const areaCounts = {};
-              painLogs.flatMap(w=>w.parsed_data.pain_flags.map(p=>p.area)).forEach(a=>areaCounts[a]=(areaCounts[a]||0)+1);
+              painLogs.flatMap(w=>w.parsed_data.pain_flags.filter(p=>!resolvedPainAreas.includes(p.area.toLowerCase())).map(p=>p.area)).forEach(a=>areaCounts[a]=(areaCounts[a]||0)+1);
               return (
                 <div style={{background:`${C.red}10`,border:`1px solid ${C.red}40`,borderRadius:12,padding:16,marginBottom:16}}>
-                  <div style={{color:C.red,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:8}}>PAIN HISTORY ({painLogs.length} sessions flagged)</div>
+                  <div style={{color:C.red,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:8}}>ACTIVE PAIN FLAGS ({painLogs.length} sessions flagged)</div>
                   <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
                     {Object.entries(areaCounts).map(([area,count])=>(
                       <div key={area} style={{background:`${C.red}20`,border:`1px solid ${C.red}40`,borderRadius:8,padding:"4px 10px",fontSize:12,color:C.red}}>
