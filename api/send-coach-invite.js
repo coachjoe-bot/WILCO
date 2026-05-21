@@ -8,7 +8,7 @@ export default async function handler(req, res) {
 
   const RESEND_KEY = process.env.RESEND_API_KEY;
   const FROM_EMAIL = process.env.FROM_EMAIL || "WILCO <reports@wilco.app>";
-  const APP_URL    = process.env.APP_URL || "https://wilco.app";
+  const APP_URL    = process.env.APP_URL || "https://app.trainwilco.com";
 
   if (!RESEND_KEY) return res.status(500).json({ error: "Missing RESEND_API_KEY" });
 
