@@ -1818,6 +1818,209 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
   );
 }
 
+// ─── SCHOOLS LIST (master only) ───────────────────────────────────────────────
+function SchoolsList({schools,coaches,onRefresh}) {
+  const [confirmDelete,setConfirmDelete] = useState(null); // school id pending delete
+  const [deleting,setDeleting] = useState(false);
+
+  const coachCountFor = (schoolId) => coaches.filter(c=>c.school_id===schoolId).length;
+
+  const handleDelete = async (school) => {
+    setDeleting(true);
+    try {
+      // Clear school_id + coach_id on athletes belonging to this school's coaches
+      const schoolCoaches = coaches.filter(c=>c.school_id===school.id);
+      for(const c of schoolCoaches){
+        await fetch(`${SUPABASE_URL}/rest/v1/athletes?coach_id=eq.${c.id}`,{
+          method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},
+          body:JSON.stringify({coach_id:null,school_id:null})
+        });
+        await sbDelete("coaches",`?id=eq.${c.id}`);
+      }
+      await sbDelete("schools",`?id=eq.${school.id}`);
+      setConfirmDelete(null);
+      onRefresh();
+    } catch(e){console.error(e);}
+    setDeleting(false);
+  };
+
+  if(schools.length===0) return null;
+
+  return (
+    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden",marginBottom:16}}>
+      <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>SCHOOLS / TEAMS</div>
+      {schools.map((s,i)=>(
+        <div key={i}>
+          <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:12}}>
+            {s.logo_url
+              ? <img src={s.logo_url} alt={s.name} style={{width:36,height:36,borderRadius:6,objectFit:"contain",background:"#fff",padding:2,flexShrink:0}}/>
+              : <div style={{width:36,height:36,borderRadius:6,background:C.navy3,border:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:16,color:C.gold,flexShrink:0}}>{s.code}</div>
+            }
+            <div style={{flex:1}}>
+              <div style={{color:C.text,fontWeight:600,fontSize:14}}>{s.name}</div>
+              <div style={{color:C.muted,fontSize:11}}>Code: <span style={{color:C.gold,fontWeight:700}}>{s.code}</span> · {coachCountFor(s.id)} coach{coachCountFor(s.id)!==1?"es":""} · {s.tier} tier</div>
+            </div>
+            {confirmDelete===s.id ? (
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <span style={{color:C.muted,fontSize:11}}>Remove school + coaches?</span>
+                <button onClick={()=>handleDelete(s)} disabled={deleting}
+                  style={{background:C.red,border:"none",color:"#fff",borderRadius:6,padding:"5px 12px",cursor:"pointer",fontSize:11,fontWeight:700}}>
+                  {deleting?"...":"Yes, delete"}
+                </button>
+                <button onClick={()=>setConfirmDelete(null)}
+                  style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:11}}>
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button onClick={()=>setConfirmDelete(s.id)}
+                style={{background:"none",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:11,flexShrink:0}}>
+                Remove
+              </button>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── COACHES LIST (master only) ────────────────────────────────────────────────
+function CoachesList({coaches,schools,onRefresh}) {
+  const [editingId,setEditingId] = useState(null);
+  const [editName,setEditName] = useState("");
+  const [editEmail,setEditEmail] = useState("");
+  const [saving,setSaving] = useState(false);
+  const [confirmDelete,setConfirmDelete] = useState(null);
+  const [deleting,setDeleting] = useState(false);
+  const [resendStatus,setResendStatus] = useState({}); // coachId → "sending"|"sent"|"error"
+
+  const schoolFor = (schoolId) => schools.find(s=>s.id===schoolId);
+
+  const startEdit = (c) => { setEditingId(c.id); setEditName(c.name); setEditEmail(c.email||""); };
+  const cancelEdit = () => { setEditingId(null); setEditName(""); setEditEmail(""); };
+
+  const saveEdit = async (c) => {
+    if(!editName.trim()){return;}
+    setSaving(true);
+    try {
+      await sbUpdate("coaches",c.id,{name:editName.trim(),email:editEmail.trim().toLowerCase()||null,pin:null});
+      cancelEdit();
+      onRefresh();
+    } catch(e){console.error(e);}
+    setSaving(false);
+  };
+
+  const resendInvite = async (c) => {
+    setResendStatus(p=>({...p,[c.id]:"sending"}));
+    try {
+      const school = schoolFor(c.school_id);
+      await fetch("/api/send-coach-invite",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({coachName:c.name,coachEmail:c.email,accessCode:c.access_code,schoolName:school?.name||""})
+      });
+      setResendStatus(p=>({...p,[c.id]:"sent"}));
+      setTimeout(()=>setResendStatus(p=>({...p,[c.id]:null})),3000);
+    } catch(e){ setResendStatus(p=>({...p,[c.id]:"error"})); }
+  };
+
+  const handleDelete = async (c) => {
+    setDeleting(true);
+    try {
+      // Clear coach_id on their athletes
+      await fetch(`${SUPABASE_URL}/rest/v1/athletes?coach_id=eq.${c.id}`,{
+        method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},
+        body:JSON.stringify({coach_id:null,school_id:null})
+      });
+      await sbDelete("coaches",`?id=eq.${c.id}`);
+      setConfirmDelete(null);
+      onRefresh();
+    } catch(e){console.error(e);}
+    setDeleting(false);
+  };
+
+  const nonMasterCoaches = coaches.filter(c=>c.role!=="master");
+  if(nonMasterCoaches.length===0) return null;
+
+  return (
+    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden",marginBottom:16}}>
+      <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>ALL COACHES</div>
+      {nonMasterCoaches.map((c,i)=>{
+        const school = schoolFor(c.school_id);
+        const isEditing = editingId===c.id;
+        const rs = resendStatus[c.id];
+        return (
+          <div key={i} style={{borderBottom:`1px solid ${C.border}`}}>
+            {isEditing ? (
+              <div style={{padding:"12px 16px",background:C.navy3}}>
+                <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>EDIT COACH — <span style={{color:C.gold}}>{c.access_code}</span></div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+                  <input value={editName} onChange={e=>setEditName(e.target.value)} placeholder="Coach name" style={inp()}/>
+                  <input type="email" value={editEmail} onChange={e=>setEditEmail(e.target.value)} placeholder="Email" style={inp()}/>
+                </div>
+                <div style={{color:C.muted,fontSize:11,marginBottom:10}}>Saving will reset their PIN so the new coach can register fresh.</div>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>saveEdit(c)} disabled={saving} style={{background:C.gold,border:"none",color:"#000",borderRadius:6,padding:"7px 16px",cursor:"pointer",fontSize:12,fontWeight:700}}>
+                    {saving?"Saving...":"Save"}
+                  </button>
+                  <button onClick={cancelEdit} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"7px 12px",cursor:"pointer",fontSize:12}}>Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <div style={{padding:"12px 16px",display:"flex",alignItems:"center",gap:12}}>
+                <div style={{width:36,height:36,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:16,color:"#000",flexShrink:0}}>{c.name?.[0]?.toUpperCase()||"?"}</div>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{color:C.text,fontWeight:600,fontSize:14}}>{c.name}</div>
+                  <div style={{color:C.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                    <span style={{color:C.gold,fontWeight:700}}>{c.access_code}</span>
+                    {school?` · ${school.name}`:""}
+                    {c.email?` · ${c.email}`:""}
+                  </div>
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
+                  <div style={{color:c.pin?C.green:C.red,fontSize:10,marginRight:4}}>{c.pin?"✓ Active":"Not set up"}</div>
+                  {/* Resend invite */}
+                  {c.email&&c.role!=="master"&&(
+                    <button onClick={()=>resendInvite(c)} disabled={!!rs}
+                      style={{background:"none",border:`1px solid ${C.border}`,color:rs==="sent"?C.green:C.muted2,borderRadius:6,padding:"4px 8px",cursor:rs?"default":"pointer",fontSize:10}}>
+                      {rs==="sending"?"...":rs==="sent"?"✓ Sent":rs==="error"?"Error":"Resend"}
+                    </button>
+                  )}
+                  {/* Edit */}
+                  {confirmDelete!==c.id&&(
+                    <button onClick={()=>startEdit(c)}
+                      style={{background:"none",border:`1px solid ${C.border}`,color:C.muted2,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:10}}>
+                      Replace
+                    </button>
+                  )}
+                  {/* Delete */}
+                  {confirmDelete===c.id ? (
+                    <>
+                      <button onClick={()=>handleDelete(c)} disabled={deleting}
+                        style={{background:C.red,border:"none",color:"#fff",borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:10,fontWeight:700}}>
+                        {deleting?"...":"Confirm"}
+                      </button>
+                      <button onClick={()=>setConfirmDelete(null)}
+                        style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:10}}>
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <button onClick={()=>setConfirmDelete(c.id)}
+                      style={{background:"none",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:10}}>
+                      Remove
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ─── SCHOOL ONBOARDING FORM (master only) ─────────────────────────────────────
 function SchoolOnboardingForm({onCreated}) {
   const [schoolName,setSchoolName] = useState("");
@@ -2030,22 +2233,23 @@ function CoachDashboard({coach,onLogout}) {
   const [showBulkModal,setShowBulkModal] = useState(false);
   const [bulkSaving,setBulkSaving] = useState(false);
   const [school,setSchool] = useState(null);
+  const [allSchools,setAllSchools] = useState([]);
 
   useEffect(()=>{loadAll();},[]);
 
   const loadAll = async () => {
     setLoading(true);
     try {
-      const [a,w,p,c,s] = await Promise.all([
+      const [a,w,p,c,s,sc] = await Promise.all([
         sbGet("athletes","?order=created_at.desc&select=*"),
         sbGet("workouts","?order=created_at.desc&select=*"),
         sbGet("prs","?order=created_at.desc&select=*"),
-        isMaster ? sbGet("coaches","?select=*") : Promise.resolve([]),
-        (!isMaster&&coach.school_id) ? sbGet("schools",`?id=eq.${coach.school_id}&select=*`) : Promise.resolve([])
+        isMaster ? sbGet("coaches","?select=*&order=created_at.asc") : Promise.resolve([]),
+        (!isMaster&&coach.school_id) ? sbGet("schools",`?id=eq.${coach.school_id}&select=*`) : Promise.resolve([]),
+        isMaster ? sbGet("schools","?select=*&order=created_at.asc") : Promise.resolve([])
       ]);
       let filteredAthletes = Array.isArray(a)?a:[];
       if(!isMaster){
-        // Filter by coach_id — only show athletes explicitly assigned to this coach
         filteredAthletes = filteredAthletes.filter(at=>at.coach_id===coach.id);
       }
       setAthletes(filteredAthletes);
@@ -2054,6 +2258,7 @@ function CoachDashboard({coach,onLogout}) {
       setPrs((Array.isArray(p)?p:[]).filter(pr=>ids.includes(pr.athlete_id)));
       setAllCoaches(Array.isArray(c)?c:[]);
       setSchool(Array.isArray(s)&&s.length>0?s[0]:null);
+      setAllSchools(Array.isArray(sc)?sc:[]);
     } catch(e){console.error(e);}
     setLoading(false);
   };
@@ -2345,24 +2550,11 @@ function CoachDashboard({coach,onLogout}) {
                     )}
                   </div>
                 </div>
-                <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden"}}>
-                  <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>ALL COACHES</div>
-                  {allCoaches.length===0?(
-                    <div style={{padding:24,textAlign:"center",color:C.muted}}>No coaches yet</div>
-                  ):allCoaches.map((c,i)=>(
-                    <div key={i} style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:12}}>
-                      <div style={{width:36,height:36,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:16,color:"#000",flexShrink:0}}>{c.name?.[0]?.toUpperCase()||"?"}</div>
-                      <div style={{flex:1}}>
-                        <div style={{color:C.text,fontWeight:600,fontSize:14}}>{c.name}</div>
-                        <div style={{color:C.muted,fontSize:11}}>{c.role==="master"?"Master Access":c.sports?.join(", ")||"No sports assigned"}</div>
-                      </div>
-                      <div style={{textAlign:"right"}}>
-                        <div style={{color:C.muted,fontSize:11}}>Code: {c.access_code}</div>
-                        <div style={{color:c.pin?C.green:C.red,fontSize:10}}>{c.pin?"PIN set":"Not activated"}</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                {/* ── SCHOOLS LIST ── */}
+                <SchoolsList schools={allSchools} coaches={allCoaches} onRefresh={loadAll}/>
+
+                {/* ── COACHES LIST ── */}
+                <CoachesList coaches={allCoaches} schools={allSchools} onRefresh={loadAll}/>
               </div>
             )}
           </>
