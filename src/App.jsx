@@ -397,7 +397,7 @@ function HomeScreen({setView}) {
 // ─── ATHLETE SIGNUP ───────────────────────────────────────────────────────────
 function SignupScreen({setView,setAthlete,setErr,err}) {
   const [step,setStep] = useState(1);
-  const [data,setData] = useState({name:"",sport:SPORTS[0],pin:"",confirmPin:"",goal:"strength",coachName:"",coachEmail:"",tier:"free",billing:"monthly"});
+  const [data,setData] = useState({name:"",sport:SPORTS[0],pin:"",confirmPin:"",goal:"strength",coachCode:"",coachName:"",coachEmail:"",tier:"free",billing:"monthly"});
   const [loading,setLoading] = useState(false);
   const setD = (k,v) => setData(p=>({...p,[k]:v}));
 
@@ -425,12 +425,20 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
         if(created?.length>0){
           const newAthlete = created[0];
           try {
+            // Look up coach by access code if provided, get coach_id + school_id
+            let coachId = null, schoolId = null;
+            if(data.coachCode.trim()){
+              const matchedCoach = await sbGet("coaches",`?access_code=eq.${encodeURIComponent(data.coachCode.trim().toUpperCase())}&select=id,school_id`);
+              if(matchedCoach?.length>0){ coachId = matchedCoach[0].id; schoolId = matchedCoach[0].school_id||null; }
+            }
             await fetch(`${SUPABASE_URL}/rest/v1/athletes?id=eq.${newAthlete.id}`,{
               method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},
               body:JSON.stringify({
                 goal:data.goal||"strength",
                 coach_name:data.coachName.trim()||null,
-                coach_email:data.coachEmail.trim().toLowerCase()||null
+                coach_email:data.coachEmail.trim().toLowerCase()||null,
+                ...(coachId ? {coach_id:coachId} : {}),
+                ...(schoolId ? {school_id:schoolId} : {})
               })
             });
             // Send welcome email to coach for all tiers
@@ -568,8 +576,18 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
         <div style={{marginBottom:12}}/>
       </>}
       {step===4&&<>
-        <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>
-          Optional: add a coach to receive updates — a PE teacher, sport coach, AAU coach, or trainer.
+        <div style={{color:C.muted2,fontSize:13,marginBottom:6,lineHeight:1.6}}>
+          Are you training with a school or team on WILCO?
+        </div>
+        <div style={{color:C.muted,fontSize:12,marginBottom:16,lineHeight:1.6}}>
+          If your coach or athletic director gave you a team code, enter it below — it connects you to their dashboard automatically. <span style={{color:C.text,fontWeight:600}}>Training on your own? Just leave this blank and hit Next.</span>
+        </div>
+        {/* Team code — joins athlete to a specific coach's dashboard */}
+        <div style={{marginBottom:14,background:`${C.gold}0f`,border:`1px solid ${C.gold}44`,borderRadius:10,padding:"12px 14px"}}>
+          <label style={{color:C.gold,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>TEAM CODE <span style={{color:C.muted,fontWeight:400,textTransform:"none",letterSpacing:0}}>(optional — from your coach or athletic director)</span></label>
+          <input value={data.coachCode} onChange={e=>setD("coachCode",e.target.value.toUpperCase())}
+            placeholder="e.g. LHS01" style={inp({textTransform:"uppercase",letterSpacing:3,fontWeight:700})}/>
+          <div style={{color:C.muted,fontSize:11,marginTop:6,lineHeight:1.5}}>No team code? No problem — WILCO works great on its own.</div>
         </div>
         <div style={{marginBottom:14}}>
           <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH'S NAME <span style={{color:C.muted,fontWeight:400}}>(optional)</span></label>
@@ -1800,6 +1818,196 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
   );
 }
 
+// ─── SCHOOL ONBOARDING FORM (master only) ─────────────────────────────────────
+function SchoolOnboardingForm({onCreated}) {
+  const [schoolName,setSchoolName] = useState("");
+  const [schoolCode,setSchoolCode] = useState("");
+  const [contactEmail,setContactEmail] = useState("");
+  const [tier,setTier] = useState("group");
+  const [maxCoaches,setMaxCoaches] = useState(3);
+  const [maxAthletes,setMaxAthletes] = useState(50);
+  const [coaches,setCoaches] = useState([{name:"",email:""},{name:"",email:""},{name:"",email:""}]);
+  const [logoFile,setLogoFile] = useState(null);
+  const [logoPreview,setLogoPreview] = useState(null);
+  const [saving,setSaving] = useState(false);
+  const [err,setErr] = useState("");
+  const [success,setSuccess] = useState("");
+
+  // Auto-suggest 3-letter code from school name
+  useEffect(()=>{
+    if(!schoolName.trim()) return;
+    const words = schoolName.trim().split(/\s+/);
+    let code = "";
+    if(words.length>=3)      code=(words[0][0]+words[1][0]+words[2][0]).toUpperCase();
+    else if(words.length===2) code=(words[0].slice(0,2)+words[1][0]).toUpperCase();
+    else                      code=schoolName.slice(0,3).toUpperCase();
+    setSchoolCode(code);
+  },[schoolName]);
+
+  const updateCoach = (i,field,val) => setCoaches(prev=>prev.map((c,idx)=>idx===i?{...c,[field]:val}:c));
+
+  const updateMaxCoaches = (n) => {
+    setMaxCoaches(n);
+    setCoaches(prev=>{
+      const arr=[...prev];
+      while(arr.length<n) arr.push({name:"",email:""});
+      return arr.slice(0,n);
+    });
+  };
+
+  const handleLogoChange = (e) => {
+    const file=e.target.files?.[0];
+    if(!file) return;
+    setLogoFile(file);
+    setLogoPreview(URL.createObjectURL(file));
+  };
+
+  const handleSubmit = async () => {
+    if(!schoolName.trim()){setErr("School name is required.");return;}
+    if(!schoolCode.trim()||schoolCode.length!==3){setErr("School code must be exactly 3 letters.");return;}
+    const validCoaches=coaches.slice(0,maxCoaches).filter(c=>c.name.trim()&&c.email.trim());
+    if(validCoaches.length===0){setErr("Add at least one coach with name and email.");return;}
+    setSaving(true); setErr(""); setSuccess("");
+    try {
+      // 1. Upload logo if provided
+      let logoUrl=null;
+      if(logoFile){
+        const ext=logoFile.name.split(".").pop();
+        const fileName=`${schoolCode.toLowerCase()}-${Date.now()}.${ext}`;
+        const uploadRes=await fetch(`${SUPABASE_URL}/storage/v1/object/school-logos/${fileName}`,{
+          method:"POST",
+          headers:{"apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`,"Content-Type":logoFile.type,"x-upsert":"true"},
+          body:logoFile
+        });
+        if(uploadRes.ok) logoUrl=`${SUPABASE_URL}/storage/v1/object/public/school-logos/${fileName}`;
+      }
+      // 2. Create school record
+      const schools=await sbInsert("schools",{
+        name:schoolName.trim(),
+        code:schoolCode.toUpperCase(),
+        logo_url:logoUrl,
+        tier,
+        max_coaches:maxCoaches,
+        max_athletes:maxAthletes,
+        contact_email:contactEmail.trim()||null
+      });
+      if(!schools?.length) throw new Error("Failed to create school — check if that 3-letter code is already taken.");
+      const school=schools[0];
+      // 3. Create coaches + send invites
+      let created=0;
+      for(let i=0;i<validCoaches.length;i++){
+        const c=validCoaches[i];
+        const coachNum=i+1;
+        const accessCode=schoolCode.toUpperCase()+String(coachNum).padStart(2,"0");
+        const coachRow=await sbInsert("coaches",{
+          name:c.name.trim(),
+          email:c.email.trim().toLowerCase(),
+          school_id:school.id,
+          coach_number:coachNum,
+          access_code:accessCode,
+          role:"coach"
+        });
+        if(coachRow?.length){
+          created++;
+          fetch("/api/send-coach-invite",{
+            method:"POST",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({coachName:c.name.trim(),coachEmail:c.email.trim().toLowerCase(),accessCode,schoolName:schoolName.trim()})
+          }).catch(()=>{});
+        }
+      }
+      setSuccess(`✓ ${schoolName} onboarded! ${created} coach invite${created!==1?"s":""} sent.`);
+      setSchoolName(""); setSchoolCode(""); setContactEmail(""); setLogoFile(null); setLogoPreview(null);
+      setCoaches([{name:"",email:""},{name:"",email:""},{name:"",email:""}]); setMaxCoaches(3);
+      if(onCreated) onCreated();
+    } catch(e){ setErr(e.message||"Something went wrong."); }
+    setSaving(false);
+  };
+
+  return (
+    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:20,marginBottom:16}}>
+      <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:16}}>ONBOARD NEW SCHOOL / TEAM</div>
+
+      {/* Row 1: name + code */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 90px",gap:12,marginBottom:14}}>
+        <div>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>SCHOOL / TEAM NAME</label>
+          <input value={schoolName} onChange={e=>setSchoolName(e.target.value)} placeholder="Lincoln High School" style={inp()}/>
+        </div>
+        <div>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CODE</label>
+          <input value={schoolCode} onChange={e=>setSchoolCode(e.target.value.toUpperCase().replace(/[^A-Z]/g,"").slice(0,3))}
+            placeholder="LHS" style={inp({textAlign:"center",letterSpacing:4,fontWeight:700,textTransform:"uppercase"})}/>
+        </div>
+      </div>
+
+      {/* Row 2: contact email + tier */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
+        <div>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CONTACT EMAIL</label>
+          <input type="email" value={contactEmail} onChange={e=>setContactEmail(e.target.value)} placeholder="ad@school.edu" style={inp()}/>
+        </div>
+        <div>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>TIER</label>
+          <select value={tier} onChange={e=>setTier(e.target.value)} style={{...inp(),cursor:"pointer"}}>
+            <option value="group">Group</option>
+            <option value="school">School</option>
+            <option value="district">District</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Row 3: max coaches + max athletes */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
+        <div>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>MAX COACHES</label>
+          <select value={maxCoaches} onChange={e=>updateMaxCoaches(Number(e.target.value))} style={{...inp(),cursor:"pointer"}}>
+            {[1,2,3,4,5,6,7,8,9,10].map(n=><option key={n} value={n}>{n}</option>)}
+          </select>
+        </div>
+        <div>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>MAX ATHLETES</label>
+          <input type="number" value={maxAthletes} min={1} onChange={e=>setMaxAthletes(Number(e.target.value))} style={inp()}/>
+        </div>
+      </div>
+
+      {/* Logo upload */}
+      <div style={{marginBottom:16}}>
+        <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>SCHOOL LOGO <span style={{color:C.muted,fontWeight:400,letterSpacing:0}}>(optional — PNG, SVG, or JPG)</span></label>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          {logoPreview&&<img src={logoPreview} alt="Preview" style={{width:40,height:40,borderRadius:8,objectFit:"contain",background:"#fff",padding:3}}/>}
+          <label style={{background:C.navy3,border:`1px dashed ${C.border}`,borderRadius:8,padding:"8px 14px",cursor:"pointer",color:C.muted2,fontSize:12,display:"inline-block"}}>
+            {logoFile?logoFile.name:"Upload logo"}
+            <input type="file" accept="image/png,image/svg+xml,image/jpeg" onChange={handleLogoChange} style={{display:"none"}}/>
+          </label>
+        </div>
+      </div>
+
+      {/* Coach slots */}
+      <div style={{marginBottom:16}}>
+        <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:10}}>
+          COACHES — codes: <span style={{color:C.gold,fontWeight:700}}>{schoolCode||"???"}01</span>, <span style={{color:C.gold,fontWeight:700}}>{schoolCode||"???"}02</span>…
+        </div>
+        {coaches.slice(0,maxCoaches).map((c,i)=>(
+          <div key={i} style={{display:"grid",gridTemplateColumns:"56px 1fr 1fr",gap:8,marginBottom:8,alignItems:"center"}}>
+            <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:6,padding:"7px 4px",fontSize:11,fontWeight:700,color:C.gold,letterSpacing:1,fontFamily:"'Bebas Neue'",textAlign:"center"}}>
+              {(schoolCode||"???")+String(i+1).padStart(2,"0")}
+            </div>
+            <input value={c.name} onChange={e=>updateCoach(i,"name",e.target.value)} placeholder={`Coach ${i+1} name`} style={inp()}/>
+            <input type="email" value={c.email} onChange={e=>updateCoach(i,"email",e.target.value)} placeholder="email@school.edu" style={inp()}/>
+          </div>
+        ))}
+      </div>
+
+      {err&&<div style={{color:C.red,fontSize:12,marginBottom:12}}>{err}</div>}
+      {success&&<div style={{color:C.green,fontSize:13,marginBottom:12,fontWeight:600}}>{success}</div>}
+      <button onClick={handleSubmit} disabled={saving} style={btn(C.gold,"#000",{opacity:saving?0.7:1})}>
+        {saving?"Creating school...":"Create School & Send Coach Invites →"}
+      </button>
+    </div>
+  );
+}
+
 // ─── COACH DASHBOARD ──────────────────────────────────────────────────────────
 function CoachDashboard({coach,onLogout}) {
   const isMaster = coach.role==="master"||coach.access_code===MASTER_CODE;
@@ -1821,27 +2029,31 @@ function CoachDashboard({coach,onLogout}) {
   const [bulkProgram,setBulkProgram] = useState("");
   const [showBulkModal,setShowBulkModal] = useState(false);
   const [bulkSaving,setBulkSaving] = useState(false);
+  const [school,setSchool] = useState(null);
 
   useEffect(()=>{loadAll();},[]);
 
   const loadAll = async () => {
     setLoading(true);
     try {
-      const [a,w,p,c] = await Promise.all([
+      const [a,w,p,c,s] = await Promise.all([
         sbGet("athletes","?order=created_at.desc&select=*"),
         sbGet("workouts","?order=created_at.desc&select=*"),
         sbGet("prs","?order=created_at.desc&select=*"),
-        isMaster ? sbGet("coaches","?select=*") : Promise.resolve([])
+        isMaster ? sbGet("coaches","?select=*") : Promise.resolve([]),
+        (!isMaster&&coach.school_id) ? sbGet("schools",`?id=eq.${coach.school_id}&select=*`) : Promise.resolve([])
       ]);
       let filteredAthletes = Array.isArray(a)?a:[];
-      if(!isMaster&&coach.sports?.length>0){
-        filteredAthletes = filteredAthletes.filter(at=>coach.sports.includes(at.sport));
+      if(!isMaster){
+        // Filter by coach_id — only show athletes explicitly assigned to this coach
+        filteredAthletes = filteredAthletes.filter(at=>at.coach_id===coach.id);
       }
       setAthletes(filteredAthletes);
       const ids = filteredAthletes.map(at=>at.id);
       setWorkouts((Array.isArray(w)?w:[]).filter(wk=>ids.includes(wk.athlete_id)));
       setPrs((Array.isArray(p)?p:[]).filter(pr=>ids.includes(pr.athlete_id)));
       setAllCoaches(Array.isArray(c)?c:[]);
+      setSchool(Array.isArray(s)&&s.length>0?s[0]:null);
     } catch(e){console.error(e);}
     setLoading(false);
   };
@@ -1935,9 +2147,19 @@ function CoachDashboard({coach,onLogout}) {
       <style>{GS}</style>
       {/* Header */}
       <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,padding:isMobile?"10px 14px":"14px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:50,gap:8}}>
-        <div style={{minWidth:0,flex:1}}>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:isMobile?17:22,color:C.gold,letterSpacing:2,lineHeight:1.1,whiteSpace:isMobile?"nowrap":"normal",overflow:"hidden",textOverflow:"ellipsis"}}>WILCO {isMaster?"MASTER":"COACH"}</div>
-          <div style={{color:C.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{coach.name}{coach.sports&&!isMaster?` · ${coach.sports.join(", ")}`:""}</div>
+        <div style={{display:"flex",alignItems:"center",gap:10,minWidth:0,flex:1}}>
+          {/* School logo — shown for team coaches who have a logo set */}
+          {!isMaster&&school?.logo_url&&(
+            <img src={school.logo_url} alt={school.name} style={{width:isMobile?32:40,height:isMobile?32:40,borderRadius:8,objectFit:"contain",background:"#fff",padding:3,flexShrink:0}}/>
+          )}
+          <div style={{minWidth:0}}>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:isMobile?17:22,color:C.gold,letterSpacing:2,lineHeight:1.1,whiteSpace:isMobile?"nowrap":"normal",overflow:"hidden",textOverflow:"ellipsis"}}>
+              {isMaster ? "WILCO MASTER" : (school?.name ? school.name.toUpperCase() : "WILCO COACH")}
+            </div>
+            <div style={{color:C.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+              {coach.name}{!isMaster&&school?" · "+school.name:""}
+            </div>
+          </div>
         </div>
         <div style={{display:"flex",gap:6,flexShrink:0}}>
           <button onClick={loadAll} style={{background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:isMobile?16:12}}>↻</button>
@@ -2096,10 +2318,9 @@ function CoachDashboard({coach,onLogout}) {
             {/* ── COACHES TAB (master only) ── */}
             {activeTab==="coaches"&&isMaster&&(
               <div style={{maxWidth:800}}>
-                <div style={{marginBottom:16,color:C.muted2,fontSize:13,lineHeight:1.6,background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16}}>
-                  To add a new coach: Supabase dashboard → Table Editor → coaches → Insert row.<br/>
-                  Set name, email, sports (array e.g. {"{Football}"}), access_code, and role ("coach" or "master").
-                </div>
+                {/* School onboarding form */}
+                <SchoolOnboardingForm onCreated={loadAll}/>
+
 
                 {/* ── PR Recalculation ── */}
                 <div style={{marginBottom:16,background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16}}>
