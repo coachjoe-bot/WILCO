@@ -1822,8 +1822,51 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
 function SchoolsList({schools,coaches,onRefresh}) {
   const [confirmDelete,setConfirmDelete] = useState(null); // school id pending delete
   const [deleting,setDeleting] = useState(false);
+  const [addingCoachFor,setAddingCoachFor] = useState(null); // school id showing add-coach form
+  const [newCoachName,setNewCoachName] = useState("");
+  const [newCoachEmail,setNewCoachEmail] = useState("");
+  const [addingCoach,setAddingCoach] = useState(false);
+  const [addCoachErr,setAddCoachErr] = useState("");
+  const [addCoachSuccess,setAddCoachSuccess] = useState("");
 
   const coachCountFor = (schoolId) => coaches.filter(c=>c.school_id===schoolId).length;
+
+  const openAddCoach = (schoolId) => {
+    setAddingCoachFor(schoolId);
+    setNewCoachName(""); setNewCoachEmail(""); setAddCoachErr(""); setAddCoachSuccess("");
+  };
+  const cancelAddCoach = () => { setAddingCoachFor(null); setAddCoachErr(""); setAddCoachSuccess(""); };
+
+  const handleAddCoach = async (school) => {
+    if(!newCoachName.trim()){setAddCoachErr("Coach name is required.");return;}
+    if(!newCoachEmail.trim()){setAddCoachErr("Coach email is required.");return;}
+    setAddingCoach(true); setAddCoachErr(""); setAddCoachSuccess("");
+    try {
+      // Next coach number = max existing coach_number for this school + 1
+      const schoolCoaches = coaches.filter(c=>c.school_id===school.id);
+      const maxNum = schoolCoaches.reduce((m,c)=>Math.max(m,c.coach_number||0),0);
+      const coachNum = maxNum + 1;
+      const accessCode = school.code.toUpperCase() + String(coachNum).padStart(2,"0");
+      const coachRow = await sbInsert("coaches",{
+        name: newCoachName.trim(),
+        email: newCoachEmail.trim().toLowerCase(),
+        school_id: school.id,
+        coach_number: coachNum,
+        access_code: accessCode,
+        role: "coach"
+      });
+      if(!coachRow?.length) throw new Error("Failed to create coach.");
+      fetch("/api/send-coach-invite",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({coachName:newCoachName.trim(),coachEmail:newCoachEmail.trim().toLowerCase(),accessCode,schoolName:school.name})
+      }).catch(()=>{});
+      setAddCoachSuccess(`✓ ${newCoachName.trim()} added as ${accessCode} — invite sent!`);
+      setNewCoachName(""); setNewCoachEmail("");
+      onRefresh();
+      setTimeout(()=>{ setAddingCoachFor(null); setAddCoachSuccess(""); },2500);
+    } catch(e){ setAddCoachErr(e.message||"Something went wrong."); }
+    setAddingCoach(false);
+  };
 
   const handleDelete = async (school) => {
     setDeleting(true);
@@ -1849,38 +1892,78 @@ function SchoolsList({schools,coaches,onRefresh}) {
   return (
     <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden",marginBottom:16}}>
       <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>SCHOOLS / TEAMS</div>
-      {schools.map((s,i)=>(
-        <div key={i}>
-          <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:12}}>
-            {s.logo_url
-              ? <img src={s.logo_url} alt={s.name} style={{width:36,height:36,borderRadius:6,objectFit:"contain",background:"#fff",padding:2,flexShrink:0}}/>
-              : <div style={{width:36,height:36,borderRadius:6,background:C.navy3,border:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:16,color:C.gold,flexShrink:0}}>{s.code}</div>
-            }
-            <div style={{flex:1}}>
-              <div style={{color:C.text,fontWeight:600,fontSize:14}}>{s.name}</div>
-              <div style={{color:C.muted,fontSize:11}}>Code: <span style={{color:C.gold,fontWeight:700}}>{s.code}</span> · {coachCountFor(s.id)} coach{coachCountFor(s.id)!==1?"es":""} · {s.tier} tier</div>
-            </div>
-            {confirmDelete===s.id ? (
-              <div style={{display:"flex",alignItems:"center",gap:8}}>
-                <span style={{color:C.muted,fontSize:11}}>Remove school + coaches?</span>
-                <button onClick={()=>handleDelete(s)} disabled={deleting}
-                  style={{background:C.red,border:"none",color:"#fff",borderRadius:6,padding:"5px 12px",cursor:"pointer",fontSize:11,fontWeight:700}}>
-                  {deleting?"...":"Yes, delete"}
-                </button>
-                <button onClick={()=>setConfirmDelete(null)}
-                  style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:11}}>
-                  Cancel
-                </button>
+      {schools.map((s,i)=>{
+        const coachCount = coachCountFor(s.id);
+        const hasOpenSlot = coachCount < (s.max_coaches||3);
+        const isAddingHere = addingCoachFor===s.id;
+        return (
+          <div key={i}>
+            <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:12}}>
+              {s.logo_url
+                ? <img src={s.logo_url} alt={s.name} style={{width:36,height:36,borderRadius:6,objectFit:"contain",background:"#fff",padding:2,flexShrink:0}}/>
+                : <div style={{width:36,height:36,borderRadius:6,background:C.navy3,border:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:16,color:C.gold,flexShrink:0}}>{s.code}</div>
+              }
+              <div style={{flex:1}}>
+                <div style={{color:C.text,fontWeight:600,fontSize:14}}>{s.name}</div>
+                <div style={{color:C.muted,fontSize:11}}>
+                  Code: <span style={{color:C.gold,fontWeight:700}}>{s.code}</span> · {coachCount}/{s.max_coaches||3} coach{coachCount!==1?"es":""} · {s.tier} tier
+                  {hasOpenSlot&&<span style={{color:C.green,marginLeft:6}}>· {(s.max_coaches||3)-coachCount} slot{(s.max_coaches||3)-coachCount!==1?"s":""} open</span>}
+                </div>
               </div>
-            ) : (
-              <button onClick={()=>setConfirmDelete(s.id)}
-                style={{background:"none",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:11,flexShrink:0}}>
-                Remove
-              </button>
+              <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
+                {hasOpenSlot&&!isAddingHere&&confirmDelete!==s.id&&(
+                  <button onClick={()=>openAddCoach(s.id)}
+                    style={{background:"none",border:`1px solid ${C.gold}66`,color:C.gold,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:11}}>
+                    + Add Coach
+                  </button>
+                )}
+                {confirmDelete===s.id ? (
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <span style={{color:C.muted,fontSize:11}}>Remove school + coaches?</span>
+                    <button onClick={()=>handleDelete(s)} disabled={deleting}
+                      style={{background:C.red,border:"none",color:"#fff",borderRadius:6,padding:"5px 12px",cursor:"pointer",fontSize:11,fontWeight:700}}>
+                      {deleting?"...":"Yes, delete"}
+                    </button>
+                    <button onClick={()=>setConfirmDelete(null)}
+                      style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:11}}>
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button onClick={()=>setConfirmDelete(s.id)}
+                    style={{background:"none",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:11,flexShrink:0}}>
+                    Remove
+                  </button>
+                )}
+              </div>
+            </div>
+            {/* Add Coach inline form */}
+            {isAddingHere&&(
+              <div style={{padding:"14px 16px",background:C.navy3,borderBottom:`1px solid ${C.border}`}}>
+                <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:10}}>
+                  ADD COACH TO {s.name.toUpperCase()} — code will be <span style={{color:C.gold,fontWeight:700}}>{s.code}{String((coaches.filter(c=>c.school_id===s.id).reduce((m,c)=>Math.max(m,c.coach_number||0),0))+1).padStart(2,"0")}</span>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+                  <input value={newCoachName} onChange={e=>setNewCoachName(e.target.value)} placeholder="Coach name" style={inp()}/>
+                  <input type="email" value={newCoachEmail} onChange={e=>setNewCoachEmail(e.target.value)} placeholder="coach@school.edu" style={inp()}/>
+                </div>
+                {addCoachErr&&<div style={{color:C.red,fontSize:12,marginBottom:8}}>{addCoachErr}</div>}
+                {addCoachSuccess&&<div style={{color:C.green,fontSize:12,marginBottom:8,fontWeight:600}}>{addCoachSuccess}</div>}
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>handleAddCoach(s)} disabled={addingCoach}
+                    style={{background:C.gold,border:"none",color:"#000",borderRadius:6,padding:"7px 16px",cursor:"pointer",fontSize:12,fontWeight:700}}>
+                    {addingCoach?"Adding...":"Add & Send Invite →"}
+                  </button>
+                  <button onClick={cancelAddCoach}
+                    style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"7px 12px",cursor:"pointer",fontSize:12}}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
             )}
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
