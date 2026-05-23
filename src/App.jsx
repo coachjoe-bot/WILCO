@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
-const ANTHROPIC_KEY = import.meta.env.VITE_ANTHROPIC_KEY;
+const CLAUDE_PROXY  = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/claude-proxy`;
 const SUPABASE_URL  = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY  = import.meta.env.VITE_SUPABASE_KEY;
 const MASTER_CODE   = "FORTIS-MASTER"; // keep for backward compat
@@ -119,9 +119,9 @@ const askClaude = async (system, user, maxTokens=600, images=[]) => {
     content.push({type:"image",source:{type:"base64",media_type:"image/jpeg",data:img}});
   }
   content.push({type:"text",text:user});
-  const r = await fetch("https://api.anthropic.com/v1/messages",{
+  const r = await fetch(CLAUDE_PROXY,{
     method:"POST",
-    headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+    headers:{"Content-Type":"application/json","Authorization":`Bearer ${SUPABASE_KEY}`},
     body:JSON.stringify({model:"claude-sonnet-4-5",max_tokens:maxTokens,system,messages:[{role:"user",content}]})
   });
   const d = await r.json();
