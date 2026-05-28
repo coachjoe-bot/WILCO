@@ -11,7 +11,7 @@ const SPORTS = ["Football","Basketball","Volleyball","Soccer","Baseball","Archer
 // ─── TIERS ────────────────────────────────────────────────────────────────────
 const TIERS = {
   free:  { label:"FREE",  color:"#6b7280", price:"Free",        priceNote:"No credit card needed",            badge:"FREE"  },
-  pro:   { label:"PRO",   color:"#d4a017", price:"$9.99/mo",    priceNote:"or $100/yr · Cancel anytime",      badge:"PRO"   },
+  pro:   { label:"PRO",   color:"#d4a017", price:"$14.99/mo",   priceNote:"or $150/yr · Cancel anytime",      badge:"PRO"   },
   elite: { label:"ELITE", color:"#3b82f6", price:"$99.99/mo",   priceNote:"or $1,000/yr · Cancel anytime",    badge:"ELITE" },
 };
 
@@ -162,7 +162,7 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[]) => {
   if(workoutHistory?.length>0){
     const recent = workoutHistory.slice(0,10).map(w=>{
       const d = new Date(w.created_at);
-      const dateStr = d.toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric"});
+      const dateStr = d.toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric",year:"numeric"});
       const runD = w.parsed_data?.run_data;
       const exs = runD
         ? `${runD.run_type||"run"}${runD.distance_miles?" "+runD.distance_miles+"mi":runD.distance_km?" "+runD.distance_km+"km":""}${runD.pace_per_mile?" @ "+runD.pace_per_mile+"/mi":runD.pace_per_km?" @ "+runD.pace_per_km+"/km":""}${runD.duration_minutes?" ("+runD.duration_minutes+"min)":""}`
@@ -200,7 +200,9 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[]) => {
     "General Fitness":"Build a balanced foundation -- squat, hinge, push, pull, carry. Health and longevity focus."
   };
 
+  const todayStr = new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"});
   const sys = `You are Coach Joe Thomas -- high school strength coach, 20+ years military S&C. Direct, real, no fluff.
+TODAY'S DATE: ${todayStr}
 Athlete: ${athlete.name}, Sport: ${athlete.sport}${athlete.level?", Level: "+athlete.level:""}
 ${phaseContext}
 SPORT: ${sportPriorities[athlete.sport]||"Build a general strength base."}
@@ -362,7 +364,7 @@ export default function WilcoApp() {
   if(view==="coach"&&coach) return <CoachDashboard coach={coach} onLogout={()=>{setCoach(null);setView("home");}}/>;
 
   return (
-    <div style={{minHeight:"100vh",background:C.navy,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24}}>
+    <div style={{minHeight:"100vh",background:C.navy,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",paddingTop:"calc(24px + env(safe-area-inset-top, 0px))",paddingBottom:24,paddingLeft:24,paddingRight:24}}>
       <style>{GS}</style>
       <div style={{width:"100%",maxWidth:420}}>
         <div style={{textAlign:"center",marginBottom:40}}>
@@ -397,7 +399,7 @@ function HomeScreen({setView}) {
 // ─── ATHLETE SIGNUP ───────────────────────────────────────────────────────────
 function SignupScreen({setView,setAthlete,setErr,err}) {
   const [step,setStep] = useState(1);
-  const [data,setData] = useState({name:"",sport:SPORTS[0],pin:"",confirmPin:"",goal:"strength",coachCode:"",coachName:"",coachEmail:"",tier:"free",billing:"monthly"});
+  const [data,setData] = useState({name:"",sport:SPORTS[0],pin:"",confirmPin:"",email:"",goal:"strength",coachCode:"",coachName:"",coachEmail:"",tier:"free",billing:"monthly"});
   const [loading,setLoading] = useState(false);
   const setD = (k,v) => setData(p=>({...p,[k]:v}));
 
@@ -421,7 +423,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
     } else if(step===5){
       setLoading(true);
       try {
-        const created = await sbInsert("athletes",{name:data.name.trim(),sport:data.sport,pin:data.pin,tier:data.tier,billing:data.billing});
+        const created = await sbInsert("athletes",{name:data.name.trim(),sport:data.sport,pin:data.pin,tier:data.tier,billing:data.billing,email:data.email.trim().toLowerCase()||null});
         if(created?.length>0){
           const newAthlete = created[0];
           try {
@@ -488,7 +490,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
     const annual = data.billing==="annual";
     const pricing = {
       free:  {monthly:"Free",        annual:"Free",       monthlyNote:"No credit card needed", annualNote:"No credit card needed"},
-      pro:   {monthly:"$9.99/mo",    annual:"$100/yr",    monthlyNote:"Billed monthly",        annualNote:"~$8.33/mo · Save $20"},
+      pro:   {monthly:"$14.99/mo",   annual:"$150/yr",    monthlyNote:"Billed monthly",        annualNote:"~$12.50/mo · Save $30"},
       elite: {monthly:"$99.99/mo",   annual:"$1,000/yr",  monthlyNote:"Billed monthly",        annualNote:"~$83/mo · Save ~$200"},
     };
     const p = pricing[tierKey];
@@ -539,18 +541,24 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
         </div>
       </>}
       {step===2&&<>
-        <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Choose a 4-digit PIN you'll remember. There's no way to recover it if you forget.</div>
+        <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Choose a 4-digit PIN you'll remember. Add a recovery email if you ever forget it.</div>
         <div style={{marginBottom:16}}>
           <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CREATE PIN</label>
           <input type="password" inputMode="numeric" maxLength={4} value={data.pin}
             onChange={e=>setD("pin",e.target.value.replace(/\D/g,"").slice(0,4))}
             placeholder="----" style={inp({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
         </div>
-        <div style={{marginBottom:20}}>
+        <div style={{marginBottom:16}}>
           <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CONFIRM PIN</label>
           <input type="password" inputMode="numeric" maxLength={4} value={data.confirmPin}
             onChange={e=>setD("confirmPin",e.target.value.replace(/\D/g,"").slice(0,4))}
             placeholder="----" style={inp({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
+        </div>
+        <div style={{marginBottom:20}}>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>RECOVERY EMAIL <span style={{color:C.muted,fontWeight:400}}>(optional — used only to recover your PIN)</span></label>
+          <input type="email" inputMode="email" value={data.email}
+            onChange={e=>setD("email",e.target.value)}
+            placeholder="you@email.com" style={inp()}/>
         </div>
       </>}
       {step===3&&<>
@@ -637,6 +645,10 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
   const [name,setName] = useState("");
   const [pin,setPin] = useState("");
   const [loading,setLoading] = useState(false);
+  const [mode,setMode] = useState("login"); // "login" | "forgot"
+  const [recoveryName,setRecoveryName] = useState("");
+  const [recoveryEmail,setRecoveryEmail] = useState("");
+  const [recoverySent,setRecoverySent] = useState(false);
 
   const login = async () => {
     if(!name.trim()||pin.length!==4){setErr("Enter your name and 4-digit PIN.");return;}
@@ -653,30 +665,88 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
     setLoading(false);
   };
 
+  const sendRecovery = async () => {
+    if(!recoveryName.trim()||!recoveryEmail.trim()){setErr("Enter your name and recovery email.");return;}
+    setLoading(true); setErr("");
+    try {
+      await fetch("/api/send-pin-recovery",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({type:"athlete",name:recoveryName.trim(),email:recoveryEmail.trim().toLowerCase()})
+      });
+      setRecoverySent(true);
+    } catch(e){setErr("Connection error. Try again.");}
+    setLoading(false);
+  };
+
+  const enterForgot = () => { setMode("forgot"); setErr(""); setRecoverySent(false); };
+  const backToLogin = () => { setMode("login"); setErr(""); setRecoverySent(false); };
+
   return (
     <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24}}>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
-        <button onClick={()=>setView("home")} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:18}}>←</button>
-        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>ATHLETE LOGIN</div>
+        <button onClick={mode==="forgot"?backToLogin:()=>setView("home")} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:18}}>←</button>
+        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>
+          {mode==="forgot"?"FORGOT PIN":"ATHLETE LOGIN"}
+        </div>
       </div>
-      <div style={{marginBottom:16}}>
-        <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>YOUR NAME</label>
-        <input value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&login()} placeholder="Exact name you signed up with" style={inp()}/>
-      </div>
-      <div style={{marginBottom:20}}>
-        <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>YOUR PIN</label>
-        <input type="password" inputMode="numeric" maxLength={4} value={pin}
-          onChange={e=>setPin(e.target.value.replace(/\D/g,"").slice(0,4))}
-          onKeyDown={e=>e.key==="Enter"&&login()}
-          placeholder="----" style={inp({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
-      </div>
-      {err&&<div style={{color:C.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
-      <button onClick={login} disabled={loading} style={btn(C.gold,"#000",{opacity:loading?0.7:1,cursor:loading?"not-allowed":"pointer"})}>
-        {loading?"Checking...":"Let's Get to Work ->"}
-      </button>
-      <div style={{textAlign:"center",marginTop:12}}>
-        <button onClick={()=>setView("signup")} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>New athlete? Sign up here</button>
-      </div>
+
+      {mode==="login"&&<>
+        <div style={{marginBottom:16}}>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>YOUR NAME</label>
+          <input value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&login()} placeholder="Exact name you signed up with" style={inp()}/>
+        </div>
+        <div style={{marginBottom:20}}>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>YOUR PIN</label>
+          <input type="password" inputMode="numeric" maxLength={4} value={pin}
+            onChange={e=>setPin(e.target.value.replace(/\D/g,"").slice(0,4))}
+            onKeyDown={e=>e.key==="Enter"&&login()}
+            placeholder="----" style={inp({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
+        </div>
+        {err&&<div style={{color:C.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
+        <button onClick={login} disabled={loading} style={btn(C.gold,"#000",{opacity:loading?0.7:1,cursor:loading?"not-allowed":"pointer"})}>
+          {loading?"Checking...":"Let's Get to Work ->"}
+        </button>
+        <div style={{textAlign:"center",marginTop:12,display:"flex",flexDirection:"column",gap:6}}>
+          <button onClick={enterForgot} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>Forgot your PIN?</button>
+          <button onClick={()=>setView("signup")} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>New athlete? Sign up here</button>
+        </div>
+      </>}
+
+      {mode==="forgot"&&<>
+        {recoverySent
+          ? <div style={{textAlign:"center",padding:"16px 0"}}>
+              <div style={{fontSize:32,marginBottom:12}}>📬</div>
+              <div style={{color:C.text,fontWeight:600,fontSize:15,marginBottom:8}}>Check your inbox</div>
+              <div style={{color:C.muted2,fontSize:13,lineHeight:1.6,marginBottom:20}}>
+                If we found an account matching that name and email, your PIN has been sent. Check your spam folder too.
+              </div>
+              <button onClick={backToLogin} style={btn(C.gold,"#000")}>Back to Login</button>
+            </div>
+          : <>
+              <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>
+                Enter the name and recovery email you signed up with and we'll email you your PIN.
+              </div>
+              <div style={{marginBottom:16}}>
+                <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>YOUR NAME</label>
+                <input value={recoveryName} onChange={e=>setRecoveryName(e.target.value)} placeholder="Exact name you signed up with" style={inp()}/>
+              </div>
+              <div style={{marginBottom:20}}>
+                <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>RECOVERY EMAIL</label>
+                <input type="email" inputMode="email" value={recoveryEmail} onChange={e=>setRecoveryEmail(e.target.value)}
+                  onKeyDown={e=>e.key==="Enter"&&sendRecovery()}
+                  placeholder="you@email.com" style={inp()}/>
+              </div>
+              {err&&<div style={{color:C.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
+              <button onClick={sendRecovery} disabled={loading} style={btn(C.gold,"#000",{opacity:loading?0.7:1,cursor:loading?"not-allowed":"pointer"})}>
+                {loading?"Sending...":"Email My PIN →"}
+              </button>
+              <div style={{textAlign:"center",marginTop:10}}>
+                <button onClick={backToLogin} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>Back to login</button>
+              </div>
+            </>
+        }
+      </>}
     </div>
   );
 }
@@ -685,6 +755,9 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
 function CoachLoginScreen({setView,setCoach,setErr,err}) {
   const [pin,setPin] = useState("");
   const [loading,setLoading] = useState(false);
+  const [mode,setMode] = useState("login"); // "login" | "forgot"
+  const [recoveryEmail,setRecoveryEmail] = useState("");
+  const [recoverySent,setRecoverySent] = useState(false);
 
   const login = async () => {
     if(pin.length!==4){setErr("Enter your 4-digit PIN.");return;}
@@ -697,26 +770,80 @@ function CoachLoginScreen({setView,setCoach,setErr,err}) {
     setLoading(false);
   };
 
+  const sendRecovery = async () => {
+    if(!recoveryEmail.trim()){setErr("Enter your email address.");return;}
+    setLoading(true); setErr("");
+    try {
+      await fetch("/api/send-pin-recovery",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({type:"coach",email:recoveryEmail.trim().toLowerCase()})
+      });
+      setRecoverySent(true);
+    } catch(e){setErr("Connection error. Try again.");}
+    setLoading(false);
+  };
+
+  const enterForgot = () => { setMode("forgot"); setErr(""); setRecoverySent(false); };
+  const backToLogin = () => { setMode("login"); setErr(""); setRecoverySent(false); };
+
   return (
     <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24}}>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
-        <button onClick={()=>setView("home")} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:18}}>←</button>
-        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>COACH LOGIN</div>
+        <button onClick={mode==="forgot"?backToLogin:()=>setView("home")} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:18}}>←</button>
+        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>
+          {mode==="forgot"?"FORGOT PIN":"COACH LOGIN"}
+        </div>
       </div>
-      <div style={{marginBottom:20}}>
-        <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH PIN</label>
-        <input type="password" inputMode="numeric" maxLength={4} value={pin}
-          onChange={e=>setPin(e.target.value.replace(/\D/g,"").slice(0,4))}
-          onKeyDown={e=>e.key==="Enter"&&login()}
-          placeholder="----" style={inp({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
-      </div>
-      {err&&<div style={{color:C.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
-      <button onClick={login} disabled={loading} style={btn(C.gold,"#000",{opacity:loading?0.7:1})}>
-        {loading?"Checking...":"Access Dashboard ->"}
-      </button>
-      <div style={{textAlign:"center",marginTop:12}}>
-        <button onClick={()=>setView("coachSetup")} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>First time? Enter access code</button>
-      </div>
+
+      {mode==="login"&&<>
+        <div style={{marginBottom:20}}>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH PIN</label>
+          <input type="password" inputMode="numeric" maxLength={4} value={pin}
+            onChange={e=>setPin(e.target.value.replace(/\D/g,"").slice(0,4))}
+            onKeyDown={e=>e.key==="Enter"&&login()}
+            placeholder="----" style={inp({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
+        </div>
+        {err&&<div style={{color:C.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
+        <button onClick={login} disabled={loading} style={btn(C.gold,"#000",{opacity:loading?0.7:1})}>
+          {loading?"Checking...":"Access Dashboard ->"}
+        </button>
+        <div style={{textAlign:"center",marginTop:12,display:"flex",flexDirection:"column",gap:6}}>
+          <button onClick={enterForgot} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>Forgot your PIN?</button>
+          <button onClick={()=>setView("coachSetup")} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>First time? Enter access code</button>
+        </div>
+      </>}
+
+      {mode==="forgot"&&<>
+        {recoverySent
+          ? <div style={{textAlign:"center",padding:"16px 0"}}>
+              <div style={{fontSize:32,marginBottom:12}}>📬</div>
+              <div style={{color:C.text,fontWeight:600,fontSize:15,marginBottom:8}}>Check your inbox</div>
+              <div style={{color:C.muted2,fontSize:13,lineHeight:1.6,marginBottom:20}}>
+                If we found a coach account linked to that email, your PIN has been sent. Check your spam folder too.
+              </div>
+              <button onClick={backToLogin} style={btn(C.gold,"#000")}>Back to Login</button>
+            </div>
+          : <>
+              <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>
+                Enter the email address on your coach account and we'll send you your PIN.
+              </div>
+              <div style={{marginBottom:20}}>
+                <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH EMAIL</label>
+                <input type="email" inputMode="email" value={recoveryEmail} onChange={e=>setRecoveryEmail(e.target.value)}
+                  onKeyDown={e=>e.key==="Enter"&&sendRecovery()}
+                  placeholder="coach@school.edu" style={inp()}/>
+              </div>
+              {err&&<div style={{color:C.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
+              <button onClick={sendRecovery} disabled={loading} style={btn(C.gold,"#000",{opacity:loading?0.7:1,cursor:loading?"not-allowed":"pointer"})}>
+                {loading?"Sending...":"Email My PIN →"}
+              </button>
+              <div style={{textAlign:"center",marginTop:10}}>
+                <button onClick={backToLogin} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>Back to login</button>
+              </div>
+            </>
+        }
+      </>}
     </div>
   );
 }
@@ -1199,7 +1326,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
     <div style={{height:"100dvh",display:"flex",flexDirection:"column",background:C.navy,maxWidth:600,margin:"0 auto"}}>
       <style>{GS}</style>
       {/* Header */}
-      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,padding:"10px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0,gap:8}}>
+      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,paddingTop:"calc(10px + env(safe-area-inset-top, 0px))",paddingBottom:"10px",paddingLeft:"14px",paddingRight:"14px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0,gap:8}}>
         <div style={{minWidth:0,flex:1}}>
           <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2,lineHeight:1}}>COACH JOE-BOT</div>
           <div style={{display:"flex",alignItems:"center",gap:6,marginTop:2,flexWrap:"wrap"}}>
@@ -2434,7 +2561,7 @@ function CoachDashboard({coach,onLogout}) {
     <div style={{minHeight:"100dvh",background:C.navy}}>
       <style>{GS}</style>
       {/* Header */}
-      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,padding:isMobile?"10px 14px":"14px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:50,gap:8}}>
+      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,paddingTop:isMobile?"calc(10px + env(safe-area-inset-top, 0px))":"14px",paddingBottom:isMobile?"10px":"14px",paddingLeft:isMobile?"14px":"20px",paddingRight:isMobile?"14px":"20px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:50,gap:8}}>
         <div style={{display:"flex",alignItems:"center",gap:10,minWidth:0,flex:1}}>
           {/* School logo — shown for team coaches who have a logo set */}
           {!isMaster&&school?.logo_url&&(
