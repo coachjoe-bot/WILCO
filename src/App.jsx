@@ -129,6 +129,14 @@ const askClaude = async (system, user, maxTokens=600, images=[]) => {
   return d.content?.[0]?.text||"";
 };
 
+const extractProgramText = async (message) => {
+  const text = await askClaude(
+    "Extract the training program from this athlete message. Return only the program content — days, exercises, sets, reps, weights. Clean formatting. No intro, no commentary, no explanation.",
+    message, 800
+  );
+  return text?.trim() || message;
+};
+
 const parseWorkout = async (message, name, sport) => {
   const sys = `Extract workout data from an athlete message. Return ONLY valid JSON, no markdown.
 {
@@ -140,18 +148,22 @@ const parseWorkout = async (message, name, sport) => {
   "pr_attempts":[{"exercise":string,"weight":number,"reps":number,"achieved":boolean}],
   "session_feel":"great"|"good"|"average"|"rough"|null,
   "general_notes":string|null,
-  "is_program_update":boolean
+  "is_program_update":boolean,
+  "is_temp_program_update":boolean,
+  "is_program_revert":boolean
 }
 Rules:
 - Populate "run_data" when the message describes any run, jog, cardio, or running workout. Set run_type to the best match. Calculate pace if distance and time are both given.
 - For interval runs, populate "intervals" array with one entry per repeat type.
 - Populate "exercises" for strength/lifting/conditioning work. Leave empty for pure runs.
 - If the athlete mentions heart rate, bpm, avg HR, or max HR, populate heart_rate_avg and/or heart_rate_max in run_data.
-- Set is_program_update:true if the athlete is describing a training plan, program, or schedule.
+- Set is_program_update:true only if the athlete is laying out a structured multi-day training program with specific exercises, sets, and reps — NOT for temporary situations, casual weekly plans, or single-week schedules.
+- Set is_temp_program_update:true when the athlete has described their available equipment or conditions for a non-standard training situation (hotel, cruise, travel, beach, limited equipment, injury restrictions). Must include actual condition info — NOT set just because they mention traveling or ask what to do.
+- Set is_program_revert:true when the athlete signals they are returning to their normal training environment ("I'm back", "home now", "back at the gym", "back to normal", "cruise is over", etc.).
 - If weight is given in kg (e.g. "100kg squat"), set unit:"kg".`;
   const text = await askClaude(sys,`Athlete: ${name} (${sport})\nMessage: ${message}`,1000);
   try { return JSON.parse(text.replace(/```json|```/g,"").trim()); }
-  catch { return {exercises:[],run_data:null,pain_flags:[],equipment_issues:[],questions:[],pr_attempts:[],session_feel:null,general_notes:message,is_program_update:false}; }
+  catch { return {exercises:[],run_data:null,pain_flags:[],equipment_issues:[],questions:[],pr_attempts:[],session_feel:null,general_notes:message,is_program_update:false,is_temp_program_update:false,is_program_revert:false}; }
 };
 
 const getJoeBotReply = async (message, athlete, history, workoutHistory=[]) => {
@@ -175,7 +187,12 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[]) => {
   }
 
   let programContext = "";
-  if(athlete.program_text){
+  if(athlete.temp_program_text){
+    programContext = `\n\nTEMPORARY ADAPTED PROGRAM (currently active — use this, not the regular program):\n${athlete.temp_program_text}`;
+    if(athlete.program_text){
+      programContext += `\n\nREGULAR PROGRAM (on hold — restore when athlete returns to normal):\n${athlete.program_text}`;
+    }
+  } else if(athlete.program_text){
     programContext = `\n\nATHLETE'S CURRENT PROGRAM:\n${athlete.program_text}\nReference this when giving programming feedback.`;
   }
 
@@ -223,7 +240,12 @@ RESERVED (only when situation genuinely matches):
 FORMATTING: Use numbered lists for exercises/alternatives/steps. Never paragraph format for exercise lists.
 Keep under 200 words. Use their name once naturally.
 Pain → suggest alternatives. Equipment unavailable → 2-3 specific alternatives.
-Out of scope: "That's one for Coach Joe directly -- email joe.thomas@commandengineering.com."${pastContext}${programContext}`;
+Out of scope: "That's one for Coach Joe directly -- email joe.thomas@commandengineering.com."
+
+UNUSUAL TRAINING CONDITIONS (travel, cruise, hotel, beach, limited equipment, injury layoff, etc.):
+- If athlete mentions they'll be away or have limited access but HASN'T described what's available yet: ask 2-3 direct questions — what equipment is on hand, how much space they have, how long the situation lasts. Do not give a program yet.
+- Once conditions ARE described: build a specific day-by-day program for exactly those conditions. Be clear it's temporary.
+- When athlete signals they're back to normal ("I'm back", "home now", "back at the gym"): transition them back to their regular program and reference it.${pastContext}${programContext}`;
 
   return askClaude(sys,`${hist}\n\n${athlete.name}: ${message}`,450);
 };
@@ -1142,12 +1164,36 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         parseWorkout(msg,athlete.name,athlete.sport)
       ]);
 
-      // Detect and save program updates (Pro/Elite only)
-      if(parsed.is_program_update && (updatedAthlete.tier||"free")!=="free" && !updatedAthlete.program_locked){
+      let finalReply = reply;
+
+      // Detect and save program updates — any tier, as long as coach hasn't locked it
+      if(parsed.is_program_update && !updatedAthlete.program_locked){
         try {
-          await sbUpdate("athletes",athlete.id,{program_text:msg});
-          updatedAthlete.program_text = msg;
+          const programText = await extractProgramText(msg);
+          await sbUpdate("athletes",athlete.id,{program_text:programText});
+          updatedAthlete.program_text = programText;
           setAthlete(updatedAthlete);
+          finalReply = reply + "\n\n📋 Program saved — I'll reference this in every session.";
+        } catch(e){}
+      }
+
+      // Temporary adapted program — conditions described, extract program from Joe-bot's reply
+      if(parsed.is_temp_program_update && !updatedAthlete.program_locked){
+        try {
+          const tempText = await extractProgramText(reply);
+          await sbUpdate("athletes",athlete.id,{temp_program_text:tempText});
+          updatedAthlete.temp_program_text = tempText;
+          setAthlete(updatedAthlete);
+        } catch(e){}
+      }
+
+      // Revert — athlete is back, clear temp program
+      if(parsed.is_program_revert && updatedAthlete.temp_program_text){
+        try {
+          await sbUpdate("athletes",athlete.id,{temp_program_text:null});
+          updatedAthlete.temp_program_text = null;
+          setAthlete(updatedAthlete);
+          finalReply = reply + "\n\n✅ Temporary program cleared — back to your regular programming.";
         } catch(e){}
       }
 
@@ -1158,15 +1204,15 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           const gapMin = Math.round((Date.now()-new Date(lastReal.created_at))/60000);
           if(gapMin>=60&&gapMin<180){
             const sessionQ = `\n\nAlso — it's been ${gapMin} minutes since your last log. Same workout still, or is this a new session?`;
-            setMessages(prev=>[...prev,{role:"assistant",content:reply+sessionQ}]);
-            setSessionCheckPending({parsed,msg,reply,updatedAthlete});
+            setMessages(prev=>[...prev,{role:"assistant",content:finalReply+sessionQ}]);
+            setSessionCheckPending({parsed,msg,reply:finalReply,updatedAthlete});
             setLoading(false);
             return;
           }
         }
       }
 
-      await finalizeWorkout(parsed,msg,reply,updatedAthlete,false,true);
+      await finalizeWorkout(parsed,msg,finalReply,updatedAthlete,false,true);
     } catch(e){
       console.error("JoBot error:",e);
       setMessages(prev=>[...prev,{role:"assistant",content:`Hit a snag. Try again. (${e?.message||"unknown error"})`}]);
@@ -2447,6 +2493,27 @@ function CoachDashboard({coach,onLogout}) {
 
   useEffect(()=>{loadAll();},[]);
 
+  // Keep selected athlete's program in sync with what Joe-bot may have updated
+  useEffect(()=>{
+    if(!selected) return;
+    const selectedId = selected.id;
+    const poll = setInterval(async ()=>{
+      try {
+        const fresh = await sbGet("athletes",`?id=eq.${selectedId}&select=program_text,program_locked,temp_program_text`);
+        if(Array.isArray(fresh)&&fresh.length>0){
+          const {program_text,program_locked,temp_program_text} = fresh[0];
+          setSelected(prev=>{
+            if(!prev||prev.id!==selectedId) return prev;
+            if(prev.program_text===program_text&&prev.program_locked===program_locked&&prev.temp_program_text===temp_program_text) return prev;
+            return {...prev,program_text,program_locked,temp_program_text};
+          });
+          setAthletes(prev=>prev.map(a=>a.id===selectedId?{...a,program_text,program_locked,temp_program_text}:a));
+        }
+      } catch(e){}
+    },30000);
+    return ()=>clearInterval(poll);
+  },[selected?.id]);
+
   const loadAll = async () => {
     setLoading(true);
     try {
@@ -2981,7 +3048,8 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
         </div>
         <div style={{display:"flex",gap:8,flexShrink:0,alignItems:"center"}}>
           {hasPain&&<div style={{background:`${C.red}20`,border:`1px solid ${C.red}`,borderRadius:8,padding:"4px 10px",color:C.red,fontSize:11}}>⚠ Pain</div>}
-          {athlete.program_text&&<div style={{background:"#0a0e1e",border:`1px solid ${C.blue}`,borderRadius:8,padding:"4px 10px",color:C.blue,fontSize:11}}>Program set</div>}
+          {athlete.temp_program_text&&<div style={{background:`${C.gold}15`,border:`1px solid ${C.gold}`,borderRadius:8,padding:"4px 10px",color:C.gold,fontSize:11}}>✈️ Temp program</div>}
+          {!athlete.temp_program_text&&athlete.program_text&&<div style={{background:"#0a0e1e",border:`1px solid ${C.blue}`,borderRadius:8,padding:"4px 10px",color:C.blue,fontSize:11}}>Program set</div>}
           {confirmDelete?(
             <div style={{display:"flex",gap:6,alignItems:"center",background:`${C.red}15`,border:`1px solid ${C.red}40`,borderRadius:10,padding:"4px 10px"}}>
               <span style={{color:C.muted2,fontSize:11}}>Delete athlete?</span>
@@ -3219,17 +3287,29 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
         {/* ── PROGRAM TAB ── */}
         {tab==="program"&&(
           <div>
+            {/* Temp program banner */}
+            {athlete.temp_program_text&&(
+              <div style={{background:`${C.gold}12`,border:`1px solid ${C.gold}50`,borderRadius:12,padding:14,marginBottom:16}}>
+                <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:6}}>✈️ TEMPORARY PROGRAM ACTIVE</div>
+                <div style={{color:C.muted2,fontSize:12,lineHeight:1.6,marginBottom:10,whiteSpace:"pre-wrap"}}>{athlete.temp_program_text}</div>
+                <div style={{color:C.muted,fontSize:11}}>Joe-bot is using this instead of the regular program. It will revert automatically when {athlete.name} tells Joe-bot they're back to normal.</div>
+              </div>
+            )}
+
             <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:14,marginBottom:16,color:C.muted2,fontSize:13,lineHeight:1.65}}>
-              {athlete.program_text
-                ? <><span style={{color:C.blue,fontWeight:600}}>Program active.</span> This was set via the Coach Joe-bot conversation or submitted by a coach. Joe-bot references it whenever making recommendations or logging workouts. You can edit or replace it below.</>
-                : <>No program set yet. You can paste or write a program here and Joe-bot will reference it going forward. Alternatively, the athlete can describe their program to Joe-bot ("my program is...") and it will be saved automatically.</>
+              {athlete.temp_program_text
+                ? <><span style={{color:C.muted,fontWeight:600}}>Regular program (on hold).</span> Joe-bot is currently using the temporary program above. This will resume when the athlete returns to normal training.</>
+                : athlete.program_text
+                  ? <><span style={{color:C.blue,fontWeight:600}}>Program active.</span> This was set via the Joe-bot conversation or submitted by a coach. Joe-bot references it whenever making recommendations or logging workouts. You can edit or replace it below.</>
+                  : <>No program set yet. You can paste or write a program here and Joe-bot will reference it going forward. Alternatively, the athlete can describe their program to Joe-bot ("my program is...") and it will be saved automatically.</>
               }
             </div>
 
             {athlete.program_text&&(
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
-                <div style={{width:8,height:8,borderRadius:"50%",background:C.blue,flexShrink:0}}/>
-                <div style={{color:C.blue,fontSize:12}}>Coach Joe-bot references this program in every conversation with {athlete.name}</div>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14,flexWrap:"wrap"}}>
+                <div style={{width:8,height:8,borderRadius:"50%",background:athlete.temp_program_text?C.muted:C.blue,flexShrink:0}}/>
+                <div style={{color:athlete.temp_program_text?C.muted:C.blue,fontSize:12}}>{athlete.temp_program_text?"On hold — resumes when temporary program clears":"Joe-bot references this in every conversation with "+athlete.name}</div>
+                {!athlete.program_locked&&!athlete.temp_program_text&&<div style={{background:`${C.blue}15`,border:`1px solid ${C.blue}30`,borderRadius:6,padding:"2px 8px",color:C.blue,fontSize:11}}>🔄 Live — updates when {athlete.name} describes their program to Joe-bot</div>}
               </div>
             )}
 
