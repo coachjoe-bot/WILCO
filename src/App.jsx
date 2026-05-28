@@ -157,7 +157,7 @@ Rules:
 - For interval runs, populate "intervals" array with one entry per repeat type.
 - Populate "exercises" for strength/lifting/conditioning work. Leave empty for pure runs.
 - If the athlete mentions heart rate, bpm, avg HR, or max HR, populate heart_rate_avg and/or heart_rate_max in run_data.
-- Set is_program_update:true only if the athlete is laying out a structured multi-day training program with specific exercises, sets, and reps — NOT for temporary situations, casual weekly plans, or single-week schedules.
+- Set is_program_update:true ONLY if the message itself CONTAINS the actual program content with specific exercises, sets, and reps. The program data must be present in the message itself — NOT for requests like "update my program", "save my program", "can you update that", or any message that requests an update without providing the program content.
 - Set is_temp_program_update:true when the athlete has described their available equipment or conditions for a non-standard training situation (hotel, cruise, travel, beach, limited equipment, injury restrictions). Must include actual condition info — NOT set just because they mention traveling or ask what to do.
 - Set is_program_revert:true when the athlete signals they are returning to their normal training environment ("I'm back", "home now", "back at the gym", "back to normal", "cruise is over", etc.).
 - If weight is given in kg (e.g. "100kg squat"), set unit:"kg".`;
@@ -1170,10 +1170,14 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       if(parsed.is_program_update && !updatedAthlete.program_locked){
         try {
           const programText = await extractProgramText(msg);
-          await sbUpdate("athletes",athlete.id,{program_text:programText});
-          updatedAthlete.program_text = programText;
-          setAthlete(updatedAthlete);
-          finalReply = reply + "\n\n📋 Program saved — I'll reference this in every session.";
+          // Guard: only save if there's real program content (not a one-line command)
+          const hasContent = programText && programText.trim().length > 60 && programText.trim().split("\n").length > 1;
+          if(hasContent){
+            await sbUpdate("athletes",athlete.id,{program_text:programText});
+            updatedAthlete.program_text = programText;
+            setAthlete(updatedAthlete);
+            finalReply = reply + "\n\n📋 Program saved — I'll reference this in every session.";
+          }
         } catch(e){}
       }
 
@@ -1384,8 +1388,8 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           {saved&&<div style={{background:"#0a1e0a",border:`1px solid ${C.green}`,borderRadius:8,padding:"4px 8px",color:C.green,fontSize:11,fontWeight:600,flexShrink:0}}>✓</div>}
           {(athlete.tier||"free")!=="free"&&(
             <button onClick={()=>setShowProgram(true)} title="View or edit your training program"
-              style={{background:athlete.program_text?"#0a0e1e":C.navy3,border:`1px solid ${athlete.program_text?C.blue:C.border}`,borderRadius:8,padding:"4px 10px",color:athlete.program_text?C.blue:C.muted,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
-              📋 {athlete.program_text?"Program":"Add Program"}
+              style={{background:athlete.temp_program_text?`${C.gold}15`:athlete.program_text?"#0a0e1e":C.navy3,border:`1px solid ${athlete.temp_program_text?C.gold:athlete.program_text?C.blue:C.border}`,borderRadius:8,padding:"4px 10px",color:athlete.temp_program_text?C.gold:athlete.program_text?C.blue:C.muted,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+              {athlete.temp_program_text?"✈️ Temp Program":"📋 "+(athlete.program_text?"Program":"Add Program")}
             </button>
           )}
           {(athlete.tier||"free")!=="free"&&<button onClick={()=>setShowLog(true)} style={{background:C.navy3,border:`1px solid ${C.gold}`,color:C.gold,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>MY LOG</button>}
@@ -1506,7 +1510,23 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
               <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2}}>MY PROGRAM</div>
               <button onClick={()=>setShowProgram(false)} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"4px 12px",cursor:"pointer",fontSize:12}}>✕ Close</button>
             </div>
-            {athlete.program_locked?(
+            {athlete.temp_program_text?(
+              <div style={{flex:1,overflowY:"auto",padding:"16px 20px",display:"flex",flexDirection:"column",gap:12}}>
+                <div style={{background:`${C.gold}12`,border:`1px solid ${C.gold}50`,borderRadius:12,padding:14}}>
+                  <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>✈️ TEMPORARY PROGRAM — ACTIVE NOW</div>
+                  <pre style={{color:C.text,fontSize:13,lineHeight:1.7,fontFamily:"'DM Sans'",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{athlete.temp_program_text}</pre>
+                </div>
+                <div style={{color:C.muted,fontSize:12,lineHeight:1.6,textAlign:"center"}}>
+                  Tell Joe-bot you're back home when you return and your regular program will resume automatically.
+                </div>
+                {athlete.program_text&&(
+                  <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:14}}>
+                    <div style={{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>REGULAR PROGRAM — ON HOLD</div>
+                    <pre style={{color:C.muted2,fontSize:12,lineHeight:1.6,fontFamily:"'DM Sans'",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{athlete.program_text}</pre>
+                  </div>
+                )}
+              </div>
+            ):athlete.program_locked?(
               <>
                 <div style={{background:`${C.gold}15`,border:`1px solid ${C.gold}40`,margin:"12px 16px 0",borderRadius:10,padding:"8px 14px",color:C.gold,fontSize:12}}>
                   🔒 Program locked by coach — contact your coach to make changes.
