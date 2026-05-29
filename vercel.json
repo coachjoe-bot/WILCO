@@ -5,5 +5,11 @@
   "functions": {
     "api/gemini-init.js": { "maxDuration": 10 },
     "api/gemini-analyze.js": { "maxDuration": 15 }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/send-weekly-report",
+      "schedule": "0 13 * * 1"
+    }
+  ]
 }

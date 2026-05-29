@@ -8,8 +8,8 @@ export default async function handler(req, res) {
     return res.status(401).json({error:"Unauthorized"});
   }
 
-  const SUPABASE_URL = process.env.VITE_SUPABASE_URL;
-  const SUPABASE_KEY = process.env.VITE_SUPABASE_KEY;
+  const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
+  const SUPABASE_KEY = process.env.VITE_SUPABASE_KEY || process.env.SUPABASE_KEY;
   const RESEND_KEY   = process.env.RESEND_API_KEY;
   const FROM_EMAIL   = process.env.FROM_EMAIL   || "WILCO <reports@wilco.app>";
   const SIGNUP_URL   = process.env.TEAM_SIGNUP_URL || "https://wilco.app/coaches";

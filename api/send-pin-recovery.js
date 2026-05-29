@@ -62,7 +62,8 @@ export default async function handler(req, res) {
         ? "Your WILCO Coach PIN"
         : "Your WILCO PIN";
 
-      await fetch("https://api.resend.com/emails", {
+      console.log("[pin-recovery] sending to:", email, "| from:", FROM_EMAIL, "| has_resend_key:", !!RESEND_KEY, "| has_supabase:", !!SUPABASE_URL);
+      const resendRes = await fetch("https://api.resend.com/emails", {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${RESEND_KEY}`,
@@ -75,6 +76,8 @@ export default async function handler(req, res) {
           html,
         }),
       });
+      const resendData = await resendRes.json();
+      console.log("[pin-recovery] resend response:", JSON.stringify(resendData));
     }
 
     return res.status(200).json({ sent: true });
