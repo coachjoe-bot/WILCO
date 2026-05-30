@@ -166,7 +166,7 @@ Rules:
   catch { return {exercises:[],run_data:null,pain_flags:[],equipment_issues:[],questions:[],pr_attempts:[],session_feel:null,general_notes:message,is_program_update:false,is_temp_program_update:false,is_program_revert:false}; }
 };
 
-const getJoeBotReply = async (message, athlete, history, workoutHistory=[]) => {
+const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athleteGoals=[]) => {
   const hist = history.slice(-6).map(m=>`${m.role==="user"?athlete.name:"Coach Joe"}: ${m.content}`).join("\n");
 
   // Improved history context with explicit dates so bot can answer "what did I do Monday" etc.
@@ -247,7 +247,75 @@ UNUSUAL TRAINING CONDITIONS (travel, cruise, hotel, beach, limited equipment, in
 - Once conditions ARE described: build a specific day-by-day program for exactly those conditions. Be clear it's temporary.
 - When athlete signals they're back to normal ("I'm back", "home now", "back at the gym"): transition them back to their regular program and reference it.${pastContext}${programContext}`;
 
-  return askClaude(sys,`${hist}\n\n${athlete.name}: ${message}`,450);
+  let goalsContext = "";
+  if(athleteGoals?.length>0){
+    const goalLines = athleteGoals.map(g=>g.goal_text||"").filter(Boolean).slice(0,3).join(" | ");
+    goalsContext = `\n\nATHLETE GOALS: ${goalLines}\nKeep these goals in view when giving advice and programming.`;
+  }
+  // Injury context from profile
+  if(athlete.injury_history){
+    goalsContext += `\n\nINJURY HISTORY: ${athlete.injury_history}\nFactor this into recommendations — suggest alternatives for any exercises that aggravate these areas.`;
+  }
+
+  return askClaude(sys+goalsContext,`${hist}\n\n${athlete.name}: ${message}`,450);
+};
+
+// ─── 1RM PROPAGATION ─────────────────────────────────────────────────────────
+// When a new PR is logged, recalculate absolute weights in program_text for that lift.
+// Logic: find lines containing the lift name, replace each weight number with
+// the same % of the new 1RM, rounded to nearest 5.
+const propagate1RM = (programText, exerciseName, old1RM, new1RM) => {
+  if(!programText||!old1RM||!new1RM||old1RM===new1RM||old1RM<=0) return {text:programText,changed:false};
+  const safeEx = exerciseName.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+  const lines = programText.split("\n");
+  let changed = false;
+  const updated = lines.map(line => {
+    if(!(new RegExp(safeEx,"i")).test(line)) return line;
+    return line.replace(/(\d+)\s*(lbs?)/gi, (match,num) => {
+      const w = +num;
+      if(w<45||w>old1RM*1.5) return match; // skip bar weight / outliers
+      const pct = w / old1RM;
+      const newW = Math.round((new1RM * pct) / 5) * 5;
+      if(newW===w) return match;
+      changed = true;
+      return `${newW}lbs`;
+    });
+  });
+  return {text:updated.join("\n"),changed};
+};
+
+// ─── BENCHMARK THRESHOLDS (bodyweight multiples) ─────────────────────────────
+// [solid_min, strong_min, elite_min] — below solid_min = Developing
+const BENCH_THRESHOLDS = {
+  male: {
+    "squat":          [1.0,  1.5,  2.0 ],
+    "deadlift":       [1.25, 1.75, 2.25],
+    "bench press":    [0.75, 1.25, 1.75],
+    "overhead press": [0.5,  0.75, 1.0 ],
+    "power clean":    [0.75, 1.1,  1.4 ],
+  },
+  female: {
+    "squat":          [0.7,  1.0,  1.4 ],
+    "deadlift":       [0.9,  1.25, 1.6 ],
+    "bench press":    [0.5,  0.85, 1.2 ],
+    "overhead press": [0.35, 0.55, 0.75],
+    "power clean":    [0.55, 0.8,  1.0 ],
+  }
+};
+const TIER_NAMES = ["DEVELOPING","SOLID","STRONG","ELITE"];
+const TIER_COLORS = ["#4b5563","#3b82f6","#10b981","#d4a017"];
+
+// Map a normalized exercise name to a BENCH_THRESHOLDS key (null if not benchmarked)
+const getBenchKey = (normalized) => {
+  if(!normalized) return null;
+  const n = normalized.toLowerCase();
+  if(n.includes("front squat")) return null; // distinct lift, no threshold
+  if(n.includes("squat")) return "squat";
+  if(n.includes("deadlift")) return "deadlift";
+  if(n.includes("bench press")||n==="bench"||n.includes("barbell bench")) return "bench press";
+  if(n.includes("overhead press")||n.includes("ohp")||n==="press"||n.includes("military press")) return "overhead press";
+  if(n.includes("power clean")||n.includes("hang clean")||n.includes("hang power clean")) return "power clean";
+  return null;
 };
 
 // ─── STYLES ──────────────────────────────────────────────────────────────────
@@ -421,9 +489,11 @@ function HomeScreen({setView}) {
 // ─── ATHLETE SIGNUP ───────────────────────────────────────────────────────────
 function SignupScreen({setView,setAthlete,setErr,err}) {
   const [step,setStep] = useState(1);
-  const [data,setData] = useState({name:"",sport:SPORTS[0],pin:"",confirmPin:"",email:"",goal:"strength",coachCode:"",coachName:"",coachEmail:"",tier:"free",billing:"monthly"});
+  const [data,setData] = useState({name:"",sport:SPORTS[0],pin:"",confirmPin:"",email:"",goal:"strength",coachCode:"",coachName:"",coachEmail:"",tier:"free",billing:"monthly",birthday:"",heightFt:"",heightIn:"0",weight:"",gender:"",trainingDays:4,equipment:[],positionOrEvent:"",injuryHistory:"",recruitingIntent:""});
   const [loading,setLoading] = useState(false);
   const setD = (k,v) => setData(p=>({...p,[k]:v}));
+
+  const TOTAL_STEPS = 13;
 
   const nextStep = async () => {
     setErr("");
@@ -437,23 +507,69 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
     } else if(step===2){
       if(data.pin.length!==4){setErr("PIN must be 4 digits.");return;}
       if(data.pin!==data.confirmPin){setErr("PINs don't match.");return;}
+      if(!data.email.trim()||!data.email.includes("@")){setErr("Enter a valid email address.");return;}
       setStep(3);
     } else if(step===3){
       setStep(4);
     } else if(step===4){
       setStep(5);
     } else if(step===5){
+      // Tier selected — advance to extended onboarding
+      setStep(6);
+    } else if(step===6){
+      // Birthday
+      if(!data.birthday){setErr("Enter your birthday.");return;}
+      const dob = new Date(data.birthday);
+      const ageYears = Math.floor((Date.now()-dob)/(365.25*24*60*60*1000));
+      if(ageYears<13){setErr("You must be at least 13 to use WILCO.");return;}
+      if(ageYears>100){setErr("Enter a valid birthday.");return;}
+      setStep(7);
+    } else if(step===7){
+      // Height + Weight
+      if(!data.heightFt||isNaN(data.heightFt)||+data.heightFt<3||+data.heightFt>8){setErr("Enter a valid height.");return;}
+      if(!data.weight||isNaN(data.weight)||+data.weight<50||+data.weight>500){setErr("Enter a valid weight.");return;}
+      setStep(8);
+    } else if(step===8){
+      if(!data.gender){setErr("Select a gender option.");return;}
+      setStep(9);
+    } else if(step===9){
+      setStep(10);
+    } else if(step===10){
+      if(data.equipment.length===0){setErr("Select at least one equipment option.");return;}
+      setStep(11);
+    } else if(step===11){
+      setStep(12);
+    } else if(step===12){
+      setStep(13);
+    } else if(step===13){
+      if(!data.recruitingIntent){setErr("Select an option.");return;}
       setLoading(true);
       try {
-        const created = await sbInsert("athletes",{name:data.name.trim(),sport:data.sport,pin:data.pin,tier:data.tier,billing:data.billing,email:data.email.trim().toLowerCase()||null});
+        const dob = new Date(data.birthday);
+        const ageYears = Math.floor((Date.now()-dob)/(365.25*24*60*60*1000));
+        const heightIn = (+data.heightFt*12)+(+data.heightIn||0);
+        const created = await sbInsert("athletes",{
+          name:data.name.trim(),sport:data.sport,pin:data.pin,tier:data.tier,billing:data.billing,
+          email:data.email.trim().toLowerCase(),
+          birthday:data.birthday,
+          age:ageYears,
+          height_inches:heightIn,
+          weight_lbs:+data.weight,
+          gender:data.gender,
+          training_days_per_week:+data.trainingDays,
+          equipment:data.equipment,
+          position_or_event:data.positionOrEvent.trim()||null,
+          injury_history:data.injuryHistory.trim()||null,
+          recruiting_intent:data.recruitingIntent,
+          first_chat_complete:false
+        });
         if(created?.length>0){
           const newAthlete = created[0];
           try {
-            // Look up coach by access code if provided, get coach_id + school_id
-            let coachId = null, schoolId = null;
+            let coachId=null,schoolId=null;
             if(data.coachCode.trim()){
               const matchedCoach = await sbGet("coaches",`?access_code=eq.${encodeURIComponent(data.coachCode.trim().toUpperCase())}&select=id,school_id`);
-              if(matchedCoach?.length>0){ coachId = matchedCoach[0].id; schoolId = matchedCoach[0].school_id||null; }
+              if(matchedCoach?.length>0){ coachId=matchedCoach[0].id; schoolId=matchedCoach[0].school_id||null; }
             }
             await fetch(`${SUPABASE_URL}/rest/v1/athletes?id=eq.${newAthlete.id}`,{
               method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},
@@ -461,37 +577,18 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
                 goal:data.goal||"strength",
                 coach_name:data.coachName.trim()||null,
                 coach_email:data.coachEmail.trim().toLowerCase()||null,
-                ...(coachId ? {coach_id:coachId} : {}),
-                ...(schoolId ? {school_id:schoolId} : {})
+                ...(coachId?{coach_id:coachId}:{}),
+                ...(schoolId?{school_id:schoolId}:{})
               })
             });
-            // Send welcome email to coach for all tiers
             if(data.coachEmail.trim()){
-              fetch("/api/send-coach-welcome",{
-                method:"POST",
-                headers:{"Content-Type":"application/json"},
-                body:JSON.stringify({
-                  athleteName: data.name.trim(),
-                  athleteSport: data.sport,
-                  coachName: data.coachName.trim()||null,
-                  coachEmail: data.coachEmail.trim().toLowerCase(),
-                  tier: data.tier
-                })
+              fetch("/api/send-coach-welcome",{method:"POST",headers:{"Content-Type":"application/json"},
+                body:JSON.stringify({athleteName:data.name.trim(),athleteSport:data.sport,coachName:data.coachName.trim()||null,coachEmail:data.coachEmail.trim().toLowerCase(),tier:data.tier})
               }).catch(()=>{});
             }
-            // For Elite tier: notify admin to assign a Wilco Certified Coach
             if(data.tier==="elite"){
-              fetch("/api/send-coach-welcome",{
-                method:"POST",
-                headers:{"Content-Type":"application/json"},
-                body:JSON.stringify({
-                  athleteName: data.name.trim(),
-                  athleteSport: data.sport,
-                  coachName: "WILCO Admin",
-                  coachEmail: "coachjoe@trainwilco.com",
-                  tier: "elite",
-                  isAdminAlert: true
-                })
+              fetch("/api/send-coach-welcome",{method:"POST",headers:{"Content-Type":"application/json"},
+                body:JSON.stringify({athleteName:data.name.trim(),athleteSport:data.sport,coachName:"WILCO Admin",coachEmail:"coachjoe@trainwilco.com",tier:"elite",isAdminAlert:true})
               }).catch(()=>{});
             }
           } catch(e){}
@@ -548,7 +645,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
     <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24}}>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
         <button onClick={()=>step>1?setStep(step-1):setView("home")} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:18}}>←</button>
-        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>NEW ATHLETE — STEP {step} OF 5</div>
+        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>NEW ATHLETE — STEP {step} OF {TOTAL_STEPS}</div>
       </div>
       {step===1&&<>
         <div style={{marginBottom:16}}>
@@ -563,7 +660,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
         </div>
       </>}
       {step===2&&<>
-        <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Choose a 4-digit PIN you'll remember. Add a recovery email if you ever forget it.</div>
+        <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Choose a 4-digit PIN you'll remember. Add your email so you can recover access if you ever forget it.</div>
         <div style={{marginBottom:16}}>
           <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CREATE PIN</label>
           <input type="password" inputMode="numeric" maxLength={4} value={data.pin}
@@ -577,7 +674,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
             placeholder="----" style={inp({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
         </div>
         <div style={{marginBottom:20}}>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>RECOVERY EMAIL <span style={{color:C.muted,fontWeight:400}}>(optional — used only to recover your PIN)</span></label>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>EMAIL <span style={{color:C.muted,fontWeight:400}}>(used to recover your PIN or username)</span></label>
           <input type="email" inputMode="email" value={data.email}
             onChange={e=>setD("email",e.target.value)}
             placeholder="you@email.com" style={inp()}/>
@@ -654,9 +751,139 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
           </div>
         )}
       </>}
+      {/* ── Step 6: Birthday ── */}
+      {step===6&&<>
+        <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>When is your birthday? We use this to personalize your program thresholds — not stored publicly.</div>
+        <div style={{marginBottom:20}}>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>BIRTHDAY</label>
+          <input type="date" value={data.birthday}
+            onChange={e=>setD("birthday",e.target.value)}
+            max={new Date().toISOString().split("T")[0]}
+            style={inp({colorScheme:"dark"})}/>
+        </div>
+      </>}
+
+      {/* ── Step 7: Height + Weight ── */}
+      {step===7&&<>
+        <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Used to personalize your strength benchmarks and programming targets.</div>
+        <div style={{marginBottom:16}}>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>HEIGHT</label>
+          <div style={{display:"flex",gap:8}}>
+            <div style={{flex:1,position:"relative"}}>
+              <input type="number" inputMode="numeric" min={3} max={8} value={data.heightFt}
+                onChange={e=>setD("heightFt",e.target.value)} placeholder="5" style={inp({textAlign:"center"})}/>
+              <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:C.muted,fontSize:12,pointerEvents:"none"}}>ft</span>
+            </div>
+            <div style={{flex:1}}>
+              <select value={data.heightIn} onChange={e=>setD("heightIn",e.target.value)} style={inp({textAlign:"center"})}>
+                {[0,1,2,3,4,5,6,7,8,9,10,11].map(n=><option key={n} value={n}>{n} in</option>)}
+              </select>
+            </div>
+          </div>
+        </div>
+        <div style={{marginBottom:20}}>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>WEIGHT <span style={{color:C.muted,fontWeight:400}}>(lbs)</span></label>
+          <input type="number" inputMode="numeric" min={50} max={500} value={data.weight}
+            onChange={e=>setD("weight",e.target.value)} placeholder="e.g. 185" style={inp()}/>
+        </div>
+      </>}
+
+      {/* ── Step 8: Gender ── */}
+      {step===8&&<>
+        <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Used to calibrate your strength benchmarks.</div>
+        {["Male","Female","Prefer not to say"].map(g=>(
+          <div key={g} onClick={()=>setD("gender",g)}
+            style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",marginBottom:8,padding:"14px 16px",background:data.gender===g?`${C.gold}18`:C.navy3,borderRadius:10,border:`2px solid ${data.gender===g?C.gold:C.border}`,transition:"all 0.15s"}}>
+            <div style={{width:20,height:20,borderRadius:"50%",border:`2px solid ${data.gender===g?C.gold:C.muted}`,background:data.gender===g?C.gold:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+              {data.gender===g&&<span style={{color:"#000",fontSize:10,fontWeight:700}}>✓</span>}
+            </div>
+            <div style={{color:C.text,fontWeight:600,fontSize:14}}>{g}</div>
+          </div>
+        ))}
+        <div style={{marginBottom:12}}/>
+      </>}
+
+      {/* ── Step 9: Training days/week ── */}
+      {step===9&&<>
+        <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>How many days per week are you available to train?</div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:20}}>
+          {[2,3,4,5,6].map(d=>(
+            <div key={d} onClick={()=>setD("trainingDays",d)}
+              style={{flex:"1 1 60px",padding:"16px 8px",textAlign:"center",cursor:"pointer",background:data.trainingDays===d?`${C.gold}18`:C.navy3,borderRadius:10,border:`2px solid ${data.trainingDays===d?C.gold:C.border}`,transition:"all 0.15s"}}>
+              <div style={{fontFamily:"'Bebas Neue'",fontSize:28,color:data.trainingDays===d?C.gold:C.muted2,lineHeight:1}}>{d}</div>
+              <div style={{color:C.muted,fontSize:10,marginTop:2}}>days</div>
+            </div>
+          ))}
+        </div>
+      </>}
+
+      {/* ── Step 10: Equipment ── */}
+      {step===10&&<>
+        <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Where do you typically train? Select all that apply.</div>
+        {["Full gym","Barbells & racks","Dumbbells only","Bodyweight only","Home gym (mixed)"].map(eq=>{
+          const selected = data.equipment.includes(eq);
+          return (
+            <div key={eq} onClick={()=>setD("equipment",selected?data.equipment.filter(e=>e!==eq):[...data.equipment,eq])}
+              style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",marginBottom:8,padding:"12px 16px",background:selected?`${C.gold}18`:C.navy3,borderRadius:10,border:`2px solid ${selected?C.gold:C.border}`,transition:"all 0.15s"}}>
+              <div style={{width:20,height:20,borderRadius:4,border:`2px solid ${selected?C.gold:C.muted}`,background:selected?C.gold:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                {selected&&<span style={{color:"#000",fontSize:10,fontWeight:700}}>✓</span>}
+              </div>
+              <div style={{color:C.text,fontWeight:600,fontSize:14}}>{eq}</div>
+            </div>
+          );
+        })}
+        <div style={{marginBottom:12}}/>
+      </>}
+
+      {/* ── Step 11: Position / event (optional) ── */}
+      {step===11&&<>
+        <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Helps Coach Joe give sport-specific advice. You can skip this.</div>
+        <div style={{marginBottom:20}}>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>POSITION OR EVENT <span style={{color:C.muted,fontWeight:400}}>(optional)</span></label>
+          <input value={data.positionOrEvent} onChange={e=>setD("positionOrEvent",e.target.value)}
+            placeholder="e.g. Linebacker, 100m sprints, Power lifter..."
+            style={inp()}/>
+        </div>
+        <button onClick={()=>{setErr("");setStep(12);}}
+          style={{background:"none",border:"none",color:C.muted,fontSize:13,cursor:"pointer",textAlign:"center",width:"100%",marginBottom:12}}>
+          Skip →
+        </button>
+      </>}
+
+      {/* ── Step 12: Injury history (optional) ── */}
+      {step===12&&<>
+        <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Helps Joe-bot give safer recommendations. You can skip this.</div>
+        <div style={{marginBottom:20}}>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>INJURIES OR LIMITATIONS <span style={{color:C.muted,fontWeight:400}}>(optional)</span></label>
+          <textarea value={data.injuryHistory} onChange={e=>setD("injuryHistory",e.target.value)}
+            placeholder="e.g. Left knee surgery 2022, lower back tightness..."
+            rows={3}
+            style={{...inp(),resize:"none",lineHeight:1.5}}/>
+        </div>
+        <button onClick={()=>{setErr("");setStep(13);}}
+          style={{background:"none",border:"none",color:C.muted,fontSize:13,cursor:"pointer",textAlign:"center",width:"100%",marginBottom:12}}>
+          Skip →
+        </button>
+      </>}
+
+      {/* ── Step 13: College recruiting ── */}
+      {step===13&&<>
+        <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Are you training with college recruiting in mind?</div>
+        {[{key:"yes",label:"Yes — I'm actively pursuing it"},{key:"maybe",label:"Maybe — open to it"},{key:"no",label:"No — training for myself"}].map(opt=>(
+          <div key={opt.key} onClick={()=>setD("recruitingIntent",opt.key)}
+            style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",marginBottom:8,padding:"14px 16px",background:data.recruitingIntent===opt.key?`${C.gold}18`:C.navy3,borderRadius:10,border:`2px solid ${data.recruitingIntent===opt.key?C.gold:C.border}`,transition:"all 0.15s"}}>
+            <div style={{width:20,height:20,borderRadius:"50%",border:`2px solid ${data.recruitingIntent===opt.key?C.gold:C.muted}`,background:data.recruitingIntent===opt.key?C.gold:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+              {data.recruitingIntent===opt.key&&<span style={{color:"#000",fontSize:10,fontWeight:700}}>✓</span>}
+            </div>
+            <div style={{color:C.text,fontWeight:600,fontSize:14}}>{opt.label}</div>
+          </div>
+        ))}
+        <div style={{marginBottom:12}}/>
+      </>}
+
       {err&&<div style={{color:C.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
       <button onClick={nextStep} disabled={loading} style={btn(C.gold,"#000",{opacity:loading?0.7:1,cursor:loading?"not-allowed":"pointer"})}>
-        {loading?"Please wait...":(step===5?"Create Account →":"Next →")}
+        {loading?"Please wait...":(step===TOTAL_STEPS?"Create Account →":(step===11||step===12)?"Save & Continue →":"Next →")}
       </button>
     </div>
   );
@@ -961,6 +1188,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [showLog,setShowLog] = useState(false);
   const [showSettings,setShowSettings] = useState(false);
   const [showProgram,setShowProgram] = useState(false);
+  const [showProgress,setShowProgress] = useState(false);
+  const [showProfileCompletion,setShowProfileCompletion] = useState(false);
+  const [profileBannerDismissed,setProfileBannerDismissed] = useState(()=>{
+    try{return!!localStorage.getItem(`wilco_profile_banner_${initialAthlete.id}`);}catch{return false;}
+  });
+  const [athleteGoals,setAthleteGoals] = useState([]);
+  const [goalCollectionActive,setGoalCollectionActive] = useState(false);
   const [athleteProgramText,setAthleteProgramText] = useState(athlete.program_text||"");
   const [athleteProgramSaving,setAthleteProgramSaving] = useState(false);
   const [athleteProgramMsg,setAthleteProgramMsg] = useState("");
@@ -1029,6 +1263,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         const freshAthlete = await sbGet("athletes",`?id=eq.${athlete.id}&select=*`);
         if(freshAthlete?.length>0) setAthlete(freshAthlete[0]);
 
+        // Load goals for AI context
+        const goals = await sbGet("athlete_goals",`?athlete_id=eq.${freshAthlete?.[0]?.id||athlete.id}&order=created_at.desc&limit=10`);
+        if(Array.isArray(goals)&&goals.length>0) setAthleteGoals(goals);
+
         // Free tier: no session memory — skip loading workout history
         const logs = tier!=="free" ? await sbGet("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=100&select=*`) : [];
         if(logs&&logs.length>0) setWorkoutHistory(logs);
@@ -1041,6 +1279,15 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           : lastLog?.parsed_data?.exercises?.map(e=>`${e.name}${e.weight?" "+fmtWeight(e.weight,e.unit):""}${e.sets&&e.reps?" "+e.sets+"x"+e.reps:""}`).join(", ")||"";
         const lastDate = lastLog ? fmtDateShort(lastLog.created_at) : null;
         const summary = lastExs ? `Last session (${lastDate}): ${lastExs}.` : "";
+
+        // Goal collection: first chat ever
+        const latestAthlete = freshAthlete?.[0]||athlete;
+        if(!latestAthlete.first_chat_complete){
+          setGoalCollectionActive(true);
+          setMessages([{role:"assistant",content:`Welcome to WILCO, ${latestAthlete.name}. Before I build your program — what are you specifically training for? Give me a goal and a number if you have one. For example: "I want to squat 300 lbs by football season" or "I want to lose 15 lbs before spring."`}]);
+          setHistoryLoaded(true);
+          return;
+        }
 
         let greeting;
         // Free tier: always greet as fresh start (no memory between sessions)
@@ -1100,7 +1347,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             await sbInsert("prs",{athlete_id:updatedAthlete.id,exercise:ex.name,weight:ex.weight,reps:ex.reps||1,estimated_1rm:exE1RM,unit:ex.unit||"lbs"});
           } else if(exE1RM > prE1RM){
             await sbInsert("prs",{athlete_id:updatedAthlete.id,exercise:ex.name,weight:ex.weight,reps:ex.reps||1,estimated_1rm:exE1RM,unit:ex.unit||"lbs"});
-            newPRs.push({exercise:ex.name,weight:ex.weight,unit:ex.unit||"lbs",reps:ex.reps||1,e1rm:exE1RM,prevE1RM:prE1RM,diff:exE1RM-prE1RM});
+            newPRs.push({exercise:ex.name,weight:ex.weight,unit:ex.unit||"lbs",reps:ex.reps||1,e1rm:exE1RM,prevE1RM:prE1RM,diff:exE1RM-prE1RM,old1RM:prE1RM});
           }
         }
       }
@@ -1109,15 +1356,45 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       setWorkoutHistory(prev=>[{raw_message:msg,parsed_data:parsedFinal,created_at:new Date().toISOString()},...prev]);
 
       if(newPRs.length>0){
+        // 1RM propagation: recalculate program weights for each new PR
+        let currentProgramText = updatedAthlete.program_text;
+        const propagationLog = [];
+        if(currentProgramText){
+          for(const pr of newPRs){
+            if(!pr.old1RM||pr.old1RM<=0) continue;
+            const {text,changed} = propagate1RM(currentProgramText,pr.exercise,pr.old1RM,pr.e1rm);
+            if(changed){
+              currentProgramText = text;
+              propagationLog.push(`${pr.exercise}: ${Math.round(pr.old1RM)}→${Math.round(pr.e1rm)}lbs est. 1RM`);
+            }
+          }
+          if(propagationLog.length>0){
+            try {
+              await sbUpdate("athletes",updatedAthlete.id,{program_text:currentProgramText});
+              setAthlete(prev=>({...prev,program_text:currentProgramText}));
+              // Log to program_modifications
+              await sbInsert("program_modifications",{
+                athlete_id:updatedAthlete.id,
+                modification_type:"pr_propagation",
+                description:`Auto-updated program weights based on new PR(s): ${propagationLog.join(", ")}`,
+                old_value:updatedAthlete.program_text?.slice(0,500)||null,
+                new_value:currentProgramText?.slice(0,500)||null
+              });
+            } catch(e){}
+          }
+        }
+
         try {
           const prCallout = newPRs.map(pr=>`${pr.exercise}: ${fmtWeight(pr.weight,pr.unit)} x${pr.reps} reps (est. 1RM: ${Math.round(pr.e1rm)}lbs-equiv, +${Math.round(pr.diff)}lbs-equiv over prev)`).join("\n");
+          const propagationNote = propagationLog.length>0 ? `\n\nI've updated your future ${propagationLog.map(l=>l.split(":")[0]).join(", ")} targets based on your new max.` : "";
           const prReply = await askClaude(
             "You are Coach Joe Thomas. An athlete just hit a new PR. Acknowledge it directly -- short, punchy, in Coach Joe's voice. Atta boy/girl is appropriate here.",
             `Athlete: ${updatedAthlete.name} (${updatedAthlete.sport})\nNew PRs:\n${prCallout}`,150
           );
-          setMessages(prev=>[...prev,{role:"assistant",content:prReply}]);
+          setMessages(prev=>[...prev,{role:"assistant",content:prReply+propagationNote}]);
         } catch(e){
-          setMessages(prev=>[...prev,{role:"assistant",content:newPRs.map(pr=>`New PR -- ${pr.exercise} at ${fmtWeight(pr.weight,pr.unit)} x${pr.reps} (est. 1RM: ${Math.round(pr.e1rm)}lbs-equiv). +${Math.round(pr.diff)}lbs-equiv over previous best. That's what the work is for.`).join("\n")}]);
+          const propagationNote = propagationLog.length>0 ? `\n\nUpdated your future ${propagationLog.map(l=>l.split(":")[0]).join(", ")} targets based on your new max.` : "";
+          setMessages(prev=>[...prev,{role:"assistant",content:newPRs.map(pr=>`New PR -- ${pr.exercise} at ${fmtWeight(pr.weight,pr.unit)} x${pr.reps} (est. 1RM: ${Math.round(pr.e1rm)}lbs-equiv). +${Math.round(pr.diff)}lbs-equiv over previous best. That's what the work is for.`).join("\n")+propagationNote}]);
         }
       }
     } catch(e){
@@ -1137,6 +1414,47 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const send = async () => {
     const msg = input.trim();
     if(!msg||loading||videoLoading||!historyLoaded) return;
+
+    // ── Goal collection flow (first chat only) ──────────────────────────────
+    if(goalCollectionActive){
+      setInput("");
+      const newMsgs=[...messages,{role:"user",content:msg}];
+      setMessages(newMsgs);
+      setLoading(true);
+      try {
+        // Parse goal from athlete's response
+        const goalJson = await askClaude(
+          `Extract training goal info from this athlete message. Return ONLY valid JSON:\n{"goal_text":string,"goal_type":"strength"|"sport_performance"|"weight_loss"|"endurance"|"body_composition"|"general"|"other","target_metric":string|null,"target_value":number|null,"target_date":string|null}\ngoal_type: pick the best match. target_date: ISO date string if mentioned, else null.`,
+          `Athlete: ${athlete.name}\nMessage: ${msg}`,200
+        );
+        try {
+          const parsed = JSON.parse(goalJson.replace(/```json|```/g,"").trim());
+          await sbInsert("athlete_goals",{
+            athlete_id:athlete.id,
+            goal_text:msg,
+            goal_type:parsed.goal_type||"general",
+            target_metric:parsed.target_metric||null,
+            target_value:parsed.target_value||null,
+            target_date:parsed.target_date||null
+          });
+          setAthleteGoals([{goal_text:msg,goal_type:parsed.goal_type||"general",created_at:new Date().toISOString()}]);
+        } catch(e){}
+        // Mark first_chat_complete
+        await sbUpdate("athletes",athlete.id,{first_chat_complete:true});
+        setAthlete(prev=>({...prev,first_chat_complete:true}));
+        setGoalCollectionActive(false);
+        const confirmReply = msg.trim().length>5
+          ? `Got it — I'll build your program around that. Now let's get to work. Tell me about your first workout, or ask me anything.`
+          : `Noted. I'll factor that in as we go. Tell me about your first workout, or ask me anything.`;
+        setMessages(prev=>[...prev,{role:"assistant",content:confirmReply}]);
+      } catch(e){
+        setMessages(prev=>[...prev,{role:"assistant",content:`Got it. Let's get to work — what did you do today?`}]);
+        setGoalCollectionActive(false);
+        try{ await sbUpdate("athletes",athlete.id,{first_chat_complete:true}); }catch(_){}
+      }
+      setLoading(false);
+      return;
+    }
 
     // Intercept log-view requests — open the log modal instead of calling Claude (Pro/Elite only)
     const logKeywords = ["show me my log","my log","my workout log","show my workouts","view my workouts","workout history","my history","show my history","see my log","all my workouts","see my workouts","show my log"];
@@ -1160,7 +1478,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       let updatedAthlete = {...athlete};
 
       const [reply,parsed] = await Promise.all([
-        getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory),
+        getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals),
         parseWorkout(msg,athlete.name,athlete.sport)
       ]);
 
@@ -1393,10 +1711,22 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             </button>
           )}
           {(athlete.tier||"free")!=="free"&&<button onClick={()=>setShowLog(true)} style={{background:C.navy3,border:`1px solid ${C.gold}`,color:C.gold,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>MY LOG</button>}
+          {(athlete.tier||"free")!=="free"&&<button onClick={()=>setShowProgress(true)} style={{background:C.navy3,border:`1px solid ${C.blue}`,color:C.blue,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>PROGRESS</button>}
           <button onClick={()=>setShowSettings(true)} title="Settings" style={{background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:14,lineHeight:1}}>⚙</button>
           {!isMobile&&<button onClick={onLogout} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12}}>Log Out</button>}
         </div>
       </div>
+
+      {/* Profile completion banner */}
+      {!profileBannerDismissed&&!athlete.birthday&&(
+        <div style={{background:`${C.gold}15`,borderBottom:`1px solid ${C.gold}40`,padding:"8px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexShrink:0}}>
+          <div style={{color:C.gold,fontSize:12}}>Help us personalize your program — takes 60 seconds.</div>
+          <div style={{display:"flex",gap:6,flexShrink:0}}>
+            <button onClick={()=>setShowProfileCompletion(true)} style={{background:C.gold,border:"none",color:"#000",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontWeight:700}}>Complete Profile</button>
+            <button onClick={()=>{setProfileBannerDismissed(true);try{localStorage.setItem(`wilco_profile_banner_${athlete.id}`,"1");}catch(_){}}} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11}}>Later</button>
+          </div>
+        </div>
+      )}
 
       {/* Messages */}
       <div style={{flex:1,overflowY:"auto",padding:"16px 16px 8px"}}>
@@ -1573,6 +1903,28 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           onClose={()=>setShowSettings(false)}
           onCoachUpdate={(updates)=>setAthlete(prev=>({...prev,...updates}))}
           onLogout={onLogout}
+        />
+      )}
+
+      {/* Progress Modal */}
+      {showProgress&&(
+        <ProgressModal
+          athlete={athlete}
+          workoutHistory={workoutHistory}
+          onClose={()=>setShowProgress(false)}
+        />
+      )}
+
+      {/* Profile Completion Modal */}
+      {showProfileCompletion&&(
+        <ProfileCompletionModal
+          athlete={athlete}
+          onClose={()=>setShowProfileCompletion(false)}
+          onSave={(updates)=>{
+            setAthlete(prev=>({...prev,...updates}));
+            setProfileBannerDismissed(true);
+            try{localStorage.setItem(`wilco_profile_banner_${athlete.id}`,"1");}catch(_){}
+          }}
         />
       )}
     </div>
@@ -1826,6 +2178,369 @@ function MyLogModal({workoutHistory, athlete, onClose}) {
             })()}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ─── PROGRESS MODAL ───────────────────────────────────────────────────────────
+function ProgressModal({athlete, workoutHistory, onClose}) {
+  const [tab,setTab] = useState("benchmarks");
+
+  // Athlete physical stats
+  const bodyweight = athlete.weight_lbs;
+  const genderKey = athlete.gender==="Female" ? "female" : "male";
+  const age = athlete.birthday
+    ? Math.floor((Date.now()-new Date(athlete.birthday))/(365.25*24*60*60*1000))
+    : (athlete.age||null);
+  const isUnder18 = age!==null && age<18;
+
+  // Build best estimated 1RM per exercise from workout history
+  const byEx = {};
+  workoutHistory.forEach(w=>{
+    const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
+    (pd.exercises||[]).forEach(ex=>{
+      if(!ex.name||!ex.weight||ex.unit==="bodyweight") return;
+      const k=normalizeExName(ex.name);
+      const lbsW=toLbs(ex.weight,ex.unit||"lbs");
+      const e1rm=epley1RM(lbsW,ex.reps||1);
+      if(!byEx[k]||e1rm>byEx[k].e1rm) byEx[k]={name:ex.name,e1rm,unit:ex.unit||"lbs"};
+    });
+  });
+
+  // Benchmark lifts that the athlete has logged
+  const benchmarked = Object.entries(byEx).map(([k,ex])=>{
+    const benchKey=getBenchKey(k);
+    if(!benchKey) return null;
+    const threshRaw=BENCH_THRESHOLDS[genderKey]?.[benchKey];
+    if(!threshRaw) return null;
+    const thresh = isUnder18 ? threshRaw.map(t=>t*0.85) : threshRaw;
+    return {name:ex.name,e1rm:ex.e1rm,benchKey,thresh};
+  }).filter(Boolean);
+
+  // Dedupe benchmark keys — keep highest e1rm per bench key
+  const seen={};
+  const dedupedBench = benchmarked.filter(b=>{
+    if(seen[b.benchKey]&&seen[b.benchKey]>=b.e1rm) return false;
+    seen[b.benchKey]=b.e1rm; return true;
+  });
+
+  // Strength/running progress for other tabs
+  const exercises = Object.values(byEx).map(ex=>{
+    const entries = workoutHistory.flatMap(w=>{
+      const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
+      return (pd.exercises||[]).filter(e=>normalizeExName(e.name)===normalizeExName(ex.name)&&e.weight&&e.unit!=="bodyweight").map(e=>({date:new Date(w.created_at),e1rm:epley1RM(toLbs(e.weight,e.unit||"lbs"),e.reps||1)}));
+    }).sort((a,b)=>a.date-b.date);
+    return {...ex,entries};
+  }).sort((a,b)=>b.e1rm-a.e1rm);
+
+  return (
+    <div style={{position:"fixed",inset:0,zIndex:300,background:C.navy,display:"flex",flexDirection:"column",maxWidth:600,margin:"0 auto"}}>
+      <style>{GS}</style>
+      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+        <div>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2}}>PROGRESS</div>
+          <div style={{color:C.muted,fontSize:11}}>{athlete.name} · {athlete.sport}</div>
+        </div>
+        <button onClick={onClose} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:13}}>✕ Close</button>
+      </div>
+
+      {/* Tabs */}
+      <div style={{display:"flex",borderBottom:`1px solid ${C.border}`,flexShrink:0}}>
+        {["benchmarks","strength","running"].map(t=>(
+          <button key={t} onClick={()=>setTab(t)}
+            style={{padding:"10px 20px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?C.gold:"transparent"}`,color:tab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,transition:"color 0.15s"}}>
+            {t}
+          </button>
+        ))}
+      </div>
+
+      <div style={{flex:1,overflowY:"auto",padding:16}}>
+
+        {/* ── BENCHMARKS TAB ── */}
+        {tab==="benchmarks"&&(
+          <div>
+            <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>STRENGTH BENCHMARKS</div>
+
+            {!bodyweight&&(
+              <div style={{background:`${C.gold}15`,border:`1px solid ${C.gold}40`,borderRadius:10,padding:"12px 14px",marginBottom:16,display:"flex",alignItems:"center",gap:10}}>
+                <span style={{fontSize:18}}>⚠</span>
+                <div>
+                  <div style={{color:C.gold,fontSize:12,fontWeight:600}}>Add your weight to see benchmarks</div>
+                  <div style={{color:C.muted2,fontSize:11,marginTop:2}}>Go to Settings to add your weight in lbs.</div>
+                </div>
+              </div>
+            )}
+
+            {isUnder18&&(
+              <div style={{background:`${C.blue}12`,border:`1px solid ${C.blue}30`,borderRadius:8,padding:"8px 12px",marginBottom:12,color:C.muted2,fontSize:11,lineHeight:1.5}}>
+                Age-adjusted thresholds applied (−15% for under-18).
+              </div>
+            )}
+
+            {bodyweight&&dedupedBench.length<3&&(
+              <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:16,color:C.muted2,fontSize:12,lineHeight:1.6}}>
+                Log more sessions to unlock your full benchmark profile. Benchmarks track: Squat, Deadlift, Bench Press, Overhead Press, Power Clean.
+              </div>
+            )}
+
+            {bodyweight&&dedupedBench.map((b,i)=>{
+              const ratio = b.e1rm / bodyweight;
+              const [t1,t2,t3] = b.thresh;
+              let tierIdx = 0;
+              if(ratio>=t3) tierIdx=3;
+              else if(ratio>=t2) tierIdx=2;
+              else if(ratio>=t1) tierIdx=1;
+              // Position marker: map ratio to 0-100% across the full range [0, t3*1.3]
+              const maxRatio = t3*1.3;
+              const markerPct = Math.min(Math.max(ratio/maxRatio*100,1),99);
+              // Tier segment widths (roughly equal)
+              const segments = [t1/maxRatio*100,(t2-t1)/maxRatio*100,(t3-t2)/maxRatio*100,(maxRatio-t3)/maxRatio*100];
+              const segColors = ["#374151","#1e3a5f","#065f46","#78460f"];
+              return (
+                <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:12}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+                    <div>
+                      <div style={{color:C.text,fontWeight:700,fontSize:14}}>{b.name}</div>
+                      <div style={{color:TIER_COLORS[tierIdx],fontSize:12,fontWeight:600,marginTop:2}}>{TIER_NAMES[tierIdx]} for your stats</div>
+                    </div>
+                    <div style={{textAlign:"right"}}>
+                      <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:TIER_COLORS[tierIdx],lineHeight:1}}>{Math.round(b.e1rm)}<span style={{fontSize:11,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span></div>
+                      <div style={{color:C.muted,fontSize:10}}>{(ratio).toFixed(2)}× bodyweight</div>
+                    </div>
+                  </div>
+                  {/* Tier labels */}
+                  <div style={{display:"flex",marginBottom:4}}>
+                    {TIER_NAMES.map((t,ti)=>(
+                      <div key={t} style={{flex:1,textAlign:"center",color:tierIdx===ti?TIER_COLORS[ti]:C.muted,fontSize:9,fontWeight:700,letterSpacing:0.5,textTransform:"uppercase"}}>{t}</div>
+                    ))}
+                  </div>
+                  {/* Bar */}
+                  <div style={{position:"relative",height:16,borderRadius:8,overflow:"visible",display:"flex"}}>
+                    {segments.map((w,si)=>(
+                      <div key={si} style={{width:`${w}%`,height:"100%",background:segColors[si],
+                        borderRadius:si===0?"8px 0 0 8px":si===3?"0 8px 8px 0":"0",
+                        borderRight:si<3?"1px solid rgba(255,255,255,0.1)":""}}/>
+                    ))}
+                    {/* Gold marker */}
+                    <div style={{position:"absolute",top:-3,left:`${markerPct}%`,transform:"translateX(-50%)",width:6,height:22,background:C.gold,borderRadius:3,boxShadow:`0 0 6px ${C.gold}`}}/>
+                  </div>
+                  {/* Threshold labels */}
+                  <div style={{display:"flex",justifyContent:"space-between",marginTop:4,paddingLeft:"0%",paddingRight:"0%"}}>
+                    <div style={{color:C.muted,fontSize:9}}>{(t1*bodyweight).toFixed(0)}</div>
+                    <div style={{color:C.muted,fontSize:9}}>{(t2*bodyweight).toFixed(0)}</div>
+                    <div style={{color:C.muted,fontSize:9}}>{(t3*bodyweight).toFixed(0)}</div>
+                  </div>
+                </div>
+              );
+            })}
+
+            {!bodyweight&&dedupedBench.length===0&&(
+              <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>Add your weight in Settings to see your strength benchmarks.</div>
+            )}
+          </div>
+        )}
+
+        {/* ── STRENGTH TAB ── */}
+        {tab==="strength"&&(
+          <div>
+            <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>STRENGTH PROGRESS</div>
+            {exercises.filter(ex=>ex.entries.length>0).length===0?(
+              <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No weighted exercises logged yet.</div>
+            ):exercises.filter(ex=>ex.entries.length>0).map((ex,i)=>(
+              <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+                  <div>
+                    <div style={{color:C.text,fontWeight:700,fontSize:14}}>{ex.name}</div>
+                    <div style={{color:C.muted,fontSize:11,marginTop:2}}>{ex.entries.length} set{ex.entries.length!==1?"s":""} logged</div>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>BEST EST. 1RM</div>
+                    <div style={{fontFamily:"'Bebas Neue'",fontSize:28,color:C.gold,lineHeight:1}}>{Math.round(ex.e1rm)}<span style={{fontSize:11,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>{ex.unit==="kg"?"kg":"lbs"}</span></div>
+                  </div>
+                </div>
+                {ex.entries.length>=2?(
+                  <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={C.gold} unit={ex.unit==="kg"?"kg":"lbs"}/>
+                ):(
+                  <div style={{background:C.navy3,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.muted2}}>Log again to see a trend.</div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ── RUNNING TAB ── */}
+        {tab==="running"&&(()=>{
+          const runs=workoutHistory.filter(w=>{
+            const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
+            return!!pd.run_data;
+          }).map(w=>{
+            const pd=typeof w.parsed_data==="string"?JSON.parse(w.parsed_data):(w.parsed_data||{});
+            return{date:new Date(w.created_at),run:pd.run_data};
+          }).sort((a,b)=>a.date-b.date);
+          if(runs.length===0) return <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No runs logged yet.</div>;
+          const paceToMin=(p)=>{if(!p)return null;const pts=p.split(":");if(pts.length<2)return null;const m=parseFloat(pts[0]),s=parseFloat(pts[1]);return isNaN(m)||isNaN(s)?null:Math.round((m+s/60)*100)/100;};
+          const distData=runs.filter(r=>r.run.distance_miles||r.run.distance_km).map(r=>({label:fmtDateShort(r.date),y:r.run.distance_miles||r.run.distance_km}));
+          const paceData=runs.filter(r=>r.run.pace_per_mile||r.run.pace_per_km).map(r=>({label:fmtDateShort(r.date),y:paceToMin(r.run.pace_per_mile||r.run.pace_per_km)})).filter(d=>d.y!==null);
+          const hrData=runs.filter(r=>r.run.heart_rate_avg).map(r=>({label:fmtDateShort(r.date),y:r.run.heart_rate_avg}));
+          return (
+            <div>
+              <div style={{color:C.blue,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>RUNNING PROGRESS</div>
+              {distData.length>=2&&<div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:12}}>Distance per run</div><LineChart data={distData} color={C.blue} unit=" mi"/></div>}
+              {paceData.length>=2&&<div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:4}}>Pace (min/mi) — lower is faster</div><LineChart data={paceData} color={C.green} unit=""/></div>}
+              {hrData.length>=2&&<div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:12}}>Avg heart rate (bpm)</div><LineChart data={hrData} color={C.red} unit=" bpm"/></div>}
+              {distData.length<2&&paceData.length<2&&<div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:10,padding:16,color:C.muted2,fontSize:12}}>Log more runs to see trend charts.</div>}
+            </div>
+          );
+        })()}
+      </div>
+    </div>
+  );
+}
+
+// ─── PROFILE COMPLETION MODAL ─────────────────────────────────────────────────
+function ProfileCompletionModal({athlete, onClose, onSave}) {
+  const [data,setData] = useState({
+    birthday:athlete.birthday||"",
+    heightFt:athlete.height_inches?Math.floor(athlete.height_inches/12).toString():"",
+    heightIn:athlete.height_inches?(athlete.height_inches%12).toString():"0",
+    weight:athlete.weight_lbs?.toString()||"",
+    gender:athlete.gender||"",
+    trainingDays:athlete.training_days_per_week||4,
+    equipment:athlete.equipment||[],
+    positionOrEvent:athlete.position_or_event||"",
+    injuryHistory:athlete.injury_history||"",
+    recruitingIntent:athlete.recruiting_intent||"",
+  });
+  const [saving,setSaving] = useState(false);
+  const [err,setErr] = useState("");
+  const setD = (k,v) => setData(p=>({...p,[k]:v}));
+
+  const save = async () => {
+    if(!err) setErr("");
+    setSaving(true);
+    try {
+      const updates = {};
+      if(!athlete.birthday&&data.birthday){
+        const dob=new Date(data.birthday);
+        const ageYears=Math.floor((Date.now()-dob)/(365.25*24*60*60*1000));
+        if(ageYears<13){setErr("Must be at least 13.");setSaving(false);return;}
+        updates.birthday=data.birthday;
+        updates.age=ageYears;
+      }
+      if(!athlete.height_inches&&data.heightFt){
+        updates.height_inches=(+data.heightFt*12)+(+data.heightIn||0);
+      }
+      if(!athlete.weight_lbs&&data.weight) updates.weight_lbs=+data.weight;
+      if(!athlete.gender&&data.gender) updates.gender=data.gender;
+      if(!athlete.training_days_per_week&&data.trainingDays) updates.training_days_per_week=+data.trainingDays;
+      if((!athlete.equipment||athlete.equipment.length===0)&&data.equipment.length>0) updates.equipment=data.equipment;
+      if(!athlete.position_or_event&&data.positionOrEvent.trim()) updates.position_or_event=data.positionOrEvent.trim();
+      if(!athlete.injury_history&&data.injuryHistory.trim()) updates.injury_history=data.injuryHistory.trim();
+      if(!athlete.recruiting_intent&&data.recruitingIntent) updates.recruiting_intent=data.recruitingIntent;
+      if(Object.keys(updates).length>0){
+        await sbUpdate("athletes",athlete.id,updates);
+        onSave(updates);
+      }
+      onClose();
+    } catch(e){setErr("Couldn't save. Try again.");}
+    setSaving(false);
+  };
+
+  // Only show fields that are missing
+  const needsBirthday = !athlete.birthday;
+  const needsPhysical = !athlete.height_inches||!athlete.weight_lbs;
+  const needsGender = !athlete.gender;
+  const needsTraining = !athlete.training_days_per_week;
+  const needsEquipment = !athlete.equipment||athlete.equipment.length===0;
+  const needsPosition = !athlete.position_or_event;
+  const needsInjury = !athlete.injury_history;
+  const needsRecruiting = !athlete.recruiting_intent;
+
+  const label = (txt,optional=false) => (
+    <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>
+      {txt}{optional&&<span style={{color:C.muted,fontWeight:400}}> (optional)</span>}
+    </label>
+  );
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.8)",display:"flex",alignItems:"flex-end",justifyContent:"center",zIndex:500}}>
+      <style>{GS}</style>
+      <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderTopLeftRadius:20,borderTopRightRadius:20,width:"100%",maxWidth:600,maxHeight:"90dvh",display:"flex",flexDirection:"column"}}>
+        <div style={{padding:"16px 20px 12px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+          <div>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2}}>COMPLETE YOUR PROFILE</div>
+            <div style={{color:C.muted2,fontSize:12,marginTop:2}}>Personalizes your strength benchmarks and programming</div>
+          </div>
+          <button onClick={onClose} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"4px 12px",cursor:"pointer",fontSize:12}}>✕</button>
+        </div>
+        <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
+
+          {needsBirthday&&<div style={{marginBottom:16}}>{label("BIRTHDAY")}<input type="date" value={data.birthday} onChange={e=>setD("birthday",e.target.value)} max={new Date().toISOString().split("T")[0]} style={inp({colorScheme:"dark"})}/></div>}
+
+          {needsPhysical&&<>
+            <div style={{marginBottom:16}}>{label("HEIGHT")}
+              <div style={{display:"flex",gap:8}}>
+                <div style={{flex:1,position:"relative"}}><input type="number" min={3} max={8} value={data.heightFt} onChange={e=>setD("heightFt",e.target.value)} placeholder="5" style={inp({textAlign:"center"})}/><span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:C.muted,fontSize:12,pointerEvents:"none"}}>ft</span></div>
+                <div style={{flex:1}}><select value={data.heightIn} onChange={e=>setD("heightIn",e.target.value)} style={inp({textAlign:"center"})}>{[0,1,2,3,4,5,6,7,8,9,10,11].map(n=><option key={n} value={n}>{n} in</option>)}</select></div>
+              </div>
+            </div>
+            <div style={{marginBottom:16}}>{label("WEIGHT (lbs)")}<input type="number" min={50} max={500} value={data.weight} onChange={e=>setD("weight",e.target.value)} placeholder="e.g. 185" style={inp()}/></div>
+          </>}
+
+          {needsGender&&<div style={{marginBottom:16}}>{label("GENDER")}
+            <div style={{display:"flex",gap:8}}>
+              {["Male","Female","Prefer not to say"].map(g=>(
+                <button key={g} onClick={()=>setD("gender",g)}
+                  style={{flex:1,padding:"10px 6px",borderRadius:8,border:`2px solid ${data.gender===g?C.gold:C.border}`,background:data.gender===g?`${C.gold}18`:C.navy3,color:data.gender===g?C.gold:C.muted2,cursor:"pointer",fontSize:11,fontWeight:600,transition:"all 0.15s"}}>
+                  {g}
+                </button>
+              ))}
+            </div>
+          </div>}
+
+          {needsTraining&&<div style={{marginBottom:16}}>{label("TRAINING DAYS / WEEK")}
+            <div style={{display:"flex",gap:8}}>
+              {[2,3,4,5,6].map(d=>(
+                <button key={d} onClick={()=>setD("trainingDays",d)}
+                  style={{flex:1,padding:"10px 6px",borderRadius:8,border:`2px solid ${data.trainingDays===d?C.gold:C.border}`,background:data.trainingDays===d?`${C.gold}18`:C.navy3,color:data.trainingDays===d?C.gold:C.muted2,cursor:"pointer",fontFamily:"'Bebas Neue'",fontSize:18,transition:"all 0.15s"}}>
+                  {d}
+                </button>
+              ))}
+            </div>
+          </div>}
+
+          {needsEquipment&&<div style={{marginBottom:16}}>{label("EQUIPMENT ACCESS")}
+            {["Full gym","Barbells & racks","Dumbbells only","Bodyweight only","Home gym (mixed)"].map(eq=>{
+              const sel=data.equipment.includes(eq);
+              return <div key={eq} onClick={()=>setD("equipment",sel?data.equipment.filter(e=>e!==eq):[...data.equipment,eq])}
+                style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",marginBottom:6,padding:"10px 12px",background:sel?`${C.gold}18`:C.navy3,borderRadius:8,border:`2px solid ${sel?C.gold:C.border}`,transition:"all 0.15s"}}>
+                <div style={{width:18,height:18,borderRadius:4,border:`2px solid ${sel?C.gold:C.muted}`,background:sel?C.gold:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontSize:9,color:"#000",fontWeight:700}}>{sel?"✓":""}</div>
+                <div style={{color:C.text,fontSize:13,fontWeight:600}}>{eq}</div>
+              </div>;
+            })}
+          </div>}
+
+          {needsPosition&&<div style={{marginBottom:16}}>{label("POSITION OR EVENT",true)}<input value={data.positionOrEvent} onChange={e=>setD("positionOrEvent",e.target.value)} placeholder="e.g. Linebacker, 100m sprints..." style={inp()}/></div>}
+
+          {needsInjury&&<div style={{marginBottom:16}}>{label("INJURIES OR LIMITATIONS",true)}<textarea value={data.injuryHistory} onChange={e=>setD("injuryHistory",e.target.value)} placeholder="e.g. Left knee surgery 2022..." rows={2} style={{...inp(),resize:"none",lineHeight:1.5}}/></div>}
+
+          {needsRecruiting&&<div style={{marginBottom:16}}>{label("COLLEGE RECRUITING?")}
+            {[{key:"yes",label:"Yes"},{key:"maybe",label:"Maybe"},{key:"no",label:"No"}].map(opt=>(
+              <div key={opt.key} onClick={()=>setD("recruitingIntent",opt.key)}
+                style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",marginBottom:6,padding:"10px 12px",background:data.recruitingIntent===opt.key?`${C.gold}18`:C.navy3,borderRadius:8,border:`2px solid ${data.recruitingIntent===opt.key?C.gold:C.border}`,transition:"all 0.15s"}}>
+                <div style={{width:18,height:18,borderRadius:"50%",border:`2px solid ${data.recruitingIntent===opt.key?C.gold:C.muted}`,background:data.recruitingIntent===opt.key?C.gold:"transparent",flexShrink:0}}/>
+                <div style={{color:C.text,fontSize:13,fontWeight:600}}>{opt.label}</div>
+              </div>
+            ))}
+          </div>}
+
+          {err&&<div style={{color:C.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
+          <button onClick={save} disabled={saving} style={btn(C.gold,"#000",{opacity:saving?0.7:1,cursor:saving?"not-allowed":"pointer",marginBottom:8})}>
+            {saving?"Saving...":"Save Profile →"}
+          </button>
+          <button onClick={onClose} style={btn("transparent",C.muted,{border:`1px solid ${C.border}`,fontSize:13,padding:"10px",letterSpacing:1})}>Skip for now</button>
+        </div>
       </div>
     </div>
   );
