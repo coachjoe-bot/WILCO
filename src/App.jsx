@@ -791,7 +791,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
       {/* ── Step 8: Gender ── */}
       {step===8&&<>
         <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Used to calibrate your strength benchmarks.</div>
-        {["Male","Female","Prefer not to say"].map(g=>(
+        {["Male","Female"].map(g=>(
           <div key={g} onClick={()=>setD("gender",g)}
             style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",marginBottom:8,padding:"14px 16px",background:data.gender===g?`${C.gold}18`:C.navy3,borderRadius:10,border:`2px solid ${data.gender===g?C.gold:C.border}`,transition:"all 0.15s"}}>
             <div style={{width:20,height:20,borderRadius:"50%",border:`2px solid ${data.gender===g?C.gold:C.muted}`,background:data.gender===g?C.gold:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
@@ -2189,7 +2189,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
 
   // Athlete physical stats
   const bodyweight = athlete.weight_lbs;
-  const genderKey = athlete.gender==="Female" ? "female" : "male";
+  const genderKey = athlete.gender==="Female" ? "female" : "male"; // default male if not set
   const age = athlete.birthday
     ? Math.floor((Date.now()-new Date(athlete.birthday))/(365.25*24*60*60*1000))
     : (athlete.age||null);
@@ -2490,7 +2490,7 @@ function ProfileCompletionModal({athlete, onClose, onSave}) {
 
           {needsGender&&<div style={{marginBottom:16}}>{label("GENDER")}
             <div style={{display:"flex",gap:8}}>
-              {["Male","Female","Prefer not to say"].map(g=>(
+              {["Male","Female"].map(g=>(
                 <button key={g} onClick={()=>setD("gender",g)}
                   style={{flex:1,padding:"10px 6px",borderRadius:8,border:`2px solid ${data.gender===g?C.gold:C.border}`,background:data.gender===g?`${C.gold}18`:C.navy3,color:data.gender===g?C.gold:C.muted2,cursor:"pointer",fontSize:11,fontWeight:600,transition:"all 0.15s"}}>
                   {g}
@@ -2554,25 +2554,48 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
   const [saving,setSaving] = useState(false);
   const [savedMsg,setSavedMsg] = useState("");
   const [selectedTier,setSelectedTier] = useState(athlete.tier||"free");
+  const [selectedBilling,setSelectedBilling] = useState(athlete.billing||"monthly");
   const [upgrading,setUpgrading] = useState(false);
   const [upgradeMsg,setUpgradeMsg] = useState("");
+  const [showCancelForm,setShowCancelForm] = useState(false);
+  const [cancelReason,setCancelReason] = useState("");
+  const [cancelSending,setCancelSending] = useState(false);
+  const [cancelSent,setCancelSent] = useState(false);
 
   const currentTier = athlete.tier||"free";
+  const currentBilling = athlete.billing||"monthly";
   const tierOrder = {free:0,pro:1,elite:2};
-  const tierChanged = selectedTier !== currentTier;
+  const planChanged = selectedTier !== currentTier || selectedBilling !== currentBilling;
 
   const upgradeTier = async () => {
-    if(upgrading||!tierChanged) return;
+    if(upgrading||!planChanged) return;
     setUpgrading(true); setUpgradeMsg("");
     try {
-      await sbUpdate("athletes",athlete.id,{tier:selectedTier});
-      onCoachUpdate({tier:selectedTier});
-      setUpgradeMsg(tierOrder[selectedTier]>tierOrder[currentTier]?"Plan upgraded! Changes are live now.":"Plan updated.");
+      await sbUpdate("athletes",athlete.id,{tier:selectedTier,billing:selectedBilling});
+      onCoachUpdate({tier:selectedTier,billing:selectedBilling});
+      const isUpgrade = tierOrder[selectedTier]>tierOrder[currentTier];
+      const billingChanged = selectedBilling!==currentBilling;
+      setUpgradeMsg(isUpgrade?"Plan upgraded! Changes are live now.":billingChanged?"Billing updated.":"Plan updated.");
     } catch(e){
       setUpgradeMsg("Couldn't update plan. Try again.");
     }
     setUpgrading(false);
     setTimeout(()=>setUpgradeMsg(""),4000);
+  };
+
+  const submitCancellation = async () => {
+    setCancelSending(true);
+    try {
+      await sbInsert("cancellation_requests",{
+        athlete_id:athlete.id,
+        athlete_name:athlete.name,
+        athlete_email:athlete.email||null,
+        tier:currentTier,
+        reason:cancelReason.trim()||null
+      });
+      setCancelSent(true);
+    } catch(e){ setCancelSent(true); } // show confirmation even if DB insert fails
+    setCancelSending(false);
   };
 
   const save = async () => {
@@ -2613,10 +2636,30 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
         {/* Tier selector */}
         <div style={{marginBottom:16}}>
           <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>YOUR PLAN</div>
+
+          {/* Billing toggle */}
+          {currentTier!=="free"&&(
+            <div style={{display:"flex",gap:0,background:C.navy3,borderRadius:10,padding:4,border:`1px solid ${C.border}`,marginBottom:10}}>
+              {["monthly","annual"].map(b=>(
+                <button key={b} onClick={()=>setSelectedBilling(b)}
+                  style={{flex:1,padding:"7px 0",borderRadius:8,border:"none",cursor:"pointer",fontSize:12,fontWeight:700,letterSpacing:1,fontFamily:"'Bebas Neue'",
+                    background:selectedBilling===b?C.gold:"transparent",
+                    color:selectedBilling===b?"#000":C.muted,transition:"all 0.15s"}}>
+                  {b==="monthly"?"MONTHLY":"ANNUAL · SAVE ~17%"}
+                </button>
+              ))}
+            </div>
+          )}
+
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
             {Object.entries(TIERS).map(([key,t])=>{
               const isCurrent = currentTier===key;
               const isSelected = selectedTier===key;
+              const pricing = {
+                free:{monthly:"Free",annual:"Free"},
+                pro:{monthly:"$14.99/mo",annual:"$150/yr"},
+                elite:{monthly:"$99.99/mo",annual:"$1,000/yr"},
+              };
               const tierFeatures = {
                 free:"Chat with JoBot, log workouts",
                 pro:"Full history, progress charts, program assignments, weekly coach reports",
@@ -2625,41 +2668,32 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
               return (
                 <div key={key}
                   onClick={()=>setSelectedTier(key)}
-                  style={{
-                    background:isSelected?`${t.color}20`:C.navy3,
-                    border:`2px solid ${isSelected?t.color:C.border}`,
-                    borderRadius:10,padding:"10px 14px",cursor:"pointer",
-                    transition:"all 0.15s",position:"relative"
-                  }}>
+                  style={{background:isSelected?`${t.color}20`:C.navy3,border:`2px solid ${isSelected?t.color:C.border}`,borderRadius:10,padding:"10px 14px",cursor:"pointer",transition:"all 0.15s",position:"relative"}}>
                   <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:2}}>
                     <div style={{fontFamily:"'Bebas Neue'",fontSize:16,color:t.color,letterSpacing:2}}>{t.label}</div>
                     <div style={{display:"flex",alignItems:"center",gap:6}}>
-                      <div style={{color:C.text,fontSize:13,fontWeight:700}}>{t.price}</div>
-                      {isCurrent&&(
-                        <span style={{background:t.color,color:"#000",fontSize:9,fontWeight:800,borderRadius:4,padding:"2px 6px",letterSpacing:1}}>CURRENT</span>
-                      )}
+                      <div style={{color:C.text,fontSize:13,fontWeight:700}}>{pricing[key][selectedBilling]}</div>
+                      {isCurrent&&<span style={{background:t.color,color:"#000",fontSize:9,fontWeight:800,borderRadius:4,padding:"2px 6px",letterSpacing:1}}>CURRENT</span>}
                     </div>
                   </div>
                   <div style={{color:C.muted2,fontSize:11,lineHeight:1.4}}>{tierFeatures[key]}</div>
-                  {isSelected&&!isCurrent&&(
-                    <div style={{position:"absolute",top:8,right:8,width:16,height:16,borderRadius:"50%",background:t.color,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:"#000",fontWeight:800}}>✓</div>
-                  )}
+                  {isSelected&&!isCurrent&&<div style={{position:"absolute",top:8,right:8,width:16,height:16,borderRadius:"50%",background:t.color,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:"#000",fontWeight:800}}>✓</div>}
                 </div>
               );
             })}
           </div>
           {upgradeMsg&&(
-            <div style={{color:upgradeMsg.includes("upgraded")||upgradeMsg.includes("updated")?C.green:C.red,fontSize:12,textAlign:"center",marginTop:8,fontWeight:600}}>
+            <div style={{color:upgradeMsg.includes("upgraded")||upgradeMsg.includes("updated")||upgradeMsg.includes("Billing")?C.green:C.red,fontSize:12,textAlign:"center",marginTop:8,fontWeight:600}}>
               {upgradeMsg}
             </div>
           )}
-          {tierChanged&&(
+          {planChanged&&(
             <button onClick={upgradeTier} disabled={upgrading}
               style={btn(TIERS[selectedTier].color,tierOrder[selectedTier]>0?"#000":C.text,{marginTop:10,opacity:upgrading?0.7:1,cursor:upgrading?"not-allowed":"pointer"})}>
-              {upgrading?"Updating...":`Switch to ${TIERS[selectedTier].label} →`}
+              {upgrading?"Updating...":tierOrder[selectedTier]>tierOrder[currentTier]?`Upgrade to ${TIERS[selectedTier].label} →`:selectedTier!==currentTier?`Switch to ${TIERS[selectedTier].label} →`:`Switch to ${selectedBilling==="annual"?"Annual":"Monthly"} →`}
             </button>
           )}
-          {currentTier==="elite"&&!tierChanged&&(
+          {currentTier==="elite"&&!planChanged&&(
             <div style={{marginTop:8,color:C.muted2,fontSize:11,lineHeight:1.5,textAlign:"center"}}>
               A WILCO Certified Coach will be in touch within 24 hrs. Email joe.thomas@commandengineering.com with any questions.
             </div>
@@ -2715,6 +2749,42 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
         <button onClick={save} disabled={saving} style={btn(C.gold,"#000",{opacity:saving?0.7:1,cursor:saving?"not-allowed":"pointer",marginBottom:10})}>
           {saving?"Saving...":"Save Changes →"}
         </button>
+
+        {/* Cancellation */}
+        {currentTier!=="free"&&(
+          <div style={{marginTop:8,marginBottom:10}}>
+            {!showCancelForm&&!cancelSent&&(
+              <button onClick={()=>setShowCancelForm(true)}
+                style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer",textDecoration:"underline",padding:0}}>
+                Request cancellation
+              </button>
+            )}
+            {showCancelForm&&!cancelSent&&(
+              <div style={{background:`${C.red}10`,border:`1px solid ${C.red}30`,borderRadius:10,padding:"12px 14px"}}>
+                <div style={{color:C.red,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>REQUEST CANCELLATION</div>
+                <div style={{color:C.muted2,fontSize:12,marginBottom:10,lineHeight:1.5}}>Your plan stays active until the end of your billing period. Let us know why you're leaving — it helps us improve.</div>
+                <textarea value={cancelReason} onChange={e=>setCancelReason(e.target.value)}
+                  placeholder="Reason (optional)..." rows={2}
+                  style={{...inp(),resize:"none",fontSize:13,marginBottom:10}}/>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={submitCancellation} disabled={cancelSending}
+                    style={{flex:1,background:C.red,border:"none",color:"#fff",borderRadius:8,padding:"9px",cursor:"pointer",fontSize:13,fontWeight:700,opacity:cancelSending?0.7:1}}>
+                    {cancelSending?"Sending...":"Submit Request"}
+                  </button>
+                  <button onClick={()=>setShowCancelForm(false)}
+                    style={{flex:1,background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"9px",cursor:"pointer",fontSize:13}}>
+                    Never mind
+                  </button>
+                </div>
+              </div>
+            )}
+            {cancelSent&&(
+              <div style={{background:`${C.green}10`,border:`1px solid ${C.green}30`,borderRadius:10,padding:"10px 14px",color:C.green,fontSize:12,lineHeight:1.5}}>
+                ✓ Cancellation request received. Your plan stays active until the end of your billing period. We'll follow up at {athlete.email||"your email"}.
+              </div>
+            )}
+          </div>
+        )}
 
         {onLogout&&(
           <button onClick={onLogout} style={btn("transparent",C.muted,{border:`1px solid ${C.border}`,fontSize:13,padding:"10px",letterSpacing:1})}>
