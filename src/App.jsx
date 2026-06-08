@@ -166,7 +166,7 @@ Rules:
   catch { return {exercises:[],run_data:null,pain_flags:[],equipment_issues:[],questions:[],pr_attempts:[],session_feel:null,general_notes:message,is_program_update:false,is_temp_program_update:false,is_program_revert:false}; }
 };
 
-const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athleteGoals=[]) => {
+const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athleteGoals=[], athleteContext=null) => {
   const hist = history.slice(-6).map(m=>`${m.role==="user"?athlete.name:"Coach Joe"}: ${m.content}`).join("\n");
 
   // Improved history context with explicit dates so bot can answer "what did I do Monday" etc.
@@ -257,7 +257,13 @@ UNUSUAL TRAINING CONDITIONS (travel, cruise, hotel, beach, limited equipment, in
     goalsContext += `\n\nINJURY HISTORY: ${athlete.injury_history}\nFactor this into recommendations — suggest alternatives for any exercises that aggravate these areas.`;
   }
 
-  return askClaude(sys+goalsContext,`${hist}\n\n${athlete.name}: ${message}`,450);
+  // Athlete context from monthly recaps
+  let contextMemory = "";
+  if(athleteContext){
+    contextMemory = `\n\nATHLETE CONTEXT (from monthly recap history — preferences, injuries, goals stated over time):\n${athleteContext}\nUse this as background — do not repeat it back, just let it inform your responses.`;
+  }
+
+  return askClaude(sys+goalsContext+contextMemory,`${hist}\n\n${athlete.name}: ${message}`,450);
 };
 
 // ─── 1RM PROPAGATION ─────────────────────────────────────────────────────────
@@ -439,6 +445,278 @@ function RunCard({runData, feel}) {
         </table>
       )}
       {runData.notes&&<div style={{color:C.muted2,fontSize:12,marginTop:6,fontStyle:"italic"}}>{runData.notes}</div>}
+    </div>
+  );
+}
+
+// ─── PUSH SUBSCRIPTION REGISTRATION ─────────────────────────────────────────
+const VAPID_PUBLIC_KEY = import.meta.env.VITE_VAPID_PUBLIC_KEY || "";
+
+const registerPushSubscription = async (athleteId) => {
+  if(!("serviceWorker" in navigator && "PushManager" in window)) return;
+  if(!VAPID_PUBLIC_KEY) return;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if(!sub){
+      const keyBytes = Uint8Array.from(atob(VAPID_PUBLIC_KEY.replace(/-/g,"+").replace(/_/g,"/")),c=>c.charCodeAt(0));
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: keyBytes,
+      });
+    }
+    // Upsert subscription in Supabase
+    await fetch(`${SUPABASE_URL}/rest/v1/push_subscriptions?on_conflict=athlete_id`,{
+      method:"POST",
+      headers:{...sbH,"Prefer":"return=minimal,resolution=merge-duplicates"},
+      body:JSON.stringify({athlete_id:athleteId,subscription_json:sub.toJSON(),updated_at:new Date().toISOString()}),
+    });
+  } catch(_) {}
+};
+
+// ─── MONTHLY RECAP MODAL ─────────────────────────────────────────────────────
+function MonthlyRecapModal({athlete, digest, onClose, onContextSaved, workoutHistory}) {
+  const isMobile = useIsMobile();
+  const [phase, setPhase] = useState("report"); // "report" | "dialogue" | "acting"
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [questionIndex, setQuestionIndex] = useState(0);
+  const [reflectionAnswers, setReflectionAnswers] = useState([]);
+  const [programPending, setProgramPending] = useState(null); // {description, newText}
+  const bottomRef = useRef(null);
+  const monthLabel = digest?.label || "MONTHLY RECAP";
+  const c = digest?.content_json || {};
+
+  // Reflection questions — Claude generates contextually, but we use these as the base
+  const questions = [
+    "What felt like it was working this month?",
+    "What felt off or wasn't working?",
+    "Anything you want more of? Less of?",
+    "Any injuries, soreness, or limitations I should know about going forward?",
+    "Anything else on your mind about your training?",
+    ...(athlete.height_finalized
+      ? ["Any changes to your weight since you signed up?"]
+      : ["Quick check — any changes to your height or weight since you signed up?"]),
+  ];
+
+  useEffect(()=>{
+    // Build the opening report message
+    const sections = [];
+    if(c.opening_message) sections.push(c.opening_message);
+    if(c.month_summary) sections.push(`**THIS MONTH**\n${c.month_summary}`);
+    if(c.goal_progress) sections.push(`**GOAL PROGRESS**\n${c.goal_progress}`);
+    if(c.month_patterns) sections.push(`**PATTERNS**\n${c.month_patterns}`);
+    if(c.unresolved_plateaus) sections.push(`**PLATEAUS TO ADDRESS**\n${c.unresolved_plateaus}`);
+    if(c.encouragement) sections.push(c.encouragement);
+    const reportText = sections.join("\n\n") || "Here's your monthly summary.";
+    setMessages([{role:"assistant",content:reportText + "\n\n---\nLet me ask you a few questions before we adjust your program."}]);
+  },[]);
+
+  useEffect(()=>{ bottomRef.current?.scrollIntoView({behavior:"smooth"}); },[messages,loading]);
+
+  const startDialogue = () => {
+    setPhase("dialogue");
+    setMessages(prev=>[...prev,{role:"assistant",content:questions[0]}]);
+    setQuestionIndex(0);
+  };
+
+  const sendMessage = async () => {
+    const msg = input.trim();
+    if(!msg||loading) return;
+    setInput("");
+    const newMsgs = [...messages,{role:"user",content:msg}];
+    setMessages(newMsgs);
+    setLoading(true);
+
+    const currentQ = questions[questionIndex];
+    const newAnswers = [...reflectionAnswers,{q:currentQ,a:msg}];
+    setReflectionAnswers(newAnswers);
+
+    // Handle height/weight question
+    const isHeightQuestion = questionIndex === questions.length - 1;
+    if(isHeightQuestion){
+      const lowerMsg = msg.toLowerCase();
+      const doneGrowing = /done growing|fully grown|same height|no change|no i'm|nope/i.test(lowerMsg);
+      if(doneGrowing && !athlete.height_finalized){
+        try{
+          await fetch(`${SUPABASE_URL}/rest/v1/athletes?id=eq.${athlete.id}`,{
+            method:"PATCH",headers:{...sbH,"Prefer":"return=minimal"},
+            body:JSON.stringify({height_finalized:true})
+          });
+        }catch(_){}
+      }
+      // Extract weight update if mentioned
+      const weightMatch = lowerMsg.match(/(\d+)\s*(lbs?|pounds?|kg)/i);
+      if(weightMatch){
+        const newWeight = parseInt(weightMatch[1]);
+        const unit = /kg/.test(weightMatch[2]) ? "kg" : "lbs";
+        try{
+          await fetch(`${SUPABASE_URL}/rest/v1/athletes?id=eq.${athlete.id}`,{
+            method:"PATCH",headers:{...sbH,"Prefer":"return=minimal"},
+            body:JSON.stringify({weight:newWeight})
+          });
+        }catch(_){}
+      }
+    }
+
+    const nextQIdx = questionIndex + 1;
+    if(nextQIdx < questions.length){
+      setQuestionIndex(nextQIdx);
+      setLoading(false);
+      setMessages(prev=>[...prev,{role:"assistant",content:questions[nextQIdx]}]);
+    } else {
+      // All questions answered — move to acting phase
+      await generateActingPhase(newAnswers);
+    }
+  };
+
+  const generateActingPhase = async (answers) => {
+    setPhase("acting");
+    try {
+      const answersText = answers.map(a=>`Q: ${a.q}\nA: ${a.a}`).join("\n\n");
+      const programInfo = athlete.program_text ? `\n\nCURRENT PROGRAM:\n${athlete.program_text}` : "\n\nNo program currently set.";
+
+      const summary = await askClaude(
+        `You are Coach Joe Thomas. An athlete just completed a monthly recap dialogue. Summarize what you heard and state any program changes needed. Be direct and specific. If program changes are needed, be explicit about what changes to make. End with a brief forward-looking statement.${programInfo}`,
+        `Athlete: ${athlete.name} (${athlete.sport})\n\nMonthly report context:\n${JSON.stringify(c)}\n\nReflection answers:\n${answersText}`,
+        600
+      );
+
+      // Determine if program changes are needed
+      const programChangeNeeded = athlete.program_text && /program|change|adjust|modify|update|add|remove|reduce|increase/i.test(answersText);
+      let newProgramText = null;
+      if(programChangeNeeded){
+        const updatedProgram = await askClaude(
+          `You are Coach Joe Thomas. Based on this month's recap and athlete feedback, update their training program. Return ONLY the updated program text — preserve the existing structure and format but incorporate the changes. No intro, no commentary.`,
+          `Current program:\n${athlete.program_text}\n\nAthlete feedback:\n${answersText}\n\nMonth context:\n${JSON.stringify(c)}`,
+          1000
+        );
+        if(updatedProgram && updatedProgram.trim().length > 60){
+          newProgramText = updatedProgram.trim();
+        }
+      }
+
+      setLoading(false);
+      setMessages(prev=>[...prev,{role:"assistant",content:summary}]);
+
+      if(newProgramText && !athlete.program_locked){
+        setProgramPending({description:"Update program based on monthly recap", newText:newProgramText});
+      } else {
+        await saveContextAndClose(answers, summary, null);
+      }
+    } catch(e){
+      setLoading(false);
+      setMessages(prev=>[...prev,{role:"assistant",content:"That's a wrap on your monthly recap. Keep putting in the work."}]);
+      await saveContextAndClose(answers, "", null);
+    }
+  };
+
+  const applyProgramChange = async (apply) => {
+    if(apply && programPending?.newText){
+      try{
+        await fetch(`${SUPABASE_URL}/rest/v1/athletes?id=eq.${athlete.id}`,{
+          method:"PATCH",headers:{...sbH,"Prefer":"return=minimal"},
+          body:JSON.stringify({program_text:programPending.newText})
+        });
+        setMessages(prev=>[...prev,{role:"assistant",content:"📋 Program updated based on your feedback."}]);
+      }catch(_){}
+    }
+    await saveContextAndClose(reflectionAnswers, "", apply ? programPending?.newText : null);
+    setProgramPending(null);
+  };
+
+  const saveContextAndClose = async (answers, summary, newProgram) => {
+    // Build athlete_context summary
+    const answersText = answers.map(a=>`${a.q}: ${a.a}`).join("; ");
+    const injuryMentioned = answers.some(a=>/injur|sore|pain|hurt|chronic|limitation/i.test(a.a));
+    const contextContent = `Monthly recap ${new Date().toLocaleDateString("en-US",{month:"long",year:"numeric"})}:\n${answersText}${newProgram ? "\n\nProgram updated this month." : ""}${summary ? "\n\nCoach summary: "+summary.slice(0,400) : ""}`;
+    try {
+      // Upsert athlete_context (overwrite unless is_long_term)
+      await fetch(`${SUPABASE_URL}/rest/v1/athlete_context?on_conflict=athlete_id`,{
+        method:"POST",
+        headers:{...sbH,"Prefer":"return=minimal,resolution=merge-duplicates"},
+        body:JSON.stringify({athlete_id:athlete.id,content:contextContent,is_long_term:injuryMentioned,updated_at:new Date().toISOString()})
+      });
+      if(onContextSaved) onContextSaved(contextContent);
+    }catch(_){}
+
+    // Mark digest as read
+    try{
+      await fetch(`${SUPABASE_URL}/rest/v1/proof_digests?athlete_id=eq.${athlete.id}&digest_type=eq.monthly`,{
+        method:"PATCH",headers:{...sbH,"Prefer":"return=minimal"},
+        body:JSON.stringify({is_read:true})
+      });
+    }catch(_){}
+
+    onClose();
+  };
+
+  return (
+    <div style={{position:"fixed",inset:0,zIndex:500,background:C.navy,display:"flex",flexDirection:"column",maxWidth:600,margin:"0 auto"}}>
+      <style>{GS}</style>
+      {/* Header */}
+      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+        <div>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:C.gold,letterSpacing:2}}>{monthLabel}</div>
+          <div style={{color:C.muted,fontSize:11}}>Monthly Check-In · {athlete.name}</div>
+        </div>
+        <button onClick={onClose} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:13}}>✕ Close</button>
+      </div>
+
+      {/* Messages */}
+      <div style={{flex:1,overflowY:"auto",padding:"16px",display:"flex",flexDirection:"column",gap:10}}>
+        {messages.map((m,i)=>(
+          <div key={i} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
+            <div style={{
+              maxWidth:"85%",background:m.role==="user"?C.gold:C.navy2,
+              color:m.role==="user"?"#000":C.text,borderRadius:12,padding:"10px 14px",
+              fontSize:14,lineHeight:1.6,whiteSpace:"pre-wrap",
+              border:m.role==="user"?"none":`1px solid ${C.border}`
+            }}>
+              {m.content}
+            </div>
+          </div>
+        ))}
+        {loading&&<div style={{display:"flex",gap:6,padding:"10px 14px"}}>
+          {[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:C.muted,animation:"pulse 1.2s ease-in-out infinite",animationDelay:`${i*0.2}s`}}/>)}
+        </div>}
+
+        {/* Program change confirmation */}
+        {programPending&&!loading&&(
+          <div style={{background:C.navy3,border:`1px solid ${C.gold}`,borderRadius:12,padding:14,margin:"6px 0"}}>
+            <div style={{color:C.gold,fontSize:13,fontWeight:700,marginBottom:8}}>📋 Suggested program update</div>
+            <div style={{color:C.muted2,fontSize:12,marginBottom:10}}>Based on your feedback this month, I have program adjustments ready. Apply them now?</div>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>applyProgramChange(true)} style={{flex:1,background:C.gold,color:"#000",border:"none",borderRadius:8,padding:"10px",fontWeight:700,cursor:"pointer",fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14}}>Yes — Apply</button>
+              <button onClick={()=>applyProgramChange(false)} style={{flex:1,background:"transparent",color:C.muted,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px",cursor:"pointer",fontSize:13}}>Skip</button>
+            </div>
+          </div>
+        )}
+
+        {/* Start dialogue CTA */}
+        {phase==="report"&&messages.length>0&&!loading&&(
+          <div style={{textAlign:"center",marginTop:8}}>
+            <button onClick={startDialogue} style={{background:C.gold,color:"#000",border:"none",borderRadius:12,padding:"12px 28px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:16,cursor:"pointer"}}>
+              START CHECK-IN →
+            </button>
+          </div>
+        )}
+        <div ref={bottomRef}/>
+      </div>
+
+      {/* Input */}
+      {phase==="dialogue"&&!programPending&&(
+        <div style={{padding:"12px 16px",borderTop:`1px solid ${C.border}`,background:C.navy2,flexShrink:0,display:"flex",gap:8}}>
+          <input
+            value={input} onChange={e=>setInput(e.target.value)}
+            onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage();}}}
+            placeholder="Type your answer..."
+            style={{flex:1,background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",color:C.text,fontSize:15,outline:"none"}}
+          />
+          <button onClick={sendMessage} disabled={loading||!input.trim()} style={{background:input.trim()&&!loading?C.gold:C.navy3,color:input.trim()&&!loading?"#000":C.muted,border:"none",borderRadius:10,padding:"10px 16px",cursor:input.trim()&&!loading?"pointer":"not-allowed",fontWeight:700,fontSize:18,transition:"background 0.15s"}}>→</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1194,6 +1472,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     try{return!!localStorage.getItem(`wilco_profile_banner_${initialAthlete.id}`);}catch{return false;}
   });
   const [athleteGoals,setAthleteGoals] = useState([]);
+  const [athleteContext,setAthleteContext] = useState(null);
+  const [proofDigest,setProofDigest] = useState(null);
+  const [showMonthlyRecap,setShowMonthlyRecap] = useState(false);
   const [goalCollectionActive,setGoalCollectionActive] = useState(false);
   const [athleteProgramText,setAthleteProgramText] = useState(athlete.program_text||"");
   const [athleteProgramSaving,setAthleteProgramSaving] = useState(false);
@@ -1266,6 +1547,17 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // Load goals for AI context
         const goals = await sbGet("athlete_goals",`?athlete_id=eq.${freshAthlete?.[0]?.id||athlete.id}&order=created_at.desc&limit=10`);
         if(Array.isArray(goals)&&goals.length>0) setAthleteGoals(goals);
+
+        // Load athlete context (from monthly recaps) for AI prompt injection
+        const ctxRows = await sbGet("athlete_context",`?athlete_id=eq.${freshAthlete?.[0]?.id||athlete.id}&order=updated_at.desc&limit=5`);
+        if(Array.isArray(ctxRows)&&ctxRows.length>0) setAthleteContext(ctxRows.map(r=>r.content).join("\n\n"));
+
+        // Load most recent proof digest
+        const digestRows = await sbGet("proof_digests",`?athlete_id=eq.${freshAthlete?.[0]?.id||athlete.id}&digest_type=in.(weekly,monthly)&order=generated_at.desc&limit=1`);
+        if(Array.isArray(digestRows)&&digestRows.length>0) setProofDigest(digestRows[0]);
+
+        // Register push notification subscription (best-effort)
+        registerPushSubscription(freshAthlete?.[0]?.id||athlete.id);
 
         // Free tier: no session memory — skip loading workout history
         const logs = tier!=="free" ? await sbGet("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=100&select=*`) : [];
@@ -1478,7 +1770,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       let updatedAthlete = {...athlete};
 
       const [reply,parsed] = await Promise.all([
-        getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals),
+        getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext),
         parseWorkout(msg,athlete.name,athlete.sport)
       ]);
 
@@ -1829,7 +2121,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
       </div>
 
       {/* My Log Modal */}
-      {showLog&&<MyLogModal workoutHistory={workoutHistory} athlete={athlete} onClose={()=>setShowLog(false)}/>}
+      {showLog&&<MyLogModal workoutHistory={workoutHistory} athlete={athlete} onClose={()=>setShowLog(false)} proofDigest={proofDigest} onDigestRead={(d)=>setProofDigest(d)} onOpenMonthlyRecap={()=>{setShowLog(false);setShowMonthlyRecap(true);}}/>}
 
       {/* Program View Modal */}
       {showProgram&&(
@@ -1915,6 +2207,17 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         />
       )}
 
+      {/* Monthly Recap Modal */}
+      {showMonthlyRecap&&proofDigest&&(
+        <MonthlyRecapModal
+          athlete={athlete}
+          digest={proofDigest}
+          workoutHistory={workoutHistory}
+          onClose={()=>setShowMonthlyRecap(false)}
+          onContextSaved={(ctx)=>setAthleteContext(ctx)}
+        />
+      )}
+
       {/* Profile Completion Modal */}
       {showProfileCompletion&&(
         <ProfileCompletionModal
@@ -1932,7 +2235,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
 }
 
 // ─── MY LOG MODAL ─────────────────────────────────────────────────────────────
-function MyLogModal({workoutHistory, athlete, onClose}) {
+function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead, onOpenMonthlyRecap}) {
   const [tab,setTab] = useState("workouts");
   const painKey = `wilco_resolved_pain_${athlete.id}`;
   const [resolvedPain,setResolvedPain] = useState(()=>{
@@ -1951,20 +2254,20 @@ function MyLogModal({workoutHistory, athlete, onClose}) {
     <div style={{position:"fixed",inset:0,zIndex:300,background:C.navy,display:"flex",flexDirection:"column",maxWidth:600,margin:"0 auto"}}>
       <style>{GS}</style>
       {/* Header */}
-      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,paddingTop:"calc(12px + env(safe-area-inset-top, 0px))",paddingBottom:"12px",paddingLeft:"16px",paddingRight:"16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
         <div>
           <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2}}>MY WORKOUT LOG</div>
           <div style={{color:C.muted,fontSize:11}}>{athlete.name} · {athlete.sport} · {sessionCount} session{sessionCount!==1?"s":""}</div>
         </div>
-        <button onClick={onClose} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:13}}>✕ Close</button>
       </div>
 
       {/* Tabs */}
       <div style={{display:"flex",borderBottom:`1px solid ${C.border}`,flexShrink:0}}>
-        {["workouts","progress"].map(t=>(
+        {["workouts","progress","proof"].map(t=>(
           <button key={t} onClick={()=>setTab(t)}
-            style={{padding:"10px 20px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?C.gold:"transparent"}`,color:tab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"color 0.15s"}}>
+            style={{padding:"10px 20px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?C.gold:"transparent"}`,color:tab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"color 0.15s",position:"relative"}}>
             {t}
+            {t==="proof"&&proofDigest&&!proofDigest.is_read&&<span style={{position:"absolute",top:8,right:8,width:6,height:6,borderRadius:"50%",background:C.gold,display:"block"}}/>}
           </button>
         ))}
       </div>
@@ -2178,6 +2481,90 @@ function MyLogModal({workoutHistory, athlete, onClose}) {
             })()}
           </div>
         )}
+
+        {/* ── PROOF TAB ── */}
+        {tab==="proof"&&(
+          <div>
+            {!proofDigest?(
+              <div style={{textAlign:"center",padding:"40px 20px",color:C.muted,fontSize:13,lineHeight:1.7}}>
+                <div style={{fontSize:28,marginBottom:12}}>📋</div>
+                <div>Your first Proof Feed drops after your first full week of training.</div>
+              </div>
+            ):(()=>{
+              const d = proofDigest;
+              const isMonthly = d.digest_type==="monthly";
+              const c = d.content_json || {};
+              const markRead = async () => {
+                if(d.is_read) return;
+                try{
+                  await fetch(`${SUPABASE_URL}/rest/v1/proof_digests?id=eq.${d.id}`,{
+                    method:"PATCH",headers:{...sbH,"Prefer":"return=minimal"},
+                    body:JSON.stringify({is_read:true})
+                  });
+                  if(onDigestRead) onDigestRead({...d,is_read:true});
+                }catch(_){}
+              };
+
+              if(isMonthly){
+                // Monthly recap card — tap to open interactive chat
+                return (
+                  <div>
+                    <button onClick={()=>{markRead();onOpenMonthlyRecap&&onOpenMonthlyRecap();}} style={{width:"100%",background:C.navy2,border:`1px solid ${C.gold}40`,borderRadius:14,padding:18,textAlign:"left",cursor:"pointer",display:"block",transition:"border-color 0.15s"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+                        <div>
+                          <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:2,marginBottom:4}}>
+                            {d.label}
+                          </div>
+                          <div style={{color:C.muted,fontSize:11}}>Monthly Recap · Tap to open check-in</div>
+                        </div>
+                        <div style={{display:"flex",alignItems:"center",gap:6}}>
+                          {!d.is_read&&<div style={{width:7,height:7,borderRadius:"50%",background:C.gold,flexShrink:0}}/>}
+                          {d.has_plateau&&<div style={{background:"rgba(239,68,68,0.15)",border:"1px solid rgba(239,68,68,0.4)",borderRadius:4,padding:"2px 6px",color:"#ef4444",fontSize:10,fontWeight:700}}>PLATEAU</div>}
+                        </div>
+                      </div>
+                      {c.month_summary&&<div style={{color:C.text,fontSize:13,lineHeight:1.6,marginBottom:10}}>{c.month_summary}</div>}
+                      <div style={{color:C.gold,fontSize:12,fontWeight:700,letterSpacing:1,marginTop:8}}>TAP TO START CHECK-IN →</div>
+                    </button>
+                  </div>
+                );
+              }
+
+              // Weekly digest card — read-only
+              return (
+                <div onClick={markRead} style={{cursor:!d.is_read?"pointer":"default"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+                    <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:2}}>{d.label}</div>
+                    <div style={{display:"flex",alignItems:"center",gap:6}}>
+                      {!d.is_read&&<div style={{width:7,height:7,borderRadius:"50%",background:C.gold}}/>}
+                      {d.has_plateau&&<div style={{background:"rgba(239,68,68,0.15)",border:"1px solid rgba(239,68,68,0.4)",borderRadius:4,padding:"2px 6px",color:"#ef4444",fontSize:10,fontWeight:700}}>PLATEAU</div>}
+                      {d.has_pain&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:4,padding:"2px 6px",color:"#ef4444",fontSize:10}}>PAIN FLAG</div>}
+                    </div>
+                  </div>
+                  {[
+                    {key:"week_vs_week",label:"THIS WEEK VS LAST"},
+                    {key:"consistency",label:"CONSISTENCY"},
+                    {key:"workouts_logged",label:"WORKOUTS LOGGED"},
+                    {key:"trend_callouts",label:"TRENDS"},
+                    {key:"plateau_flag",label:"PLATEAU FLAG",color:"#ef4444"},
+                    {key:"encouragement",label:"FROM COACH JOE"},
+                    {key:"focus_next_week",label:"FOCUS NEXT WEEK"},
+                  ].filter(s=>c[s.key]).map((s,i)=>(
+                    <div key={i} style={{background:C.navy2,border:`1px solid ${s.color?`${s.color}30`:C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
+                      <div style={{color:s.color||C.muted,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:6}}>{s.label}</div>
+                      <div style={{color:C.text,fontSize:13,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{c[s.key]}</div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
+      </div>
+
+      {/* Sticky footer close button — sits above iPhone home bar / gesture area */}
+      <div style={{padding:"10px 16px",paddingBottom:"max(10px, env(safe-area-inset-bottom))",borderTop:`1px solid ${C.border}`,background:C.navy2,flexShrink:0}}>
+        <button onClick={onClose} style={{width:"100%",background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"12px 14px",cursor:"pointer",fontSize:14,fontWeight:600}}>✕ Close</button>
       </div>
     </div>
   );
@@ -2237,12 +2624,11 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   return (
     <div style={{position:"fixed",inset:0,zIndex:300,background:C.navy,display:"flex",flexDirection:"column",maxWidth:600,margin:"0 auto"}}>
       <style>{GS}</style>
-      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,paddingTop:"calc(12px + env(safe-area-inset-top, 0px))",paddingBottom:"12px",paddingLeft:"16px",paddingRight:"16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
         <div>
           <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2}}>PROGRESS</div>
           <div style={{color:C.muted,fontSize:11}}>{athlete.name} · {athlete.sport}</div>
         </div>
-        <button onClick={onClose} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:13}}>✕ Close</button>
       </div>
 
       {/* Tabs */}
@@ -2393,6 +2779,11 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
             </div>
           );
         })()}
+      </div>
+
+      {/* Sticky footer close button — sits above iPhone home bar / gesture area */}
+      <div style={{padding:"10px 16px",paddingBottom:"max(10px, env(safe-area-inset-bottom))",borderTop:`1px solid ${C.border}`,background:C.navy2,flexShrink:0}}>
+        <button onClick={onClose} style={{width:"100%",background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"12px 14px",cursor:"pointer",fontSize:14,fontWeight:600}}>✕ Close</button>
       </div>
     </div>
   );
@@ -3287,6 +3678,11 @@ function CoachDashboard({coach,onLogout}) {
   const [filterInactive,setFilterInactive] = useState(false);
   const [sortBy,setSortBy] = useState("lastActive"); // "lastActive" | "name"
   const [recalcStatus,setRecalcStatus] = useState(null); // null | "running" | "done" | "error" | "X/Y
+  const [allDigests,setAllDigests] = useState([]);
+  const [reportFilter,setReportFilter] = useState("all"); // "all" | "weekly" | "monthly"
+  const [reportSearch,setReportSearch] = useState("");
+  const [reportFlagFilter,setReportFlagFilter] = useState(false);
+  const [selectedDigest,setSelectedDigest] = useState(null);
   const isMobile = useIsMobile();
   const [selectMode,setSelectMode] = useState(false);
   const [selectedIds,setSelectedIds] = useState(new Set());
@@ -3341,6 +3737,12 @@ function CoachDashboard({coach,onLogout}) {
       setAllCoaches(Array.isArray(c)?c:[]);
       setSchool(Array.isArray(s)&&s.length>0?s[0]:null);
       setAllSchools(Array.isArray(sc)?sc:[]);
+      // Load proof digests for this coach's athletes
+      if(ids.length>0){
+        const idList = ids.map(id=>`"${id}"`).join(",");
+        const digests = await sbGet("proof_digests",`?athlete_id=in.(${idList})&order=generated_at.desc&select=*`);
+        setAllDigests(Array.isArray(digests)?digests:[]);
+      }
     } catch(e){console.error(e);}
     setLoading(false);
   };
@@ -3427,7 +3829,7 @@ function CoachDashboard({coach,onLogout}) {
     return new Date(lb) - new Date(la);
   });
 
-  const tabs = ["athletes","stats",...(isMaster?["coaches"]:[])];
+  const tabs = ["athletes","stats","reports",...(isMaster?["coaches"]:[])];
 
   return (
     <div style={{minHeight:"100dvh",background:C.navy}}>
@@ -3601,6 +4003,146 @@ function CoachDashboard({coach,onLogout}) {
             {activeTab==="stats"&&(
               <GroupStats athletes={athletes} workouts={workouts} prs={prs}/>
             )}
+
+            {/* ── REPORTS TAB ── */}
+            {activeTab==="reports"&&(()=>{
+              const athleteById = Object.fromEntries(athletes.map(a=>[a.id,a]));
+              // Exclude coach-facing monthly reports from the main list — they are shown inline
+              const displayDigests = allDigests.filter(d=>d.digest_type!=="monthly_coach");
+              const coachDigests = allDigests.filter(d=>d.digest_type==="monthly_coach");
+
+              let filtered = displayDigests;
+              if(reportFilter==="weekly") filtered = filtered.filter(d=>d.digest_type==="weekly");
+              if(reportFilter==="monthly") filtered = filtered.filter(d=>d.digest_type==="monthly");
+              if(reportFlagFilter) filtered = filtered.filter(d=>d.has_plateau||d.has_pain||d.has_missed);
+              if(reportSearch) filtered = filtered.filter(d=>{
+                const a = athleteById[d.athlete_id];
+                return a?.name?.toLowerCase().includes(reportSearch.toLowerCase());
+              });
+
+              if(selectedDigest){
+                const a = athleteById[selectedDigest.athlete_id];
+                const c = selectedDigest.content_json||{};
+                const isMonthly = selectedDigest.digest_type==="monthly";
+                return (
+                  <div style={{maxWidth:700}}>
+                    <button onClick={()=>setSelectedDigest(null)} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:12,marginBottom:14}}>← Back to Reports</button>
+                    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
+                        <div>
+                          <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>{selectedDigest.label}</div>
+                          <div style={{color:C.muted,fontSize:12}}>{a?.name||"Unknown"} · {a?.sport||""}</div>
+                        </div>
+                        <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"flex-end"}}>
+                          {selectedDigest.has_plateau&&<div style={{background:"rgba(239,68,68,0.15)",border:"1px solid rgba(239,68,68,0.4)",borderRadius:4,padding:"2px 7px",color:"#ef4444",fontSize:10,fontWeight:700}}>PLATEAU</div>}
+                          {selectedDigest.has_pain&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:4,padding:"2px 7px",color:"#ef4444",fontSize:10}}>PAIN FLAG</div>}
+                          {selectedDigest.has_missed&&<div style={{background:"rgba(100,116,139,0.2)",border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 7px",color:C.muted,fontSize:10}}>MISSED SESSIONS</div>}
+                        </div>
+                      </div>
+                      {isMonthly?(
+                        [
+                          {key:"opening_message",label:"OPENING"},
+                          {key:"month_summary",label:"MONTH SUMMARY"},
+                          {key:"goal_progress",label:"GOAL PROGRESS"},
+                          {key:"month_patterns",label:"PATTERNS"},
+                          {key:"unresolved_plateaus",label:"PLATEAUS"},
+                          {key:"encouragement",label:"FROM COACH JOE"},
+                        ]
+                      ):(
+                        [
+                          {key:"week_vs_week",label:"THIS WEEK VS LAST"},
+                          {key:"consistency",label:"CONSISTENCY"},
+                          {key:"workouts_logged",label:"WORKOUTS LOGGED"},
+                          {key:"trend_callouts",label:"TRENDS"},
+                          {key:"plateau_flag",label:"PLATEAU FLAG",color:"#ef4444"},
+                          {key:"encouragement",label:"FROM COACH JOE"},
+                          {key:"focus_next_week",label:"FOCUS NEXT WEEK"},
+                        ]
+                      ).filter(s=>c[s.key]).map((s,i)=>(
+                        <div key={i} style={{background:C.navy3,border:`1px solid ${s.color?`${s.color}30`:C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
+                          <div style={{color:s.color||C.muted,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:6}}>{s.label}</div>
+                          <div style={{color:C.text,fontSize:13,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{c[s.key]}</div>
+                        </div>
+                      ))}
+                      {/* Monthly coach report if available */}
+                      {isMonthly&&(()=>{
+                        const cr = coachDigests.find(d=>d.athlete_id===selectedDigest.athlete_id);
+                        if(!cr) return null;
+                        const cc = cr.content_json||{};
+                        return (
+                          <div style={{marginTop:14,borderTop:`1px solid ${C.border}`,paddingTop:14}}>
+                            <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:2,marginBottom:10}}>COACH REPORT</div>
+                            {cc.coach_summary&&<div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
+                              <div style={{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:6}}>SUMMARY</div>
+                              <div style={{color:C.text,fontSize:13,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{cc.coach_summary}</div>
+                            </div>}
+                            {cc.flags?.length>0&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:10,padding:"10px 14px",marginBottom:8}}>
+                              <div style={{color:"#ef4444",fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:4}}>FLAGS</div>
+                              <div style={{color:C.text,fontSize:13}}>{cc.flags.join(", ")}</div>
+                            </div>}
+                            {cc.program_changes&&<div style={{background:"rgba(16,185,129,0.1)",border:"1px solid rgba(16,185,129,0.3)",borderRadius:10,padding:"10px 14px"}}>
+                              <div style={{color:C.green,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:4}}>PROGRAM CHANGES</div>
+                              <div style={{color:C.text,fontSize:13}}>{cc.program_changes}</div>
+                            </div>}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  </div>
+                );
+              }
+
+              return (
+                <div style={{maxWidth:700}}>
+                  {/* Filters */}
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:14}}>
+                    <input value={reportSearch} onChange={e=>setReportSearch(e.target.value)} placeholder="Search athlete..."
+                      style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"7px 12px",color:C.text,fontSize:13,outline:"none",flex:1,minWidth:120}}/>
+                    {["all","weekly","monthly"].map(f=>(
+                      <button key={f} onClick={()=>setReportFilter(f)}
+                        style={{background:reportFilter===f?`${C.gold}20`:"transparent",border:`1px solid ${reportFilter===f?C.gold:C.border}`,color:reportFilter===f?C.gold:C.muted,borderRadius:6,padding:"6px 12px",cursor:"pointer",fontSize:12,fontFamily:"'DM Sans'",fontWeight:reportFilter===f?700:400}}>
+                        {f.charAt(0).toUpperCase()+f.slice(1)}
+                      </button>
+                    ))}
+                    <button onClick={()=>setReportFlagFilter(p=>!p)}
+                      style={{background:reportFlagFilter?`${C.red}20`:"transparent",border:`1px solid ${reportFlagFilter?"#ef4444":C.border}`,color:reportFlagFilter?"#ef4444":C.muted,borderRadius:6,padding:"6px 12px",cursor:"pointer",fontSize:12}}>
+                      Flags only
+                    </button>
+                  </div>
+
+                  {filtered.length===0?(
+                    <div style={{textAlign:"center",padding:40,color:C.muted,fontSize:13}}>No reports found.</div>
+                  ):(
+                    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                      {filtered.map((d,i)=>{
+                        const a = athleteById[d.athlete_id];
+                        const isMonthly = d.digest_type==="monthly";
+                        return (
+                          <button key={i} onClick={()=>setSelectedDigest(d)}
+                            style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:"12px 16px",cursor:"pointer",textAlign:"left",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,transition:"border-color 0.15s"}}>
+                            <div style={{minWidth:0}}>
+                              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                                <div style={{color:isMonthly?C.blue:C.gold,fontSize:10,fontWeight:700,letterSpacing:1.5}}>
+                                  {isMonthly?"MONTHLY":"WEEKLY"}
+                                </div>
+                                <div style={{color:C.text,fontSize:13,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a?.name||"Unknown"}</div>
+                              </div>
+                              <div style={{color:C.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.label}</div>
+                            </div>
+                            <div style={{display:"flex",gap:5,flexShrink:0,alignItems:"center"}}>
+                              {d.has_plateau&&<div style={{background:"rgba(239,68,68,0.15)",border:"1px solid rgba(239,68,68,0.4)",borderRadius:4,padding:"2px 6px",color:"#ef4444",fontSize:9,fontWeight:700}}>PLT</div>}
+                              {d.has_pain&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:4,padding:"2px 6px",color:"#ef4444",fontSize:9}}>PAIN</div>}
+                              {d.has_missed&&<div style={{background:`${C.navy3}`,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 6px",color:C.muted,fontSize:9}}>MISSED</div>}
+                              <div style={{color:C.muted,fontSize:18}}>›</div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* ── COACHES TAB (master only) ── */}
             {activeTab==="coaches"&&isMaster&&(
