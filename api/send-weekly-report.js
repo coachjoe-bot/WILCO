@@ -282,4 +282,11 @@ function buildEmail(coach, workouts, prs, weekLabel, signupUrl) {
         SET UP YOUR TEAM ACCOUNT →
       </a>
       <p style="color:#475569;font-size:11px;margin:16px 0 0">
-        This report was requested by one of your athletes via WILCO. To unsubscri
+        This report was requested by one of your athletes via WILCO. To unsubscribe, reply to this email.
+      </p>
+    </div>
+
+  </div>
+</body>
+</html>`;
+}
