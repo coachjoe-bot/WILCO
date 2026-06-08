@@ -8,8 +8,8 @@ export default async function handler(req, res) {
     return res.status(401).json({error:"Unauthorized"});
   }
 
-  const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
-  const SUPABASE_KEY = process.env.VITE_SUPABASE_KEY || process.env.SUPABASE_KEY;
+  const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
+  const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_KEY || process.env.SUPABASE_KEY;
   const RESEND_KEY   = process.env.RESEND_API_KEY;
   const FROM_EMAIL   = process.env.FROM_EMAIL   || "WILCO <reports@wilco.app>";
   const SIGNUP_URL   = process.env.TEAM_SIGNUP_URL || "https://wilco.app/coaches";
@@ -282,11 +282,4 @@ function buildEmail(coach, workouts, prs, weekLabel, signupUrl) {
         SET UP YOUR TEAM ACCOUNT →
       </a>
       <p style="color:#475569;font-size:11px;margin:16px 0 0">
-        This report was requested by one of your athletes via WILCO. To unsubscribe, reply to this email.
-      </p>
-    </div>
-
-  </div>
-</body>
-</html>`;
-}
+        This report was requested by one of your athletes via WILCO. To unsubscri
