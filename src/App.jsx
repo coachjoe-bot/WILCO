@@ -767,11 +767,11 @@ function HomeScreen({setView}) {
 // ─── ATHLETE SIGNUP ───────────────────────────────────────────────────────────
 function SignupScreen({setView,setAthlete,setErr,err}) {
   const [step,setStep] = useState(1);
-  const [data,setData] = useState({name:"",sport:SPORTS[0],pin:"",confirmPin:"",email:"",goal:"strength",coachCode:"",coachName:"",coachEmail:"",tier:"free",billing:"monthly",birthday:"",heightFt:"",heightIn:"0",weight:"",gender:"",trainingDays:4,equipment:[],positionOrEvent:"",injuryHistory:"",recruitingIntent:""});
+  const [data,setData] = useState({name:"",sport:SPORTS[0],pin:"",confirmPin:"",email:"",goal:"strength",coachCode:"",coachName:"",coachEmail:"",tier:"free",billing:"monthly",birthday:"",heightFt:"",heightIn:"0",weight:"",gender:"",trainingDays:4,equipment:[],positionOrEvent:"",injuryHistory:"",recruitingIntent:"",graduationYear:""});
   const [loading,setLoading] = useState(false);
   const setD = (k,v) => setData(p=>({...p,[k]:v}));
 
-  const TOTAL_STEPS = 13;
+  const TOTAL_STEPS = 14;
 
   const nextStep = async () => {
     setErr("");
@@ -820,6 +820,9 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
     } else if(step===12){
       setStep(13);
     } else if(step===13){
+      // graduation_year — optional, always advance
+      setStep(14);
+    } else if(step===14){
       if(!data.recruitingIntent){setErr("Select an option.");return;}
       setLoading(true);
       try {
@@ -839,6 +842,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
           position_or_event:data.positionOrEvent.trim()||null,
           injury_history:data.injuryHistory.trim()||null,
           recruiting_intent:data.recruitingIntent,
+          graduation_year:data.graduationYear?parseInt(data.graduationYear):null,
           first_chat_complete:false
         });
         if(created?.length>0){
@@ -1144,8 +1148,23 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
         </button>
       </>}
 
-      {/* ── Step 13: College recruiting ── */}
+      {/* ── Step 13: Graduation year (optional) ── */}
       {step===13&&<>
+        <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>What year do you graduate? Helps track your athletic timeline.</div>
+        <div style={{marginBottom:16}}>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>GRADUATION YEAR <span style={{color:C.muted,fontWeight:400}}>(optional)</span></label>
+          <input type="number" inputMode="numeric" value={data.graduationYear}
+            onChange={e=>setD("graduationYear",e.target.value.replace(/\D/g,"").slice(0,4))}
+            placeholder="e.g. 2027" style={inp({fontSize:20,letterSpacing:2,textAlign:"center"})}/>
+        </div>
+        <button onClick={()=>{setErr("");setStep(14);}}
+          style={{background:"none",border:"none",color:C.muted,fontSize:13,cursor:"pointer",textAlign:"center",width:"100%",marginBottom:12}}>
+          Skip →
+        </button>
+      </>}
+
+      {/* ── Step 14: College recruiting ── */}
+      {step===14&&<>
         <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Are you training with college recruiting in mind?</div>
         {[{key:"yes",label:"Yes — I'm actively pursuing it"},{key:"maybe",label:"Maybe — open to it"},{key:"no",label:"No — training for myself"}].map(opt=>(
           <div key={opt.key} onClick={()=>setD("recruitingIntent",opt.key)}
@@ -1617,6 +1636,26 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       await sbInsert("workouts",{athlete_id:updatedAthlete.id,raw_message:msg,bot_reply:reply,parsed_data:parsedFinal});
       setSaved(true); setTimeout(()=>setSaved(false),3000);
 
+      // ── Session counter + milestone callouts + certified badge ────────────
+      try {
+        const newCount = (updatedAthlete.total_sessions_logged||0)+1;
+        const badgeAlreadyEarned = !!updatedAthlete.certified_badge_earned_at;
+        const badgeUpdates = {total_sessions_logged:newCount};
+        if(newCount===100&&!badgeAlreadyEarned) badgeUpdates.certified_badge_earned_at=new Date().toISOString();
+        await sbUpdate("athletes",updatedAthlete.id,badgeUpdates);
+        setAthlete(prev=>({...prev,total_sessions_logged:newCount,...(badgeUpdates.certified_badge_earned_at?{certified_badge_earned_at:badgeUpdates.certified_badge_earned_at}:{})}));
+        const MILESTONES=[10,25,50,100,250,500,1000];
+        if(MILESTONES.includes(newCount)){
+          const badgeTier=newCount>=1000?" ×4":newCount>=500?" ×3":newCount>=250?" ×2":"";
+          const isBadge=[100,250,500,1000].includes(newCount);
+          const milestoneMsg=isBadge&&newCount===100
+            ?`You've hit the WILCO Certified standard. 100 sessions logged. That's not common. You've earned the badge.`
+            :isBadge?`Session ${newCount}. WILCO Certified${badgeTier}. Keep stacking.`
+            :`Session ${newCount}. Keep stacking.`;
+          setTimeout(()=>setMessages(prev=>[...prev,{role:"assistant",content:milestoneMsg}]),1500);
+        }
+      } catch(_){}
+
       // Auto PR detection
       const newPRs = [];
       if(parsed.exercises?.length>0){
@@ -1990,8 +2029,12 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         <div style={{minWidth:0,flex:1}}>
           <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2,lineHeight:1}}>COACH JOE-BOT</div>
           <div style={{display:"flex",alignItems:"center",gap:6,marginTop:2,flexWrap:"wrap"}}>
-            <div style={{color:C.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{athlete.name} · {athlete.sport}</div>
+            <div style={{color:C.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                {athlete.name} · {athlete.sport}
+                {(()=>{const wk=workoutHistory.filter(w=>(Date.now()-new Date(w.created_at))<=7*24*60*60*1000).length;return wk>0?<span style={{color:C.gold,fontWeight:700,marginLeft:6}}>{wk}W</span>:null;})()}
+              </div>
             {(()=>{const t=TIERS[athlete.tier||"free"];return(<span style={{background:`${t.color}22`,border:`1px solid ${t.color}`,borderRadius:4,padding:"1px 6px",color:t.color,fontSize:9,fontWeight:700,letterSpacing:1,flexShrink:0}}>{t.badge}</span>);})()}
+            {athlete.certified_badge_earned_at&&(()=>{const cnt=athlete.total_sessions_logged||0;const tier=cnt>=1000?"×4":cnt>=500?"×3":cnt>=250?"×2":"";return<span title="WILCO Certified" style={{background:`${C.gold}22`,border:`1px solid ${C.gold}`,borderRadius:4,padding:"1px 6px",color:C.gold,fontSize:9,fontWeight:700,letterSpacing:1,flexShrink:0}}>✦ CERTIFIED{tier?` ${tier}`:""}</span>;})()} 
           </div>
         </div>
         <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
@@ -2646,6 +2689,32 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
         {/* ── BENCHMARKS TAB ── */}
         {tab==="benchmarks"&&(
           <div>
+            {/* ── Workouts Logged Card ── */}
+            {(()=>{
+              const now=Date.now();
+              const wk=workoutHistory.filter(w=>(now-new Date(w.created_at))<=7*24*60*60*1000).length;
+              const mo=workoutHistory.filter(w=>(now-new Date(w.created_at))<=30*24*60*60*1000).length;
+              const life=athlete.total_sessions_logged||workoutHistory.length;
+              return(
+                <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:16,display:"flex",justifyContent:"space-around",textAlign:"center"}}>
+                  <div>
+                    <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>{wk}</div>
+                    <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:2}}>THIS WEEK</div>
+                  </div>
+                  <div style={{width:1,background:C.border}}/>
+                  <div>
+                    <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>{mo}</div>
+                    <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:2}}>THIS MONTH</div>
+                  </div>
+                  <div style={{width:1,background:C.border}}/>
+                  <div>
+                    <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>{life}</div>
+                    <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:2}}>LIFETIME</div>
+                  </div>
+                </div>
+              );
+            })()}
+
             <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>STRENGTH BENCHMARKS</div>
 
             {!bodyweight&&(
@@ -3571,6 +3640,16 @@ function SchoolOnboardingForm({onCreated}) {
           }).catch(()=>{});
         }
       }
+      // Create admin account for contact email
+      if(contactEmail.trim()){
+        const adminCode=schoolCode.toUpperCase()+"AD";
+        try {
+          const adminRow=await sbInsert("coaches",{name:"Admin",email:contactEmail.trim().toLowerCase(),school_id:school.id,coach_number:0,access_code:adminCode,role:"admin"});
+          if(adminRow?.length){
+            fetch("/api/send-coach-invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({coachName:"Admin",coachEmail:contactEmail.trim().toLowerCase(),accessCode:adminCode,schoolName:schoolName.trim(),isAdmin:true})}).catch(()=>{});
+          }
+        }catch(_){}
+      }
       setSuccess(`✓ ${schoolName} onboarded! ${created} coach invite${created!==1?"s":""} sent.`);
       setSchoolName(""); setSchoolCode(""); setContactEmail(""); setLogoFile(null); setLogoPreview(null);
       setCoaches([{name:"",email:""},{name:"",email:""},{name:"",email:""}]); setMaxCoaches(3);
@@ -3666,6 +3745,7 @@ function SchoolOnboardingForm({onCreated}) {
 // ─── COACH DASHBOARD ──────────────────────────────────────────────────────────
 function CoachDashboard({coach,onLogout}) {
   const isMaster = coach.role==="master"||coach.access_code===MASTER_CODE;
+  const isAdmin = coach.role==="admin";
   const [athletes,setAthletes] = useState([]);
   const [workouts,setWorkouts] = useState([]);
   const [prs,setPrs] = useState([]);
@@ -3722,7 +3802,7 @@ function CoachDashboard({coach,onLogout}) {
         sbGet("athletes","?order=created_at.desc&select=*"),
         sbGet("workouts","?order=created_at.desc&select=*"),
         sbGet("prs","?order=created_at.desc&select=*"),
-        isMaster ? sbGet("coaches","?select=*&order=created_at.asc") : Promise.resolve([]),
+        (isMaster||isAdmin) ? sbGet("coaches",`?${isAdmin&&!isMaster?`school_id=eq.${coach.school_id}&`:""}select=*&order=created_at.asc`) : Promise.resolve([]),
         (!isMaster&&coach.school_id) ? sbGet("schools",`?id=eq.${coach.school_id}&select=*`) : Promise.resolve([]),
         isMaster ? sbGet("schools","?select=*&order=created_at.asc") : Promise.resolve([])
       ]);
@@ -3829,7 +3909,7 @@ function CoachDashboard({coach,onLogout}) {
     return new Date(lb) - new Date(la);
   });
 
-  const tabs = ["athletes","stats","reports",...(isMaster?["coaches"]:[])];
+  const tabs = ["athletes","stats","reports",...(isMaster?["coaches"]:[]),...(!isMaster&&isAdmin?["account"]:[])];
 
   return (
     <div style={{minHeight:"100dvh",background:C.navy}}>
@@ -3930,7 +4010,7 @@ function CoachDashboard({coach,onLogout}) {
                           <div style={{width:34,height:34,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:15,color:"#000",flexShrink:0}}>{a.name[0].toUpperCase()}</div>
                           )}
                           <div style={{flex:1,minWidth:0}}>
-                            <div style={{color:C.text,fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.name}</div>
+                            <div style={{color:C.text,fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:5}}>{a.name}{a.certified_badge_earned_at&&<span title="WILCO Certified" style={{color:C.gold,fontSize:10,flexShrink:0}}>✦</span>}</div>
                             <div style={{color:C.muted,fontSize:11}}>{a.sport} · {groupIntoSessions(workouts.filter(w=>w.athlete_id===a.id)).length} sessions</div>
                           </div>
                           <div style={{textAlign:"right",flexShrink:0}}>
@@ -4092,8 +4172,63 @@ function CoachDashboard({coach,onLogout}) {
                 );
               }
 
+              // ── Leaderboard (school accounts only) ───────────────────────────────
+              const leaderboard = school ? (()=>{
+                const now = Date.now();
+                const d30 = 30*24*60*60*1000;
+                const schoolAthletes = athletes.filter(a=>a.school_id===school.id);
+                if(schoolAthletes.length<2) return null;
+                // Most Improved
+                const improved = schoolAthletes.map(a=>{
+                  const aw=workouts.filter(w=>w.athlete_id===a.id);
+                  const rb={};const pb={};
+                  aw.filter(w=>now-new Date(w.created_at)<=d30).forEach(w=>(w.parsed_data?.exercises||[]).forEach(ex=>{if(!ex.name||!ex.weight||ex.unit==="bodyweight")return;const k=normalizeExName(ex.name);const e=epley1RM(toLbs(ex.weight,ex.unit||"lbs"),ex.reps||1);if(!rb[k]||e>rb[k])rb[k]=e;}));
+                  aw.filter(w=>{const age=now-new Date(w.created_at);return age>d30&&age<=d30*2;}).forEach(w=>(w.parsed_data?.exercises||[]).forEach(ex=>{if(!ex.name||!ex.weight||ex.unit==="bodyweight")return;const k=normalizeExName(ex.name);const e=epley1RM(toLbs(ex.weight,ex.unit||"lbs"),ex.reps||1);if(!pb[k]||e>pb[k])pb[k]=e;}));
+                  let best=0;
+                  Object.keys(rb).forEach(k=>{if(pb[k]&&pb[k]>0){const p=(rb[k]-pb[k])/pb[k]*100;if(p>best)best=p;}});
+                  return best>0?{athlete:a,metric:`+${Math.round(best)}% est. 1RM`}:null;
+                }).filter(Boolean).sort((a,b)=>parseFloat(b.metric)-parseFloat(a.metric)).slice(0,3);
+                // Most Impressive Lift
+                const impressive = schoolAthletes.filter(a=>a.weight_lbs).map(a=>{
+                  let bestRatio=0,bestLift="";
+                  workouts.filter(w=>w.athlete_id===a.id).forEach(w=>(w.parsed_data?.exercises||[]).forEach(ex=>{if(!ex.name||!ex.weight||ex.unit==="bodyweight")return;const r=epley1RM(toLbs(ex.weight,ex.unit||"lbs"),ex.reps||1)/a.weight_lbs;if(r>bestRatio){bestRatio=r;bestLift=ex.name;}}));
+                  return bestRatio>0?{athlete:a,metric:`${bestLift} · ${bestRatio.toFixed(2)}×BW`,ratio:bestRatio}:null;
+                }).filter(Boolean).sort((a,b)=>b.ratio-a.ratio).slice(0,3);
+                // Most Consistent (sessions in last 30d)
+                const consistent = schoolAthletes.map(a=>{
+                  const cnt=workouts.filter(w=>w.athlete_id===a.id&&(now-new Date(w.created_at))<=d30).length;
+                  return cnt>0?{athlete:a,metric:`${cnt} sessions`}:null;
+                }).filter(Boolean).sort((a,b)=>parseInt(b.metric)-parseInt(a.metric)).slice(0,3);
+                return {improved,impressive,consistent,asOf:new Date().toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})};
+              })() : null;
+
               return (
                 <div style={{maxWidth:700}}>
+                  {/* ── Leaderboard Section ── */}
+                  {leaderboard&&(
+                    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16,marginBottom:20}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+                        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>TEAM LEADERBOARD</div>
+                        <div style={{color:C.muted,fontSize:10}}>As of {leaderboard.asOf}</div>
+                      </div>
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
+                        {[{label:"Most Improved",data:leaderboard.improved},{label:"Most Impressive Lift",data:leaderboard.impressive},{label:"Most Consistent",data:leaderboard.consistent}].map(({label,data})=>(
+                          <div key={label}>
+                            <div style={{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,marginBottom:8,textTransform:"uppercase"}}>{label}</div>
+                            {data.length===0?<div style={{color:C.muted,fontSize:11,fontStyle:"italic"}}>Not enough data</div>:data.map((entry,i)=>(
+                              <div key={i} style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
+                                <span style={{color:i===0?C.gold:C.muted,fontSize:i===0?14:11,flexShrink:0}}>{i===0?"🥇":i===1?"2.":"3."}</span>
+                                <div style={{minWidth:0}}>
+                                  <div style={{color:C.text,fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{entry.athlete.name}</div>
+                                  <div style={{color:C.muted,fontSize:10,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{entry.metric}</div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   {/* Filters */}
                   <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:14}}>
                     <input value={reportSearch} onChange={e=>setReportSearch(e.target.value)} placeholder="Search athlete..."
@@ -4140,6 +4275,89 @@ function CoachDashboard({coach,onLogout}) {
                       })}
                     </div>
                   )}
+                </div>
+              );
+            })()}
+
+            {/* ── ACCOUNT TAB (admin only) ── */}
+            {activeTab==="account"&&isAdmin&&!isMaster&&(()=>{
+              const schoolCoachesList = allCoaches.filter(c=>c.school_id===coach.school_id&&c.role!=="admin");
+              const atLimit = schoolCoachesList.length>=(school?.max_coaches||3);
+              const [acName,setAcName] = useState("");
+              const [acEmail,setAcEmail] = useState("");
+              const [acErr,setAcErr] = useState("");
+              const [acOk,setAcOk] = useState("");
+              const [acSaving,setAcSaving] = useState(false);
+
+              const doAddCoach = async () => {
+                if(!acName.trim()||!acEmail.trim()||!acEmail.includes("@")){setAcErr("Enter a name and valid email.");return;}
+                if(atLimit){setAcErr("Coach limit reached for your plan.");return;}
+                setAcSaving(true);setAcErr("");setAcOk("");
+                try {
+                  const nextNum=(schoolCoachesList.reduce((m,c)=>Math.max(m,c.coach_number||0),0))+1;
+                  const newCode=(school?.code||"???").toUpperCase()+String(nextNum).padStart(2,"0");
+                  const row=await sbInsert("coaches",{name:acName.trim(),email:acEmail.trim().toLowerCase(),school_id:coach.school_id,coach_number:nextNum,access_code:newCode,role:"coach"});
+                  if(row?.length){
+                    fetch("/api/send-coach-invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({coachName:acName.trim(),coachEmail:acEmail.trim().toLowerCase(),accessCode:newCode,schoolName:school?.name||""})}).catch(()=>{});
+                    setAcOk(`✓ ${acName.trim()} added — invite sent (code: ${newCode})`);
+                    setAcName("");setAcEmail("");
+                    loadAll();
+                  }else{setAcErr("Could not create coach. Try again.");}
+                }catch(e){setAcErr("Error: "+e.message);}
+                setAcSaving(false);
+              };
+
+              const doRemoveCoach = async (c) => {
+                if(!window.confirm(`Remove ${c.name}? Their athletes will remain unassigned.`)) return;
+                try {
+                  await fetch(`${SUPABASE_URL}/rest/v1/coaches?id=eq.${c.id}`,{method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},body:JSON.stringify({pin:null,access_code:`REMOVED_${c.access_code}`})});
+                  await fetch(`${SUPABASE_URL}/rest/v1/athletes?coach_id=eq.${c.id}`,{method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},body:JSON.stringify({coach_id:null})});
+                  loadAll();
+                }catch(e){}
+              };
+
+              return (
+                <div style={{maxWidth:600}}>
+                  <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:20,marginBottom:16}}>
+                    <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:14}}>SCHOOL ACCOUNT</div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:4}}>
+                      <div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>SCHOOL</div><div style={{color:C.text,fontWeight:600,fontSize:14,marginTop:2}}>{school?.name||"—"}</div></div>
+                      <div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>CODE</div><div style={{color:C.gold,fontWeight:700,fontSize:18,fontFamily:"'Bebas Neue'",letterSpacing:2,marginTop:2}}>{school?.code||"—"}</div></div>
+                      <div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>TIER</div><div style={{color:C.text,fontSize:13,marginTop:2}}>{school?.tier||"—"}</div></div>
+                      <div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>COACHES</div><div style={{color:C.text,fontSize:13,marginTop:2}}>{schoolCoachesList.length} / {school?.max_coaches||3}</div></div>
+                    </div>
+                  </div>
+
+                  <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:20,marginBottom:16}}>
+                    <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:14}}>COACHES</div>
+                    {schoolCoachesList.length===0?<div style={{color:C.muted,fontSize:13,marginBottom:12}}>No coaches added yet.</div>:schoolCoachesList.map(c=>{
+                      const athCount=athletes.filter(a=>a.coach_id===c.id).length;
+                      return(
+                        <div key={c.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:`1px solid ${C.border}`}}>
+                          <div>
+                            <div style={{color:C.text,fontWeight:600,fontSize:13}}>{c.name}</div>
+                            <div style={{color:C.muted,fontSize:11}}>{c.email} · Code: {c.access_code} · {athCount} athlete{athCount!==1?"s":""}</div>
+                          </div>
+                          <button onClick={()=>doRemoveCoach(c)} style={{background:"none",border:`1px solid ${C.border}`,color:C.red,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:11}}>Remove</button>
+                        </div>
+                      );
+                    })}
+
+                    <div style={{marginTop:16}}>
+                      <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:10}}>ADD COACH</div>
+                      {atLimit?<div style={{color:C.muted,fontSize:12,fontStyle:"italic"}}>Coach limit reached for your plan ({school?.max_coaches||3} max).</div>:(
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:8,alignItems:"center"}}>
+                          <input value={acName} onChange={e=>setAcName(e.target.value)} placeholder="Coach name" style={inp({padding:"9px 12px",fontSize:13})}/>
+                          <input type="email" value={acEmail} onChange={e=>setAcEmail(e.target.value)} placeholder="email@school.edu" style={inp({padding:"9px 12px",fontSize:13})}/>
+                          <button onClick={doAddCoach} disabled={acSaving} style={{background:C.gold,border:"none",color:"#000",borderRadius:8,padding:"9px 14px",cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"'Bebas Neue'",letterSpacing:1,whiteSpace:"nowrap",opacity:acSaving?0.7:1}}>
+                            {acSaving?"Adding...":"Add Coach →"}
+                          </button>
+                        </div>
+                      )}
+                      {acErr&&<div style={{color:C.red,fontSize:12,marginTop:8}}>{acErr}</div>}
+                      {acOk&&<div style={{color:C.green,fontSize:12,marginTop:8,fontWeight:600}}>{acOk}</div>}
+                    </div>
+                  </div>
                 </div>
               );
             })()}
