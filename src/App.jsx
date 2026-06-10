@@ -142,6 +142,7 @@ const parseWorkout = async (message, name, sport) => {
 {
   "exercises":[{"name":string,"sets":number|null,"reps":number|null,"weight":number|null,"unit":"lbs"|"kg"|"bodyweight","feel":"easy"|"good"|"hard"|null,"notes":string|null}],
   "run_data":{"run_type":"easy"|"tempo"|"interval"|"long_run"|"race"|"recovery"|"fartlek"|null,"distance_miles":number|null,"distance_km":number|null,"duration_minutes":number|null,"pace_per_mile":string|null,"pace_per_km":string|null,"heart_rate_avg":number|null,"heart_rate_max":number|null,"intervals":[{"repeat":number|null,"distance":string|null,"time":string|null,"pace":string|null,"rest":string|null}]|null,"notes":string|null}|null,
+  "practice_data":{"practice_type":"practice"|"game"|"scrimmage"|"conditioning"|"skill_work"|"film"|"walkthrough"|null,"sport":string|null,"duration_minutes":number|null,"intensity":"light"|"moderate"|"high"|"very_high"|null,"notes":string|null}|null,
   "pain_flags":[{"area":string,"description":string}],
   "equipment_issues":[string],
   "questions":[string],
@@ -157,13 +158,15 @@ Rules:
 - For interval runs, populate "intervals" array with one entry per repeat type.
 - Populate "exercises" for strength/lifting/conditioning work. Leave empty for pure runs.
 - If the athlete mentions heart rate, bpm, avg HR, or max HR, populate heart_rate_avg and/or heart_rate_max in run_data.
+- Populate "practice_data" when the message describes a sport practice, game, scrimmage, team conditioning session, skill work, or film/walkthrough. Set practice_type to the best match. Intensity: light=walkthrough/film/skill_work (shooting, ball handling, passing drills — minimal physical exertion), moderate=half-speed/light practice, high=full practice, very_high=game/scrimmage/full-contact. Do NOT populate for gym workouts or standalone runs.
+- A single message may have BOTH practice_data AND exercises (e.g. athlete did practice then hit the weight room). Populate both when applicable.
 - Set is_program_update:true ONLY if the message itself CONTAINS the actual program content with specific exercises, sets, and reps. The program data must be present in the message itself — NOT for requests like "update my program", "save my program", "can you update that", or any message that requests an update without providing the program content.
 - Set is_temp_program_update:true when the athlete has described their available equipment or conditions for a non-standard training situation (hotel, cruise, travel, beach, limited equipment, injury restrictions). Must include actual condition info — NOT set just because they mention traveling or ask what to do.
 - Set is_program_revert:true when the athlete signals they are returning to their normal training environment ("I'm back", "home now", "back at the gym", "back to normal", "cruise is over", etc.).
 - If weight is given in kg (e.g. "100kg squat"), set unit:"kg".`;
   const text = await askClaude(sys,`Athlete: ${name} (${sport})\nMessage: ${message}`,1000);
   try { return JSON.parse(text.replace(/```json|```/g,"").trim()); }
-  catch { return {exercises:[],run_data:null,pain_flags:[],equipment_issues:[],questions:[],pr_attempts:[],session_feel:null,general_notes:message,is_program_update:false,is_temp_program_update:false,is_program_revert:false}; }
+  catch { return {exercises:[],run_data:null,practice_data:null,pain_flags:[],equipment_issues:[],questions:[],pr_attempts:[],session_feel:null,general_notes:message,is_program_update:false,is_temp_program_update:false,is_program_revert:false}; }
 };
 
 const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athleteGoals=[], athleteContext=null) => {
@@ -174,14 +177,24 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
   if(workoutHistory?.length>0){
     const recent = workoutHistory.slice(0,10).map(w=>{
       const d = new Date(w.created_at);
-      const dateStr = d.toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric",year:"numeric"});
+      const dateStr = d.toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric",year:"numeric"})+" at "+d.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit",hour12:true});
       const runD = w.parsed_data?.run_data;
-      const exs = runD
-        ? `${runD.run_type||"run"}${runD.distance_miles?" "+runD.distance_miles+"mi":runD.distance_km?" "+runD.distance_km+"km":""}${runD.pace_per_mile?" @ "+runD.pace_per_mile+"/mi":runD.pace_per_km?" @ "+runD.pace_per_km+"/km":""}${runD.duration_minutes?" ("+runD.duration_minutes+"min)":""}`
-        : w.parsed_data?.exercises?.map(e=>`${e.name}${e.weight?" "+fmtWeight(e.weight,e.unit):""}${e.sets&&e.reps?" "+e.sets+"x"+e.reps:""}${e.feel?" ("+e.feel+")":""}`).join(", ")||"";
+      const pracD = w.parsed_data?.practice_data;
+      const parts = [];
+      if(pracD?.practice_type){
+        const pLabel = pracD.practice_type==="game"?"GAME":pracD.practice_type==="scrimmage"?"SCRIMMAGE":pracD.practice_type==="conditioning"?"TEAM CONDITIONING":"PRACTICE";
+        parts.push(`${pLabel}${pracD.sport&&pracD.sport!==w.sport?" ("+pracD.sport+")":""}${pracD.duration_minutes?" "+pracD.duration_minutes+"min":""}${pracD.intensity?" ["+pracD.intensity+"]":""}`);
+      }
+      if(runD){
+        parts.push(`${runD.run_type||"run"}${runD.distance_miles?" "+runD.distance_miles+"mi":runD.distance_km?" "+runD.distance_km+"km":""}${runD.pace_per_mile?" @ "+runD.pace_per_mile+"/mi":runD.pace_per_km?" @ "+runD.pace_per_km+"/km":""}${runD.duration_minutes?" ("+runD.duration_minutes+"min)":""}`);
+      }
+      if(w.parsed_data?.exercises?.length>0){
+        parts.push(w.parsed_data.exercises.map(e=>`${e.name}${e.weight?" "+fmtWeight(e.weight,e.unit):""}${e.sets&&e.reps?" "+e.sets+"x"+e.reps:""}${e.feel?" ("+e.feel+")":""}`).join(", "));
+      }
+      const activityStr = parts.length>0 ? parts.join(" + ") : w.raw_message?.slice(0,120)||"";
       const pain = w.parsed_data?.pain_flags?.map(p=>p.area).join(", ")||"";
       const feel = w.parsed_data?.session_feel?` | Session feel: ${w.parsed_data.session_feel}`:"";
-      return `• ${dateStr}: ${exs||w.raw_message?.slice(0,120)}${pain?" | PAIN: "+pain:""}${feel}`;
+      return `• ${dateStr}: ${activityStr}${pain?" | PAIN: "+pain:""}${feel}`;
     }).filter(Boolean).join("\n");
     pastContext = `\n\nATHLETE WORKOUT HISTORY (most recent first):\n${recent}\nWhen asked what they did on a specific day or recently, reference these exact dates and numbers.`;
   }
@@ -217,9 +230,11 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
     "General Fitness":"Build a balanced foundation -- squat, hinge, push, pull, carry. Health and longevity focus."
   };
 
-  const todayStr = new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"});
+  const now = new Date();
+  const todayStr = now.toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"});
+  const timeStr = now.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit",hour12:true});
   const sys = `You are Coach Joe Thomas -- high school strength coach, 20+ years military S&C. Direct, real, no fluff.
-TODAY'S DATE: ${todayStr}
+TODAY'S DATE: ${todayStr}, ${timeStr}
 Athlete: ${athlete.name}, Sport: ${athlete.sport}${athlete.level?", Level: "+athlete.level:""}
 ${phaseContext}
 SPORT: ${sportPriorities[athlete.sport]||"Build a general strength base."}
@@ -245,7 +260,14 @@ Out of scope: "That's one for Coach Joe directly -- email joe.thomas@commandengi
 UNUSUAL TRAINING CONDITIONS (travel, cruise, hotel, beach, limited equipment, injury layoff, etc.):
 - If athlete mentions they'll be away or have limited access but HASN'T described what's available yet: ask 2-3 direct questions — what equipment is on hand, how much space they have, how long the situation lasts. Do not give a program yet.
 - Once conditions ARE described: build a specific day-by-day program for exactly those conditions. Be clear it's temporary.
-- When athlete signals they're back to normal ("I'm back", "home now", "back at the gym"): transition them back to their regular program and reference it.${pastContext}${programContext}`;
+- When athlete signals they're back to normal ("I'm back", "home now", "back at the gym"): transition them back to their regular program and reference it.
+
+SPORT PRACTICE + TRAINING LOAD:
+- Sport practices (practice, game, scrimmage, team conditioning) count as real workouts. A 2-hour basketball practice is significant physical stress — treat it as such.
+- When the current message OR recent history shows a practice AND a gym workout on the same day: acknowledge the double load. Ask about how they're feeling, sleep quality, or soreness before piling on more volume advice. Do not just say "Solid session" and move on.
+- When a game or high-intensity scrimmage was logged (today or yesterday) plus a gym session: flag recovery directly. Ask how their legs/body feel, mention sleep and nutrition if relevant, and suggest they keep the gym work moderate unless they feel fresh.
+- Back-to-back high-load days (practice + lift two days in a row): note the cumulative stress and ask if they need a down day or modified session. Injury prevention > training volume.
+- Do not manufacture concern if it's not warranted — film, walkthrough, or skill work (shooting, ball handling, passing drills) before a lift is fine. Use judgment on actual physical load.${pastContext}${programContext}`;
 
   let goalsContext = "";
   if(athleteGoals?.length>0){
