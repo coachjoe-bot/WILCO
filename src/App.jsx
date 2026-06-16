@@ -57,6 +57,47 @@ const epley1RM = (weight, reps) => {
   return Math.round(weight * (1 + reps / 30));
 };
 
+// Expand a logged exercise entry into its individual sets.
+// Handles both the new "set_details" array (variable weight/reps per set) and
+// legacy entries that only have flat sets/reps/weight fields.
+const getExerciseSets = (ex) => {
+  if(!ex) return [];
+  if(Array.isArray(ex.set_details) && ex.set_details.length>0){
+    return ex.set_details.map(s=>({weight:s.weight??ex.weight??0, reps:s.reps??ex.reps??1}));
+  }
+  const n = ex.sets||1;
+  return Array.from({length:n},()=>({weight:ex.weight??0, reps:ex.reps||1}));
+};
+
+// Best estimated 1RM across all sets in a logged exercise entry (lbs-equivalent).
+const bestE1RMForExercise = (ex) => {
+  if(!ex || ex.unit==="bodyweight") return 0;
+  const sets = getExerciseSets(ex);
+  let best = 0;
+  sets.forEach(s=>{
+    const lbs = toLbs(s.weight, ex.unit);
+    const e1rm = epley1RM(lbs, s.reps);
+    if(e1rm>best) best = e1rm;
+  });
+  return best;
+};
+
+// Render set_details (or legacy flat fields) as a human-readable string, grouping
+// consecutive sets that share the same rep count, e.g. "3×5 @ 135/155/175lbs, 1×1 @ 275lbs".
+const formatSetDetails = (ex) => {
+  if(!ex) return "—";
+  const u = ex.unit==="kg" ? "kg" : ex.unit==="bodyweight" ? "" : "lbs";
+  const sets = getExerciseSets(ex);
+  if(sets.length===0) return "—";
+  const groups = [];
+  sets.forEach(s=>{
+    const last = groups[groups.length-1];
+    if(last && last.reps===s.reps){ last.weights.push(s.weight); }
+    else { groups.push({reps:s.reps, weights:[s.weight]}); }
+  });
+  return groups.map(g=>`${g.weights.length}×${g.reps} @ ${g.weights.join("/")}${u}`).join(", ");
+};
+
 // Format weight with correct unit label. Falls back to "lbs" for legacy data.
 const fmtWeight = (weight, unit) => {
   if(!weight) return "—";
@@ -140,7 +181,7 @@ const extractProgramText = async (message) => {
 const parseWorkout = async (message, name, sport) => {
   const sys = `Extract workout data from an athlete message. Return ONLY valid JSON, no markdown.
 {
-  "exercises":[{"name":string,"sets":number|null,"reps":number|null,"weight":number|null,"unit":"lbs"|"kg"|"bodyweight","feel":"easy"|"good"|"hard"|null,"notes":string|null}],
+  "exercises":[{"name":string,"sets":number|null,"reps":number|null,"weight":number|null,"unit":"lbs"|"kg"|"bodyweight","feel":"easy"|"good"|"hard"|null,"notes":string|null,"set_details":[{"weight":number,"reps":number}]|null}],
   "run_data":{"run_type":"easy"|"tempo"|"interval"|"long_run"|"race"|"recovery"|"fartlek"|null,"distance_miles":number|null,"distance_km":number|null,"duration_minutes":number|null,"pace_per_mile":string|null,"pace_per_km":string|null,"heart_rate_avg":number|null,"heart_rate_max":number|null,"intervals":[{"repeat":number|null,"distance":string|null,"time":string|null,"pace":string|null,"rest":string|null}]|null,"notes":string|null}|null,
   "practice_data":{"practice_type":"practice"|"game"|"scrimmage"|"conditioning"|"skill_work"|"film"|"walkthrough"|null,"sport":string|null,"duration_minutes":number|null,"intensity":"light"|"moderate"|"high"|"very_high"|null,"notes":string|null}|null,
   "pain_flags":[{"area":string,"description":string}],
@@ -154,6 +195,7 @@ const parseWorkout = async (message, name, sport) => {
   "is_program_revert":boolean
 }
 Rules:
+- "set_details": populate this as an array with ONE ENTRY PER ACTUAL SET PERFORMED, in the order performed, whenever weight and/or reps VARY between sets of the same exercise (ramping/ascending sets, top sets, drop sets, pyramids, etc). Example: "3 sets of 5 at 135/155/175, then 3 sets of 3 at 185/205/225, then 2 sets of 2 at 245/255, then 1 rep at 275" becomes set_details:[{"weight":135,"reps":5},{"weight":155,"reps":5},{"weight":175,"reps":5},{"weight":185,"reps":3},{"weight":205,"reps":3},{"weight":225,"reps":3},{"weight":245,"reps":2},{"weight":255,"reps":2},{"weight":275,"reps":1}]. When set_details is populated, ALSO set "sets" to the total number of sets and "reps"/"weight" to the top (heaviest/last) set's values, so older code that only reads sets/reps/weight still gets a sane summary. If every set of an exercise used the same weight and reps, leave set_details null and just use sets/reps/weight as before — do not populate set_details for uniform sets.
 - Populate "run_data" when the message describes any run, jog, cardio, or running workout. Set run_type to the best match. Calculate pace if distance and time are both given.
 - For interval runs, populate "intervals" array with one entry per repeat type.
 - Populate "exercises" for strength/lifting/conditioning work. Leave empty for pure runs.
@@ -163,7 +205,8 @@ Rules:
 - Set is_program_update:true ONLY if the message itself CONTAINS the actual program content with specific exercises, sets, and reps. The program data must be present in the message itself — NOT for requests like "update my program", "save my program", "can you update that", or any message that requests an update without providing the program content.
 - Set is_temp_program_update:true when the athlete has described their available equipment or conditions for a non-standard training situation (hotel, cruise, travel, beach, limited equipment, injury restrictions). Must include actual condition info — NOT set just because they mention traveling or ask what to do.
 - Set is_program_revert:true when the athlete signals they are returning to their normal training environment ("I'm back", "home now", "back at the gym", "back to normal", "cruise is over", etc.).
-- If weight is given in kg (e.g. "100kg squat"), set unit:"kg".`;
+- If weight is given in kg (e.g. "100kg squat"), set unit:"kg".
+- "pr_attempts": include an entry with reps:1 and achieved:true whenever the athlete reports an ACTUAL (not estimated) 1-rep max for a lift — either because they just performed a true 1RM single in this session, OR because they are simply telling you their current actual max for a lift (e.g. "my real squat max is 405", "current bench 1RM is 275", "just hit a 315 deadlift max"). This applies even if no other exercises were logged in the message. If they describe a failed attempt at a 1RM, set achieved:false.`;
   const text = await askClaude(sys,`Athlete: ${name} (${sport})\nMessage: ${message}`,1000);
   try { return JSON.parse(text.replace(/```json|```/g,"").trim()); }
   catch { return {exercises:[],run_data:null,practice_data:null,pain_flags:[],equipment_issues:[],questions:[],pr_attempts:[],session_feel:null,general_notes:message,is_program_update:false,is_temp_program_update:false,is_program_revert:false}; }
@@ -374,6 +417,7 @@ function useIsMobile(bp=640) {
 
 // ─── LINE CHART ───────────────────────────────────────────────────────────────
 function LineChart({data, color=C.gold, unit=""}) {
+  const [selected, setSelected] = useState(null);
   if(!data||data.length<2) return (
     <div style={{color:C.muted,fontSize:12,textAlign:"center",padding:"16px 0"}}>Not enough data yet.</div>
   );
@@ -386,8 +430,10 @@ function LineChart({data, color=C.gold, unit=""}) {
   const pts = data.map((d,i)=>`${px(i)},${py(d.y)}`).join(" ");
   const area = `${pl},${pt+ih} ${pts} ${px(data.length-1)},${pt+ih}`;
   const gid = `g${color.replace("#","")}${Math.random().toString(36).slice(2,6)}`;
+  const tipW = 44;
+  const tipX = selected!=null ? Math.min(Math.max(px(selected), tipW/2), W-tipW/2) : 0;
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",overflow:"visible"}}>
+    <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",overflow:"visible"}} onClick={()=>setSelected(null)}>
       <defs><linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stopColor={color} stopOpacity="0.25"/>
         <stop offset="100%" stopColor={color} stopOpacity="0"/>
@@ -396,12 +442,23 @@ function LineChart({data, color=C.gold, unit=""}) {
       <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round"/>
       {data.map((d,i)=>(
         <g key={i}>
-          <circle cx={px(i)} cy={py(d.y)} r={2.5} fill={color}/>
-          <text x={px(i)} y={H-3} textAnchor="middle" fill={C.muted} fontSize={7} fontFamily="DM Sans">{d.label}</text>
+          <circle cx={px(i)} cy={py(d.y)} r={selected===i?3.5:2.5} fill={color}/>
+          <circle
+            cx={px(i)} cy={py(d.y)} r={12} fill="transparent" style={{cursor:"pointer"}}
+            onClick={(e)=>{e.stopPropagation(); setSelected(selected===i?null:i);}}
+            onTouchStart={(e)=>{e.stopPropagation(); setSelected(selected===i?null:i);}}
+          />
+          <text x={px(i)} y={H-3} textAnchor="middle" fill={selected===i?C.text:C.muted} fontSize={7} fontFamily="DM Sans">{d.label}</text>
         </g>
       ))}
       <text x={pl-3} y={pt+6} textAnchor="end" fill={C.muted} fontSize={7}>{max}{unit}</text>
       <text x={pl-3} y={pt+ih+4} textAnchor="end" fill={C.muted} fontSize={7}>{min}{unit}</text>
+      {selected!=null && (
+        <g>
+          <rect x={tipX-tipW/2} y={Math.max(py(data[selected].y)-24,1)} width={tipW} height={16} rx={3} fill={C.navy3} stroke={color} strokeWidth={0.75}/>
+          <text x={tipX} y={Math.max(py(data[selected].y)-24,1)+11} textAnchor="middle" fill={C.text} fontSize={8} fontWeight="600">{data[selected].y}{unit}</text>
+        </g>
+      )}
     </svg>
   );
 }
@@ -1678,10 +1735,14 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         }
       } catch(_){}
 
-      // Auto PR detection
+      // Auto PR detection (estimated 1RM, from any logged set — handles variable weight/reps via set_details)
       const newPRs = [];
-      if(parsed.exercises?.length>0){
-        const existingPRs = await sbGet("prs",`?athlete_id=eq.${updatedAthlete.id}`);
+      let manualMap = {};
+      if(parsed.exercises?.length>0 || parsed.pr_attempts?.length>0){
+        const [existingPRs, existingManual] = await Promise.all([
+          sbGet("prs",`?athlete_id=eq.${updatedAthlete.id}`),
+          sbGet("manual_one_rms",`?athlete_id=eq.${updatedAthlete.id}`),
+        ]);
         const prMap = {};
         if(Array.isArray(existingPRs)){
           existingPRs.forEach(pr=>{
@@ -1689,19 +1750,51 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             if(!prMap[k]||epley1RM(pr.weight,pr.reps)>epley1RM(prMap[k].weight,prMap[k].reps)) prMap[k]=pr;
           });
         }
-        for(const ex of parsed.exercises){
-          if(!ex.name||!ex.weight||ex.unit==="bodyweight") continue;
+        if(Array.isArray(existingManual)){
+          existingManual.forEach(m=>{ manualMap[m.normalized_exercise]=m; });
+        }
+
+        for(const ex of (parsed.exercises||[])){
+          if(!ex.name||ex.unit==="bodyweight") continue;
+          const exE1RM = bestE1RMForExercise(ex);
+          if(!exE1RM) continue;
           const k = normalizeExName(ex.name);
-          // Normalize to lbs-equivalent for cross-unit comparison
-          const exLbs = toLbs(ex.weight, ex.unit);
-          const exE1RM = epley1RM(exLbs, ex.reps||1);
+          // Use the heaviest single set as the representative weight/reps for the prs row
+          const topSet = getExerciseSets(ex).reduce((best,s)=>{
+            const e = epley1RM(toLbs(s.weight, ex.unit), s.reps);
+            return e > epley1RM(toLbs(best.weight, ex.unit), best.reps) ? s : best;
+          }, {weight:ex.weight??0, reps:ex.reps||1});
           const prE1RM = prMap[k] ? epley1RM(toLbs(prMap[k].weight, prMap[k].unit), prMap[k].reps||1) : 0;
           if(!prMap[k]){
-            await sbInsert("prs",{athlete_id:updatedAthlete.id,exercise:ex.name,weight:ex.weight,reps:ex.reps||1,estimated_1rm:exE1RM,unit:ex.unit||"lbs"});
+            await sbInsert("prs",{athlete_id:updatedAthlete.id,exercise:ex.name,weight:topSet.weight,reps:topSet.reps||1,estimated_1rm:exE1RM,unit:ex.unit||"lbs"});
           } else if(exE1RM > prE1RM){
-            await sbInsert("prs",{athlete_id:updatedAthlete.id,exercise:ex.name,weight:ex.weight,reps:ex.reps||1,estimated_1rm:exE1RM,unit:ex.unit||"lbs"});
-            newPRs.push({exercise:ex.name,weight:ex.weight,unit:ex.unit||"lbs",reps:ex.reps||1,e1rm:exE1RM,prevE1RM:prE1RM,diff:exE1RM-prE1RM,old1RM:prE1RM});
+            await sbInsert("prs",{athlete_id:updatedAthlete.id,exercise:ex.name,weight:topSet.weight,reps:topSet.reps||1,estimated_1rm:exE1RM,unit:ex.unit||"lbs"});
+            // Only let the estimate drive program-text propagation when there's no manual (actual) 1RM
+            // for this lift — a manual 1RM is authoritative and should only change via an explicit attempt.
+            if(!manualMap[k]){
+              newPRs.push({exercise:ex.name,weight:topSet.weight,unit:ex.unit||"lbs",reps:topSet.reps||1,e1rm:exE1RM,prevE1RM:prE1RM,diff:exE1RM-prE1RM,old1RM:prE1RM});
+            }
           }
+        }
+
+        // Manual (actual, non-estimated) 1RM — set via chat declaration or an achieved true single.
+        const oneRMAttempts = (parsed.pr_attempts||[]).filter(p=>p.reps===1 && p.achieved && p.exercise && p.weight);
+        for(const attempt of oneRMAttempts){
+          const k = normalizeExName(attempt.exercise);
+          const unit = attempt.unit==="kg" ? "kg" : "lbs";
+          const newLbs = toLbs(attempt.weight, unit);
+          const existing = manualMap[k];
+          const oldLbs = existing
+            ? toLbs(existing.weight, existing.unit)
+            : (prMap[k] ? epley1RM(toLbs(prMap[k].weight, prMap[k].unit), prMap[k].reps||1) : 0);
+          if(existing && newLbs <= oldLbs) continue; // not actually a new max — leave the existing manual 1RM as-is
+          if(existing){
+            await sbUpdate("manual_one_rms", existing.id, {weight:attempt.weight, unit, source:"workout", updated_at:new Date().toISOString()});
+          } else {
+            await sbInsert("manual_one_rms", {athlete_id:updatedAthlete.id, exercise:attempt.exercise, normalized_exercise:k, weight:attempt.weight, unit, source:"workout"});
+          }
+          manualMap[k] = {athlete_id:updatedAthlete.id, exercise:attempt.exercise, normalized_exercise:k, weight:attempt.weight, unit, source:"workout"};
+          newPRs.push({exercise:attempt.exercise, weight:attempt.weight, unit, reps:1, e1rm:newLbs, prevE1RM:oldLbs, diff:newLbs-oldLbs, old1RM:oldLbs, isActual1RM:true});
         }
       }
 
@@ -1738,7 +1831,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         }
 
         try {
-          const prCallout = newPRs.map(pr=>`${pr.exercise}: ${fmtWeight(pr.weight,pr.unit)} x${pr.reps} reps (est. 1RM: ${Math.round(pr.e1rm)}lbs-equiv, +${Math.round(pr.diff)}lbs-equiv over prev)`).join("\n");
+          const prCallout = newPRs.map(pr=>pr.isActual1RM
+            ? `${pr.exercise}: NEW ACTUAL 1RM ${fmtWeight(pr.weight,pr.unit)} (+${Math.round(pr.diff)}lbs-equiv over prev)`
+            : `${pr.exercise}: ${fmtWeight(pr.weight,pr.unit)} x${pr.reps} reps (est. 1RM: ${Math.round(pr.e1rm)}lbs-equiv, +${Math.round(pr.diff)}lbs-equiv over prev)`
+          ).join("\n");
           const propagationNote = propagationLog.length>0 ? `\n\nI've updated your future ${propagationLog.map(l=>l.split(":")[0]).join(", ")} targets based on your new max.` : "";
           const prReply = await askClaude(
             "You are Coach Joe Thomas. An athlete just hit a new PR. Acknowledge it directly -- short, punchy, in Coach Joe's voice. Atta boy/girl is appropriate here.",
@@ -1747,7 +1843,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           setMessages(prev=>[...prev,{role:"assistant",content:prReply+propagationNote}]);
         } catch(e){
           const propagationNote = propagationLog.length>0 ? `\n\nUpdated your future ${propagationLog.map(l=>l.split(":")[0]).join(", ")} targets based on your new max.` : "";
-          setMessages(prev=>[...prev,{role:"assistant",content:newPRs.map(pr=>`New PR -- ${pr.exercise} at ${fmtWeight(pr.weight,pr.unit)} x${pr.reps} (est. 1RM: ${Math.round(pr.e1rm)}lbs-equiv). +${Math.round(pr.diff)}lbs-equiv over previous best. That's what the work is for.`).join("\n")+propagationNote}]);
+          setMessages(prev=>[...prev,{role:"assistant",content:newPRs.map(pr=>pr.isActual1RM
+            ? `New ACTUAL 1RM -- ${pr.exercise} at ${fmtWeight(pr.weight,pr.unit)}. +${Math.round(pr.diff)}lbs-equiv over previous best. That's what the work is for.`
+            : `New PR -- ${pr.exercise} at ${fmtWeight(pr.weight,pr.unit)} x${pr.reps} (est. 1RM: ${Math.round(pr.e1rm)}lbs-equiv). +${Math.round(pr.diff)}lbs-equiv over previous best. That's what the work is for.`
+          ).join("\n")+propagationNote}]);
         }
       }
     } catch(e){
@@ -2186,7 +2285,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
       </div>
 
       {/* My Log Modal */}
-      {showLog&&<MyLogModal workoutHistory={workoutHistory} athlete={athlete} onClose={()=>setShowLog(false)} proofDigest={proofDigest} onDigestRead={(d)=>setProofDigest(d)} onOpenMonthlyRecap={()=>{setShowLog(false);setShowMonthlyRecap(true);}}/>}
+      {showLog&&<MyLogModal workoutHistory={workoutHistory} athlete={athlete} onClose={()=>setShowLog(false)} proofDigest={proofDigest} onDigestRead={(d)=>setProofDigest(d)} onOpenMonthlyRecap={()=>{setShowLog(false);setShowMonthlyRecap(true);}} setWorkoutHistory={setWorkoutHistory}/>}
 
       {/* Program View Modal */}
       {showProgram&&(
@@ -2300,8 +2399,9 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
 }
 
 // ─── MY LOG MODAL ─────────────────────────────────────────────────────────────
-function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead, onOpenMonthlyRecap}) {
+function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead, onOpenMonthlyRecap, setWorkoutHistory}) {
   const [tab,setTab] = useState("workouts");
+  const [editSession,setEditSession] = useState(null);
   const painKey = `wilco_resolved_pain_${athlete.id}`;
   const [resolvedPain,setResolvedPain] = useState(()=>{
     try{return JSON.parse(localStorage.getItem(painKey)||"[]");}catch{return[];}
@@ -2328,7 +2428,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
 
       {/* Tabs */}
       <div style={{display:"flex",borderBottom:`1px solid ${C.border}`,flexShrink:0}}>
-        {["workouts","progress","proof"].map(t=>(
+        {["workouts","proof"].map(t=>(
           <button key={t} onClick={()=>setTab(t)}
             style={{padding:"10px 20px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?C.gold:"transparent"}`,color:tab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"color 0.15s",position:"relative"}}>
             {t}
@@ -2396,7 +2496,12 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                           <div style={{width:6,height:6,borderRadius:"50%",background:runDotColor,flexShrink:0}}/>
                           <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1}}>{isRunSession?"RUN":"WORKOUT"} — {fmtDate(sessionDate)}</div>
                         </div>
-                        {!isRunSession&&feelVal&&<div style={{fontSize:11,color:feelVal==="great"||feelVal==="good"?C.green:feelVal==="rough"?C.red:C.gold,fontWeight:600}}>{feelVal}</div>}
+                        <div style={{display:"flex",alignItems:"center",gap:10}}>
+                          {!isRunSession&&feelVal&&<div style={{fontSize:11,color:feelVal==="great"||feelVal==="good"?C.green:feelVal==="rough"?C.red:C.gold,fontWeight:600}}>{feelVal}</div>}
+                          {!isRunSession&&allExercises.length>0&&(
+                            <button onClick={()=>setEditSession(session)} title="Edit this workout" style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"3px 8px",cursor:"pointer",fontSize:11}}>✎ Edit</button>
+                          )}
+                        </div>
                       </div>
                       {isRunSession?(
                         <RunCard runData={allRunData[0]} feel={feelVal}/>
@@ -2404,7 +2509,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                         <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,marginBottom:allPainFlags.length>0?8:0}}>
                           <thead>
                             <tr>
-                              {["Exercise","Sets","Reps","Weight","Feel"].map(h=>(
+                              {["Exercise","Sets","Feel"].map(h=>(
                                 <th key={h} style={{color:C.muted,fontWeight:600,fontSize:10,letterSpacing:1,textAlign:"left",paddingBottom:4,borderBottom:`1px solid ${C.border}`}}>{h}</th>
                               ))}
                             </tr>
@@ -2412,11 +2517,9 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                           <tbody>
                             {allExercises.map((e,j)=>(
                               <tr key={j}>
-                                <td style={{color:C.text,fontWeight:600,padding:"5px 8px 5px 0"}}>{e.name}</td>
-                                <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.sets||"—"}</td>
-                                <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.reps||"—"}</td>
-                                <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{fmtWeight(e.weight,e.unit)}</td>
-                                <td style={{color:e.feel==="easy"?C.blue:e.feel==="hard"?C.red:C.muted,padding:"5px 0"}}>{e.feel||"—"}</td>
+                                <td style={{color:C.text,fontWeight:600,padding:"5px 8px 5px 0",verticalAlign:"top"}}>{e.name}</td>
+                                <td style={{color:C.muted2,padding:"5px 8px 5px 0",verticalAlign:"top"}}>{formatSetDetails(e)}</td>
+                                <td style={{color:e.feel==="easy"?C.blue:e.feel==="hard"?C.red:C.muted,padding:"5px 0",verticalAlign:"top"}}>{e.feel||"—"}</td>
                               </tr>
                             ))}
                           </tbody>
@@ -2454,98 +2557,6 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
             </div>
           );
         })()}
-
-        {/* ── PROGRESS TAB ── */}
-        {tab==="progress"&&(
-          <div>
-            {/* Strength */}
-            {(()=>{
-              const byEx={};
-              workoutHistory.forEach(w=>{
-                const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
-                (pd.exercises||[]).forEach(ex=>{
-                  if(!ex.name||!ex.weight||ex.unit==="bodyweight") return;
-                  const k=normalizeExName(ex.name);
-                  const unit=ex.unit||"lbs";
-                  if(!byEx[k]) byEx[k]={name:ex.name,unit,entries:[]};
-                  const lbsW=toLbs(ex.weight,unit);
-                  byEx[k].entries.push({date:new Date(w.created_at),weight:ex.weight,unit,reps:ex.reps||1,e1rm:epley1RM(lbsW,ex.reps||1)});
-                });
-              });
-              const exercises=Object.values(byEx).map(ex=>{
-                const sorted=[...ex.entries].sort((a,b)=>a.date-b.date);
-                const best=Math.max(...sorted.map(e=>e.e1rm));
-                const bestEntry=sorted.reduce((a,b)=>b.e1rm>a.e1rm?b:a);
-                return{...ex,entries:sorted,best,bestEntry};
-              }).sort((a,b)=>b.best-a.best);
-              if(exercises.length===0) return null;
-              return(
-                <>
-                  <div style={{color:"#d4a017",fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>STRENGTH</div>
-                  {exercises.map((ex,i)=>(
-                    <div key={i} style={{background:"#0a1228",border:"1px solid #1e2a4a",borderRadius:12,padding:16,marginBottom:14}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
-                        <div>
-                          <div style={{color:"#e2e8f0",fontWeight:700,fontSize:14}}>{ex.name}</div>
-                          <div style={{color:"#64748b",fontSize:11,marginTop:2}}>{ex.entries.length} logged set{ex.entries.length!==1?"s":""}</div>
-                        </div>
-                        <div style={{textAlign:"right"}}>
-                          <div style={{color:"#64748b",fontSize:10,letterSpacing:1,marginBottom:2}}>BEST EST. 1RM</div>
-                          <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:"#d4a017",lineHeight:1}}>{ex.best}<span style={{fontSize:13,color:"#64748b",fontFamily:"'DM Sans'",marginLeft:2}}>{ex.unit==="kg"?"kg":"lbs"}</span></div>
-                          <div style={{color:"#64748b",fontSize:10,marginTop:2}}>{fmtWeight(ex.bestEntry.weight,ex.unit)} × {ex.bestEntry.reps} rep{ex.bestEntry.reps!==1?"s":""}</div>
-                        </div>
-                      </div>
-                      {ex.entries.length>=2?(
-                        <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color="#d4a017" unit={ex.unit==="kg"?"kg":"lbs"}/>
-                      ):(
-                        <div style={{background:"#0d1836",borderRadius:8,padding:"8px 12px",fontSize:12,color:"#94a3b8"}}>Log again to see a trend.</div>
-                      )}
-                    </div>
-                  ))}
-                </>
-              );
-            })()}
-
-            {/* Running */}
-            {(()=>{
-              const runs=workoutHistory.filter(w=>{
-                const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
-                return!!pd.run_data;
-              }).map(w=>{
-                const pd=typeof w.parsed_data==="string"?JSON.parse(w.parsed_data):(w.parsed_data||{});
-                return{date:new Date(w.created_at),run:pd.run_data};
-              }).sort((a,b)=>a.date-b.date);
-              if(runs.length<2) return null;
-              const paceToMin=(p)=>{if(!p)return null;const pts=p.split(":");if(pts.length<2)return null;const m=parseFloat(pts[0]),s=parseFloat(pts[1]);return isNaN(m)||isNaN(s)?null:Math.round((m+s/60)*100)/100;};
-              const distData=runs.filter(r=>r.run.distance_miles||r.run.distance_km).map(r=>({label:fmtDateShort(r.date),y:r.run.distance_miles||r.run.distance_km}));
-              const paceData=runs.filter(r=>r.run.pace_per_mile||r.run.pace_per_km).map(r=>({label:fmtDateShort(r.date),y:paceToMin(r.run.pace_per_mile||r.run.pace_per_km)})).filter(d=>d.y!==null);
-              const hrData=runs.filter(r=>r.run.heart_rate_avg).map(r=>({label:fmtDateShort(r.date),y:r.run.heart_rate_avg}));
-              return(
-                <div style={{marginTop:8}}>
-                  <div style={{color:"#3b82f6",fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>RUNNING</div>
-                  {distData.length>=2&&(
-                    <div style={{background:"#0a1228",border:"1px solid #1e2a4a",borderRadius:12,padding:16,marginBottom:14}}>
-                      <div style={{color:"#e2e8f0",fontWeight:700,fontSize:14,marginBottom:12}}>Distance per run</div>
-                      <LineChart data={distData} color="#3b82f6" unit=" mi"/>
-                    </div>
-                  )}
-                  {paceData.length>=2&&(
-                    <div style={{background:"#0a1228",border:"1px solid #1e2a4a",borderRadius:12,padding:16,marginBottom:14}}>
-                      <div style={{color:"#e2e8f0",fontWeight:700,fontSize:14,marginBottom:4}}>Pace (min/mi) — lower is faster</div>
-                      <LineChart data={paceData} color="#10b981" unit=""/>
-                    </div>
-                  )}
-                  {hrData.length>=2&&(
-                    <div style={{background:"#0a1228",border:"1px solid #1e2a4a",borderRadius:12,padding:16,marginBottom:14}}>
-                      <div style={{color:"#e2e8f0",fontWeight:700,fontSize:14,marginBottom:12}}>Avg heart rate (bpm)</div>
-                      <LineChart data={hrData} color="#ef4444" unit=" bpm"/>
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-          </div>
-        )}
 
         {/* ── PROOF TAB ── */}
         {tab==="proof"&&(
@@ -2631,6 +2642,134 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
       <div style={{padding:"10px 16px",paddingBottom:"max(10px, env(safe-area-inset-bottom))",borderTop:`1px solid ${C.border}`,background:C.navy2,flexShrink:0}}>
         <button onClick={onClose} style={{width:"100%",background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"12px 14px",cursor:"pointer",fontSize:14,fontWeight:600}}>✕ Close</button>
       </div>
+
+      {editSession&&(
+        <EditWorkoutModal
+          session={editSession}
+          onClose={()=>setEditSession(null)}
+          setWorkoutHistory={setWorkoutHistory}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── EDIT WORKOUT MODAL ───────────────────────────────────────────────────────
+// Lets the athlete fix a past logged workout: adjust sets/reps/weight per exercise,
+// or remove an exercise entirely. Edits are written back to whichever underlying
+// "workouts" row each exercise came from (a session can span more than one entry).
+function EditWorkoutModal({session, onClose, setWorkoutHistory}) {
+  const parseEntry = (e) => typeof e.parsed_data==="string" ? (()=>{try{return JSON.parse(e.parsed_data);}catch{return {};}})() : (e.parsed_data||{});
+
+  const [rows,setRows] = useState(()=>{
+    const out = [];
+    session.entries.forEach((entry,ei)=>{
+      const pd = parseEntry(entry);
+      (pd.exercises||[]).forEach((ex,xi)=>{
+        out.push({ei,xi,name:ex.name,sets:ex.sets||1,reps:ex.reps||1,weight:ex.weight??"",unit:ex.unit||"lbs",hadSetDetails:Array.isArray(ex.set_details)&&ex.set_details.length>0,deleted:false});
+      });
+    });
+    return out;
+  });
+  const [saving,setSaving] = useState(false);
+  const [err,setErr] = useState("");
+
+  const updateRow = (idx,field,val) => setRows(prev=>prev.map((r,i)=>i===idx?{...r,[field]:val}:r));
+  const removeRow = (idx) => setRows(prev=>prev.map((r,i)=>i===idx?{...r,deleted:true}:r));
+
+  const save = async () => {
+    if(!session.entries.every(e=>e.id)){
+      setErr("This workout hasn't finished syncing yet — try again in a moment.");
+      return;
+    }
+    setSaving(true);
+    setErr("");
+    try {
+      for(const [ei,entry] of session.entries.entries()){
+        const pd = parseEntry(entry);
+        const origExercises = pd.exercises||[];
+        const keptRows = rows.filter(r=>r.ei===ei && !r.deleted);
+        if(keptRows.length===origExercises.length && rows.filter(r=>r.ei===ei).every(r=>!r.deleted &&
+            r.sets===(origExercises[r.xi]?.sets||1) && r.reps===(origExercises[r.xi]?.reps||1) && String(r.weight)===String(origExercises[r.xi]?.weight??""))) {
+          continue; // nothing changed in this entry
+        }
+        const newExercises = keptRows.map(r=>{
+          const orig = origExercises[r.xi]||{};
+          return {
+            ...orig,
+            sets: r.sets===""?null:+r.sets,
+            reps: r.reps===""?null:+r.reps,
+            weight: r.weight===""?null:+r.weight,
+            unit: r.unit,
+            // Edited manually — the old per-set breakdown no longer matches, so drop it
+            // rather than leave it inconsistent with the new flat values.
+            set_details: null,
+          };
+        });
+        const newParsedData = {...pd, exercises:newExercises};
+        await sbUpdate("workouts", entry.id, {parsed_data:newParsedData});
+        setWorkoutHistory(prev=>prev.map(w=>w.id===entry.id?{...w,parsed_data:newParsedData}:w));
+      }
+      onClose();
+    } catch(e){
+      setErr("Couldn't save those changes. Try again.");
+    }
+    setSaving(false);
+  };
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.8)",display:"flex",alignItems:"flex-end",justifyContent:"center",zIndex:500}}>
+      <style>{GS}</style>
+      <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderTopLeftRadius:20,borderTopRightRadius:20,width:"100%",maxWidth:600,maxHeight:"85dvh",display:"flex",flexDirection:"column"}}>
+        <div style={{padding:"16px 20px 12px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+          <div>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2}}>EDIT WORKOUT</div>
+            <div style={{color:C.muted2,fontSize:12,marginTop:2}}>{fmtDate(session.entries[0].created_at)}</div>
+          </div>
+          <button onClick={onClose} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"4px 12px",cursor:"pointer",fontSize:12}}>✕</button>
+        </div>
+        <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
+          {rows.filter(r=>!r.deleted).length===0&&(
+            <div style={{color:C.muted,textAlign:"center",padding:20,fontSize:13}}>All exercises removed. Save to clear this workout, or close without saving.</div>
+          )}
+          {rows.map((r,idx)=>r.deleted?null:(
+            <div key={idx} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <div style={{color:C.text,fontWeight:700,fontSize:13}}>{r.name}</div>
+                <button onClick={()=>removeRow(idx)} style={{background:"none",border:"none",color:"#ef4444",cursor:"pointer",fontSize:11}}>Remove</button>
+              </div>
+              {r.hadSetDetails&&<div style={{color:C.muted,fontSize:10,marginBottom:6,lineHeight:1.4}}>This exercise had per-set weight/rep variation. Editing here replaces it with one flat value across all sets.</div>}
+              <div style={{display:"flex",gap:8}}>
+                <div style={{flex:1}}>
+                  <label style={{color:C.muted,fontSize:9,letterSpacing:1,display:"block",marginBottom:3}}>SETS</label>
+                  <input type="number" min={0} value={r.sets} onChange={e=>updateRow(idx,"sets",e.target.value)} style={inp({padding:"6px 8px",fontSize:12})}/>
+                </div>
+                <div style={{flex:1}}>
+                  <label style={{color:C.muted,fontSize:9,letterSpacing:1,display:"block",marginBottom:3}}>REPS</label>
+                  <input type="number" min={0} value={r.reps} onChange={e=>updateRow(idx,"reps",e.target.value)} style={inp({padding:"6px 8px",fontSize:12})}/>
+                </div>
+                <div style={{flex:1.3}}>
+                  <label style={{color:C.muted,fontSize:9,letterSpacing:1,display:"block",marginBottom:3}}>WEIGHT</label>
+                  <input type="number" min={0} value={r.weight} onChange={e=>updateRow(idx,"weight",e.target.value)} style={inp({padding:"6px 8px",fontSize:12})}/>
+                </div>
+                <div style={{flex:1}}>
+                  <label style={{color:C.muted,fontSize:9,letterSpacing:1,display:"block",marginBottom:3}}>UNIT</label>
+                  <select value={r.unit} onChange={e=>updateRow(idx,"unit",e.target.value)} style={inp({padding:"6px 8px",fontSize:12})}>
+                    <option value="lbs">lbs</option>
+                    <option value="kg">kg</option>
+                    <option value="bodyweight">BW</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          ))}
+          {err&&<div style={{color:"#ef4444",fontSize:12,marginBottom:10}}>{err}</div>}
+        </div>
+        <div style={{padding:"12px 20px",paddingBottom:"max(12px, env(safe-area-inset-bottom))",borderTop:`1px solid ${C.border}`,display:"flex",gap:10,flexShrink:0}}>
+          <button onClick={onClose} style={{flex:1,background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"12px 14px",cursor:"pointer",fontSize:14,fontWeight:600}}>Cancel</button>
+          <button onClick={save} disabled={saving} style={{flex:1,background:C.gold,border:"none",color:C.navy,borderRadius:8,padding:"12px 14px",cursor:saving?"default":"pointer",fontSize:14,fontWeight:700,opacity:saving?0.6:1}}>{saving?"Saving...":"Save changes"}</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2638,6 +2777,18 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
 // ─── PROGRESS MODAL ───────────────────────────────────────────────────────────
 function ProgressModal({athlete, workoutHistory, onClose}) {
   const [tab,setTab] = useState("benchmarks");
+  const [search,setSearch] = useState("");
+  const [manualRMs,setManualRMs] = useState([]);
+  const [editingKey,setEditingKey] = useState(null);
+  const [editVal,setEditVal] = useState("");
+
+  useEffect(()=>{
+    sbGet("manual_one_rms",`?athlete_id=eq.${athlete.id}`).then(rows=>{
+      if(Array.isArray(rows)) setManualRMs(rows);
+    }).catch(()=>{});
+  },[athlete.id]);
+
+  const matchesSearch = (name) => !search.trim() || (name||"").toLowerCase().includes(search.trim().toLowerCase());
 
   // Athlete physical stats
   const bodyweight = athlete.weight_lbs;
@@ -2647,15 +2798,16 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
     : (athlete.age||null);
   const isUnder18 = age!==null && age<18;
 
-  // Build best estimated 1RM per exercise from workout history
+  // Build best estimated 1RM per exercise from workout history (uses every logged set,
+  // including variable weight/rep sets captured via set_details)
   const byEx = {};
   workoutHistory.forEach(w=>{
     const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
     (pd.exercises||[]).forEach(ex=>{
-      if(!ex.name||!ex.weight||ex.unit==="bodyweight") return;
+      if(!ex.name||ex.unit==="bodyweight") return;
+      const e1rm = bestE1RMForExercise(ex);
+      if(!e1rm) return;
       const k=normalizeExName(ex.name);
-      const lbsW=toLbs(ex.weight,ex.unit||"lbs");
-      const e1rm=epley1RM(lbsW,ex.reps||1);
       if(!byEx[k]||e1rm>byEx[k].e1rm) byEx[k]={name:ex.name,e1rm,unit:ex.unit||"lbs"};
     });
   });
@@ -2675,16 +2827,47 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   const dedupedBench = benchmarked.filter(b=>{
     if(seen[b.benchKey]&&seen[b.benchKey]>=b.e1rm) return false;
     seen[b.benchKey]=b.e1rm; return true;
-  });
+  }).filter(b=>matchesSearch(b.name));
 
   // Strength/running progress for other tabs
   const exercises = Object.values(byEx).map(ex=>{
     const entries = workoutHistory.flatMap(w=>{
       const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
-      return (pd.exercises||[]).filter(e=>normalizeExName(e.name)===normalizeExName(ex.name)&&e.weight&&e.unit!=="bodyweight").map(e=>({date:new Date(w.created_at),e1rm:epley1RM(toLbs(e.weight,e.unit||"lbs"),e.reps||1)}));
+      return (pd.exercises||[]).filter(e=>normalizeExName(e.name)===normalizeExName(ex.name)&&e.unit!=="bodyweight").map(e=>({date:new Date(w.created_at),e1rm:bestE1RMForExercise(e)})).filter(e=>e.e1rm>0);
     }).sort((a,b)=>a.date-b.date);
     return {...ex,entries};
-  }).sort((a,b)=>b.e1rm-a.e1rm);
+  }).sort((a,b)=>b.e1rm-a.e1rm).filter(ex=>matchesSearch(ex.name));
+
+  // PR tab — manual (actual) 1RM takes precedence over the estimated 1RM above
+  const prMap = {};
+  Object.entries(byEx).forEach(([k,ex])=>{ prMap[k]={key:k,name:ex.name,unit:ex.unit,estimated:ex.e1rm,manual:null}; });
+  manualRMs.forEach(m=>{
+    const k=m.normalized_exercise;
+    if(!prMap[k]) prMap[k]={key:k,name:m.exercise,unit:m.unit,estimated:0,manual:null};
+    prMap[k].manual=m;
+  });
+  const prList = Object.values(prMap)
+    .map(row=>({...row,active: row.manual ? toLbs(row.manual.weight,row.manual.unit) : row.estimated}))
+    .sort((a,b)=>b.active-a.active)
+    .filter(row=>matchesSearch(row.name));
+
+  const saveManual = async (row) => {
+    const w = parseFloat(editVal);
+    if(!w||w<=0) return;
+    const unit = row.unit==="kg"?"kg":"lbs";
+    try {
+      if(row.manual){
+        await sbUpdate("manual_one_rms", row.manual.id, {weight:w, unit, source:"manual", updated_at:new Date().toISOString()});
+        setManualRMs(prev=>prev.map(m=>m.id===row.manual.id?{...m,weight:w,unit}:m));
+      } else {
+        const inserted = await sbInsert("manual_one_rms", {athlete_id:athlete.id, exercise:row.name, normalized_exercise:row.key, weight:w, unit, source:"manual"});
+        const newRow = Array.isArray(inserted)&&inserted[0] ? inserted[0] : {athlete_id:athlete.id,exercise:row.name,normalized_exercise:row.key,weight:w,unit,source:"manual"};
+        setManualRMs(prev=>[...prev,newRow]);
+      }
+    } catch(_){}
+    setEditingKey(null);
+    setEditVal("");
+  };
 
   return (
     <div style={{position:"fixed",inset:0,zIndex:300,background:C.navy,display:"flex",flexDirection:"column",maxWidth:600,margin:"0 auto"}}>
@@ -2696,12 +2879,22 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
         </div>
       </div>
 
+      {/* Search */}
+      <div style={{padding:"10px 16px 0",flexShrink:0}}>
+        <input
+          value={search}
+          onChange={e=>setSearch(e.target.value)}
+          placeholder="Search exercises..."
+          style={inp({padding:"8px 12px",fontSize:13})}
+        />
+      </div>
+
       {/* Tabs */}
       <div style={{display:"flex",borderBottom:`1px solid ${C.border}`,flexShrink:0}}>
-        {["benchmarks","strength","running"].map(t=>(
+        {["benchmarks","strength","running","pr"].map(t=>(
           <button key={t} onClick={()=>setTab(t)}
             style={{padding:"10px 20px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?C.gold:"transparent"}`,color:tab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,transition:"color 0.15s"}}>
-            {t}
+            {t==="pr"?"PRs":t}
           </button>
         ))}
       </div>
@@ -2870,6 +3063,43 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
             </div>
           );
         })()}
+
+        {/* ── PR TAB ── */}
+        {tab==="pr"&&(
+          <div>
+            <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:6}}>YOUR 1RMs</div>
+            <div style={{color:C.muted2,fontSize:11,marginBottom:14,lineHeight:1.5}}>
+              Set your actual 1RM here, or just tell Coach Joe in chat when you hit one (e.g. "hit a true 1RM of 315 on squat"). Your actual 1RM always overrides the estimate for program math — until then, programming uses your best estimated 1RM.
+            </div>
+            {prList.length===0?(
+              <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>Log some lifts to start tracking 1RMs.</div>
+            ):prList.map((row,i)=>(
+              <div key={row.key} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:12}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                  <div>
+                    <div style={{color:C.text,fontWeight:700,fontSize:14}}>{row.name}</div>
+                    <div style={{color:row.manual?C.gold:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,marginTop:2}}>{row.manual?"ACTUAL 1RM":"ESTIMATED 1RM"}</div>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontFamily:"'Bebas Neue'",fontSize:28,color:C.gold,lineHeight:1}}>{Math.round(row.active)}<span style={{fontSize:11,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>{row.unit==="kg"?"kg":"lbs"}</span></div>
+                    {row.manual&&row.estimated>0&&<div style={{color:C.muted,fontSize:10,marginTop:2}}>est. {Math.round(row.estimated)}lbs</div>}
+                  </div>
+                </div>
+                {editingKey===row.key?(
+                  <div style={{display:"flex",gap:8,marginTop:10}}>
+                    <input autoFocus type="number" min={0} value={editVal} onChange={e=>setEditVal(e.target.value)} placeholder={`Actual 1RM (${row.unit==="kg"?"kg":"lbs"})`} style={inp({padding:"8px 10px",fontSize:13,flex:1})}/>
+                    <button onClick={()=>saveManual(row)} style={{background:C.gold,border:"none",color:C.navy,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13,fontWeight:700}}>Save</button>
+                    <button onClick={()=>{setEditingKey(null);setEditVal("");}} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13}}>Cancel</button>
+                  </div>
+                ):(
+                  <button onClick={()=>{setEditingKey(row.key);setEditVal(row.manual?String(row.manual.weight):"");}} style={{marginTop:10,background:"none",border:`1px solid ${C.border}`,color:C.muted2,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12}}>
+                    {row.manual?"Update actual 1RM":"Set actual 1RM"}
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Sticky footer close button — sits above iPhone home bar / gesture area */}
@@ -3793,6 +4023,10 @@ function CoachDashboard({coach,onLogout}) {
   const [bulkSaving,setBulkSaving] = useState(false);
   const [school,setSchool] = useState(null);
   const [allSchools,setAllSchools] = useState([]);
+  const [showAssignCoachModal,setShowAssignCoachModal] = useState(false);
+  const [assignCoachId,setAssignCoachId] = useState("");
+  const [assignSaving,setAssignSaving] = useState(false);
+  const [assignError,setAssignError] = useState("");
 
   useEffect(()=>{loadAll();},[]);
 
@@ -3864,19 +4098,21 @@ function CoachDashboard({coach,onLogout}) {
           // parsed_data may come back as a string in some cases — parse it if so
           const pd = typeof w.parsed_data==="string" ? (() => { try{return JSON.parse(w.parsed_data);}catch{return {};} })() : (w.parsed_data||{});
           for(const ex of (pd.exercises||[])){
-            if(!ex.name||!ex.weight||ex.unit==="bodyweight") continue;
+            if(!ex.name||ex.unit==="bodyweight") continue;
+            const e1rm = bestE1RMForExercise(ex);
+            if(!e1rm) continue;
             const k = normalizeExName(ex.name);
-            const e1rm = epley1RM(ex.weight, ex.reps||1);
             if(!best[k]||e1rm>best[k].e1rm){
-              best[k] = {exercise:ex.name,weight:ex.weight,reps:ex.reps||1,e1rm};
+              const topSet = getExerciseSets(ex).reduce((b,s)=>epley1RM(toLbs(s.weight,ex.unit),s.reps)>epley1RM(toLbs(b.weight,ex.unit),b.reps)?s:b, {weight:ex.weight??0, reps:ex.reps||1});
+              best[k] = {exercise:ex.name,weight:topSet.weight,reps:topSet.reps||1,e1rm,unit:ex.unit||"lbs"};
             }
           }
         }
         // Only wipe and re-insert if we actually found exercises (safety guard)
         if(Object.keys(best).length>0){
           await sbDelete("prs",`?athlete_id=eq.${ath.id}`);
-          for(const {exercise,weight,reps,e1rm} of Object.values(best)){
-            await sbInsert("prs",{athlete_id:ath.id,exercise,weight,reps,estimated_1rm:e1rm});
+          for(const {exercise,weight,reps,e1rm,unit} of Object.values(best)){
+            await sbInsert("prs",{athlete_id:ath.id,exercise,weight,reps,estimated_1rm:e1rm,unit});
           }
         }
         done++;
@@ -3906,6 +4142,30 @@ function CoachDashboard({coach,onLogout}) {
       setShowBulkModal(false);
     } catch(e){console.error(e);}
     setBulkSaving(false);
+  };
+
+  // Assign (or unassign) selected athletes to a coach/school. assignCoachId==="" means unassign.
+  const handleBulkAssignCoach = async () => {
+    if(selectedIds.size===0) return;
+    setAssignSaving(true);
+    setAssignError("");
+    try {
+      const targetCoach = assignCoachId ? allCoaches.find(c=>c.id===assignCoachId) : null;
+      if(assignCoachId && !targetCoach){ setAssignError("Coach not found — try again."); setAssignSaving(false); return; }
+      const patch = targetCoach ? {coach_id:targetCoach.id, school_id:targetCoach.school_id||null} : {coach_id:null, school_id:null};
+      for(const id of selectedIds){
+        await sbUpdate("athletes",id,patch);
+      }
+      setAthletes(prev=>prev.map(a=>selectedIds.has(a.id)?{...a,...patch}:a));
+      setSelectedIds(new Set());
+      setSelectMode(false);
+      setAssignCoachId("");
+      setShowAssignCoachModal(false);
+    } catch(e){
+      console.error(e);
+      setAssignError("Couldn't save that assignment. Try again.");
+    }
+    setAssignSaving(false);
   };
 
   const lastActive = (id) => {
@@ -4004,10 +4264,18 @@ function CoachDashboard({coach,onLogout}) {
                       {selectMode?"✕ Cancel":"☑ Bulk Assign"}
                     </button>
                     {selectMode&&selectedIds.size>0&&(
-                      <button onClick={()=>setShowBulkModal(true)}
-                        style={{background:C.gold,border:"none",color:"#000",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>
-                        Assign ({selectedIds.size})
-                      </button>
+                      <div style={{display:"flex",gap:6}}>
+                        <button onClick={()=>setShowBulkModal(true)}
+                          style={{background:C.gold,border:"none",color:"#000",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,whiteSpace:"nowrap"}}>
+                          Program ({selectedIds.size})
+                        </button>
+                        {isMaster&&(
+                          <button onClick={()=>setShowAssignCoachModal(true)}
+                            style={{background:C.blue,border:"none",color:"#000",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,whiteSpace:"nowrap"}}>
+                            Coach ({selectedIds.size})
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
                   <div style={{maxHeight:isMobile?"none":"calc(100dvh - 240px)",overflowY:"auto"}}>
@@ -4100,6 +4368,49 @@ function CoachDashboard({coach,onLogout}) {
                 </div>
               </div>
             )}
+
+            {/* Bulk Assign Coach/School Modal (master only) */}
+            {showAssignCoachModal&&(()=>{
+              const schoolsById = Object.fromEntries(allSchools.map(s=>[s.id,s]));
+              const sortedCoaches = [...allCoaches].sort((a,b)=>{
+                const sa = schoolsById[a.school_id]?.name||"";
+                const sb = schoolsById[b.school_id]?.name||"";
+                return sa.localeCompare(sb) || a.name.localeCompare(b.name);
+              });
+              return (
+                <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.8)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:500,padding:24}}
+                  onClick={()=>!assignSaving&&setShowAssignCoachModal(false)}>
+                  <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:460}}
+                    onClick={e=>e.stopPropagation()}>
+                    <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2,marginBottom:4}}>ASSIGN TO COACH</div>
+                    <div style={{color:C.muted,fontSize:12,marginBottom:14}}>
+                      Moving {selectedIds.size} athlete{selectedIds.size!==1?"s":""} to a coach/school. This overwrites their current assignment.
+                    </div>
+                    <select value={assignCoachId} onChange={e=>setAssignCoachId(e.target.value)}
+                      style={{width:"100%",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"11px 12px",color:C.text,fontSize:13,outline:"none",marginBottom:14}}>
+                      <option value="">— Unassigned (remove from any school) —</option>
+                      {sortedCoaches.map(c=>{
+                        const s = schoolsById[c.school_id];
+                        return (
+                          <option key={c.id} value={c.id}>
+                            {(s?.name||"No School")} — {c.name}{c.role==="admin"?" (Admin)":""}{c.access_code?` · ${c.access_code}`:""}
+                          </option>
+                        );
+                      })}
+                    </select>
+                    {assignError&&<div style={{color:C.red,fontSize:12,marginBottom:10}}>{assignError}</div>}
+                    <div style={{display:"flex",gap:8}}>
+                      <button onClick={()=>{setShowAssignCoachModal(false);setAssignCoachId("");setAssignError("");}}
+                        style={{flex:1,background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14}}>Cancel</button>
+                      <button onClick={handleBulkAssignCoach} disabled={assignSaving}
+                        style={{flex:2,background:C.blue,border:"none",color:"#000",borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,opacity:assignSaving?0.6:1}}>
+                        {assignSaving?"Saving...":(assignCoachId?`Assign ${selectedIds.size} Athlete${selectedIds.size!==1?"s":""} →`:`Unassign ${selectedIds.size} Athlete${selectedIds.size!==1?"s":""} →`)}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* ── GROUP STATS TAB ── */}
             {activeTab==="stats"&&(
@@ -4204,8 +4515,8 @@ function CoachDashboard({coach,onLogout}) {
                 const improved = schoolAthletes.map(a=>{
                   const aw=workouts.filter(w=>w.athlete_id===a.id);
                   const rb={};const pb={};
-                  aw.filter(w=>now-new Date(w.created_at)<=d30).forEach(w=>(w.parsed_data?.exercises||[]).forEach(ex=>{if(!ex.name||!ex.weight||ex.unit==="bodyweight")return;const k=normalizeExName(ex.name);const e=epley1RM(toLbs(ex.weight,ex.unit||"lbs"),ex.reps||1);if(!rb[k]||e>rb[k])rb[k]=e;}));
-                  aw.filter(w=>{const age=now-new Date(w.created_at);return age>d30&&age<=d30*2;}).forEach(w=>(w.parsed_data?.exercises||[]).forEach(ex=>{if(!ex.name||!ex.weight||ex.unit==="bodyweight")return;const k=normalizeExName(ex.name);const e=epley1RM(toLbs(ex.weight,ex.unit||"lbs"),ex.reps||1);if(!pb[k]||e>pb[k])pb[k]=e;}));
+                  aw.filter(w=>now-new Date(w.created_at)<=d30).forEach(w=>(w.parsed_data?.exercises||[]).forEach(ex=>{if(!ex.name||ex.unit==="bodyweight")return;const k=normalizeExName(ex.name);const e=bestE1RMForExercise(ex);if(e&&(!rb[k]||e>rb[k]))rb[k]=e;}));
+                  aw.filter(w=>{const age=now-new Date(w.created_at);return age>d30&&age<=d30*2;}).forEach(w=>(w.parsed_data?.exercises||[]).forEach(ex=>{if(!ex.name||ex.unit==="bodyweight")return;const k=normalizeExName(ex.name);const e=bestE1RMForExercise(ex);if(e&&(!pb[k]||e>pb[k]))pb[k]=e;}));
                   let best=0;
                   Object.keys(rb).forEach(k=>{if(pb[k]&&pb[k]>0){const p=(rb[k]-pb[k])/pb[k]*100;if(p>best)best=p;}});
                   return best>0?{athlete:a,metric:`+${Math.round(best)}% est. 1RM`}:null;
@@ -4213,7 +4524,7 @@ function CoachDashboard({coach,onLogout}) {
                 // Most Impressive Lift
                 const impressive = schoolAthletes.filter(a=>a.weight_lbs).map(a=>{
                   let bestRatio=0,bestLift="";
-                  workouts.filter(w=>w.athlete_id===a.id).forEach(w=>(w.parsed_data?.exercises||[]).forEach(ex=>{if(!ex.name||!ex.weight||ex.unit==="bodyweight")return;const r=epley1RM(toLbs(ex.weight,ex.unit||"lbs"),ex.reps||1)/a.weight_lbs;if(r>bestRatio){bestRatio=r;bestLift=ex.name;}}));
+                  workouts.filter(w=>w.athlete_id===a.id).forEach(w=>(w.parsed_data?.exercises||[]).forEach(ex=>{if(!ex.name||ex.unit==="bodyweight")return;const e=bestE1RMForExercise(ex);if(!e)return;const r=e/a.weight_lbs;if(r>bestRatio){bestRatio=r;bestLift=ex.name;}}));
                   return bestRatio>0?{athlete:a,metric:`${bestLift} · ${bestRatio.toFixed(2)}×BW`,ratio:bestRatio}:null;
                 }).filter(Boolean).sort((a,b)=>b.ratio-a.ratio).slice(0,3);
                 // Most Consistent (sessions in last 30d)
@@ -4820,12 +5131,14 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
               workouts.forEach(w=>{
                 const pd = typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return {};}})():(w.parsed_data||{});
                 (pd.exercises||[]).forEach(ex=>{
-                  if(!ex.name||!ex.weight||ex.unit==="bodyweight") return;
+                  if(!ex.name||ex.unit==="bodyweight") return;
+                  const e1rm = bestE1RMForExercise(ex);
+                  if(!e1rm) return;
                   const k = normalizeExName(ex.name);
                   const unit = ex.unit||"lbs";
                   if(!byEx[k]) byEx[k]={name:ex.name,unit,entries:[]};
-                  const lbsW = toLbs(ex.weight, unit);
-                  byEx[k].entries.push({date:new Date(w.created_at),weight:ex.weight,unit,reps:ex.reps||1,e1rm:epley1RM(lbsW,ex.reps||1)});
+                  const topSet = getExerciseSets(ex).reduce((b,s)=>epley1RM(toLbs(s.weight,unit),s.reps)>epley1RM(toLbs(b.weight,unit),b.reps)?s:b, {weight:ex.weight??0, reps:ex.reps||1});
+                  byEx[k].entries.push({date:new Date(w.created_at),weight:topSet.weight,unit,reps:topSet.reps||1,e1rm});
                 });
               });
               const exercises = Object.values(byEx)
