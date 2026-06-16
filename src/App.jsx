@@ -5042,85 +5042,127 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
         )}
 
         {/* ── WORKOUTS TAB ── */}
-        {tab==="workouts"&&(
-          <div>
-            {workouts.length===0?(
-              <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No activity logged yet.</div>
-            ):workouts.slice(0,60).map((w,i)=>{
-              const pd = typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return {};}})():(w.parsed_data||{});
-              const isRun = !!pd.run_data && !pd.exercises?.length;
-              const isWorkout = pd.exercises?.length>0 || isRun;
-              const isFormCheck = w.raw_message?.startsWith("[Form review:");
-              // ── Workout entry ──
-              if(isWorkout) return (
-                <div key={i} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:14,marginBottom:10}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                    <div style={{display:"flex",alignItems:"center",gap:8}}>
-                      <div style={{width:6,height:6,borderRadius:"50%",background:isRun?C.blue:C.green,flexShrink:0}}/>
-                      <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1}}>{isRun?"RUN":"WORKOUT"} — {fmtDate(w.created_at)}</div>
+        {tab==="workouts"&&(()=>{
+          // Group entries into sessions (entries within 3hrs = same session) — mirrors athlete-facing log view
+          const sessions = groupIntoSessions(workouts)
+            .sort((a,b)=>new Date(b.entries[0].created_at)-new Date(a.entries[0].created_at));
+          const formChecks = workouts.filter(w=>w.raw_message?.startsWith("[Form review:"));
+          const qaEntries = workouts.filter(w=>!isRealSession(w)&&!w.raw_message?.startsWith("[Form review:"));
+
+          const timeline = [
+            ...sessions.map(s=>({type:"session",data:s,date:new Date(s.entries[s.entries.length-1].created_at)})),
+            ...formChecks.map(w=>({type:"formcheck",data:w,date:new Date(w.created_at)})),
+            ...qaEntries.map(w=>({type:"qa",data:w,date:new Date(w.created_at)})),
+          ].sort((a,b)=>b.date-a.date);
+
+          if(timeline.length===0) return (
+            <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No activity logged yet.</div>
+          );
+
+          return (
+            <div>
+              {timeline.slice(0,60).map((item,i)=>{
+                // ── Workout / run session (merged across entries within the 3hr window) ──
+                if(item.type==="session"){
+                  const session = item.data;
+                  const allExercises = session.entries.flatMap(e=>{
+                    const pd = typeof e.parsed_data==="string"?(()=>{try{return JSON.parse(e.parsed_data);}catch{return {};}})():(e.parsed_data||{});
+                    return pd.exercises||[];
+                  });
+                  const allPainFlags = session.entries.flatMap(e=>{
+                    const pd = typeof e.parsed_data==="string"?(()=>{try{return JSON.parse(e.parsed_data);}catch{return {};}})():(e.parsed_data||{});
+                    return pd.pain_flags||[];
+                  });
+                  const sessionFeel = session.entries.slice().reverse().find(e=>{
+                    const pd = typeof e.parsed_data==="string"?(()=>{try{return JSON.parse(e.parsed_data);}catch{return {};}})():(e.parsed_data||{});
+                    return pd.session_feel;
+                  });
+                  const feelVal = sessionFeel?(typeof sessionFeel.parsed_data==="string"?JSON.parse(sessionFeel.parsed_data):sessionFeel.parsed_data)?.session_feel:null;
+                  const lastReply = [...session.entries].reverse().find(e=>e.bot_reply)?.bot_reply;
+                  const sessionDate = session.entries[0].created_at;
+
+                  const allRunData = session.entries.map(e=>{
+                    const pd = typeof e.parsed_data==="string"?(()=>{try{return JSON.parse(e.parsed_data);}catch{return {};}})():(e.parsed_data||{});
+                    return pd.run_data;
+                  }).filter(Boolean);
+                  const isRunSession = allRunData.length>0 && allExercises.length===0;
+                  const runDotColor = isRunSession ? C.blue : C.green;
+
+                  return (
+                    <div key={i} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:14,marginBottom:10}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <div style={{width:6,height:6,borderRadius:"50%",background:runDotColor,flexShrink:0}}/>
+                          <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1}}>{isRunSession?"RUN":"WORKOUT"} — {fmtDate(sessionDate)}</div>
+                        </div>
+                        {!isRunSession&&feelVal&&<div style={{fontSize:11,color:feelVal==="great"||feelVal==="good"?C.green:feelVal==="rough"?C.red:C.gold,fontWeight:600}}>{feelVal}</div>}
+                      </div>
+                      {isRunSession?(
+                        <RunCard runData={allRunData[0]} feel={feelVal}/>
+                      ):(
+                        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,marginBottom:allPainFlags.length>0?8:0}}>
+                          <thead>
+                            <tr>
+                              {["Exercise","Sets","Reps","Weight","Feel"].map(h=>(
+                                <th key={h} style={{color:C.muted,fontWeight:600,fontSize:10,letterSpacing:1,textAlign:"left",paddingBottom:4,borderBottom:`1px solid ${C.border}`}}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {allExercises.map((e,j)=>(
+                              <tr key={j}>
+                                <td style={{color:C.text,fontWeight:600,padding:"5px 8px 5px 0"}}>{e.name}</td>
+                                <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.sets||"—"}</td>
+                                <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.reps||"—"}</td>
+                                <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{fmtWeight(e.weight,e.unit)}</td>
+                                <td style={{color:e.feel==="easy"?C.blue:e.feel==="hard"?C.red:C.muted,padding:"5px 0"}}>{e.feel||"—"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                      {allPainFlags.length>0&&<div style={{color:C.red,fontSize:11,marginTop:4}}>⚠ {allPainFlags.map(p=>p.area).join(", ")}</div>}
+                      {lastReply&&<div style={{marginTop:8,borderTop:`1px solid ${C.border}`,paddingTop:8,color:C.muted2,fontSize:12,fontStyle:"italic"}}>Coach Joe: "{lastReply.slice(0,200)}{lastReply.length>200?"...":""}"</div>}
                     </div>
-                    {!isRun&&pd.session_feel&&<div style={{fontSize:11,color:pd.session_feel==="great"||pd.session_feel==="good"?C.green:pd.session_feel==="rough"?C.red:C.gold,fontWeight:600}}>{pd.session_feel}</div>}
-                  </div>
-                  {isRun?(
-                    <RunCard runData={pd.run_data} feel={pd.session_feel}/>
-                  ):(
-                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,marginBottom:pd.pain_flags?.length>0?8:0}}>
-                      <thead>
-                        <tr>
-                          {["Exercise","Sets","Reps","Weight","Feel"].map(h=>(
-                            <th key={h} style={{color:C.muted,fontWeight:600,fontSize:10,letterSpacing:1,textAlign:"left",paddingBottom:4,borderBottom:`1px solid ${C.border}`}}>{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {pd.exercises.map((e,j)=>(
-                          <tr key={j}>
-                            <td style={{color:C.text,fontWeight:600,padding:"5px 8px 5px 0"}}>{e.name}</td>
-                            <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.sets||"—"}</td>
-                            <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.reps||"—"}</td>
-                            <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{fmtWeight(e.weight,e.unit)}</td>
-                            <td style={{color:e.feel==="easy"?C.blue:e.feel==="hard"?C.red:C.muted,padding:"5px 0"}}>{e.feel||"—"}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                  {pd.pain_flags?.length>0&&<div style={{color:C.red,fontSize:11,marginTop:4}}>⚠ {pd.pain_flags.map(p=>p.area).join(", ")}</div>}
-                  {w.bot_reply&&<div style={{marginTop:8,borderTop:`1px solid ${C.border}`,paddingTop:8,color:C.muted2,fontSize:12,fontStyle:"italic"}}>Coach Joe: "{w.bot_reply.slice(0,200)}{w.bot_reply.length>200?"...":""}"</div>}
-                </div>
-              );
-              // ── Form check ──
-              if(isFormCheck) return (
-                <div key={i} style={{background:C.navy3,border:`1px solid ${C.blue}30`,borderRadius:12,padding:14,marginBottom:10}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
-                    <div style={{width:6,height:6,borderRadius:"50%",background:C.blue,flexShrink:0}}/>
-                    <div style={{color:C.blue,fontSize:11,fontWeight:700,letterSpacing:1}}>FORM CHECK — {fmtDate(w.created_at)}</div>
-                  </div>
-                  <div style={{color:C.muted2,fontSize:12,marginBottom:6}}>{w.raw_message}</div>
-                  {w.bot_reply&&<div style={{color:C.text,fontSize:12,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{w.bot_reply}</div>}
-                </div>
-              );
-              // ── Q&A / Chat ──
-              return (
-                <div key={i} style={{marginBottom:10}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-                    <div style={{width:6,height:6,borderRadius:"50%",background:C.muted,flexShrink:0}}/>
-                    <div style={{color:C.muted,fontSize:10,letterSpacing:1}}>Q&A — {fmtDate(w.created_at)}</div>
-                  </div>
-                  <div style={{display:"flex",justifyContent:"flex-end",marginBottom:4}}>
-                    <div style={{background:C.gold,color:"#000",borderRadius:"14px 14px 4px 14px",padding:"8px 12px",fontSize:12,maxWidth:"85%"}}>{w.raw_message}</div>
-                  </div>
-                  {w.bot_reply&&(
-                    <div style={{display:"flex",gap:6,alignItems:"flex-start"}}>
-                      <div style={{width:22,height:22,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#000",flexShrink:0,marginTop:2}}>J</div>
-                      <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:"14px 14px 14px 4px",padding:"8px 12px",fontSize:12,color:C.text,maxWidth:"85%",lineHeight:1.5}}>{w.bot_reply}</div>
+                  );
+                }
+                // ── Form check ──
+                if(item.type==="formcheck"){
+                  const w = item.data;
+                  return (
+                    <div key={i} style={{background:C.navy3,border:`1px solid ${C.blue}30`,borderRadius:12,padding:14,marginBottom:10}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                        <div style={{width:6,height:6,borderRadius:"50%",background:C.blue,flexShrink:0}}/>
+                        <div style={{color:C.blue,fontSize:11,fontWeight:700,letterSpacing:1}}>FORM CHECK — {fmtDate(w.created_at)}</div>
+                      </div>
+                      <div style={{color:C.muted2,fontSize:12,marginBottom:6}}>{w.raw_message}</div>
+                      {w.bot_reply&&<div style={{color:C.text,fontSize:12,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{w.bot_reply}</div>}
                     </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
+                  );
+                }
+                // ── Q&A / Chat ──
+                const w = item.data;
+                return (
+                  <div key={i} style={{marginBottom:10}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                      <div style={{width:6,height:6,borderRadius:"50%",background:C.muted,flexShrink:0}}/>
+                      <div style={{color:C.muted,fontSize:10,letterSpacing:1}}>Q&A — {fmtDate(w.created_at)}</div>
+                    </div>
+                    <div style={{display:"flex",justifyContent:"flex-end",marginBottom:4}}>
+                      <div style={{background:C.gold,color:"#000",borderRadius:"14px 14px 4px 14px",padding:"8px 12px",fontSize:12,maxWidth:"85%"}}>{w.raw_message}</div>
+                    </div>
+                    {w.bot_reply&&(
+                      <div style={{display:"flex",gap:6,alignItems:"flex-start"}}>
+                        <div style={{width:22,height:22,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#000",flexShrink:0,marginTop:2}}>J</div>
+                        <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:"14px 14px 14px 4px",padding:"8px 12px",fontSize:12,color:C.text,maxWidth:"85%",lineHeight:1.5}}>{w.bot_reply}</div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
 
         {/* ── PROGRESS TAB ── */}
         {tab==="progress"&&(
