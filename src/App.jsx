@@ -4986,7 +4986,7 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
                       <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 10px"}}>
                         <div style={{color:C.text,fontSize:12,fontWeight:600}}>{e.name}</div>
                         <div style={{color:C.muted,fontSize:11}}>
-                          {e.sets&&e.reps?`${e.sets}×${e.reps}`:""}{e.weight?` @ ${fmtWeight(e.weight,e.unit)}`:""}
+                          {formatSetDetails(e)}
                         </div>
                       </div>
                     ))}
@@ -5103,7 +5103,7 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
                         <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,marginBottom:allPainFlags.length>0?8:0}}>
                           <thead>
                             <tr>
-                              {["Exercise","Sets","Reps","Weight","Feel"].map(h=>(
+                              {["Exercise","Sets","Feel"].map(h=>(
                                 <th key={h} style={{color:C.muted,fontWeight:600,fontSize:10,letterSpacing:1,textAlign:"left",paddingBottom:4,borderBottom:`1px solid ${C.border}`}}>{h}</th>
                               ))}
                             </tr>
@@ -5111,11 +5111,9 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
                           <tbody>
                             {allExercises.map((e,j)=>(
                               <tr key={j}>
-                                <td style={{color:C.text,fontWeight:600,padding:"5px 8px 5px 0"}}>{e.name}</td>
-                                <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.sets||"—"}</td>
-                                <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{e.reps||"—"}</td>
-                                <td style={{color:C.muted2,padding:"5px 8px 5px 0"}}>{fmtWeight(e.weight,e.unit)}</td>
-                                <td style={{color:e.feel==="easy"?C.blue:e.feel==="hard"?C.red:C.muted,padding:"5px 0"}}>{e.feel||"—"}</td>
+                                <td style={{color:C.text,fontWeight:600,padding:"5px 8px 5px 0",verticalAlign:"top"}}>{e.name}</td>
+                                <td style={{color:C.muted2,padding:"5px 8px 5px 0",verticalAlign:"top"}}>{formatSetDetails(e)}</td>
+                                <td style={{color:e.feel==="easy"?C.blue:e.feel==="hard"?C.red:C.muted,padding:"5px 0",verticalAlign:"top"}}>{e.feel||"—"}</td>
                               </tr>
                             ))}
                           </tbody>
