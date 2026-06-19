@@ -1,10 +1,26 @@
 import { useState, useEffect, useRef } from "react";
+import { loadStripe } from "@stripe/stripe-js";
+import { Elements, PaymentElement, useStripe, useElements } from "@stripe/react-stripe-js";
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const CLAUDE_PROXY  = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/claude-proxy`;
 const SUPABASE_URL  = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY  = import.meta.env.VITE_SUPABASE_KEY;
 const MASTER_CODE   = "FORTIS-MASTER"; // keep for backward compat
+
+// ─── STRIPE ────────────────────────────────────────────────────────────────────
+// Publishable key is safe in the client. loadStripe() is called once at module
+// scope (never per-render). Null-guarded so the app still boots if the key is unset.
+const STRIPE_PK = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY;
+const stripePromise = STRIPE_PK ? loadStripe(STRIPE_PK) : null;
+const TERMS_URL   = "https://trainwilco.com/terms";
+const PRIVACY_URL = "https://trainwilco.com/privacy";
+const SCHOOL_PRICE_ID = "price_1TbNnkRlrDCVlwEBUiO5txAx"; // School plan — billed via invoice, no in-app charge
+// Display-only price labels (the server is the source of truth for actual price IDs).
+const PRICE_LABEL = {
+  pro:   { monthly: "$14.99/month", annual: "$150.00/year" },
+  elite: { monthly: "$99.99/month", annual: "$1,000.00/year" },
+};
 
 const SPORTS = ["Football","Basketball","Volleyball","Soccer","Baseball","Archery","Olympic Weightlifting","Running","General Fitness"];
 
@@ -843,14 +859,268 @@ function HomeScreen({setView}) {
   );
 }
 
+// ─── STRIPE PAYMENT ─────────────────────────────────────────────────────────
+// Required pre-purchase disclosures (T&C compliance + Stripe). Rendered ABOVE the
+// confirm button. Branches on the standard 7-day-trial path vs the gift-code path.
+function PaymentDisclosures({tier, billing, giftApplied}) {
+  const priceLabel = PRICE_LABEL[tier]?.[billing] || "";
+  const trialChargeDate = fmtDate(Date.now() + 7*24*60*60*1000);
+  const giftMonthlyChargeDate = (()=>{ const d=new Date(); d.setMonth(d.getMonth()+1); return fmtDate(d); })();
+  const giftAnnualRenewDate  = (()=>{ const d=new Date(); d.setFullYear(d.getFullYear()+1); return fmtDate(d); })();
+  const renewWord = billing==="annual" ? "year" : "month";
+  return (
+    <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
+        <span style={{color:C.muted,fontSize:11,letterSpacing:1}}>{tier.toUpperCase()} · {billing==="annual"?"ANNUAL":"MONTHLY"}</span>
+        <span style={{color:C.gold,fontWeight:700,fontSize:16}}>{priceLabel}</span>
+      </div>
+      {!giftApplied ? (
+        <div style={{color:C.muted2,fontSize:12,lineHeight:1.6}}>
+          Your 7-day free trial starts today. You will be charged <b style={{color:C.text}}>{priceLabel}</b> on <b style={{color:C.text}}>{trialChargeDate}</b> unless you cancel before then.
+        </div>
+      ) : (
+        <div style={{color:C.muted2,fontSize:12,lineHeight:1.6}}>
+          {billing==="annual"
+            ? <>Your gift code takes $14.99 off today, so you'll be charged <b style={{color:C.text}}>$135.01</b> now, then <b style={{color:C.text}}>{priceLabel}</b> on <b style={{color:C.text}}>{giftAnnualRenewDate}</b>.</>
+            : <>Your first month of Pro is free. You will be charged <b style={{color:C.text}}>{priceLabel}</b> on <b style={{color:C.text}}>{giftMonthlyChargeDate}</b> unless you cancel before then.</>}
+        </div>
+      )}
+      <div style={{color:C.muted,fontSize:11,lineHeight:1.6,marginTop:8}}>
+        Your subscription renews automatically each {renewWord} until cancelled. Manage or cancel anytime in Settings → Your Plan.
+      </div>
+      <div style={{color:C.muted,fontSize:11,lineHeight:1.6,marginTop:6}}>
+        By subscribing you agree to our <a href={TERMS_URL} target="_blank" rel="noreferrer" style={{color:C.gold}}>Terms &amp; Conditions</a> and <a href={PRIVACY_URL} target="_blank" rel="noreferrer" style={{color:C.gold}}>Privacy Policy</a>.
+      </div>
+    </div>
+  );
+}
+
+// Inner form — lives inside <Elements> so it can use the Stripe hooks. Collects the
+// card via PaymentElement and confirms the SetupIntent (trial/$0) or PaymentIntent
+// (real first charge) in-app, no redirect.
+function PayForm({confirmMode, payLabel, onSuccess}) {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [submitting,setSubmitting] = useState(false);
+  const [error,setError] = useState("");
+
+  const submit = async () => {
+    if(!stripe||!elements||submitting) return;
+    setSubmitting(true); setError("");
+    const opts = { elements, confirmParams: { return_url: window.location.href }, redirect: "if_required" };
+    let result;
+    try {
+      result = confirmMode==="payment" ? await stripe.confirmPayment(opts) : await stripe.confirmSetup(opts);
+    } catch(e){ setError("Something went wrong. Try again."); setSubmitting(false); return; }
+    if(result.error){
+      setError(result.error.message || "Payment failed. Check your card details and try again.");
+      setSubmitting(false);
+      return;
+    }
+    onSuccess();
+  };
+
+  return (
+    <div>
+      <PaymentElement options={{layout:"tabs"}}/>
+      {error && <div style={{color:C.red,fontSize:12,marginTop:10,textAlign:"center"}}>{error}</div>}
+      <button onClick={submit} disabled={!stripe||submitting}
+        style={btn(C.gold,"#000",{marginTop:14,opacity:(!stripe||submitting)?0.7:1,cursor:(!stripe||submitting)?"not-allowed":"pointer"})}>
+        {submitting ? "Processing..." : payLabel}
+      </button>
+    </div>
+  );
+}
+
+// Payment step: creates the subscription server-side (to get a client secret), shows
+// disclosures + an optional gift-code field, then mounts Stripe Elements.
+function PaymentStep({athleteId, pin, tier, billing, onSuccess}) {
+  const [clientSecret,setClientSecret] = useState(null);
+  const [confirmMode,setConfirmMode] = useState("setup");
+  const [initializing,setInitializing] = useState(true);
+  const [initError,setInitError] = useState("");
+  const [retryKey,setRetryKey] = useState(0);
+  // Gift code
+  const [giftInput,setGiftInput] = useState("");
+  const [appliedGift,setAppliedGift] = useState("");
+  const [giftMsg,setGiftMsg] = useState(null); // {ok, text}
+  const [giftChecking,setGiftChecking] = useState(false);
+
+  const isPro = tier==="pro";
+
+  // Create (or recreate, when the gift changes) the subscription to get a secret.
+  useEffect(()=>{
+    let cancelled = false;
+    (async()=>{
+      setInitializing(true); setInitError(""); setClientSecret(null);
+      try {
+        const r = await fetch("/api/create-subscription",{
+          method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({athleteId,pin,tier,billing,giftCode:appliedGift||undefined})
+        });
+        const j = await r.json();
+        if(cancelled) return;
+        if(!r.ok||!j.clientSecret){ setInitError(j.error||"Couldn't start checkout. Try again."); setInitializing(false); return; }
+        setClientSecret(j.clientSecret); setConfirmMode(j.mode||"setup"); setInitializing(false);
+      } catch(e){ if(!cancelled){ setInitError("Connection error. Try again."); setInitializing(false); } }
+    })();
+    return ()=>{ cancelled=true; };
+  },[appliedGift,tier,billing,athleteId,pin,retryKey]);
+
+  const applyGift = async () => {
+    const code = giftInput.trim().toUpperCase();
+    if(!code) return;
+    if(!isPro){ setGiftMsg({ok:false,text:"This gift code is valid for Pro plans only."}); return; }
+    setGiftChecking(true); setGiftMsg(null);
+    try {
+      const r = await fetch("/api/validate-gift-code",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({athleteId,pin,code,tier})
+      });
+      const j = await r.json();
+      if(j.valid){ setAppliedGift(code); setGiftMsg({ok:true,text:j.discountLabel||"Gift code applied."}); }
+      else { setGiftMsg({ok:false,text:j.error||"That code isn't valid."}); }
+    } catch(e){ setGiftMsg({ok:false,text:"Couldn't check that code."}); }
+    setGiftChecking(false);
+  };
+  const removeGift = () => { setAppliedGift(""); setGiftInput(""); setGiftMsg(null); };
+
+  const payLabel = appliedGift
+    ? (billing==="annual" ? "Pay $135.01 →" : "Start First Month Free →")
+    : "Start 7-Day Free Trial →";
+
+  return (
+    <div className="fade-up">
+      <div style={{color:C.muted2,fontSize:13,marginBottom:14,lineHeight:1.6}}>
+        {appliedGift ? "Confirm your payment details to activate Pro." : "Add a card to start your free trial. You won't be charged until it ends — cancel anytime."}
+      </div>
+
+      <PaymentDisclosures tier={tier} billing={billing} giftApplied={!!appliedGift}/>
+
+      {/* Gift code — Pro only */}
+      {isPro && (
+        <div style={{marginBottom:14}}>
+          {!appliedGift ? (
+            <>
+              <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>HAVE A GIFT CODE? <span style={{color:C.muted,fontWeight:400,textTransform:"none",letterSpacing:0}}>(optional)</span></label>
+              <div style={{display:"flex",gap:8}}>
+                <input value={giftInput} onChange={e=>setGiftInput(e.target.value.toUpperCase())}
+                  placeholder="WILCO-XXXXX" style={inp({textTransform:"uppercase",letterSpacing:2,fontWeight:700})}/>
+                <button onClick={applyGift} disabled={giftChecking||!giftInput.trim()}
+                  style={{background:C.navy3,border:`1px solid ${C.border}`,color:C.text,borderRadius:10,padding:"0 16px",cursor:"pointer",fontSize:13,fontWeight:700,whiteSpace:"nowrap",opacity:(giftChecking||!giftInput.trim())?0.6:1}}>
+                  {giftChecking?"...":"Apply"}
+                </button>
+              </div>
+            </>
+          ) : (
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:`${C.green}15`,border:`1px solid ${C.green}55`,borderRadius:10,padding:"10px 14px"}}>
+              <span style={{color:C.green,fontSize:12,fontWeight:600}}>✓ Code {appliedGift} applied</span>
+              <button onClick={removeGift} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer",textDecoration:"underline"}}>Remove</button>
+            </div>
+          )}
+          {giftMsg && <div style={{color:giftMsg.ok?C.green:C.red,fontSize:12,marginTop:8}}>{giftMsg.text}</div>}
+        </div>
+      )}
+
+      {initializing && <div style={{color:C.muted,fontSize:13,textAlign:"center",padding:"20px 0"}}>Loading secure checkout…</div>}
+      {initError && (
+        <div style={{textAlign:"center",padding:"12px 0"}}>
+          <div style={{color:C.red,fontSize:13,marginBottom:10}}>{initError}</div>
+          <button onClick={()=>setRetryKey(k=>k+1)} style={btn(C.gold,"#000")}>Try Again</button>
+        </div>
+      )}
+      {clientSecret && stripePromise && (
+        <Elements stripe={stripePromise} options={{clientSecret, appearance:{theme:"night", variables:{colorPrimary:C.gold, colorBackground:C.navy3, colorText:C.text, borderRadius:"10px"}}}}>
+          <PayForm confirmMode={confirmMode} payLabel={payLabel} onSuccess={onSuccess}/>
+        </Elements>
+      )}
+      {clientSecret && !stripePromise && (
+        <div style={{color:C.red,fontSize:12,textAlign:"center"}}>Payments are not configured (missing publishable key).</div>
+      )}
+    </div>
+  );
+}
+
 // ─── ATHLETE SIGNUP ───────────────────────────────────────────────────────────
 function SignupScreen({setView,setAthlete,setErr,err}) {
   const [step,setStep] = useState(1);
   const [data,setData] = useState({name:"",sport:SPORTS[0],pin:"",confirmPin:"",email:"",goal:"strength",coachCode:"",coachName:"",coachEmail:"",tier:"free",billing:"monthly",birthday:"",heightFt:"",heightIn:"0",weight:"",gender:"",trainingDays:4,equipment:[],positionOrEvent:"",injuryHistory:"",recruitingIntent:"",graduationYear:""});
   const [loading,setLoading] = useState(false);
+  const [athleteRow,setAthleteRow] = useState(null); // created athlete (exists before payment)
   const setD = (k,v) => setData(p=>({...p,[k]:v}));
 
-  const TOTAL_STEPS = 14;
+  // Total steps shown in the header. Plan selection is the last data step; paid tiers
+  // add a payment step; school athletes skip both plan and payment.
+  const isPaidTier = data.tier==="pro"||data.tier==="elite";
+  const TOTAL_STEPS = data.isSchool ? 13 : (isPaidTier ? 15 : 14);
+
+  // Insert the athlete once all profile data is collected (step 13). The row must
+  // exist before we create a Stripe subscription. Returns the row, or null on error.
+  const createAthlete = async () => {
+    const dob = new Date(data.birthday);
+    const ageYears = Math.floor((Date.now()-dob)/(365.25*24*60*60*1000));
+    const heightIn = (+data.heightFt*12)+(+data.heightIn||0);
+    const initialTier = data.isSchool ? "school" : "free"; // upgraded later by plan/payment
+    const created = await sbInsert("athletes",{
+      name:data.name.trim(),sport:data.sport,pin:data.pin,tier:initialTier,billing:data.billing,
+      email:data.email.trim().toLowerCase(),
+      birthday:data.birthday,
+      age:ageYears,
+      height_inches:heightIn,
+      weight_lbs:+data.weight,
+      gender:data.gender,
+      training_days_per_week:+data.trainingDays,
+      equipment:data.equipment,
+      position_or_event:data.positionOrEvent.trim()||null,
+      injury_history:data.injuryHistory.trim()||null,
+      recruiting_intent:data.recruitingIntent,
+      graduation_year:data.graduationYear?parseInt(data.graduationYear):null,
+      first_chat_complete:false,
+      ...(data.isSchool?{stripe_price_id:SCHOOL_PRICE_ID}:{})
+    });
+    if(!(created?.length>0)){
+      setErr("Error: "+(created?.message||created?.error||JSON.stringify(created)));
+      return null;
+    }
+    const newAthlete = created[0];
+    try {
+      await fetch(`${SUPABASE_URL}/rest/v1/athletes?id=eq.${newAthlete.id}`,{
+        method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},
+        body:JSON.stringify({
+          goal:data.goal||"strength",
+          coach_name:data.coachName.trim()||null,
+          coach_email:data.coachEmail.trim().toLowerCase()||null,
+          ...(data.coachId?{coach_id:data.coachId}:{}),
+          ...(data.schoolId?{school_id:data.schoolId}:{})
+        })
+      });
+    } catch(e){}
+    const merged = {...newAthlete,goal:data.goal||"strength",coach_id:data.coachId||null,school_id:data.schoolId||null};
+    setAthleteRow(merged);
+    setD("athleteId",newAthlete.id);
+    return merged;
+  };
+
+  // Finalize onboarding: send coach notifications (now that the tier is final) and
+  // drop the athlete into the app. Called for school, free, and post-payment paths.
+  const finishOnboarding = async (finalTier, row) => {
+    const athleteForApp = row || athleteRow;
+    if(finalTier==="free" && athleteForApp?.id){
+      try { await sbUpdate("athletes",athleteForApp.id,{tier:"free"}); } catch(_){}
+    }
+    if(data.coachEmail.trim()){
+      fetch("/api/send-coach-welcome",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({athleteName:data.name.trim(),athleteSport:data.sport,coachName:data.coachName.trim()||null,coachEmail:data.coachEmail.trim().toLowerCase(),tier:finalTier})
+      }).catch(()=>{});
+    }
+    if(finalTier==="elite"){
+      fetch("/api/send-coach-welcome",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({athleteName:data.name.trim(),athleteSport:data.sport,coachName:"WILCO Admin",coachEmail:"coachjoe@trainwilco.com",tier:"elite",isAdminAlert:true})
+      }).catch(()=>{});
+    }
+    setAthlete({...athleteForApp,tier:finalTier,goal:data.goal||"strength"});
+    setView("athlete");
+  };
 
   const nextStep = async () => {
     setErr("");
@@ -869,98 +1139,71 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
     } else if(step===3){
       setStep(4);
     } else if(step===4){
+      // Resolve school membership now so school athletes skip plan + payment.
+      setLoading(true);
+      let coachId=null,schoolId=null,isSchool=false;
+      if(data.coachCode.trim()){
+        try {
+          const matched = await sbGet("coaches",`?access_code=eq.${encodeURIComponent(data.coachCode.trim().toUpperCase())}&select=id,school_id`);
+          if(matched?.length>0){ coachId=matched[0].id; schoolId=matched[0].school_id||null; isSchool=true; }
+        } catch(_){}
+      }
+      setData(p=>({...p,coachId,schoolId,isSchool}));
+      setLoading(false);
       setStep(5);
     } else if(step===5){
-      // Tier selected — advance to extended onboarding
-      setStep(6);
-    } else if(step===6){
       // Birthday
       if(!data.birthday){setErr("Enter your birthday.");return;}
       const dob = new Date(data.birthday);
       const ageYears = Math.floor((Date.now()-dob)/(365.25*24*60*60*1000));
       if(ageYears<13){setErr("You must be at least 13 to use WILCO.");return;}
       if(ageYears>100){setErr("Enter a valid birthday.");return;}
-      setStep(7);
-    } else if(step===7){
+      setStep(6);
+    } else if(step===6){
       // Height + Weight
       if(!data.heightFt||isNaN(data.heightFt)||+data.heightFt<3||+data.heightFt>8){setErr("Enter a valid height.");return;}
       if(!data.weight||isNaN(data.weight)||+data.weight<50||+data.weight>500){setErr("Enter a valid weight.");return;}
+      setStep(7);
+    } else if(step===7){
+      if(!data.gender){setErr("Select a gender option.");return;}
       setStep(8);
     } else if(step===8){
-      if(!data.gender){setErr("Select a gender option.");return;}
       setStep(9);
     } else if(step===9){
+      if(data.equipment.length===0){setErr("Select at least one equipment option.");return;}
       setStep(10);
     } else if(step===10){
-      if(data.equipment.length===0){setErr("Select at least one equipment option.");return;}
       setStep(11);
     } else if(step===11){
       setStep(12);
     } else if(step===12){
+      // graduation_year — optional, always advance
       setStep(13);
     } else if(step===13){
-      // graduation_year — optional, always advance
-      setStep(14);
-    } else if(step===14){
+      // College recruiting — final data step → create the athlete row.
       if(!data.recruitingIntent){setErr("Select an option.");return;}
       setLoading(true);
       try {
-        const dob = new Date(data.birthday);
-        const ageYears = Math.floor((Date.now()-dob)/(365.25*24*60*60*1000));
-        const heightIn = (+data.heightFt*12)+(+data.heightIn||0);
-        const created = await sbInsert("athletes",{
-          name:data.name.trim(),sport:data.sport,pin:data.pin,tier:data.tier,billing:data.billing,
-          email:data.email.trim().toLowerCase(),
-          birthday:data.birthday,
-          age:ageYears,
-          height_inches:heightIn,
-          weight_lbs:+data.weight,
-          gender:data.gender,
-          training_days_per_week:+data.trainingDays,
-          equipment:data.equipment,
-          position_or_event:data.positionOrEvent.trim()||null,
-          injury_history:data.injuryHistory.trim()||null,
-          recruiting_intent:data.recruitingIntent,
-          graduation_year:data.graduationYear?parseInt(data.graduationYear):null,
-          first_chat_complete:false
-        });
-        if(created?.length>0){
-          const newAthlete = created[0];
-          try {
-            let coachId=null,schoolId=null;
-            if(data.coachCode.trim()){
-              const matchedCoach = await sbGet("coaches",`?access_code=eq.${encodeURIComponent(data.coachCode.trim().toUpperCase())}&select=id,school_id`);
-              if(matchedCoach?.length>0){ coachId=matchedCoach[0].id; schoolId=matchedCoach[0].school_id||null; }
-            }
-            await fetch(`${SUPABASE_URL}/rest/v1/athletes?id=eq.${newAthlete.id}`,{
-              method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},
-              body:JSON.stringify({
-                goal:data.goal||"strength",
-                coach_name:data.coachName.trim()||null,
-                coach_email:data.coachEmail.trim().toLowerCase()||null,
-                ...(coachId?{coach_id:coachId}:{}),
-                ...(schoolId?{school_id:schoolId}:{})
-              })
-            });
-            if(data.coachEmail.trim()){
-              fetch("/api/send-coach-welcome",{method:"POST",headers:{"Content-Type":"application/json"},
-                body:JSON.stringify({athleteName:data.name.trim(),athleteSport:data.sport,coachName:data.coachName.trim()||null,coachEmail:data.coachEmail.trim().toLowerCase(),tier:data.tier})
-              }).catch(()=>{});
-            }
-            if(data.tier==="elite"){
-              fetch("/api/send-coach-welcome",{method:"POST",headers:{"Content-Type":"application/json"},
-                body:JSON.stringify({athleteName:data.name.trim(),athleteSport:data.sport,coachName:"WILCO Admin",coachEmail:"coachjoe@trainwilco.com",tier:"elite",isAdminAlert:true})
-              }).catch(()=>{});
-            }
-          } catch(e){}
-          setAthlete({...newAthlete,goal:data.goal||"strength",tier:data.tier});
-          setView("athlete");
-        } else {
-          setErr("Error: "+(created?.message||created?.error||JSON.stringify(created)));
+        const row = athleteRow || await createAthlete();
+        if(!row){ setLoading(false); return; } // createAthlete already set the error
+        if(data.isSchool){
+          await finishOnboarding("school", row); // school: skip plan + payment
+          return;
         }
-      } catch(e){setErr("Connection error.");}
-      setLoading(false);
+        setLoading(false);
+        setStep(14); // plan selection
+      } catch(e){ setErr("Connection error."); setLoading(false); }
+    } else if(step===14){
+      // Plan selection
+      if(data.tier==="free"){
+        setLoading(true);
+        try { await finishOnboarding("free", athleteRow); }
+        catch(e){ setErr("Connection error."); setLoading(false); }
+        return;
+      }
+      setStep(15); // Pro/Elite → payment
     }
+    // step 15 (payment) is handled inside <PaymentStep/>, not here.
   };
 
   // Tier card component used in step 5
@@ -1089,7 +1332,8 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
           <div style={{color:C.muted,fontSize:11,marginTop:6,lineHeight:1.5}}>Pro/Elite: coach gets weekly progress reports. All tiers: coach gets a welcome email.</div>
         </div>
       </>}
-      {step===5&&<>
+      {/* ── Step 14: Plan selection (last data step) ── */}
+      {step===14&&<>
         <div style={{color:C.muted2,fontSize:13,marginBottom:12,lineHeight:1.6}}>Choose your plan. You can upgrade anytime from settings.</div>
         {/* Billing toggle */}
         <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:0,marginBottom:14,background:C.navy3,borderRadius:10,padding:4,border:`1px solid ${C.border}`}}>
@@ -1112,8 +1356,8 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
           </div>
         )}
       </>}
-      {/* ── Step 6: Birthday ── */}
-      {step===6&&<>
+      {/* ── Step 5: Birthday ── */}
+      {step===5&&<>
         <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>When is your birthday? We use this to personalize your program thresholds — not stored publicly.</div>
         <div style={{marginBottom:20}}>
           <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>BIRTHDAY</label>
@@ -1124,8 +1368,8 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
         </div>
       </>}
 
-      {/* ── Step 7: Height + Weight ── */}
-      {step===7&&<>
+      {/* ── Step 6: Height + Weight ── */}
+      {step===6&&<>
         <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Used to personalize your strength benchmarks and programming targets.</div>
         <div style={{marginBottom:16}}>
           <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>HEIGHT</label>
@@ -1149,8 +1393,8 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
         </div>
       </>}
 
-      {/* ── Step 8: Gender ── */}
-      {step===8&&<>
+      {/* ── Step 7: Gender ── */}
+      {step===7&&<>
         <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Used to calibrate your strength benchmarks.</div>
         {["Male","Female"].map(g=>(
           <div key={g} onClick={()=>setD("gender",g)}
@@ -1164,8 +1408,8 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
         <div style={{marginBottom:12}}/>
       </>}
 
-      {/* ── Step 9: Training days/week ── */}
-      {step===9&&<>
+      {/* ── Step 8: Training days/week ── */}
+      {step===8&&<>
         <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>How many days per week are you available to train?</div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:20}}>
           {[2,3,4,5,6].map(d=>(
@@ -1178,8 +1422,8 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
         </div>
       </>}
 
-      {/* ── Step 10: Equipment ── */}
-      {step===10&&<>
+      {/* ── Step 9: Equipment ── */}
+      {step===9&&<>
         <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Where do you typically train? Select all that apply.</div>
         {["Full gym","Barbells & racks","Dumbbells only","Bodyweight only","Home gym (mixed)"].map(eq=>{
           const selected = data.equipment.includes(eq);
@@ -1196,8 +1440,8 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
         <div style={{marginBottom:12}}/>
       </>}
 
-      {/* ── Step 11: Position / event (optional) ── */}
-      {step===11&&<>
+      {/* ── Step 10: Position / event (optional) ── */}
+      {step===10&&<>
         <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Helps Coach Joe give sport-specific advice. You can skip this.</div>
         <div style={{marginBottom:20}}>
           <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>POSITION OR EVENT <span style={{color:C.muted,fontWeight:400}}>(optional)</span></label>
@@ -1205,14 +1449,14 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
             placeholder="e.g. Linebacker, 100m sprints, Power lifter..."
             style={inp()}/>
         </div>
-        <button onClick={()=>{setErr("");setStep(12);}}
+        <button onClick={()=>{setErr("");setStep(11);}}
           style={{background:"none",border:"none",color:C.muted,fontSize:13,cursor:"pointer",textAlign:"center",width:"100%",marginBottom:12}}>
           Skip →
         </button>
       </>}
 
-      {/* ── Step 12: Injury history (optional) ── */}
-      {step===12&&<>
+      {/* ── Step 11: Injury history (optional) ── */}
+      {step===11&&<>
         <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Helps Joe-bot give safer recommendations. You can skip this.</div>
         <div style={{marginBottom:20}}>
           <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>INJURIES OR LIMITATIONS <span style={{color:C.muted,fontWeight:400}}>(optional)</span></label>
@@ -1221,14 +1465,14 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
             rows={3}
             style={{...inp(),resize:"none",lineHeight:1.5}}/>
         </div>
-        <button onClick={()=>{setErr("");setStep(13);}}
+        <button onClick={()=>{setErr("");setStep(12);}}
           style={{background:"none",border:"none",color:C.muted,fontSize:13,cursor:"pointer",textAlign:"center",width:"100%",marginBottom:12}}>
           Skip →
         </button>
       </>}
 
-      {/* ── Step 13: Graduation year (optional) ── */}
-      {step===13&&<>
+      {/* ── Step 12: Graduation year (optional) ── */}
+      {step===12&&<>
         <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>What year do you graduate? Helps track your athletic timeline.</div>
         <div style={{marginBottom:16}}>
           <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>GRADUATION YEAR <span style={{color:C.muted,fontWeight:400}}>(optional)</span></label>
@@ -1236,14 +1480,14 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
             onChange={e=>setD("graduationYear",e.target.value.replace(/\D/g,"").slice(0,4))}
             placeholder="e.g. 2027" style={inp({fontSize:20,letterSpacing:2,textAlign:"center"})}/>
         </div>
-        <button onClick={()=>{setErr("");setStep(14);}}
+        <button onClick={()=>{setErr("");setStep(13);}}
           style={{background:"none",border:"none",color:C.muted,fontSize:13,cursor:"pointer",textAlign:"center",width:"100%",marginBottom:12}}>
           Skip →
         </button>
       </>}
 
-      {/* ── Step 14: College recruiting ── */}
-      {step===14&&<>
+      {/* ── Step 13: College recruiting (last data step) ── */}
+      {step===13&&<>
         <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Are you training with college recruiting in mind?</div>
         {[{key:"yes",label:"Yes — I'm actively pursuing it"},{key:"maybe",label:"Maybe — open to it"},{key:"no",label:"No — training for myself"}].map(opt=>(
           <div key={opt.key} onClick={()=>setD("recruitingIntent",opt.key)}
@@ -1257,10 +1501,27 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
         <div style={{marginBottom:12}}/>
       </>}
 
+      {/* ── Step 15: Payment (Pro/Elite only) ── */}
+      {step===15&&(
+        <PaymentStep
+          athleteId={data.athleteId}
+          pin={data.pin}
+          tier={data.tier}
+          billing={data.billing}
+          onSuccess={()=>finishOnboarding(data.tier, athleteRow)}
+        />
+      )}
+
       {err&&<div style={{color:C.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
-      <button onClick={nextStep} disabled={loading} style={btn(C.gold,"#000",{opacity:loading?0.7:1,cursor:loading?"not-allowed":"pointer"})}>
-        {loading?"Please wait...":(step===TOTAL_STEPS?"Create Account →":(step===11||step===12)?"Save & Continue →":"Next →")}
-      </button>
+      {step!==15 && (
+        <button onClick={nextStep} disabled={loading} style={btn(C.gold,"#000",{opacity:loading?0.7:1,cursor:loading?"not-allowed":"pointer"})}>
+          {loading ? "Please wait..."
+            : step===14 ? (isPaidTier ? "Continue to Payment →" : "Start with Free →")
+            : step===13 ? (data.isSchool ? "Create Account →" : "Next →")
+            : (step===10||step===11) ? "Save & Continue →"
+            : "Next →"}
+        </button>
+      )}
     </div>
   );
 }
@@ -3269,45 +3530,66 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
   const [selectedBilling,setSelectedBilling] = useState(athlete.billing||"monthly");
   const [upgrading,setUpgrading] = useState(false);
   const [upgradeMsg,setUpgradeMsg] = useState("");
-  const [showCancelForm,setShowCancelForm] = useState(false);
-  const [cancelReason,setCancelReason] = useState("");
-  const [cancelSending,setCancelSending] = useState(false);
-  const [cancelSent,setCancelSent] = useState(false);
+  const [actionPin,setActionPin] = useState("");      // PIN confirming money actions
+  const [actionBusy,setActionBusy] = useState(false);
+  const [actionMsg,setActionMsg] = useState(null);    // {ok,text}
+  const [showUpgradePay,setShowUpgradePay] = useState(false);
+  const [cancelAtPeriodEnd,setCancelAtPeriodEnd] = useState(!!athlete.cancel_at_period_end);
+  const [subStatus,setSubStatus] = useState(athlete.subscription_status||null);
 
   const currentTier = athlete.tier||"free";
   const currentBilling = athlete.billing||"monthly";
   const tierOrder = {free:0,pro:1,elite:2};
   const planChanged = selectedTier !== currentTier || selectedBilling !== currentBilling;
 
-  const upgradeTier = async () => {
-    if(upgrading||!planChanged) return;
-    setUpgrading(true); setUpgradeMsg("");
-    try {
-      await sbUpdate("athletes",athlete.id,{tier:selectedTier,billing:selectedBilling});
-      onCoachUpdate({tier:selectedTier,billing:selectedBilling});
-      const isUpgrade = tierOrder[selectedTier]>tierOrder[currentTier];
-      const billingChanged = selectedBilling!==currentBilling;
-      setUpgradeMsg(isUpgrade?"Plan upgraded! Changes are live now.":billingChanged?"Billing updated.":"Plan updated.");
-    } catch(e){
-      setUpgradeMsg("Couldn't update plan. Try again.");
-    }
-    setUpgrading(false);
-    setTimeout(()=>setUpgradeMsg(""),4000);
-  };
+  const hasStripeSub = !!athlete.stripe_subscription_id;
+  const isTrialing = subStatus==="trialing";
+  const renewalDate = athlete.trial_end || athlete.current_period_end || null;
+  const currentPriceLabel = currentTier==="pro"||currentTier==="elite" ? (PRICE_LABEL[currentTier]?.[currentBilling]||"") : "";
 
-  const submitCancellation = async () => {
-    setCancelSending(true);
+  // Cancel / resume — both PIN-gated against the money endpoints.
+  const callSubAction = async (endpoint) => {
+    if(actionPin.length!==4){ setActionMsg({ok:false,text:"Enter your 4-digit PIN to confirm."}); return; }
+    setActionBusy(true); setActionMsg(null);
     try {
-      await sbInsert("cancellation_requests",{
-        athlete_id:athlete.id,
-        athlete_name:athlete.name,
-        athlete_email:athlete.email||null,
-        tier:currentTier,
-        reason:cancelReason.trim()||null
-      });
-      setCancelSent(true);
-    } catch(e){ setCancelSent(true); } // show confirmation even if DB insert fails
-    setCancelSending(false);
+      const r = await fetch(endpoint,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({athleteId:athlete.id,pin:actionPin})});
+      const j = await r.json();
+      if(!r.ok){ setActionMsg({ok:false,text:j.error||"Something went wrong."}); setActionBusy(false); return; }
+      setCancelAtPeriodEnd(j.cancel_at_period_end);
+      setSubStatus(j.status||subStatus);
+      onCoachUpdate({cancel_at_period_end:j.cancel_at_period_end,subscription_status:j.status,current_period_end:j.current_period_end,trial_end:j.trial_end});
+      setActionMsg({ok:true,text:j.cancel_at_period_end?"Your plan is set to cancel — you keep access until the date above.":"Your plan will continue."});
+    } catch(e){ setActionMsg({ok:false,text:"Connection error."}); }
+    setActionBusy(false);
+  };
+  const cancelSub = ()=>callSubAction("/api/subscription-cancel");
+  const resumeSub = ()=>callSubAction("/api/subscription-resume");
+
+  // Upgrade / switch plan. Existing subscribers swap the price server-side (card on
+  // file). New/free athletes go through the in-modal payment step.
+  const startUpgrade = async () => {
+    if(!planChanged||upgrading) return;
+    if(selectedTier==="free"){ setUpgradeMsg("To move to Free, cancel your plan below."); setTimeout(()=>setUpgradeMsg(""),5000); return; }
+    if(actionPin.length!==4){ setUpgradeMsg("Enter your 4-digit PIN to confirm."); setTimeout(()=>setUpgradeMsg(""),4000); return; }
+    if(hasStripeSub){
+      setUpgrading(true); setUpgradeMsg("");
+      try {
+        const r = await fetch("/api/subscription-change",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({athleteId:athlete.id,pin:actionPin,tier:selectedTier,billing:selectedBilling})});
+        const j = await r.json();
+        if(!r.ok){ setUpgradeMsg(j.error||"Couldn't update plan."); }
+        else { onCoachUpdate({tier:selectedTier,billing:selectedBilling}); setUpgradeMsg("Plan updated. Changes are live now."); }
+      } catch(e){ setUpgradeMsg("Connection error."); }
+      setUpgrading(false);
+      setTimeout(()=>setUpgradeMsg(""),5000);
+    } else {
+      setShowUpgradePay(true); // collect a card via PaymentStep
+    }
+  };
+  const onUpgradePaid = () => {
+    setShowUpgradePay(false);
+    onCoachUpdate({tier:selectedTier,billing:selectedBilling});
+    setUpgradeMsg("You're all set! Your "+selectedTier.toUpperCase()+" plan is active.");
+    setTimeout(()=>setUpgradeMsg(""),5000);
   };
 
   const save = async () => {
@@ -3345,9 +3627,37 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
           <div style={{color:C.muted,fontSize:11}}>{athlete.sport}</div>
         </div>
 
-        {/* Tier selector */}
+        {/* Plan / subscription */}
         <div style={{marginBottom:16}}>
           <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>YOUR PLAN</div>
+
+          {currentTier==="school" ? (
+            <div style={{background:`${C.blue}15`,border:`1px solid ${C.blue}55`,borderRadius:10,padding:"12px 14px"}}>
+              <div style={{color:C.blue,fontWeight:700,fontSize:14,marginBottom:2,fontFamily:"'Bebas Neue'",letterSpacing:2}}>SCHOOL PLAN</div>
+              <div style={{color:C.muted2,fontSize:12,lineHeight:1.5}}>Your access is covered by your school or team. No payment needed.</div>
+            </div>
+          ) : (
+          <>
+          {/* Current subscription status */}
+          {hasStripeSub&&(
+            <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{color:C.text,fontWeight:700,fontSize:13}}>{currentTier.toUpperCase()}{currentPriceLabel?` · ${currentPriceLabel}`:""}</span>
+                <span style={{color:cancelAtPeriodEnd?C.red:(isTrialing?C.blue:C.green),fontSize:11,fontWeight:700,letterSpacing:1}}>
+                  {cancelAtPeriodEnd?"CANCELING":(isTrialing?"TRIAL":(subStatus||"active").toUpperCase())}
+                </span>
+              </div>
+              {renewalDate&&(
+                <div style={{color:C.muted,fontSize:11,marginTop:4,lineHeight:1.5}}>
+                  {cancelAtPeriodEnd
+                    ? `You'll keep access until ${fmtDate(renewalDate)}.`
+                    : isTrialing
+                      ? `Free trial ends ${fmtDate(renewalDate)} — first charge then.`
+                      : `Renews ${fmtDate(renewalDate)}.`}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Billing toggle */}
           {currentTier!=="free"&&(
@@ -3395,20 +3705,39 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
             })}
           </div>
           {upgradeMsg&&(
-            <div style={{color:upgradeMsg.includes("upgraded")||upgradeMsg.includes("updated")||upgradeMsg.includes("Billing")?C.green:C.red,fontSize:12,textAlign:"center",marginTop:8,fontWeight:600}}>
+            <div style={{color:upgradeMsg.includes("set")||upgradeMsg.includes("updated")||upgradeMsg.includes("active")?C.green:C.red,fontSize:12,textAlign:"center",marginTop:8,fontWeight:600}}>
               {upgradeMsg}
             </div>
           )}
-          {planChanged&&(
-            <button onClick={upgradeTier} disabled={upgrading}
-              style={btn(TIERS[selectedTier].color,tierOrder[selectedTier]>0?"#000":C.text,{marginTop:10,opacity:upgrading?0.7:1,cursor:upgrading?"not-allowed":"pointer"})}>
-              {upgrading?"Updating...":tierOrder[selectedTier]>tierOrder[currentTier]?`Upgrade to ${TIERS[selectedTier].label} →`:selectedTier!==currentTier?`Switch to ${TIERS[selectedTier].label} →`:`Switch to ${selectedBilling==="annual"?"Annual":"Monthly"} →`}
-            </button>
+          {planChanged&&selectedTier!=="free"&&!showUpgradePay&&(
+            <div style={{marginTop:10}}>
+              <input type="password" inputMode="numeric" maxLength={4} value={actionPin}
+                onChange={e=>setActionPin(e.target.value.replace(/\D/g,"").slice(0,4))}
+                placeholder="Enter PIN to confirm"
+                style={inp({textAlign:"center",letterSpacing:6,marginBottom:8})}/>
+              <button onClick={startUpgrade} disabled={upgrading}
+                style={btn(TIERS[selectedTier].color,"#000",{opacity:upgrading?0.7:1,cursor:upgrading?"not-allowed":"pointer"})}>
+                {upgrading?"Updating...":hasStripeSub?`Switch to ${TIERS[selectedTier].label} →`:`Subscribe to ${TIERS[selectedTier].label} →`}
+              </button>
+            </div>
+          )}
+          {planChanged&&selectedTier==="free"&&(
+            <div style={{marginTop:8,color:C.muted2,fontSize:11,lineHeight:1.5,textAlign:"center"}}>
+              To move to Free, cancel your current plan below — you'll keep access until the period ends.
+            </div>
+          )}
+          {showUpgradePay&&(
+            <div style={{marginTop:12,paddingTop:12,borderTop:`1px solid ${C.border}`}}>
+              <PaymentStep athleteId={athlete.id} pin={actionPin} tier={selectedTier} billing={selectedBilling} onSuccess={onUpgradePaid}/>
+              <button onClick={()=>setShowUpgradePay(false)} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer",width:"100%",marginTop:8}}>Cancel</button>
+            </div>
           )}
           {currentTier==="elite"&&!planChanged&&(
             <div style={{marginTop:8,color:C.muted2,fontSize:11,lineHeight:1.5,textAlign:"center"}}>
               A WILCO Certified Coach will be in touch within 24 hrs. Email joe.thomas@commandengineering.com with any questions.
             </div>
+          )}
+          </>
           )}
         </div>
 
@@ -3462,39 +3791,62 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
           {saving?"Saving...":"Save Changes →"}
         </button>
 
-        {/* Cancellation */}
-        {currentTier!=="free"&&(
-          <div style={{marginTop:8,marginBottom:10}}>
-            {!showCancelForm&&!cancelSent&&(
-              <button onClick={()=>setShowCancelForm(true)}
-                style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer",textDecoration:"underline",padding:0}}>
-                Request cancellation
-              </button>
-            )}
-            {showCancelForm&&!cancelSent&&(
-              <div style={{background:`${C.red}10`,border:`1px solid ${C.red}30`,borderRadius:10,padding:"12px 14px"}}>
-                <div style={{color:C.red,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>REQUEST CANCELLATION</div>
-                <div style={{color:C.muted2,fontSize:12,marginBottom:10,lineHeight:1.5}}>Your plan stays active until the end of your billing period. Let us know why you're leaving — it helps us improve.</div>
-                <textarea value={cancelReason} onChange={e=>setCancelReason(e.target.value)}
-                  placeholder="Reason (optional)..." rows={2}
-                  style={{...inp(),resize:"none",fontSize:13,marginBottom:10}}/>
-                <div style={{display:"flex",gap:8}}>
-                  <button onClick={submitCancellation} disabled={cancelSending}
-                    style={{flex:1,background:C.red,border:"none",color:"#fff",borderRadius:8,padding:"9px",cursor:"pointer",fontSize:13,fontWeight:700,opacity:cancelSending?0.7:1}}>
-                    {cancelSending?"Sending...":"Submit Request"}
-                  </button>
-                  <button onClick={()=>setShowCancelForm(false)}
-                    style={{flex:1,background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"9px",cursor:"pointer",fontSize:13}}>
-                    Never mind
-                  </button>
-                </div>
+        {/* Gift codes — unlock after the first real payment */}
+        {(currentTier==="pro"||currentTier==="elite")&&(
+          <div style={{marginTop:4,marginBottom:16}}>
+            <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>GIFT WILCO TO 4 FRIENDS</div>
+            {Array.isArray(athlete.gift_codes)&&athlete.gift_codes.length>0 ? (
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                <div style={{color:C.muted2,fontSize:11,marginBottom:2,lineHeight:1.5}}>Each code gives a friend their first month of Pro free. Single use.</div>
+                {athlete.gift_codes.map((g,i)=>{
+                  const redeemed = g.status==="redeemed";
+                  return (
+                    <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"9px 12px"}}>
+                      <span style={{fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:15,color:redeemed?C.muted:C.gold,textDecoration:redeemed?"line-through":"none"}}>{g.code}</span>
+                      {redeemed
+                        ? <span style={{color:C.muted,fontSize:11}}>Claimed{g.redeemed_by?` by ${g.redeemed_by}`:""}</span>
+                        : <button onClick={()=>{try{navigator.clipboard.writeText(g.code);}catch(_){}}}
+                            style={{background:"none",border:`1px solid ${C.border}`,color:C.text,borderRadius:8,padding:"4px 10px",cursor:"pointer",fontSize:11,fontWeight:700}}>Copy</button>}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div style={{color:C.muted2,fontSize:12,lineHeight:1.5,background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px"}}>
+                Your 4 gift codes unlock after your first payment.
               </div>
             )}
-            {cancelSent&&(
-              <div style={{background:`${C.green}10`,border:`1px solid ${C.green}30`,borderRadius:10,padding:"10px 14px",color:C.green,fontSize:12,lineHeight:1.5}}>
-                ✓ Cancellation request received. Your plan stays active until the end of your billing period. We'll follow up at {athlete.email||"your email"}.
-              </div>
+          </div>
+        )}
+
+        {/* Cancel / resume — real Stripe subscription control */}
+        {hasStripeSub&&(
+          <div style={{marginTop:4,marginBottom:12}}>
+            {actionMsg&&(
+              <div style={{color:actionMsg.ok?C.green:C.red,fontSize:12,marginBottom:8,textAlign:"center",lineHeight:1.5}}>{actionMsg.text}</div>
             )}
+            <div style={{display:"flex",gap:8,marginBottom:8}}>
+              <input type="password" inputMode="numeric" maxLength={4} value={actionPin}
+                onChange={e=>setActionPin(e.target.value.replace(/\D/g,"").slice(0,4))}
+                placeholder="PIN"
+                style={inp({textAlign:"center",letterSpacing:6,flex:1})}/>
+              {cancelAtPeriodEnd ? (
+                <button onClick={resumeSub} disabled={actionBusy}
+                  style={{flex:2,background:C.green,border:"none",color:"#000",borderRadius:10,padding:"0 12px",cursor:"pointer",fontSize:13,fontWeight:700,opacity:actionBusy?0.7:1}}>
+                  {actionBusy?"Working...":"Resume Plan"}
+                </button>
+              ) : (
+                <button onClick={cancelSub} disabled={actionBusy}
+                  style={{flex:2,background:"none",border:`1px solid ${C.red}66`,color:C.red,borderRadius:10,padding:"10px 12px",cursor:"pointer",fontSize:13,fontWeight:700,opacity:actionBusy?0.7:1}}>
+                  {actionBusy?"Working...":"Cancel Plan"}
+                </button>
+              )}
+            </div>
+            <div style={{color:C.muted,fontSize:11,lineHeight:1.5,textAlign:"center"}}>
+              {isTrialing
+                ? "Cancel now and you won't be charged — you keep access until your trial ends."
+                : "Cancel anytime. You keep access until the end of your billing period; no further charges."}
+            </div>
           </div>
         )}
 
