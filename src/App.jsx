@@ -3548,11 +3548,11 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
   const currentPriceLabel = currentTier==="pro"||currentTier==="elite" ? (PRICE_LABEL[currentTier]?.[currentBilling]||"") : "";
 
   // Cancel / resume — both PIN-gated against the money endpoints.
-  const callSubAction = async (endpoint) => {
+  const callSubAction = async (action) => {
     if(actionPin.length!==4){ setActionMsg({ok:false,text:"Enter your 4-digit PIN to confirm."}); return; }
     setActionBusy(true); setActionMsg(null);
     try {
-      const r = await fetch(endpoint,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({athleteId:athlete.id,pin:actionPin})});
+      const r = await fetch("/api/subscription-manage",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({athleteId:athlete.id,pin:actionPin,action})});
       const j = await r.json();
       if(!r.ok){ setActionMsg({ok:false,text:j.error||"Something went wrong."}); setActionBusy(false); return; }
       setCancelAtPeriodEnd(j.cancel_at_period_end);
@@ -3562,8 +3562,8 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
     } catch(e){ setActionMsg({ok:false,text:"Connection error."}); }
     setActionBusy(false);
   };
-  const cancelSub = ()=>callSubAction("/api/subscription-cancel");
-  const resumeSub = ()=>callSubAction("/api/subscription-resume");
+  const cancelSub = ()=>callSubAction("cancel");
+  const resumeSub = ()=>callSubAction("resume");
 
   // Upgrade / switch plan. Existing subscribers swap the price server-side (card on
   // file). New/free athletes go through the in-modal payment step.
@@ -3574,7 +3574,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
     if(hasStripeSub){
       setUpgrading(true); setUpgradeMsg("");
       try {
-        const r = await fetch("/api/subscription-change",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({athleteId:athlete.id,pin:actionPin,tier:selectedTier,billing:selectedBilling})});
+        const r = await fetch("/api/subscription-manage",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({athleteId:athlete.id,pin:actionPin,action:"change",tier:selectedTier,billing:selectedBilling})});
         const j = await r.json();
         if(!r.ok){ setUpgradeMsg(j.error||"Couldn't update plan."); }
         else { onCoachUpdate({tier:selectedTier,billing:selectedBilling}); setUpgradeMsg("Plan updated. Changes are live now."); }
