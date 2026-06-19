@@ -3,7 +3,7 @@
 // Settings upgrade/switch flow for athletes who already have a card on file, so no
 // new card entry is needed. New subscribers go through create-subscription instead.
 
-import { applyCors, verifyAthlete, getStripe, priceFor, sbAthletePatch, epochToISO } from "./_stripe.js";
+import { applyCors, verifyAthlete, getStripe, priceFor, sbAthletePatch, epochToISO, subPeriodEnd } from "./_stripe.js";
 
 export default async function handler(req, res) {
   if (applyCors(req, res)) return;
@@ -39,7 +39,7 @@ export default async function handler(req, res) {
       billing: interval,
       stripe_price_id: priceId,
       subscription_status: updated.status,
-      current_period_end: epochToISO(updated.current_period_end),
+      current_period_end: epochToISO(subPeriodEnd(updated)),
       cancel_at_period_end: !!updated.cancel_at_period_end,
     });
 

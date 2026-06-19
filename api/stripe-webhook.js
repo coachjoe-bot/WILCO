@@ -9,8 +9,11 @@ import {
   sbAthleteGet,
   sbAthleteGetBy,
   sbAthletePatch,
+  claimGiftGeneration,
+  releaseGiftGeneration,
   tierForPrice,
   epochToISO,
+  subPeriodEnd,
   GIFT_COUPON_ID,
   randomGiftCode,
 } from "./_stripe.js";
@@ -51,7 +54,8 @@ export default async function handler(req, res) {
         await syncSubscription(event.data.object);
         break;
       case "invoice.paid":
-      case "invoice.payment_succeeded":
+        // Only invoice.paid (NOT invoice.payment_succeeded — both fire for one
+        // payment, which would double-trigger generation).
         await handleInvoicePaid(stripe, event.data.object);
         break;
       default:
@@ -90,7 +94,7 @@ async function syncSubscription(sub) {
     stripe_subscription_id: sub.id,
     subscription_status: sub.status,
     cancel_at_period_end: !!sub.cancel_at_period_end,
-    current_period_end: epochToISO(sub.current_period_end),
+    current_period_end: epochToISO(subPeriodEnd(sub)),
     trial_end: epochToISO(sub.trial_end),
   };
   if (priceId) patch.stripe_price_id = priceId;
@@ -114,41 +118,42 @@ async function handleInvoicePaid(stripe, invoice) {
     return;
   }
 
-  // Idempotency guard — re-fetch (webhooks can be delivered more than once).
-  const fresh = await sbAthleteGet(athlete.id);
-  if (fresh?.gift_codes_generated_at) return;
+  // Atomic idempotency claim — only ONE invocation proceeds even if invoice.paid is
+  // delivered twice or concurrently. Sets gift_codes_generated_at iff it was null.
+  if (!(await claimGiftGeneration(athlete.id))) return;
 
-  const codes = [];
-  for (let i = 0; i < 4; i++) {
-    let created = null;
-    for (let attempt = 0; attempt < 6 && !created; attempt++) {
-      const code = randomGiftCode();
-      try {
-        const promo = await stripe.promotionCodes.create({
-          coupon: GIFT_COUPON_ID,
-          code,
-          max_redemptions: 1,
-          metadata: { gifter_athlete_id: String(athlete.id) },
-        });
-        created = {
-          code: promo.code,
-          promotion_code_id: promo.id,
-          status: "available",
-          redeemed_by: null,
-          redeemed_at: null,
-        };
-      } catch (e) {
-        // Collision on the human-readable code → retry; anything else is fatal.
-        if (!/already exists|already been taken|code/i.test(e.message)) throw e;
+  try {
+    const codes = [];
+    for (let i = 0; i < 4; i++) {
+      let created = null;
+      for (let attempt = 0; attempt < 6 && !created; attempt++) {
+        const code = randomGiftCode();
+        try {
+          const promo = await stripe.promotionCodes.create({
+            coupon: GIFT_COUPON_ID,
+            code,
+            max_redemptions: 1,
+            metadata: { gifter_athlete_id: String(athlete.id) },
+          });
+          created = {
+            code: promo.code,
+            promotion_code_id: promo.id,
+            status: "available",
+            redeemed_by: null,
+            redeemed_at: null,
+          };
+        } catch (e) {
+          // Collision on the human-readable code → retry; anything else is fatal.
+          if (!/already exists|already been taken|code/i.test(e.message)) throw e;
+        }
       }
+      if (created) codes.push(created);
     }
-    if (created) codes.push(created);
+    await sbAthletePatch(athlete.id, { gift_codes: codes });
+    console.log(`[stripe-webhook] generated ${codes.length} gift codes for athlete ${athlete.id}`);
+  } catch (e) {
+    // Release the claim so a Stripe retry can regenerate.
+    await releaseGiftGeneration(athlete.id);
+    throw e;
   }
-
-  // Single atomic PATCH so the flag and the array commit together.
-  await sbAthletePatch(athlete.id, {
-    gift_codes: codes,
-    gift_codes_generated_at: new Date().toISOString(),
-  });
-  console.log(`[stripe-webhook] generated ${codes.length} gift codes for athlete ${athlete.id}`);
 }

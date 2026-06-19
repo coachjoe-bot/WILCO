@@ -14,6 +14,7 @@ import {
   markGiftRedeemed,
   sbAthletePatch,
   epochToISO,
+  subPeriodEnd,
   STRIPE_MODE,
 } from "./_stripe.js";
 
@@ -131,7 +132,7 @@ export default async function handler(req, res) {
       tier,
       billing: interval,
       trial_end: epochToISO(subscription.trial_end),
-      current_period_end: epochToISO(subscription.current_period_end),
+      current_period_end: epochToISO(subPeriodEnd(subscription)),
       cancel_at_period_end: !!subscription.cancel_at_period_end,
     });
 
@@ -152,7 +153,7 @@ export default async function handler(req, res) {
       customerId,
       status: subscription.status,
       trialEnd: epochToISO(subscription.trial_end),
-      currentPeriodEnd: epochToISO(subscription.current_period_end),
+      currentPeriodEnd: epochToISO(subPeriodEnd(subscription)),
       giftApplied,
     });
   } catch (e) {

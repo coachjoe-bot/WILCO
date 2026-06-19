@@ -103,6 +103,29 @@ export async function sbAthleteGetBy(column, value) {
   return Array.isArray(rows) && rows.length ? rows[0] : null;
 }
 
+// Atomically claim gift-code generation for an athlete. Sets gift_codes_generated_at
+// only if it is currently NULL (PostgREST filter), and returns true iff THIS call
+// won the claim. Prevents duplicate generation when Stripe delivers invoice.paid more
+// than once (at-least-once delivery) or near-simultaneously.
+export async function claimGiftGeneration(id) {
+  const r = await fetch(
+    `${SB_URL}/rest/v1/athletes?id=eq.${encodeURIComponent(id)}&gift_codes_generated_at=is.null`,
+    {
+      method: "PATCH",
+      headers: { ...sbHeaders(), Prefer: "return=representation" },
+      body: JSON.stringify({ gift_codes_generated_at: new Date().toISOString() }),
+    }
+  );
+  const json = await r.json();
+  return Array.isArray(json) && json.length > 0;
+}
+
+// Release a gift-generation claim (set the flag back to NULL) so a retry can run —
+// used if code creation fails after the claim was taken.
+export async function releaseGiftGeneration(id) {
+  await sbAthletePatch(id, { gift_codes_generated_at: null });
+}
+
 export async function sbAthletePatch(id, patch) {
   const r = await fetch(`${SB_URL}/rest/v1/athletes?id=eq.${encodeURIComponent(id)}`, {
     method: "PATCH",
@@ -178,6 +201,12 @@ export async function markGiftRedeemed(stripe, promotionCodeId, redeemer) {
 
 // ── Misc helpers ─────────────────────────────────────────────────────────────
 export const epochToISO = (s) => (s ? new Date(s * 1000).toISOString() : null);
+
+// Period end of a subscription. Newer Stripe API versions (2025+) moved
+// current_period_end from the subscription onto each subscription item, so fall
+// back to the item when the top-level field is absent.
+export const subPeriodEnd = (sub) =>
+  sub?.current_period_end || sub?.items?.data?.[0]?.current_period_end || null;
 
 // CORS preamble shared by the JSON endpoints. Returns true if the request was a
 // preflight (handler should stop).

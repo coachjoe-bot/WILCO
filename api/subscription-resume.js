@@ -1,7 +1,7 @@
 // Vercel serverless function — undoes a pending cancellation while the
 // subscription is still active or trialing (clears cancel_at_period_end).
 
-import { applyCors, verifyAthlete, getStripe, sbAthletePatch, epochToISO } from "./_stripe.js";
+import { applyCors, verifyAthlete, getStripe, sbAthletePatch, epochToISO, subPeriodEnd } from "./_stripe.js";
 
 export default async function handler(req, res) {
   if (applyCors(req, res)) return;
@@ -23,14 +23,14 @@ export default async function handler(req, res) {
     await sbAthletePatch(athlete.id, {
       cancel_at_period_end: false,
       subscription_status: sub.status,
-      current_period_end: epochToISO(sub.current_period_end),
+      current_period_end: epochToISO(subPeriodEnd(sub)),
       trial_end: epochToISO(sub.trial_end),
     });
 
     return res.status(200).json({
       cancel_at_period_end: false,
       status: sub.status,
-      current_period_end: epochToISO(sub.current_period_end),
+      current_period_end: epochToISO(subPeriodEnd(sub)),
       trial_end: epochToISO(sub.trial_end),
     });
   } catch (e) {
