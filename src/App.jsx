@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { loadStripe } from "@stripe/stripe-js";
 import { Elements, PaymentElement, useStripe, useElements } from "@stripe/react-stripe-js";
+import { ConsentFlow, LEGAL_VERSION } from "./legal.jsx";
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const CLAUDE_PROXY  = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/claude-proxy`;
@@ -1047,6 +1048,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
   const [data,setData] = useState({name:"",sport:SPORTS[0],pin:"",confirmPin:"",email:"",goal:"strength",coachCode:"",coachName:"",coachEmail:"",tier:"free",billing:"monthly",birthday:"",heightFt:"",heightIn:"0",weight:"",gender:"",trainingDays:4,equipment:[],positionOrEvent:"",injuryHistory:"",recruitingIntent:"",graduationYear:""});
   const [loading,setLoading] = useState(false);
   const [athleteRow,setAthleteRow] = useState(null); // created athlete (exists before payment)
+  const [showConsent,setShowConsent] = useState(false); // T&C + Privacy consent overlay
   const setD = (k,v) => setData(p=>({...p,[k]:v}));
 
   // Total steps shown in the header. Plan selection is the last data step; paid tiers
@@ -1100,6 +1102,41 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
     setD("athleteId",newAthlete.id);
     return merged;
   };
+
+  // Record the athlete's legal acceptances. Best-effort: a failure is logged but
+  // never blocks account creation (per the consent spec). One row per document,
+  // tagged with the version the athlete actually agreed to.
+  const recordAcceptances = async (athleteId, isMinor) => {
+    const docs = ["terms","privacy",...(isMinor?["parental_consent"]:[])];
+    try {
+      await sbInsert("legal_acceptances", docs.map(d=>({athlete_id:athleteId, document:d, version:LEGAL_VERSION})));
+    } catch(e){ console.log("[legal_acceptances] insert failed:", e?.message||e); }
+  };
+
+  // Called when all required consent boxes are checked and "Create Account" is
+  // tapped on the Privacy step. Creates the athlete row, records acceptances,
+  // then resumes the normal post-step-13 flow (school finishes; everyone else
+  // advances to plan selection). Only runs when no athlete row exists yet, so
+  // acceptances are recorded exactly once.
+  const completeSignup = async ({isMinor}) => {
+    setErr("");
+    setLoading(true);
+    try {
+      const row = await createAthlete();
+      if(!row){ setShowConsent(false); setLoading(false); return; } // createAthlete set the error
+      await recordAcceptances(row.id, isMinor);
+      setShowConsent(false);
+      if(data.isSchool){
+        await finishOnboarding("school", row); // navigates to the app
+        return;
+      }
+      setLoading(false);
+      setStep(14); // plan selection
+    } catch(e){ setShowConsent(false); setErr("Connection error."); setLoading(false); }
+  };
+
+  // "Decline & Go Back" on any consent step — no athlete row was created.
+  const declineConsent = () => { setShowConsent(false); setView("home"); };
 
   // Finalize onboarding: send coach notifications (now that the tier is final) and
   // drop the athlete into the app. Called for school, free, and post-payment paths.
@@ -1180,19 +1217,22 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
       // graduation_year — optional, always advance
       setStep(13);
     } else if(step===13){
-      // College recruiting — final data step → create the athlete row.
+      // College recruiting — final data step. Before creating the athlete row,
+      // capture T&C + Privacy (+ parental, for 13–17) consent.
       if(!data.recruitingIntent){setErr("Select an option.");return;}
-      setLoading(true);
-      try {
-        const row = athleteRow || await createAthlete();
-        if(!row){ setLoading(false); return; } // createAthlete already set the error
+      if(athleteRow){
+        // Already consented + created on a previous pass (user navigated back then
+        // forward) — don't re-show consent or re-create the row, just continue.
         if(data.isSchool){
-          await finishOnboarding("school", row); // school: skip plan + payment
+          setLoading(true);
+          try { await finishOnboarding("school", athleteRow); }
+          catch(e){ setErr("Connection error."); setLoading(false); }
           return;
         }
-        setLoading(false);
-        setStep(14); // plan selection
-      } catch(e){ setErr("Connection error."); setLoading(false); }
+        setStep(14);
+        return;
+      }
+      setShowConsent(true); // ConsentFlow → completeSignup() handles creation
     } else if(step===14){
       // Plan selection
       if(data.tier==="free"){
@@ -1246,6 +1286,16 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
   };
 
   return (
+    <>
+    {showConsent && (
+      <ConsentFlow
+        C={C}
+        birthday={data.birthday}
+        busy={loading}
+        onComplete={completeSignup}
+        onDecline={declineConsent}
+      />
+    )}
     <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24}}>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
         <button onClick={()=>step>1?setStep(step-1):setView("home")} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:18}}>←</button>
@@ -1523,6 +1573,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
         </button>
       )}
     </div>
+    </>
   );
 }
 
@@ -2259,6 +2310,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // Approach: attach to DOM with real dimensions (iOS requirement), prime with
   // muted play() before seeking (iOS seeking requires prior playback), filter
   // blank frames by checking base64 length.
+  //
+  // PRIVACY AUDIT: Frames are not retained post-processing — consistent with
+  // Privacy Policy §7. Frames are extracted client-side into an in-memory base64
+  // array, sent to Claude (askClaude) for analysis in handleVideoUpload, and
+  // discarded when the function returns. They are never written to Supabase
+  // storage, any DB table, or local/persistent storage. The source video object
+  // URL is revoked in finish(). No biometric identifiers are derived.
   const extractFrames = (file, numFrames=4) => new Promise((resolve) => {
     const url = URL.createObjectURL(file);
     const video = document.createElement("video");
@@ -3536,6 +3594,25 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
   const [showUpgradePay,setShowUpgradePay] = useState(false);
   const [cancelAtPeriodEnd,setCancelAtPeriodEnd] = useState(!!athlete.cancel_at_period_end);
   const [subStatus,setSubStatus] = useState(athlete.subscription_status||null);
+  const [confirmDeleteAccount,setConfirmDeleteAccount] = useState(false); // delete-account confirm dialog
+  const [deleteBusy,setDeleteBusy] = useState(false);
+  const [deleteMsg,setDeleteMsg] = useState("");
+
+  // Queue an account deletion. We do NOT delete anything here — just log the
+  // request. The process-deletions edge function hard-deletes after the 30-day
+  // window (Privacy Policy §4/§5). scheduled_deletion_at defaults to now()+30d.
+  const requestAccountDeletion = async () => {
+    if(deleteBusy) return;
+    setDeleteBusy(true); setDeleteMsg("");
+    try {
+      await sbInsert("deletion_requests",{ athlete_id:athlete.id, triggered_by:"user_request", status:"pending" });
+      setConfirmDeleteAccount(false);
+      setDeleteMsg("Your deletion request has been received. Your account and data will be deleted within 30 days.");
+    } catch(e){
+      setDeleteMsg("Couldn't submit your request. Please try again or email support@trainwilco.com.");
+    }
+    setDeleteBusy(false);
+  };
 
   const currentTier = athlete.tier||"free";
   const currentBilling = athlete.billing||"monthly";
@@ -3855,6 +3932,49 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
             Log Out
           </button>
         )}
+
+        {/* Legal — links to the publicly hosted documents on the marketing site. */}
+        <div style={{display:"flex",justifyContent:"center",gap:14,marginTop:18,marginBottom:4}}>
+          <a href="https://trainwilco.com/terms" target="_blank" rel="noopener noreferrer"
+            style={{color:C.muted,fontSize:12,textDecoration:"none"}}>Terms &amp; Conditions</a>
+          <span style={{color:C.border,fontSize:12}}>·</span>
+          <a href="https://trainwilco.com/privacy" target="_blank" rel="noopener noreferrer"
+            style={{color:C.muted,fontSize:12,textDecoration:"none"}}>Privacy Policy</a>
+        </div>
+
+        {/* ── Danger zone — permanent account deletion ── */}
+        <div style={{marginTop:18,border:`1px solid ${C.red}44`,borderRadius:12,padding:16}}>
+          <div style={{color:C.red,fontFamily:"'Bebas Neue'",fontSize:15,letterSpacing:2,marginBottom:6}}>DANGER ZONE</div>
+          {deleteMsg ? (
+            <div style={{color:C.muted2,fontSize:12,lineHeight:1.6}}>{deleteMsg}</div>
+          ) : confirmDeleteAccount ? (
+            <div>
+              <div style={{color:C.muted2,fontSize:12,lineHeight:1.6,marginBottom:12}}>
+                Are you sure? Your account and all data will be permanently deleted within 30 days. This cannot be undone.
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={()=>setConfirmDeleteAccount(false)} disabled={deleteBusy}
+                  style={{flex:1,background:C.navy3,border:`1px solid ${C.border}`,color:C.text,borderRadius:10,padding:"10px 12px",cursor:"pointer",fontSize:13,fontWeight:700}}>
+                  Cancel
+                </button>
+                <button onClick={requestAccountDeletion} disabled={deleteBusy}
+                  style={{flex:1,background:C.red,border:"none",color:"#fff",borderRadius:10,padding:"10px 12px",cursor:deleteBusy?"not-allowed":"pointer",fontSize:13,fontWeight:700,opacity:deleteBusy?0.7:1}}>
+                  {deleteBusy?"Working...":"Confirm Deletion"}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div style={{color:C.muted,fontSize:12,lineHeight:1.6,marginBottom:10}}>
+                Permanently delete your account and all associated data.
+              </div>
+              <button onClick={()=>setConfirmDeleteAccount(true)}
+                style={{width:"100%",background:"none",border:`1px solid ${C.red}66`,color:C.red,borderRadius:10,padding:"10px 12px",cursor:"pointer",fontSize:13,fontWeight:700}}>
+                Delete My Account
+              </button>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

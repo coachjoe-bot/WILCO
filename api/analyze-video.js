@@ -1,5 +1,19 @@
 // Vercel serverless function — proxies video to Gemini File API server-side,
 // avoiding browser CORS restrictions on the upload headers.
+//
+// ⚠️ PRIVACY RISK: This path uploads the full video to Google's Gemini File API
+// and never explicitly deletes the uploaded file (it relies on Gemini's own
+// ~48h auto-expiry). Two issues to review against Privacy Policy §7 before launch:
+//   1. Gemini/Google is NOT listed among the third-party processors disclosed in
+//      Privacy Policy §3.2 (only Anthropic is named for AI processing). The active
+//      in-app form-review path uses Claude (see extractFrames/handleVideoUpload in
+//      src/App.jsx); this Gemini route does not appear to be called from src/, but
+//      it is deployed and reachable.
+//   2. "Still frames are used only during the processing period ... not retained"
+//      (§7) — here the entire video (not just frames) is sent to a third party and
+//      left to expire rather than being deleted on completion.
+// Audit note only — no logic changed. Raise with Joe Thomas: either disclose
+// Gemini in the Privacy Policy + add explicit file deletion, or retire this route.
 
 export const config = {
   api: {
