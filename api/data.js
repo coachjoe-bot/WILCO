@@ -3,11 +3,24 @@
 // key entirely. The caller proves identity (athlete or coach id + PIN); the write
 // itself runs server-side with the service key.
 //
-// POST { auth:{role,id,pin}, op:"insert"|"update"|"delete", table, data?, id?, params? }
+// POST { auth:{role,id,pin}, op:"insert"|"update"|"delete"|"upsert", table, data?, id?, params?, conflict? }
 //
-// NOTE (Phase 1): this requires a VALID logged-in caller, which closes the
-// catastrophic ANONYMOUS write hole. Per-row ownership scoping (so an authed
-// athlete can't write another athlete's row) is a follow-up (Phase 1b).
+// Phase 1   closed the ANONYMOUS write hole (a valid logged-in caller is required).
+// Phase 1b  adds per-row OWNERSHIP scoping for ATHLETE callers: an athlete may only
+//           write rows they own (athlete_id == their id, or the athletes row whose
+//           id == their id) and only the athlete-owned tables. Enforced two ways:
+//           (1) insert/upsert payloads must carry the caller's own id in the
+//               ownership column (every row);
+//           (2) update/delete queries get an extra "&<col>=eq.<callerId>" filter
+//               appended, so a stray/forged client filter can only ever match the
+//               caller's own rows — PostgREST ANDs repeated column filters, so a
+//               mismatched id matches zero rows (a silent no-op, not a cross-write).
+//
+// NOTE: COACH-role writes are NOT yet per-row scoped (the coach/admin/school
+//       hierarchy needs its own mapping — next follow-up). This is acceptable
+//       because athletes CANNOT assume the coach role (authCaller verifies a coach
+//       PIN against the coaches table), so athlete-vs-athlete tampering — the
+//       high-volume vector, including minors — is fully removed here.
 
 import { applyCors, httpErr, str, sbWrite, authCaller } from "./_supa.js";
 
@@ -21,6 +34,22 @@ const WRITABLE = new Set([
   "push_subscriptions", "proof_digests",
 ]);
 
+// Tables an ATHLETE caller may write, each mapped to the column that must equal
+// their own id. Any table NOT listed here is denied outright for athlete callers.
+const ATHLETE_OWN_COL = {
+  athletes: "id",
+  workouts: "athlete_id",
+  prs: "athlete_id",
+  manual_one_rms: "athlete_id",
+  athlete_goals: "athlete_id",
+  program_modifications: "athlete_id",
+  athlete_context: "athlete_id",
+  push_subscriptions: "athlete_id",
+  proof_digests: "athlete_id",
+  legal_acceptances: "athlete_id",
+  deletion_requests: "athlete_id",
+};
+
 export default async function handler(req, res) {
   if (applyCors(req, res)) return;
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -32,10 +61,30 @@ export default async function handler(req, res) {
   body = body || {};
 
   try {
-    await authCaller(body.auth);
+    const caller = await authCaller(body.auth);
 
     const table = String(body.table || "");
     if (!WRITABLE.has(table)) throw httpErr(400, `Table not writable: ${table}`);
+
+    // ── Phase 1b: athlete ownership scoping ──────────────────────────────────
+    // ownFilter is appended to update/delete queries (stays "" for coach callers,
+    // which preserves their existing behavior exactly).
+    let ownFilter = "";
+    if (caller.role === "athlete") {
+      const col = ATHLETE_OWN_COL[table];
+      if (!col) throw httpErr(403, "This account can't write that data");
+      ownFilter = `&${col}=eq.${enc(caller.id)}`;
+      // insert/upsert: every row must declare the caller as the owner.
+      if (body.op === "insert" || body.op === "upsert") {
+        const rows = Array.isArray(body.data) ? body.data : [body.data];
+        for (const r of rows) {
+          if (!r || typeof r !== "object") throw httpErr(400, `${body.op} requires data`);
+          if (String(r[col]) !== String(caller.id)) {
+            throw httpErr(403, "Cannot write another account's data");
+          }
+        }
+      }
+    }
 
     if (body.op === "insert") {
       if (body.data == null || typeof body.data !== "object") throw httpErr(400, "insert requires data");
@@ -46,10 +95,10 @@ export default async function handler(req, res) {
     if (body.op === "update") {
       if (body.data == null || typeof body.data !== "object") throw httpErr(400, "update requires data");
       // Update by an explicit PostgREST filter (e.g. "?coach_id=eq.<uuid>") or by id.
-      const query = typeof body.params === "string" && body.params
+      const base = typeof body.params === "string" && body.params
         ? body.params
         : `?id=eq.${enc(str(body.id, { max: 64, name: "id" }))}`;
-      const json = await sbWrite({ method: "PATCH", table, query, body: body.data });
+      const json = await sbWrite({ method: "PATCH", table, query: base + ownFilter, body: body.data });
       return res.status(200).json(json);
     }
 
@@ -68,11 +117,11 @@ export default async function handler(req, res) {
 
     if (body.op === "delete") {
       // The app passes a PostgREST filter string (e.g. "?athlete_id=eq.<uuid>").
-      const query = typeof body.params === "string" && body.params
+      const base = typeof body.params === "string" && body.params
         ? body.params
         : (body.id ? `?id=eq.${enc(str(body.id, { max: 64, name: "id" }))}` : "");
-      if (!query) throw httpErr(400, "delete requires params or id");
-      await sbWrite({ method: "DELETE", table, query, prefer: "return=minimal" });
+      if (!base) throw httpErr(400, "delete requires params or id");
+      await sbWrite({ method: "DELETE", table, query: base + ownFilter, prefer: "return=minimal" });
       return res.status(200).json({ ok: true });
     }
 
