@@ -73,6 +73,22 @@ const sbDelete = async (table,params="") => {
   }
   await dataApi("delete",table,{params});
 };
+// Update rows matching an explicit PostgREST filter (e.g. "?coach_id=eq.<id>").
+const sbUpdateWhere = async (table,params,data) => {
+  if(!CURRENT_AUTH){
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}${params}`,{method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},body:JSON.stringify(data)});
+    return r.json();
+  }
+  return dataApi("update",table,{params,data});
+};
+// Insert-or-update on a conflict column (e.g. "athlete_id").
+const sbUpsert = async (table,data,conflict) => {
+  if(!CURRENT_AUTH){
+    await fetch(`${SUPABASE_URL}/rest/v1/${table}?on_conflict=${conflict}`,{method:"POST",headers:{...sbH,"Prefer":"return=minimal,resolution=merge-duplicates"},body:JSON.stringify(data)});
+    return;
+  }
+  await dataApi("upsert",table,{data,conflict});
+};
 
 // Authenticated identity/login calls go through our server (api/identity.js),
 // which reads athletes/coaches with the service key. The browser can no longer
@@ -595,11 +611,7 @@ const registerPushSubscription = async (athleteId) => {
       });
     }
     // Upsert subscription in Supabase
-    await fetch(`${SUPABASE_URL}/rest/v1/push_subscriptions?on_conflict=athlete_id`,{
-      method:"POST",
-      headers:{...sbH,"Prefer":"return=minimal,resolution=merge-duplicates"},
-      body:JSON.stringify({athlete_id:athleteId,subscription_json:sub.toJSON(),updated_at:new Date().toISOString()}),
-    });
+    await sbUpsert("push_subscriptions",{athlete_id:athleteId,subscription_json:sub.toJSON(),updated_at:new Date().toISOString()},"athlete_id");
   } catch(_) {}
 };
 
@@ -669,10 +681,7 @@ function MonthlyRecapModal({athlete, digest, onClose, onContextSaved, workoutHis
       const doneGrowing = /done growing|fully grown|same height|no change|no i'm|nope/i.test(lowerMsg);
       if(doneGrowing && !athlete.height_finalized){
         try{
-          await fetch(`${SUPABASE_URL}/rest/v1/athletes?id=eq.${athlete.id}`,{
-            method:"PATCH",headers:{...sbH,"Prefer":"return=minimal"},
-            body:JSON.stringify({height_finalized:true})
-          });
+          await sbUpdate("athletes",athlete.id,{height_finalized:true});
         }catch(_){}
       }
       // Extract weight update if mentioned
@@ -681,10 +690,7 @@ function MonthlyRecapModal({athlete, digest, onClose, onContextSaved, workoutHis
         const newWeight = parseInt(weightMatch[1]);
         const unit = /kg/.test(weightMatch[2]) ? "kg" : "lbs";
         try{
-          await fetch(`${SUPABASE_URL}/rest/v1/athletes?id=eq.${athlete.id}`,{
-            method:"PATCH",headers:{...sbH,"Prefer":"return=minimal"},
-            body:JSON.stringify({weight:newWeight})
-          });
+          await sbUpdate("athletes",athlete.id,{weight:newWeight});
         }catch(_){}
       }
     }
@@ -744,10 +750,7 @@ function MonthlyRecapModal({athlete, digest, onClose, onContextSaved, workoutHis
   const applyProgramChange = async (apply) => {
     if(apply && programPending?.newText){
       try{
-        await fetch(`${SUPABASE_URL}/rest/v1/athletes?id=eq.${athlete.id}`,{
-          method:"PATCH",headers:{...sbH,"Prefer":"return=minimal"},
-          body:JSON.stringify({program_text:programPending.newText})
-        });
+        await sbUpdate("athletes",athlete.id,{program_text:programPending.newText});
         setMessages(prev=>[...prev,{role:"assistant",content:"📋 Program updated based on your feedback."}]);
       }catch(_){}
     }
@@ -762,20 +765,13 @@ function MonthlyRecapModal({athlete, digest, onClose, onContextSaved, workoutHis
     const contextContent = `Monthly recap ${new Date().toLocaleDateString("en-US",{month:"long",year:"numeric"})}:\n${answersText}${newProgram ? "\n\nProgram updated this month." : ""}${summary ? "\n\nCoach summary: "+summary.slice(0,400) : ""}`;
     try {
       // Upsert athlete_context (overwrite unless is_long_term)
-      await fetch(`${SUPABASE_URL}/rest/v1/athlete_context?on_conflict=athlete_id`,{
-        method:"POST",
-        headers:{...sbH,"Prefer":"return=minimal,resolution=merge-duplicates"},
-        body:JSON.stringify({athlete_id:athlete.id,content:contextContent,is_long_term:injuryMentioned,updated_at:new Date().toISOString()})
-      });
+      await sbUpsert("athlete_context",{athlete_id:athlete.id,content:contextContent,is_long_term:injuryMentioned,updated_at:new Date().toISOString()},"athlete_id");
       if(onContextSaved) onContextSaved(contextContent);
     }catch(_){}
 
     // Mark digest as read
     try{
-      await fetch(`${SUPABASE_URL}/rest/v1/proof_digests?athlete_id=eq.${athlete.id}&digest_type=eq.monthly`,{
-        method:"PATCH",headers:{...sbH,"Prefer":"return=minimal"},
-        body:JSON.stringify({is_read:true})
-      });
+      await sbUpdateWhere("proof_digests",`?athlete_id=eq.${athlete.id}&digest_type=eq.monthly`,{is_read:true});
     }catch(_){}
 
     onClose();
@@ -1096,29 +1092,27 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
     const ageYears = Math.floor((Date.now()-dob)/(365.25*24*60*60*1000));
     const heightIn = (+data.heightFt*12)+(+data.heightIn||0);
     const initialTier = data.isSchool ? "school" : "free"; // upgraded later by plan/payment
-    const pinHash = (await idApi("hash-pin",{pin:data.pin})).hash; // store the hash, never plaintext
-    const created = await sbInsert("athletes",{
-      name:data.name.trim(),sport:data.sport,pin:pinHash,tier:initialTier,billing:data.billing,
-      email:data.email.trim().toLowerCase(),
-      birthday:data.birthday,
-      age:ageYears,
-      height_inches:heightIn,
-      weight_lbs:+data.weight,
-      gender:data.gender,
-      training_days_per_week:+data.trainingDays,
-      equipment:data.equipment,
-      position_or_event:data.positionOrEvent.trim()||null,
-      injury_history:data.injuryHistory.trim()||null,
-      recruiting_intent:data.recruitingIntent,
-      graduation_year:data.graduationYear?parseInt(data.graduationYear):null,
-      first_chat_complete:false,
-      ...(data.isSchool?{stripe_price_id:SCHOOL_PRICE_ID}:{})
-    });
-    if(!(created?.length>0)){
-      setErr("Error: "+(created?.message||created?.error||JSON.stringify(created)));
-      return null;
-    }
-    const newAthlete = created[0];
+    // Create the account server-side: PIN is hashed and tier is forced there.
+    let newAthlete;
+    try {
+      const r = await idApi("create-athlete",{
+        pin:data.pin, isSchool:data.isSchool, schoolPriceId:SCHOOL_PRICE_ID,
+        athlete:{
+          name:data.name.trim(), sport:data.sport, billing:data.billing,
+          email:data.email.trim().toLowerCase(),
+          birthday:data.birthday, age:ageYears, height_inches:heightIn,
+          weight_lbs:+data.weight, gender:data.gender,
+          training_days_per_week:+data.trainingDays, equipment:data.equipment,
+          position_or_event:data.positionOrEvent.trim()||null,
+          injury_history:data.injuryHistory.trim()||null,
+          recruiting_intent:data.recruitingIntent,
+          graduation_year:data.graduationYear?parseInt(data.graduationYear):null,
+          first_chat_complete:false,
+        }
+      });
+      newAthlete = r.athlete;
+    } catch(e){ setErr("Error: "+(e.message||"could not create account")); return null; }
+    if(!newAthlete){ setErr("Error creating your account. Try again."); return null; }
     CURRENT_AUTH={role:"athlete",id:newAthlete.id,pin:data.pin}; // authenticate subsequent writes
     try {
       await sbUpdate("athletes",newAthlete.id,{
@@ -1843,10 +1837,8 @@ function CoachSetupScreen({setView,setCoach,setErr,err}) {
     if(pin!==confirmPin){setErr("PINs don't match.");return;}
     setLoading(true); setErr("");
     try {
-      const pinHash = (await idApi("hash-pin",{pin})).hash; // store the hash, never plaintext
-      const updated = await sbUpdate("coaches",coachRecord.id,{pin:pinHash});
-      if(updated?.length>0){CURRENT_AUTH={role:"coach",id:coachRecord.id,pin};setCoach({...coachRecord,pin});setView("coach");}
-      else setErr("Could not save PIN. Try again.");
+      await idApi("set-coach-pin",{coachId:coachRecord.id,accessCode:code.trim().toUpperCase(),pin});
+      CURRENT_AUTH={role:"coach",id:coachRecord.id,pin};setCoach({...coachRecord,pin});setView("coach");
     } catch(e){setErr("Connection error.");}
     setLoading(false);
   };
@@ -2925,10 +2917,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
               const markRead = async () => {
                 if(d.is_read) return;
                 try{
-                  await fetch(`${SUPABASE_URL}/rest/v1/proof_digests?id=eq.${d.id}`,{
-                    method:"PATCH",headers:{...sbH,"Prefer":"return=minimal"},
-                    body:JSON.stringify({is_read:true})
-                  });
+                  await sbUpdate("proof_digests",d.id,{is_read:true});
                   if(onDigestRead) onDigestRead({...d,is_read:true});
                 }catch(_){}
               };
@@ -4069,10 +4058,7 @@ function SchoolsList({schools,coaches,onRefresh}) {
       // Clear school_id + coach_id on athletes belonging to this school's coaches
       const schoolCoaches = coaches.filter(c=>c.school_id===school.id);
       for(const c of schoolCoaches){
-        await fetch(`${SUPABASE_URL}/rest/v1/athletes?coach_id=eq.${c.id}`,{
-          method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},
-          body:JSON.stringify({coach_id:null,school_id:null})
-        });
+        await sbUpdateWhere("athletes",`?coach_id=eq.${c.id}`,{coach_id:null,school_id:null});
         await sbDelete("coaches",`?id=eq.${c.id}`);
       }
       await sbDelete("schools",`?id=eq.${school.id}`);
@@ -4206,10 +4192,7 @@ function CoachesList({coaches,schools,onRefresh}) {
     setDeleting(true);
     try {
       // Clear coach_id on their athletes
-      await fetch(`${SUPABASE_URL}/rest/v1/athletes?coach_id=eq.${c.id}`,{
-        method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},
-        body:JSON.stringify({coach_id:null,school_id:null})
-      });
+      await sbUpdateWhere("athletes",`?coach_id=eq.${c.id}`,{coach_id:null,school_id:null});
       await sbDelete("coaches",`?id=eq.${c.id}`);
       setConfirmDelete(null);
       onRefresh();
@@ -5152,8 +5135,8 @@ function CoachDashboard({coach,onLogout}) {
               const doRemoveCoach = async (c) => {
                 if(!window.confirm(`Remove ${c.name}? Their athletes will remain unassigned.`)) return;
                 try {
-                  await fetch(`${SUPABASE_URL}/rest/v1/coaches?id=eq.${c.id}`,{method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},body:JSON.stringify({pin:null,access_code:`REMOVED_${c.access_code}`})});
-                  await fetch(`${SUPABASE_URL}/rest/v1/athletes?coach_id=eq.${c.id}`,{method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},body:JSON.stringify({coach_id:null})});
+                  await sbUpdate("coaches",c.id,{pin:null,access_code:`REMOVED_${c.access_code}`});
+                  await sbUpdateWhere("athletes",`?coach_id=eq.${c.id}`,{coach_id:null});
                   loadAll();
                 }catch(e){}
               };

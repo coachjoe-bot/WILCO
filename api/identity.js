@@ -14,7 +14,7 @@
 
 import {
   applyCors, httpErr, str, pin4, clientIp, stripPin,
-  sbSelect, rateLimit, rateLimitReset, verifyPin, hashPin,
+  sbSelect, sbWrite, rateLimit, rateLimitReset, verifyPin, hashPin,
 } from "./_supa.js";
 
 const enc = encodeURIComponent;
@@ -39,6 +39,8 @@ export default async function handler(req, res) {
       case "coach-dashboard":      return await coachDashboard(req, res, body);
       case "coach-athlete-fields": return await coachAthleteFields(req, res, body);
       case "hash-pin":             return await hashPinAction(req, res, body);
+      case "create-athlete":       return await createAthleteAction(req, res, body);
+      case "set-coach-pin":        return await setCoachPinAction(req, res, body);
       default:                     return res.status(400).json({ error: "Unknown action" });
     }
   } catch (e) {
@@ -148,11 +150,52 @@ async function coachDashboard(req, res, body) {
   });
 }
 
-// ── hash-pin (signup / coach setup store a bcrypt hash, never plaintext) ─────
+// ── hash-pin (legacy helper; kept for any caller still using it) ─────────────
 async function hashPinAction(req, res, body) {
   const pin = pin4(body.pin);
   await rateLimit(`hash-pin:${clientIp(req)}`, { max: 30, windowMin: 15 });
   return res.status(200).json({ hash: await hashPin(pin) });
+}
+
+// ── create-athlete (signup: hash PIN + force tier server-side, then insert) ──
+// Unauthenticated (the account doesn't exist yet) so it's rate-limited. Tier is
+// set by the server (never trust a client claiming "elite"). Returns the row
+// without the PIN; the browser keeps the plaintext PIN it just typed.
+const ATHLETE_FIELDS = [
+  "sport", "billing", "birthday", "age", "height_inches", "weight_lbs", "gender",
+  "training_days_per_week", "equipment", "position_or_event", "injury_history",
+  "recruiting_intent", "graduation_year", "first_chat_complete",
+];
+async function createAthleteAction(req, res, body) {
+  const pin = pin4(body.pin);
+  const a = body.athlete || {};
+  const name = str(a.name, { max: 100, name: "Name" });
+  const email = str(a.email, { max: 200, name: "Email" });
+  await rateLimit(`create-athlete:${clientIp(req)}`, { max: 10, windowMin: 60 });
+
+  const row = { name, email: email.toLowerCase(), pin: await hashPin(pin) };
+  for (const k of ATHLETE_FIELDS) if (a[k] !== undefined) row[k] = a[k];
+  row.tier = body.isSchool ? "school" : "free"; // never set from the client's tier
+  if (body.isSchool && body.schoolPriceId) row.stripe_price_id = str(body.schoolPriceId, { max: 120, name: "price" });
+
+  const created = await sbWrite({ method: "POST", table: "athletes", body: row });
+  const athlete = Array.isArray(created) ? created[0] : created;
+  return res.status(200).json({ athlete: athlete ? stripPin(athlete) : null });
+}
+
+// ── set-coach-pin (first-time coach setup: prove access code, set hashed PIN) ─
+async function setCoachPinAction(req, res, body) {
+  const coachId = str(body.coachId, { max: 64, name: "coachId" });
+  const accessCode = str(body.accessCode, { max: 40, name: "Access code" }).toUpperCase();
+  const pin = pin4(body.pin);
+  await rateLimit(`set-coach-pin:${clientIp(req)}`, { max: 10, windowMin: 60 });
+
+  const rows = await sbSelect("coaches", `?id=eq.${enc(coachId)}&access_code=eq.${enc(accessCode)}&select=id,pin`);
+  const c = rows[0];
+  if (!c) throw httpErr(401, "Invalid coach or access code");
+  if (c.pin) throw httpErr(409, "This account already has a PIN set");
+  await sbWrite({ method: "PATCH", table: "coaches", query: `?id=eq.${enc(coachId)}`, body: { pin: await hashPin(pin) }, prefer: "return=minimal" });
+  return res.status(200).json({ ok: true });
 }
 
 // ── coach-athlete-fields (dashboard polling one athlete's program) ───────────

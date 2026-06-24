@@ -18,6 +18,7 @@ const WRITABLE = new Set([
   "athletes", "workouts", "prs", "coaches", "schools",
   "manual_one_rms", "program_modifications", "athlete_goals",
   "legal_acceptances", "deletion_requests", "athlete_context",
+  "push_subscriptions", "proof_digests",
 ]);
 
 // Verify the caller is a real athlete/coach with a matching PIN.
@@ -54,9 +55,25 @@ export default async function handler(req, res) {
     }
 
     if (body.op === "update") {
-      const id = str(body.id, { max: 64, name: "id" });
       if (body.data == null || typeof body.data !== "object") throw httpErr(400, "update requires data");
-      const json = await sbWrite({ method: "PATCH", table, query: `?id=eq.${enc(id)}`, body: body.data });
+      // Update by an explicit PostgREST filter (e.g. "?coach_id=eq.<uuid>") or by id.
+      const query = typeof body.params === "string" && body.params
+        ? body.params
+        : `?id=eq.${enc(str(body.id, { max: 64, name: "id" }))}`;
+      const json = await sbWrite({ method: "PATCH", table, query, body: body.data });
+      return res.status(200).json(json);
+    }
+
+    if (body.op === "upsert") {
+      if (body.data == null || typeof body.data !== "object") throw httpErr(400, "upsert requires data");
+      const conflict = str(body.conflict, { max: 120, name: "conflict" });
+      const json = await sbWrite({
+        method: "POST",
+        table,
+        query: `?on_conflict=${enc(conflict)}`,
+        body: body.data,
+        prefer: "resolution=merge-duplicates,return=representation",
+      });
       return res.status(200).json(json);
     }
 
