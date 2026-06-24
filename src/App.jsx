@@ -4,7 +4,6 @@ import { Elements, PaymentElement, useStripe, useElements } from "@stripe/react-
 import { ConsentFlow, LEGAL_VERSION } from "./legal.jsx";
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
-const CLAUDE_PROXY  = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/claude-proxy`;
 const SUPABASE_URL  = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY  = import.meta.env.VITE_SUPABASE_KEY;
 const MASTER_CODE   = "FORTIS-MASTER"; // keep for backward compat
@@ -226,13 +225,16 @@ const askClaude = async (system, user, maxTokens=600, images=[]) => {
     content.push({type:"image",source:{type:"base64",media_type:"image/jpeg",data:img}});
   }
   content.push({type:"text",text:user});
-  const r = await fetch(CLAUDE_PROXY,{
+  // Routes through our authenticated server proxy (api/claude.js): it verifies
+  // CURRENT_AUTH, rate-limits per user, and holds the Anthropic key. Same-origin,
+  // so no Authorization header is needed.
+  const r = await fetch("/api/claude",{
     method:"POST",
-    headers:{"Content-Type":"application/json","Authorization":`Bearer ${SUPABASE_KEY}`},
-    body:JSON.stringify({model:"claude-sonnet-4-5",max_tokens:maxTokens,system,messages:[{role:"user",content}]})
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({auth:CURRENT_AUTH,model:"claude-sonnet-4-5",max_tokens:maxTokens,system,messages:[{role:"user",content}]})
   });
   const d = await r.json();
-  if(d.error) throw new Error(d.error.message);
+  if(d.error) throw new Error(typeof d.error==="string"?d.error:d.error.message);
   return d.content?.[0]?.text||"";
 };
 

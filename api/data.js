@@ -9,7 +9,7 @@
 // catastrophic ANONYMOUS write hole. Per-row ownership scoping (so an authed
 // athlete can't write another athlete's row) is a follow-up (Phase 1b).
 
-import { applyCors, httpErr, str, sbSelect, verifyPin, sbWrite } from "./_supa.js";
+import { applyCors, httpErr, str, sbWrite, authCaller } from "./_supa.js";
 
 const enc = encodeURIComponent;
 
@@ -20,17 +20,6 @@ const WRITABLE = new Set([
   "legal_acceptances", "deletion_requests", "athlete_context",
   "push_subscriptions", "proof_digests",
 ]);
-
-// Verify the caller is a real athlete/coach with a matching PIN.
-async function authCaller(auth) {
-  if (!auth || typeof auth !== "object") throw httpErr(401, "Sign in required");
-  const id = str(auth.id, { max: 64, name: "auth.id" });
-  const table = auth.role === "coach" ? "coaches" : auth.role === "athlete" ? "athletes" : null;
-  if (!table) throw httpErr(401, "Invalid auth role");
-  const rows = await sbSelect(table, `?id=eq.${enc(id)}&select=id,pin`);
-  if (!rows[0] || !(await verifyPin(auth.pin, rows[0].pin))) throw httpErr(401, "Not authorized");
-  return { role: auth.role, id };
-}
 
 export default async function handler(req, res) {
   if (applyCors(req, res)) return;

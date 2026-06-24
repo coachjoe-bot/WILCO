@@ -156,3 +156,18 @@ export async function rateLimit(key, { max = 5, windowMin = 15 } = {}) {
 export async function rateLimitReset(key) {
   await sbDelete("rate_limits", `?key=eq.${encodeURIComponent(key)}`);
 }
+
+// ── Caller authentication ─────────────────────────────────────────────────────
+// Verify a request's `auth:{role,id,pin}` is a real athlete/coach with a matching
+// (bcrypt) PIN. Shared by the write gateway (api/data.js) and the Claude proxy
+// (api/claude.js) so "what counts as authenticated" lives in exactly one place.
+// Returns { role, id } on success; throws 401 otherwise.
+export async function authCaller(auth) {
+  if (!auth || typeof auth !== "object") throw httpErr(401, "Sign in required");
+  const id = str(auth.id, { max: 64, name: "auth.id" });
+  const table = auth.role === "coach" ? "coaches" : auth.role === "athlete" ? "athletes" : null;
+  if (!table) throw httpErr(401, "Invalid auth role");
+  const rows = await sbSelect(table, `?id=eq.${encodeURIComponent(id)}&select=id,pin`);
+  if (!rows[0] || !(await verifyPin(auth.pin, rows[0].pin))) throw httpErr(401, "Not authorized");
+  return { role: auth.role, id };
+}
