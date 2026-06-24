@@ -9,7 +9,8 @@
 //   2. rate-limits per user,
 //   3. allowlists the model (ignores client-chosen expensive models),
 //   4. caps max_tokens,
-//   5. forwards ONLY the fields we expect (model/max_tokens/system/messages).
+//   5. forwards ONLY the fields we build here (model/max_tokens/system/messages
+//      + server-chosen inference params) — never the client's raw body.
 //
 // POST { auth:{role,id,pin}, model?, max_tokens?, system?, messages:[...] }
 
@@ -18,13 +19,35 @@ import { applyCors, httpErr, authCaller, rateLimit } from "./_supa.js";
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY || process.env.ANTHROPIC_API_KEY;
 
-// Models the app is allowed to request. Anything else falls back to DEFAULT_MODEL
-// so a stray/malicious model id can't reach a pricier model — without breaking the app.
-const DEFAULT_MODEL = "claude-sonnet-4-5";
+// ─── MODEL CONFIG ────────────────────────────────────────────────────────────
+// Single source of truth for which models the app may use. Anything the client
+// asks for that isn't here falls back to DEFAULT_MODEL, so a stray/malicious
+// model id can't reach a pricier model — without breaking the app.
+//
+// claude-sonnet-4-5 is kept allowlisted for one release so rollback is a
+// one-line DEFAULT_MODEL flip rather than a redeploy of the client too.
+const DEFAULT_MODEL = "claude-sonnet-4-6";
 const ALLOWED_MODELS = new Set([
+  "claude-sonnet-4-6",
   "claude-sonnet-4-5",
   "claude-sonnet-4-5-20250929",
 ]);
+
+// Per-model inference params, chosen SERVER-side (the client never picks these).
+// Sonnet 4.6 defaults effort to "high" and supports thinking; Sonnet 4.5 had
+// neither. WILCO's calls are mechanical extraction + short coaching replies, so
+// a naive 4.6 swap would raise cost/latency for no quality gain. Pin effort low
+// and thinking off to keep the 4.5-equivalent fast/cheap profile.
+//   NOTE (Phase 2): effort is INVALID on Haiku 4.5 — if a call is ever routed to
+//   Haiku, it must NOT receive `output_config.effort`. Gate on the model id here.
+//   If any feature later needs more reasoning, bump effort to "medium" for that
+//   model — do not remove the gate.
+function modelParams(model) {
+  if (model === "claude-sonnet-4-6") {
+    return { output_config: { effort: "low" }, thinking: { type: "disabled" } };
+  }
+  return {};
+}
 
 // The app's largest legitimate call asks for 1000 tokens; cap above that with headroom.
 const MAX_TOKENS_CAP = 1500;
@@ -59,8 +82,9 @@ export default async function handler(req, res) {
       throw httpErr(400, "messages required");
     }
 
-    // 4) Forward ONLY the fields we expect — strip anything else the client sent.
-    const payload = { model, max_tokens, messages: body.messages };
+    // 4) Forward ONLY the fields we build here — strip anything else the client
+    //    sent. Inference params (effort/thinking) are server-chosen per model.
+    const payload = { model, max_tokens, messages: body.messages, ...modelParams(model) };
     if (typeof body.system === "string" && body.system) payload.system = body.system;
 
     const r = await fetch(ANTHROPIC_URL, {

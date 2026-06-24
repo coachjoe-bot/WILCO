@@ -92,8 +92,15 @@ const askClaude = async (system: string, user: string, maxTokens = 1200): Promis
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-5",
+      // This background digest calls Anthropic directly (it does not go through
+      // api/claude.js). Keep its model + inference params in sync with the proxy:
+      // Sonnet 4.6 with effort pinned low and thinking off, so the version bump
+      // does not raise cost on a daily job. If digest narrative quality drops,
+      // bump effort to "medium" — do not re-enable thinking.
+      model: "claude-sonnet-4-6",
       max_tokens: maxTokens,
+      output_config: { effort: "low" },
+      thinking: { type: "disabled" },
       system,
       messages: [{ role: "user", content: user }],
     }),

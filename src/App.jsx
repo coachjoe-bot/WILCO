@@ -231,7 +231,9 @@ const askClaude = async (system, user, maxTokens=600, images=[]) => {
   const r = await fetch("/api/claude",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({auth:CURRENT_AUTH,model:"claude-sonnet-4-5",max_tokens:maxTokens,system,messages:[{role:"user",content}]})
+    // Model is a hint only — the server (api/claude.js) allowlists it, picks the
+    // real model + inference params, and ignores anything unexpected.
+    body:JSON.stringify({auth:CURRENT_AUTH,model:"claude-sonnet-4-6",max_tokens:maxTokens,system,messages:[{role:"user",content}]})
   });
   const d = await r.json();
   if(d.error) throw new Error(typeof d.error==="string"?d.error:d.error.message);
