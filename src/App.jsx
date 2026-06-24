@@ -38,18 +38,40 @@ const sbGet = async (table,params="") => {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}${params}`,{headers:{...sbH,"Prefer":"return=representation"}});
   return r.json();
 };
+// CURRENT_AUTH holds the logged-in identity ({role:"athlete"|"coach",id,pin}),
+// set at login/signup. Writes go through the authenticated gateway (api/data.js)
+// when a session exists; otherwise they fall back to the legacy direct path so
+// nothing breaks before the database is locked down. Once RLS denies anon writes,
+// the fallback simply stops working and only authenticated writes remain.
+let CURRENT_AUTH = null;
+const dataApi = async (op,table,{data,id,params}={}) => {
+  const r = await fetch("/api/data",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth:CURRENT_AUTH,op,table,data,id,params})});
+  const t = await r.text(); let d; try{ d = t?JSON.parse(t):null; }catch(_){ d=t; }
+  if(!r.ok) throw new Error((d&&d.error)||`Write failed (${r.status})`);
+  return d;
+};
 const sbInsert = async (table,data) => {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`,{method:"POST",headers:{...sbH,"Prefer":"return=representation"},body:JSON.stringify(data)});
-  return r.json();
+  if(!CURRENT_AUTH){
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`,{method:"POST",headers:{...sbH,"Prefer":"return=representation"},body:JSON.stringify(data)});
+    return r.json();
+  }
+  return dataApi("insert",table,{data});
 };
 const sbUpdate = async (table,id,data) => {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`,{method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},body:JSON.stringify(data)});
-  const json = await r.json();
-  if(!r.ok) throw new Error(json?.message||json?.error||`Update failed (${r.status})`);
-  return json;
+  if(!CURRENT_AUTH){
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`,{method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},body:JSON.stringify(data)});
+    const json = await r.json();
+    if(!r.ok) throw new Error(json?.message||json?.error||`Update failed (${r.status})`);
+    return json;
+  }
+  return dataApi("update",table,{id,data});
 };
 const sbDelete = async (table,params="") => {
-  await fetch(`${SUPABASE_URL}/rest/v1/${table}${params}`,{method:"DELETE",headers:sbH});
+  if(!CURRENT_AUTH){
+    await fetch(`${SUPABASE_URL}/rest/v1/${table}${params}`,{method:"DELETE",headers:sbH});
+    return;
+  }
+  await dataApi("delete",table,{params});
 };
 
 // Authenticated identity/login calls go through our server (api/identity.js),
@@ -1097,16 +1119,14 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
       return null;
     }
     const newAthlete = created[0];
+    CURRENT_AUTH={role:"athlete",id:newAthlete.id,pin:data.pin}; // authenticate subsequent writes
     try {
-      await fetch(`${SUPABASE_URL}/rest/v1/athletes?id=eq.${newAthlete.id}`,{
-        method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},
-        body:JSON.stringify({
-          goal:data.goal||"strength",
-          coach_name:data.coachName.trim()||null,
-          coach_email:data.coachEmail.trim().toLowerCase()||null,
-          ...(data.coachId?{coach_id:data.coachId}:{}),
-          ...(data.schoolId?{school_id:data.schoolId}:{})
-        })
+      await sbUpdate("athletes",newAthlete.id,{
+        goal:data.goal||"strength",
+        coach_name:data.coachName.trim()||null,
+        coach_email:data.coachEmail.trim().toLowerCase()||null,
+        ...(data.coachId?{coach_id:data.coachId}:{}),
+        ...(data.schoolId?{school_id:data.schoolId}:{})
       });
     } catch(e){}
     const merged = {...newAthlete,pin:data.pin,goal:data.goal||"strength",coach_id:data.coachId||null,school_id:data.schoolId||null};
@@ -1606,7 +1626,7 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
     setLoading(true); setErr("");
     try {
       const res = await idApi("athlete-login",{name:name.trim(),pin});
-      if(res.athlete){setAthlete({...res.athlete,pin});setView("athlete");}
+      if(res.athlete){CURRENT_AUTH={role:"athlete",id:res.athlete.id,pin};setAthlete({...res.athlete,pin});setView("athlete");}
       else if(res.reason==="wrong_pin") setErr("Wrong PIN. Try again.");
       else setErr("Name not found. Check spelling or sign up as a new athlete.");
     } catch(e){setErr(e.message||"Connection error. Check your internet.");}
@@ -1712,7 +1732,7 @@ function CoachLoginScreen({setView,setCoach,setErr,err}) {
     setLoading(true); setErr("");
     try {
       const res = await idApi("coach-login",{pin});
-      if(res.coach){setCoach({...res.coach,pin});setView("coach");}
+      if(res.coach){CURRENT_AUTH={role:"coach",id:res.coach.id,pin};setCoach({...res.coach,pin});setView("coach");}
       else setErr("PIN not found. Check your PIN or set up your coach account first.");
     } catch(e){setErr(e.message||"Connection error.");}
     setLoading(false);
@@ -1825,7 +1845,7 @@ function CoachSetupScreen({setView,setCoach,setErr,err}) {
     try {
       const pinHash = (await idApi("hash-pin",{pin})).hash; // store the hash, never plaintext
       const updated = await sbUpdate("coaches",coachRecord.id,{pin:pinHash});
-      if(updated?.length>0){setCoach({...coachRecord,pin});setView("coach");}
+      if(updated?.length>0){CURRENT_AUTH={role:"coach",id:coachRecord.id,pin};setCoach({...coachRecord,pin});setView("coach");}
       else setErr("Could not save PIN. Try again.");
     } catch(e){setErr("Connection error.");}
     setLoading(false);
