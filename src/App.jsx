@@ -219,7 +219,10 @@ const groupIntoSessions = (workouts, gapMs = 3*60*60*1000) => {
 
 
 // ─── CLAUDE ──────────────────────────────────────────────────────────────────
-const askClaude = async (system, user, maxTokens=600, images=[]) => {
+// `model` defaults to Sonnet 4.6 (coaching voice / anything athletes read).
+// Pass "claude-haiku-4-5" ONLY for mechanical, never-seen extraction calls
+// (parseWorkout, goal parsing) to cut cost ~3x. The server still allowlists it.
+const askClaude = async (system, user, maxTokens=600, images=[], model="claude-sonnet-4-6") => {
   const content = [];
   for(const img of images){
     content.push({type:"image",source:{type:"base64",media_type:"image/jpeg",data:img}});
@@ -233,7 +236,7 @@ const askClaude = async (system, user, maxTokens=600, images=[]) => {
     headers:{"Content-Type":"application/json"},
     // Model is a hint only — the server (api/claude.js) allowlists it, picks the
     // real model + inference params, and ignores anything unexpected.
-    body:JSON.stringify({auth:CURRENT_AUTH,model:"claude-sonnet-4-6",max_tokens:maxTokens,system,messages:[{role:"user",content}]})
+    body:JSON.stringify({auth:CURRENT_AUTH,model,max_tokens:maxTokens,system,messages:[{role:"user",content}]})
   });
   const d = await r.json();
   if(d.error) throw new Error(typeof d.error==="string"?d.error:d.error.message);
@@ -277,7 +280,8 @@ Rules:
 - Set is_program_revert:true when the athlete signals they are returning to their normal training environment ("I'm back", "home now", "back at the gym", "back to normal", "cruise is over", etc.).
 - If weight is given in kg (e.g. "100kg squat"), set unit:"kg".
 - "pr_attempts": include an entry with reps:1 and achieved:true whenever the athlete reports an ACTUAL (not estimated) 1-rep max for a lift — either because they just performed a true 1RM single in this session, OR because they are simply telling you their current actual max for a lift (e.g. "my real squat max is 405", "current bench 1RM is 275", "just hit a 315 deadlift max"). This applies even if no other exercises were logged in the message. If they describe a failed attempt at a 1RM, set achieved:false.`;
-  const text = await askClaude(sys,`Athlete: ${name} (${sport})\nMessage: ${message}`,1000);
+  // Mechanical extraction → Haiku (athlete never sees this raw JSON; ~3x cheaper).
+  const text = await askClaude(sys,`Athlete: ${name} (${sport})\nMessage: ${message}`,1000,[],"claude-haiku-4-5");
   try { return JSON.parse(text.replace(/```json|```/g,"").trim()); }
   catch { return {exercises:[],run_data:null,practice_data:null,pain_flags:[],equipment_issues:[],questions:[],pr_attempts:[],session_feel:null,general_notes:message,is_program_update:false,is_temp_program_update:false,is_program_revert:false}; }
 };
@@ -2218,7 +2222,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // Parse goal from athlete's response
         const goalJson = await askClaude(
           `Extract training goal info from this athlete message. Return ONLY valid JSON:\n{"goal_text":string,"goal_type":"strength"|"sport_performance"|"weight_loss"|"endurance"|"body_composition"|"general"|"other","target_metric":string|null,"target_value":number|null,"target_date":string|null}\ngoal_type: pick the best match. target_date: ISO date string if mentioned, else null.`,
-          `Athlete: ${athlete.name}\nMessage: ${msg}`,200
+          `Athlete: ${athlete.name}\nMessage: ${msg}`,200,[],"claude-haiku-4-5"
         );
         try {
           const parsed = JSON.parse(goalJson.replace(/```json|```/g,"").trim());

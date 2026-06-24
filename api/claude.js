@@ -29,6 +29,10 @@ const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY || process.env.ANTHROPIC_API_KEY
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 const ALLOWED_MODELS = new Set([
   "claude-sonnet-4-6",
+  // Haiku 4.5 is used ONLY for mechanical, never-seen extraction calls
+  // (parseWorkout, goal parsing) — ~3x cheaper. modelParams() below gives it
+  // no effort param (effort is invalid on Haiku). Coaching voice stays on 4.6.
+  "claude-haiku-4-5",
   "claude-sonnet-4-5",
   "claude-sonnet-4-5-20250929",
 ]);
