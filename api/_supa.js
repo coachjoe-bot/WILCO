@@ -124,6 +124,19 @@ export async function sbDelete(table, query = "") {
   await fetch(`${SB_URL}/rest/v1/${table}${query}`, { method: "DELETE", headers: sbHeaders() });
 }
 
+// Generic write used by the authenticated write gateway (api/data.js). Mirrors a
+// raw PostgREST call but with the service key, after the caller has been verified.
+export async function sbWrite({ method, table, query = "", body, prefer = "return=representation" }) {
+  const opts = { method, headers: { ...sbHeaders(), Prefer: prefer } };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const r = await fetch(`${SB_URL}/rest/v1/${table}${query}`, opts);
+  const text = await r.text();
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch { json = text; }
+  if (!r.ok) throw httpErr(r.status, (json && json.message) || `Database write failed (${r.status})`);
+  return json;
+}
+
 // ── Rate limiting (backed by the `rate_limits` table) ────────────────────────
 // Counts attempts for `key` within the window; throws 429 when over `max`.
 // Stateless functions can't hold counters in memory, so we use the DB.
