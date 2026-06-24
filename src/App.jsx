@@ -52,6 +52,17 @@ const sbDelete = async (table,params="") => {
   await fetch(`${SUPABASE_URL}/rest/v1/${table}${params}`,{method:"DELETE",headers:sbH});
 };
 
+// Authenticated identity/login calls go through our server (api/identity.js),
+// which reads athletes/coaches with the service key. The browser can no longer
+// read those tables directly (RLS). Throws a friendly message on rate-limit (429).
+const idApi = async (action,payload={}) => {
+  const r = await fetch("/api/identity",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,...payload})});
+  let d={}; try{ d = await r.json(); }catch(_){}
+  if(r.status===429) throw new Error(d.error||"Too many attempts. Wait a few minutes and try again.");
+  if(!r.ok) throw new Error(d.error||"Server error. Try again.");
+  return d;
+};
+
 // ─── UTILITIES ────────────────────────────────────────────────────────────────
 // Compare dates at midnight local time — fixes the "-1d" timezone bug
 const daysBetween = (date) => {
@@ -1164,9 +1175,11 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
     if(step===1){
       if(!data.name.trim()){setErr("Enter your name.");return;}
       setLoading(true);
-      const existing = await sbGet("athletes",`?name=ilike.${encodeURIComponent(data.name.trim())}`);
+      let nameTaken=false;
+      try{ const res = await idApi("check-athlete-name",{name:data.name.trim()}); nameTaken=!!res.exists; }
+      catch(e){ setLoading(false); setErr(e.message||"Connection error. Try again."); return; }
       setLoading(false);
-      if(existing?.length>0){setErr("That name is already registered. Go to Athlete Login instead.");return;}
+      if(nameTaken){setErr("That name is already registered. Go to Athlete Login instead.");return;}
       setStep(2);
     } else if(step===2){
       if(data.pin.length!==4){setErr("PIN must be 4 digits.");return;}
@@ -1181,8 +1194,8 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
       let coachId=null,schoolId=null,isSchool=false;
       if(data.coachCode.trim()){
         try {
-          const matched = await sbGet("coaches",`?access_code=eq.${encodeURIComponent(data.coachCode.trim().toUpperCase())}&select=id,school_id`);
-          if(matched?.length>0){ coachId=matched[0].id; schoolId=matched[0].school_id||null; isSchool=true; }
+          const res = await idApi("resolve-coach-code",{code:data.coachCode.trim().toUpperCase()});
+          if(res.coach){ coachId=res.coach.id; schoolId=res.coach.school_id||null; isSchool=true; }
         } catch(_){}
       }
       setData(p=>({...p,coachId,schoolId,isSchool}));
@@ -1591,14 +1604,11 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
     if(!name.trim()||pin.length!==4){setErr("Enter your name and 4-digit PIN.");return;}
     setLoading(true); setErr("");
     try {
-      const results = await sbGet("athletes",`?name=ilike.${encodeURIComponent(name.trim())}&pin=eq.${pin}&select=*`);
-      if(results?.length>0){setAthlete(results[0]);setView("athlete");}
-      else {
-        const nameCheck = await sbGet("athletes",`?name=ilike.${encodeURIComponent(name.trim())}`);
-        if(nameCheck?.length>0) setErr("Wrong PIN. Try again.");
-        else setErr("Name not found. Check spelling or sign up as a new athlete.");
-      }
-    } catch(e){setErr("Connection error. Check your internet.");}
+      const res = await idApi("athlete-login",{name:name.trim(),pin});
+      if(res.athlete){setAthlete(res.athlete);setView("athlete");}
+      else if(res.reason==="wrong_pin") setErr("Wrong PIN. Try again.");
+      else setErr("Name not found. Check spelling or sign up as a new athlete.");
+    } catch(e){setErr(e.message||"Connection error. Check your internet.");}
     setLoading(false);
   };
 
@@ -1700,10 +1710,10 @@ function CoachLoginScreen({setView,setCoach,setErr,err}) {
     if(pin.length!==4){setErr("Enter your 4-digit PIN.");return;}
     setLoading(true); setErr("");
     try {
-      const results = await sbGet("coaches",`?pin=eq.${pin}&select=*`);
-      if(results?.length>0){setCoach(results[0]);setView("coach");}
+      const res = await idApi("coach-login",{pin});
+      if(res.coach){setCoach(res.coach);setView("coach");}
       else setErr("PIN not found. Check your PIN or set up your coach account first.");
-    } catch(e){setErr("Connection error.");}
+    } catch(e){setErr(e.message||"Connection error.");}
     setLoading(false);
   };
 
@@ -1798,12 +1808,12 @@ function CoachSetupScreen({setView,setCoach,setErr,err}) {
     if(!code.trim()){setErr("Enter your access code.");return;}
     setLoading(true); setErr("");
     try {
-      const results = await sbGet("coaches",`?access_code=eq.${encodeURIComponent(code.trim().toUpperCase())}&select=*`);
-      if(results?.length>0){
-        if(results[0].pin){setErr("This code has already been used. Go to Coach Login.");setLoading(false);return;}
-        setCoachRecord(results[0]); setStep(2);
+      const res = await idApi("resolve-coach-code",{code:code.trim().toUpperCase()});
+      if(res.coach){
+        if(res.coach.pin_set){setErr("This code has already been used. Go to Coach Login.");setLoading(false);return;}
+        setCoachRecord(res.coach); setStep(2);
       } else setErr("Invalid access code. Check with your athletic director.");
-    } catch(e){setErr("Connection error.");}
+    } catch(e){setErr(e.message||"Connection error.");}
     setLoading(false);
   };
 
@@ -1951,8 +1961,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       try {
         // Re-fetch athlete from Supabase so JoBot has the latest program_text
         // even if the coach set it after this athlete logged in
-        const freshAthlete = await sbGet("athletes",`?id=eq.${athlete.id}&select=*`);
-        if(freshAthlete?.length>0) setAthlete(freshAthlete[0]);
+        const _fa = await idApi("get-athlete",{athleteId:athlete.id,pin:athlete.pin});
+        const freshAthlete = _fa.athlete ? [_fa.athlete] : [];
+        if(freshAthlete.length>0) setAthlete(freshAthlete[0]);
 
         // Load goals for AI context
         const goals = await sbGet("athlete_goals",`?athlete_id=eq.${freshAthlete?.[0]?.id||athlete.id}&order=created_at.desc&limit=10`);
@@ -4508,8 +4519,9 @@ function CoachDashboard({coach,onLogout}) {
     const selectedId = selected.id;
     const poll = setInterval(async ()=>{
       try {
-        const fresh = await sbGet("athletes",`?id=eq.${selectedId}&select=program_text,program_locked,temp_program_text`);
-        if(Array.isArray(fresh)&&fresh.length>0){
+        const _r = await idApi("coach-athlete-fields",{coachId:coach.id,pin:coach.pin,athleteId:selectedId});
+        const fresh = _r.fields ? [_r.fields] : [];
+        if(fresh.length>0){
           const {program_text,program_locked,temp_program_text} = fresh[0];
           setSelected(prev=>{
             if(!prev||prev.id!==selectedId) return prev;
@@ -4526,14 +4538,17 @@ function CoachDashboard({coach,onLogout}) {
   const loadAll = async () => {
     setLoading(true);
     try {
-      const [a,w,p,c,s,sc] = await Promise.all([
-        sbGet("athletes","?order=created_at.desc&select=*"),
+      // athletes/coaches/schools are RLS-protected — fetch them server-side (role-scoped).
+      // workouts/prs remain direct reads.
+      const [dash,w,p] = await Promise.all([
+        idApi("coach-dashboard",{coachId:coach.id,pin:coach.pin}),
         sbGet("workouts","?order=created_at.desc&select=*"),
         sbGet("prs","?order=created_at.desc&select=*"),
-        (isMaster||isAdmin) ? sbGet("coaches",`?${isAdmin&&!isMaster?`school_id=eq.${coach.school_id}&`:""}select=*&order=created_at.asc`) : Promise.resolve([]),
-        (!isMaster&&coach.school_id) ? sbGet("schools",`?id=eq.${coach.school_id}&select=*`) : Promise.resolve([]),
-        isMaster ? sbGet("schools","?select=*&order=created_at.asc") : Promise.resolve([])
       ]);
+      const a  = dash.athletes||[];
+      const c  = dash.coaches||[];
+      const s  = dash.school||[];
+      const sc = dash.schoolsAll||[];
       let filteredAthletes = Array.isArray(a)?a:[];
       if(!isMaster){
         filteredAthletes = filteredAthletes.filter(at=>at.coach_id===coach.id);

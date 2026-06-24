@@ -2,10 +2,6 @@
   "buildCommand": "npm ci && node_modules/.bin/vite build",
   "outputDirectory": "dist",
   "framework": "vite",
-  "functions": {
-    "api/gemini-init.js": { "maxDuration": 10 },
-    "api/gemini-analyze.js": { "maxDuration": 15 }
-  },
   "crons": [
     {
       "path": "/api/send-weekly-report",

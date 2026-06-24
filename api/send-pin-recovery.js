@@ -9,8 +9,9 @@ export default async function handler(req, res) {
 
   const RESEND_KEY   = process.env.RESEND_API_KEY;
   const FROM_EMAIL   = process.env.FROM_EMAIL || "WILCO <noreply@trainwilco.com>";
-  const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
-  const SUPABASE_KEY = process.env.VITE_SUPABASE_KEY || process.env.SUPABASE_KEY;
+  const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+  // Must be the SERVICE key — athletes/coaches reads are RLS-protected from the anon key.
+  const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || process.env.VITE_SUPABASE_KEY;
 
   if (!RESEND_KEY)    return res.status(500).json({ error: "Missing RESEND_API_KEY" });
   if (!SUPABASE_URL)  return res.status(500).json({ error: "Missing SUPABASE_URL" });
