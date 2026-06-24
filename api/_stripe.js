@@ -7,6 +7,7 @@
 // can read/write any athlete from a webhook), all I/O via fetch / the stripe SDK.
 
 import Stripe from "stripe";
+import { verifyPin } from "./_supa.js";
 
 // ── Stripe client (lazy singleton) ───────────────────────────────────────────
 let _stripe = null;
@@ -153,7 +154,7 @@ export async function verifyAthlete({ athleteId, pin }) {
     e.status = 404;
     throw e;
   }
-  if (String(athlete.pin) !== String(pin)) {
+  if (!(await verifyPin(pin, athlete.pin))) {
     const e = new Error("Incorrect PIN");
     e.status = 401;
     throw e;

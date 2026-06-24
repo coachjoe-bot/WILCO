@@ -26,6 +26,23 @@ const sbHeaders = () => ({
   Authorization: `Bearer ${SB_KEY}`,
 });
 
+import bcrypt from "bcryptjs";
+
+// ── PIN hashing ──────────────────────────────────────────────────────────────
+// PINs are stored as bcrypt hashes. verifyPin compares a typed PIN against the
+// stored value; it falls back to plain-equality only if the stored value isn't a
+// bcrypt hash (defensive — shouldn't happen now that all PINs are hashed).
+export async function verifyPin(plain, stored) {
+  if (stored == null) return false;
+  const s = String(stored);
+  if (s.startsWith("$2")) return bcrypt.compare(String(plain), s);
+  return String(plain) === s;
+}
+
+export async function hashPin(plain) {
+  return bcrypt.hash(String(plain), 10);
+}
+
 // ── Errors ───────────────────────────────────────────────────────────────────
 export function httpErr(status, msg) {
   const e = new Error(msg);

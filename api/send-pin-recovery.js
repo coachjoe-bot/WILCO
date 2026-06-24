@@ -1,6 +1,10 @@
-// Vercel serverless function — looks up a PIN by email and sends it to the user.
-// Works for both athletes (matched by name + email) and coaches (matched by email).
+// Vercel serverless function — PIN reset by email.
+// PINs are stored as bcrypt hashes and cannot be read back, so "recovery" issues a
+// NEW random PIN, stores its hash, and emails the new PIN to the account's address.
+// Works for athletes (matched by name + email) and coaches (matched by email).
 // Always returns a generic success response to prevent account enumeration.
+
+import bcrypt from "bcryptjs";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -29,39 +33,51 @@ export default async function handler(req, res) {
   };
 
   try {
-    let pin = null;
     let displayName = "";
+    let target = null; // { table, id } of the matched account
 
     if (type === "athlete") {
       if (!name) return res.status(400).json({ error: "name is required for athlete recovery" });
 
-      const url = `${SUPABASE_URL}/rest/v1/athletes?name=ilike.${encodeURIComponent(name.trim())}&email=eq.${encodeURIComponent(email.trim().toLowerCase())}&select=pin,name`;
+      const url = `${SUPABASE_URL}/rest/v1/athletes?name=ilike.${encodeURIComponent(name.trim())}&email=eq.${encodeURIComponent(email.trim().toLowerCase())}&select=id,name`;
       const r = await fetch(url, { headers: sbHeaders });
       const rows = await r.json();
 
       if (Array.isArray(rows) && rows.length > 0) {
-        pin = rows[0].pin;
+        target = { table: "athletes", id: rows[0].id };
         displayName = rows[0].name;
       }
 
     } else if (type === "coach") {
-      const url = `${SUPABASE_URL}/rest/v1/coaches?email=eq.${encodeURIComponent(email.trim().toLowerCase())}&select=pin,name`;
+      const url = `${SUPABASE_URL}/rest/v1/coaches?email=eq.${encodeURIComponent(email.trim().toLowerCase())}&select=id,name`;
       const r = await fetch(url, { headers: sbHeaders });
       const rows = await r.json();
 
       if (Array.isArray(rows) && rows.length > 0) {
-        pin = rows[0].pin;
+        target = { table: "coaches", id: rows[0].id };
         displayName = rows[0].name || "Coach";
       }
     }
 
+    // Hashed PINs can't be read back — reset to a new random 4-digit PIN and email it.
+    let newPin = null;
+    if (target) {
+      newPin = String(Math.floor(1000 + Math.random() * 9000));
+      const hash = await bcrypt.hash(newPin, 10);
+      await fetch(`${SUPABASE_URL}/rest/v1/${target.table}?id=eq.${target.id}`, {
+        method: "PATCH",
+        headers: { ...sbHeaders, Prefer: "return=minimal" },
+        body: JSON.stringify({ pin: hash }),
+      });
+    }
+
     // Always return 200 regardless of whether we found an account (prevents enumeration)
-    if (pin) {
-      const html = buildPinEmail({ displayName, pin, type });
+    if (newPin) {
+      const html = buildPinEmail({ displayName, pin: newPin, type });
 
       const subject = type === "coach"
-        ? "Your WILCO Coach PIN"
-        : "Your WILCO PIN";
+        ? "Your new WILCO Coach PIN"
+        : "Your new WILCO PIN";
 
       console.log("[pin-recovery] sending to:", email, "| from:", FROM_EMAIL, "| has_resend_key:", !!RESEND_KEY, "| has_supabase:", !!SUPABASE_URL);
       const resendRes = await fetch("https://api.resend.com/emails", {
@@ -110,7 +126,7 @@ function buildPinEmail({ displayName, pin, type }) {
     <div style="background:#fff;padding:32px 28px;border-left:1px solid #e0e0e0;border-right:1px solid #e0e0e0">
       <p style="color:#1a1a2e;font-size:15px;margin:0 0 16px">${greeting}</p>
       <p style="color:#444;font-size:14px;line-height:1.7;margin:0 0 24px">
-        You requested your WILCO ${roleLabel} PIN. Here it is:
+        You requested a PIN reset. Your new WILCO ${roleLabel} PIN is:
       </p>
 
       <!-- PIN display -->
@@ -120,7 +136,7 @@ function buildPinEmail({ displayName, pin, type }) {
       </div>
 
       <p style="color:#888;font-size:13px;line-height:1.6;margin:0 0 16px">
-        Keep this somewhere safe. If you didn't request this email, you can ignore it — your PIN hasn't changed.
+        Keep this somewhere safe. If you didn't request this reset, contact us right away — your PIN was just changed.
       </p>
       <p style="color:#888;font-size:13px;line-height:1.6;margin:0">
         Questions? Email us at <a href="mailto:joe.thomas@commandengineering.com" style="color:#d4a017">joe.thomas@commandengineering.com</a>.

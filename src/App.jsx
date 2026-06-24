@@ -1074,8 +1074,9 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
     const ageYears = Math.floor((Date.now()-dob)/(365.25*24*60*60*1000));
     const heightIn = (+data.heightFt*12)+(+data.heightIn||0);
     const initialTier = data.isSchool ? "school" : "free"; // upgraded later by plan/payment
+    const pinHash = (await idApi("hash-pin",{pin:data.pin})).hash; // store the hash, never plaintext
     const created = await sbInsert("athletes",{
-      name:data.name.trim(),sport:data.sport,pin:data.pin,tier:initialTier,billing:data.billing,
+      name:data.name.trim(),sport:data.sport,pin:pinHash,tier:initialTier,billing:data.billing,
       email:data.email.trim().toLowerCase(),
       birthday:data.birthday,
       age:ageYears,
@@ -1108,7 +1109,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
         })
       });
     } catch(e){}
-    const merged = {...newAthlete,goal:data.goal||"strength",coach_id:data.coachId||null,school_id:data.schoolId||null};
+    const merged = {...newAthlete,pin:data.pin,goal:data.goal||"strength",coach_id:data.coachId||null,school_id:data.schoolId||null};
     setAthleteRow(merged);
     setD("athleteId",newAthlete.id);
     return merged;
@@ -1605,7 +1606,7 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
     setLoading(true); setErr("");
     try {
       const res = await idApi("athlete-login",{name:name.trim(),pin});
-      if(res.athlete){setAthlete(res.athlete);setView("athlete");}
+      if(res.athlete){setAthlete({...res.athlete,pin});setView("athlete");}
       else if(res.reason==="wrong_pin") setErr("Wrong PIN. Try again.");
       else setErr("Name not found. Check spelling or sign up as a new athlete.");
     } catch(e){setErr(e.message||"Connection error. Check your internet.");}
@@ -1711,7 +1712,7 @@ function CoachLoginScreen({setView,setCoach,setErr,err}) {
     setLoading(true); setErr("");
     try {
       const res = await idApi("coach-login",{pin});
-      if(res.coach){setCoach(res.coach);setView("coach");}
+      if(res.coach){setCoach({...res.coach,pin});setView("coach");}
       else setErr("PIN not found. Check your PIN or set up your coach account first.");
     } catch(e){setErr(e.message||"Connection error.");}
     setLoading(false);
@@ -1822,7 +1823,8 @@ function CoachSetupScreen({setView,setCoach,setErr,err}) {
     if(pin!==confirmPin){setErr("PINs don't match.");return;}
     setLoading(true); setErr("");
     try {
-      const updated = await sbUpdate("coaches",coachRecord.id,{pin});
+      const pinHash = (await idApi("hash-pin",{pin})).hash; // store the hash, never plaintext
+      const updated = await sbUpdate("coaches",coachRecord.id,{pin:pinHash});
       if(updated?.length>0){setCoach({...coachRecord,pin});setView("coach");}
       else setErr("Could not save PIN. Try again.");
     } catch(e){setErr("Connection error.");}
@@ -1963,7 +1965,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // even if the coach set it after this athlete logged in
         const _fa = await idApi("get-athlete",{athleteId:athlete.id,pin:athlete.pin});
         const freshAthlete = _fa.athlete ? [_fa.athlete] : [];
-        if(freshAthlete.length>0) setAthlete(freshAthlete[0]);
+        if(freshAthlete.length>0) setAthlete({...freshAthlete[0],pin:athlete.pin});
 
         // Load goals for AI context
         const goals = await sbGet("athlete_goals",`?athlete_id=eq.${freshAthlete?.[0]?.id||athlete.id}&order=created_at.desc&limit=10`);

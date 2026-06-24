@@ -14,7 +14,7 @@
 
 import {
   applyCors, httpErr, str, pin4, clientIp, stripPin,
-  sbSelect, rateLimit, rateLimitReset,
+  sbSelect, rateLimit, rateLimitReset, verifyPin, hashPin,
 } from "./_supa.js";
 
 const enc = encodeURIComponent;
@@ -38,6 +38,7 @@ export default async function handler(req, res) {
       case "get-athlete":          return await getAthlete(req, res, body);
       case "coach-dashboard":      return await coachDashboard(req, res, body);
       case "coach-athlete-fields": return await coachAthleteFields(req, res, body);
+      case "hash-pin":             return await hashPinAction(req, res, body);
       default:                     return res.status(400).json({ error: "Unknown action" });
     }
   } catch (e) {
@@ -49,9 +50,10 @@ export default async function handler(req, res) {
 async function authCoach(coachId, pin) {
   const id = str(coachId, { max: 64, name: "coachId" });
   const p = pin4(pin);
-  const rows = await sbSelect("coaches", `?id=eq.${enc(id)}&pin=eq.${enc(p)}&select=*`);
-  if (!rows.length) throw httpErr(401, "Not authorized");
-  return rows[0];
+  const rows = await sbSelect("coaches", `?id=eq.${enc(id)}&select=*`);
+  const me = rows[0];
+  if (!me || !(await verifyPin(p, me.pin))) throw httpErr(401, "Not authorized");
+  return me;
 }
 
 // ── athlete-login ─────────────────────────────────────────────────────────────
@@ -61,12 +63,14 @@ async function athleteLogin(req, res, body) {
   const key = `athlete-login:${clientIp(req)}:${name.toLowerCase()}`;
   await rateLimit(key, { max: 5, windowMin: 15 });
 
-  const found = await sbSelect("athletes", `?name=ilike.${enc(name)}&pin=eq.${enc(pin)}&select=*`);
-  if (found.length) {
-    await rateLimitReset(key);
-    return res.status(200).json({ athlete: found[0] }); // own record: pin kept for self-refresh auth
+  // PINs are bcrypt-hashed, so we can't filter by them — match by name, then compare.
+  const byName = await sbSelect("athletes", `?name=ilike.${enc(name)}&select=*`);
+  for (const a of byName) {
+    if (await verifyPin(pin, a.pin)) {
+      await rateLimitReset(key);
+      return res.status(200).json({ athlete: stripPin(a) }); // never send the hash to the browser
+    }
   }
-  const byName = await sbSelect("athletes", `?name=ilike.${enc(name)}&select=id`);
   return res.status(200).json({ athlete: null, reason: byName.length ? "wrong_pin" : "not_found" });
 }
 
@@ -75,8 +79,12 @@ async function coachLogin(req, res, body) {
   const pin = pin4(body.pin);
   // Key on IP so an attacker is capped across ALL pins (defends the 4-digit space).
   await rateLimit(`coach-login:${clientIp(req)}`, { max: 10, windowMin: 15 });
-  const found = await sbSelect("coaches", `?pin=eq.${enc(pin)}&select=*`);
-  return res.status(200).json({ coach: found[0] || null });
+  // Hashed PINs can't be queried — pull coaches that have a PIN set and compare.
+  const coaches = await sbSelect("coaches", `?pin=not.is.null&select=*`);
+  for (const c of coaches) {
+    if (await verifyPin(pin, c.pin)) return res.status(200).json({ coach: stripPin(c) });
+  }
+  return res.status(200).json({ coach: null });
 }
 
 // ── resolve-coach-code (setup + signup school resolution) ────────────────────
@@ -105,8 +113,10 @@ async function checkAthleteName(req, res, body) {
 async function getAthlete(req, res, body) {
   const id = str(body.athleteId, { max: 64, name: "athleteId" });
   const pin = pin4(body.pin);
-  const found = await sbSelect("athletes", `?id=eq.${enc(id)}&pin=eq.${enc(pin)}&select=*`);
-  return res.status(200).json({ athlete: found[0] || null });
+  const found = await sbSelect("athletes", `?id=eq.${enc(id)}&select=*`);
+  const a = found[0];
+  if (a && (await verifyPin(pin, a.pin))) return res.status(200).json({ athlete: stripPin(a) });
+  return res.status(200).json({ athlete: null });
 }
 
 // ── coach-dashboard (role-scoped bulk read) ──────────────────────────────────
@@ -136,6 +146,13 @@ async function coachDashboard(req, res, body) {
     school,
     schoolsAll,
   });
+}
+
+// ── hash-pin (signup / coach setup store a bcrypt hash, never plaintext) ─────
+async function hashPinAction(req, res, body) {
+  const pin = pin4(body.pin);
+  await rateLimit(`hash-pin:${clientIp(req)}`, { max: 30, windowMin: 15 });
+  return res.status(200).json({ hash: await hashPin(pin) });
 }
 
 // ── coach-athlete-fields (dashboard polling one athlete's program) ───────────
