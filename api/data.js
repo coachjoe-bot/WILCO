@@ -44,6 +44,10 @@ const WRITABLE = new Set([
 const READ_OWN_COL = {
   workouts: "athlete_id",
   prs: "athlete_id",
+  proof_digests: "athlete_id",
+  manual_one_rms: "athlete_id",
+  athlete_goals: "athlete_id",
+  athlete_context: "athlete_id",
 };
 
 // Tables an ATHLETE caller may write, each mapped to the column that must equal

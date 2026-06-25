@@ -1998,15 +1998,15 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         if(freshAthlete.length>0) setAthlete({...freshAthlete[0],pin:athlete.pin});
 
         // Load goals for AI context
-        const goals = await sbGet("athlete_goals",`?athlete_id=eq.${freshAthlete?.[0]?.id||athlete.id}&order=created_at.desc&limit=10`);
+        const goals = await sbRead("athlete_goals",`?athlete_id=eq.${freshAthlete?.[0]?.id||athlete.id}&order=created_at.desc&limit=10`);
         if(Array.isArray(goals)&&goals.length>0) setAthleteGoals(goals);
 
         // Load athlete context (from monthly recaps) for AI prompt injection
-        const ctxRows = await sbGet("athlete_context",`?athlete_id=eq.${freshAthlete?.[0]?.id||athlete.id}&order=updated_at.desc&limit=5`);
+        const ctxRows = await sbRead("athlete_context",`?athlete_id=eq.${freshAthlete?.[0]?.id||athlete.id}&order=updated_at.desc&limit=5`);
         if(Array.isArray(ctxRows)&&ctxRows.length>0) setAthleteContext(ctxRows.map(r=>r.content).join("\n\n"));
 
         // Load most recent proof digest
-        const digestRows = await sbGet("proof_digests",`?athlete_id=eq.${freshAthlete?.[0]?.id||athlete.id}&digest_type=in.(weekly,monthly)&order=generated_at.desc&limit=1`);
+        const digestRows = await sbRead("proof_digests",`?athlete_id=eq.${freshAthlete?.[0]?.id||athlete.id}&digest_type=in.(weekly,monthly)&order=generated_at.desc&limit=1`);
         if(Array.isArray(digestRows)&&digestRows.length>0) setProofDigest(digestRows[0]);
 
         // Register push notification subscription (best-effort)
@@ -2096,7 +2096,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       if(parsed.exercises?.length>0 || parsed.pr_attempts?.length>0){
         const [existingPRs, existingManual] = await Promise.all([
           sbRead("prs",`?athlete_id=eq.${updatedAthlete.id}`),
-          sbGet("manual_one_rms",`?athlete_id=eq.${updatedAthlete.id}`),
+          sbRead("manual_one_rms",`?athlete_id=eq.${updatedAthlete.id}`),
         ]);
         const prMap = {};
         if(Array.isArray(existingPRs)){
@@ -3142,7 +3142,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   const [editVal,setEditVal] = useState("");
 
   useEffect(()=>{
-    sbGet("manual_one_rms",`?athlete_id=eq.${athlete.id}`).then(rows=>{
+    sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`).then(rows=>{
       if(Array.isArray(rows)) setManualRMs(rows);
     }).catch(()=>{});
   },[athlete.id]);
@@ -4588,7 +4588,7 @@ function CoachDashboard({coach,onLogout}) {
       // Load proof digests for this coach's athletes
       if(ids.length>0){
         const idList = ids.map(id=>`"${id}"`).join(",");
-        const digests = await sbGet("proof_digests",`?athlete_id=in.(${idList})&order=generated_at.desc&select=*`);
+        const digests = await sbRead("proof_digests",`?athlete_id=in.(${idList})&order=generated_at.desc&select=*`);
         setAllDigests(Array.isArray(digests)?digests:[]);
       }
     } catch(e){console.error(e);}
