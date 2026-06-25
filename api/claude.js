@@ -14,7 +14,7 @@
 //
 // POST { auth:{role,id,pin}, model?, max_tokens?, system?, messages:[...] }
 
-import { applyCors, httpErr, authCaller, rateLimit, sbSelect, sbInsert } from "./_supa.js";
+import { applyCors, httpErr, authCaller, rateLimit, sbSelect, sbInsert, logError } from "./_supa.js";
 
 const enc = encodeURIComponent;
 
@@ -122,9 +122,10 @@ export default async function handler(req, res) {
   }
   body = body || {};
 
+  let caller = null;
   try {
     // 1) Require a real logged-in athlete/coach (bcrypt PIN verified server-side).
-    const caller = await authCaller(body.auth);
+    caller = await authCaller(body.auth);
 
     // 2) Per-user rate limit — a compromised account can't burn the bill unbounded.
     await rateLimit(`claude:${caller.role}:${caller.id}`, RATE);
@@ -174,6 +175,19 @@ export default async function handler(req, res) {
 
     return res.status(r.status).json(data);
   } catch (e) {
-    return res.status(e.status || 500).json({ error: e.message || "Server error" });
+    const status = e.status || 500;
+    // Only log genuine 5xx reliability events (e.g. misconfig / unexpected throw).
+    // NOTE: Anthropic HTTP errors do NOT reach here — they're returned above and
+    // already recorded in usage_costs.status (Phase 1), so this can't double-log
+    // them. Routine 4xx (auth/rate-limit/validation) are skipped as normal flow.
+    if (status >= 500) {
+      logError({
+        source: "server", severity: "error", area: "ai", route: "api/claude",
+        error_type: `http_${status}`, message: e.message, status_code: status,
+        role: caller?.role, actor_id: caller?.id,
+        athlete_id: caller?.role === "athlete" ? caller.id : null,
+      });
+    }
+    return res.status(status).json({ error: e.message || "Server error" });
   }
 }

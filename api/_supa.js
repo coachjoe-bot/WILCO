@@ -171,3 +171,81 @@ export async function authCaller(auth) {
   if (!rows[0] || !(await verifyPin(auth.pin, rows[0].pin))) throw httpErr(401, "Not authorized");
   return { role: auth.role, id };
 }
+
+// ── Reliability / error logging (Phase 1.5) ──────────────────────────────────
+// Best-effort structured capture into error_events. Mirrors the cost logger in
+// api/claude.js: it NEVER throws and NEVER blocks the user path — every call is
+// wrapped so a logging failure can't itself become a user-facing error. Metadata
+// only: the message is sanitized + truncated here; no content/secrets are stored.
+// AI/Claude HTTP errors are NOT logged here (they live in usage_costs.status).
+
+const SEVERITIES = new Set(["info", "warn", "error", "fatal"]);
+
+// Redact secrets / PII from a free-text error message, then truncate. Defensive:
+// messages can accidentally embed emails, API keys, tokens, JWTs, PINs, or phones.
+export function sanitizeMessage(raw, max = 500) {
+  if (raw == null) return null;
+  let s = String(raw)
+    .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, "[email]")            // emails
+    .replace(/\b[sprk]k-[A-Za-z0-9_-]{8,}/g, "[token]")        // sk-/pk- style keys
+    .replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, "Bearer [token]") // bearer tokens
+    .replace(/\beyJ[A-Za-z0-9._-]{10,}/g, "[jwt]")             // JWTs
+    .replace(/\$2[aby]\$[./A-Za-z0-9]{20,}/g, "[hash]")        // bcrypt hashes
+    .replace(/\b\d{4,}\b/g, "[num]");                          // PINs / phones / long ids
+  return s.length > max ? s.slice(0, max) + "…" : s;
+}
+
+// Short, stable, dependency-free grouping hash (djb2 → base36). The same
+// area+type+message-prefix always yields the same fingerprint, so the agent /
+// dashboard can collapse "the same error 10,000 times" into one counted row.
+export function fingerprintOf({ area, error_type, message } = {}) {
+  const basis = `${area || ""}|${error_type || ""}|${String(message || "").slice(0, 80)}`;
+  let h = 5381;
+  for (let i = 0; i < basis.length; i++) h = ((h << 5) + h + basis.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+const clip = (v, n) => (v == null ? null : String(v).slice(0, n));
+
+// Insert one error row. The CALLER supplies server-derived attribution (role /
+// actor_id / athlete_id / snapshots) — never let those come from a client body, or
+// the dashboard's per-athlete/per-school numbers could be forged. Sanitizing and
+// clamping happen here so every write path (client-reported and server-caught) is
+// consistent. Returns nothing; swallows all failures.
+export async function logError(e = {}) {
+  try {
+    const message = sanitizeMessage(e.message);
+    const area = clip(e.area, 40);
+    const error_type = clip(e.error_type, 60);
+
+    const sc = parseInt(e.status_code, 10);
+
+    // meta is a small structured extra — size-capped so it can't be used to dump
+    // content or balloon storage. Dropped (not truncated) if oversized.
+    let meta = null;
+    if (e.meta && typeof e.meta === "object") {
+      try { if (JSON.stringify(e.meta).length <= 1000) meta = e.meta; } catch { /* unserializable */ }
+    }
+
+    await sbInsert("error_events", {
+      source: e.source === "server" ? "server" : "client",
+      severity: SEVERITIES.has(e.severity) ? e.severity : "error",
+      area,
+      route: clip(e.route, 120),
+      component: clip(e.component, 80),
+      error_type,
+      message,
+      status_code: Number.isFinite(sc) ? sc : null,
+      role: e.role === "athlete" || e.role === "coach" ? e.role : "anon",
+      actor_id: e.actor_id ?? null,
+      athlete_id: e.athlete_id ?? null,
+      school_id: e.school_id ?? null,
+      coach_id: e.coach_id ?? null,
+      tier: clip(e.tier, 20),
+      app_version: clip(e.app_version, 40),
+      user_agent: clip(e.user_agent, 200),
+      fingerprint: e.fingerprint || fingerprintOf({ area, error_type, message }),
+      meta,
+    });
+  } catch { /* reliability logging must never break anything */ }
+}

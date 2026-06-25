@@ -110,6 +110,74 @@ const idApi = async (action,payload={}) => {
   return d;
 };
 
+// ─── RELIABILITY / ERROR REPORTING (Phase 1.5) ────────────────────────────────
+// Best-effort client error capture. Fires metadata to api/identity (log-error),
+// which validates, rate-limits, sanitizes, and writes server-side with the service
+// key. NEVER awaited on a user path and NEVER throws — a reporting failure must
+// stay invisible to the athlete. Two noise guards so one looping error can't spam
+// the backend: dedup identical errors within a short window, and a hard per-page-
+// load cap. `auth` is sent when known but is OPTIONAL — pre-login errors still log
+// (as 'anon' server-side), which is the whole point.
+const APP_VERSION = "1.0.0"; // bump per release; lands in error_events.app_version
+const _errSeen = new Map();  // fingerprint -> last-sent ms
+const ERR_DEDUP_MS = 10000;  // collapse identical errors within 10s
+const ERR_MAX_PER_LOAD = 25; // hard cap per page load
+let _errSent = 0;
+function reportError(area, error, extra={}){
+  try{
+    const message = error && error.message ? error.message : String(error||"");
+    const error_type = extra.error_type || (error && error.name) || "Error";
+    const fp = `${area}|${error_type}|${message.slice(0,80)}`;
+    const now = Date.now();
+    const last = _errSeen.get(fp);
+    if(last && now-last < ERR_DEDUP_MS) return;        // identical + recent -> drop
+    if(_errSent >= ERR_MAX_PER_LOAD) return;           // runaway guard
+    _errSeen.set(fp, now); _errSent++;
+    // Top stack frame only (no full stack) — enough to locate the failure without
+    // dumping paths/PII. Query strings stripped defensively.
+    let frame = null;
+    if(error && typeof error.stack==="string"){
+      const ln = error.stack.split("\n")[1];
+      if(ln) frame = ln.trim().replace(/\?[^\s)]*/g,"").slice(0,200);
+    }
+    const event = {
+      severity: extra.severity || "error",
+      area,
+      route: typeof location!=="undefined" ? location.pathname : null,
+      component: extra.component || null,
+      error_type,
+      message,
+      status_code: extra.status_code ?? null,
+      app_version: APP_VERSION,
+      meta: (frame || extra.meta) ? {...(frame?{frame}:{}), ...(extra.meta||{})} : null,
+    };
+    // keepalive so it still flushes if the page is unloading; result is ignored.
+    fetch("/api/identity",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"log-error",auth:CURRENT_AUTH,event}),
+      keepalive:true,
+    }).catch(()=>{});
+  }catch{ /* reporting must never throw */ }
+}
+// Register global handlers once (idempotent). Captures uncaught errors + unhandled
+// promise rejections app-wide, INCLUDING pre-login (auth is optional server-side).
+let _errInstalled = false;
+function installErrorReporting(){
+  if(_errInstalled || typeof window==="undefined") return;
+  _errInstalled = true;
+  window.addEventListener("error",(e)=>{
+    reportError("nav", e.error || e.message, {
+      error_type: e.error?.name || "WindowError",
+      component: e.filename ? e.filename.split("/").pop() : null,
+    });
+  });
+  window.addEventListener("unhandledrejection",(e)=>{
+    const reason = e.reason;
+    reportError("nav", reason, { error_type: reason?.name || "unhandledrejection" });
+  });
+}
+
 // ─── UTILITIES ────────────────────────────────────────────────────────────────
 // Compare dates at midnight local time — fixes the "-1d" timezone bug
 const daysBetween = (date) => {
@@ -243,13 +311,23 @@ const askClaude = async (system, user, maxTokens=600, images=[], model="claude-s
   // so no Authorization header is needed.
   // `feature` labels the call for cost tracking (usage_costs) — server-side it's
   // validated against an allowlist; an unknown value is stored as "other".
-  const r = await fetch("/api/claude",{
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    // Model is a hint only — the server (api/claude.js) allowlists it, picks the
-    // real model + inference params, and ignores anything unexpected.
-    body:JSON.stringify({auth:CURRENT_AUTH,model,max_tokens:maxTokens,system,messages:[{role:"user",content}],feature})
-  });
+  let r;
+  try{
+    r = await fetch("/api/claude",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      // Model is a hint only — the server (api/claude.js) allowlists it, picks the
+      // real model + inference params, and ignores anything unexpected.
+      body:JSON.stringify({auth:CURRENT_AUTH,model,max_tokens:maxTokens,system,messages:[{role:"user",content}],feature})
+    });
+  }catch(netErr){
+    // The request never reached our server (offline / DNS / dropped). This produces
+    // NO usage_costs row, so it's the one AI failure worth logging here. Anthropic's
+    // own HTTP errors DO reach the server and are recorded in usage_costs.status —
+    // we deliberately don't double-log those. Re-throw so the UI handles it as before.
+    reportError("ai", netErr, { error_type:"network", component:"askClaude", meta:{ feature } });
+    throw netErr;
+  }
   const d = await r.json();
   if(d.error) throw new Error(typeof d.error==="string"?d.error:d.error.message);
   return d.content?.[0]?.text||"";
@@ -872,6 +950,10 @@ export default function WilcoApp() {
   const [athlete,setAthlete] = useState(null);
   const [coach,setCoach] = useState(null);
   const [err,setErr] = useState("");
+
+  // Install global error reporting once, on mount (before any early return so the
+  // hook order stays stable). Captures uncaught errors + unhandled rejections.
+  useEffect(()=>{ installErrorReporting(); },[]);
 
   if(view==="athlete"&&athlete) return <AthleteView athlete={athlete} onLogout={()=>{setAthlete(null);setView("home");}}/>;
   if(view==="coach"&&coach) return <CoachDashboard coach={coach} onLogout={()=>{setCoach(null);setView("home");}}/>;

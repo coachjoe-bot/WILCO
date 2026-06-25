@@ -22,7 +22,7 @@
 //       PIN against the coaches table), so athlete-vs-athlete tampering — the
 //       high-volume vector, including minors — is fully removed here.
 
-import { applyCors, httpErr, str, sbWrite, sbSelect, authCaller } from "./_supa.js";
+import { applyCors, httpErr, str, sbWrite, sbSelect, authCaller, logError } from "./_supa.js";
 
 const enc = encodeURIComponent;
 
@@ -76,8 +76,9 @@ export default async function handler(req, res) {
   }
   body = body || {};
 
+  let caller = null;
   try {
-    const caller = await authCaller(body.auth);
+    caller = await authCaller(body.auth);
 
     // ── Phase 1b(b): scoped READ ─────────────────────────────────────────────
     // Routed here so the anon key can be denied SELECT on these PII tables. The
@@ -181,6 +182,21 @@ export default async function handler(req, res) {
 
     throw httpErr(400, "Unknown op");
   } catch (e) {
-    return res.status(e.status || 500).json({ error: e.message || "Server error" });
+    const status = e.status || 500;
+    // Log only genuine reliability events (5xx — e.g. a Supabase write/read that
+    // failed). Routine 4xx (auth/validation) are normal user flow, not failures, so
+    // logging them would just create noise. We deliberately do NOT read the DB to
+    // snapshot school/tier here — we may be in this catch *because* the DB failed —
+    // so we attribute only with what authCaller already gave us (in memory).
+    if (status >= 500) {
+      logError({
+        source: "server", severity: "error", area: "data", route: "api/data",
+        error_type: `http_${status}`, message: e.message, status_code: status,
+        role: caller?.role, actor_id: caller?.id,
+        athlete_id: caller?.role === "athlete" ? caller.id : null,
+        meta: { op: body.op, table: body.table },
+      });
+    }
+    return res.status(status).json({ error: e.message || "Server error" });
   }
 }

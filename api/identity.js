@@ -15,6 +15,7 @@
 import {
   applyCors, httpErr, str, pin4, clientIp, stripPin,
   sbSelect, sbWrite, rateLimit, rateLimitReset, verifyPin, hashPin,
+  authCaller, logError,
 } from "./_supa.js";
 
 const enc = encodeURIComponent;
@@ -41,6 +42,7 @@ export default async function handler(req, res) {
       case "hash-pin":             return await hashPinAction(req, res, body);
       case "create-athlete":       return await createAthleteAction(req, res, body);
       case "set-coach-pin":        return await setCoachPinAction(req, res, body);
+      case "log-error":            return await logErrorAction(req, res, body);
       default:                     return res.status(400).json({ error: "Unknown action" });
     }
   } catch (e) {
@@ -197,6 +199,81 @@ async function setCoachPinAction(req, res, body) {
   await sbWrite({ method: "PATCH", table: "coaches", query: `?id=eq.${enc(coachId)}`, body: { pin: await hashPin(pin) }, prefer: "return=minimal" });
   return res.status(200).json({ ok: true });
 }
+
+// ── log-error (Phase 1.5 reliability ingestion) ──────────────────────────────
+// The single error-capture entry point for the browser. Deliberately accepts
+// UNAUTHENTICATED callers: many of the most important failures happen pre-login or
+// when auth itself is broken, and we must still capture those. Auth is OPTIONAL
+// ENRICHMENT, never a gate — a present+valid auth attaches the account + snapshot
+// so the future coach dashboard can scope by athlete/school; an absent or invalid
+// auth simply logs as role='anon'.
+//
+// This does NOT reopen the Phase-1 anon-write hole: the browser still cannot touch
+// error_events with the anon key (RLS denies it). It POSTs metadata here; the
+// server validates, rate-limits per IP, and writes with the SERVICE key. ALL
+// attribution (role/ids/snapshots) is derived server-side and never read from the
+// client body, so per-athlete / per-school numbers can't be forged.
+//
+// Always returns 200 — the client treats this as fire-and-forget and must never
+// surface a logging failure (or rate-limit) to the user.
+async function logErrorAction(req, res, body) {
+  // Bound abuse / storage-flooding. Generous (a janky client can burst) but capped.
+  // The client also dedups + throttles before sending (see App.jsx reportError).
+  try {
+    await rateLimit(`log-error:${clientIp(req)}`, { max: 60, windowMin: 15 });
+  } catch {
+    return res.status(200).json({ ok: true, dropped: "rate_limited" });
+  }
+
+  const ev = body.event && typeof body.event === "object" ? body.event : {};
+
+  // Optional auth enrichment — SOFT: authCaller throws on bad creds, but an
+  // auth-failure error must still be logged, so we swallow and fall back to anon.
+  let enrich = { role: "anon" };
+  if (body.auth && typeof body.auth === "object") {
+    try {
+      enrich = await enrichFromCaller(await authCaller(body.auth));
+    } catch { /* keep anon */ }
+  }
+
+  await logError({
+    source: "client",
+    severity: ev.severity,
+    area: ev.area,
+    route: stripQuery(ev.route),
+    component: ev.component,
+    error_type: ev.error_type,
+    message: ev.message,
+    status_code: ev.status_code,
+    app_version: ev.app_version,
+    meta: ev.meta,
+    // Server-derived — client-supplied role/ids/snapshots are intentionally ignored.
+    user_agent: req.headers["user-agent"],
+    ...enrich,
+  });
+
+  return res.status(200).json({ ok: true });
+}
+
+// Server-trusted attribution + snapshots for a verified caller (mirrors the
+// snapshot read in api/claude.js so cost and error rows attribute identically).
+async function enrichFromCaller(caller) {
+  if (caller.role === "athlete") {
+    const s = (await sbSelect("athletes", `?id=eq.${enc(caller.id)}&select=tier,school_id,coach_id`))[0] || {};
+    return {
+      role: "athlete", actor_id: caller.id, athlete_id: caller.id,
+      tier: s.tier ?? null, school_id: s.school_id ?? null, coach_id: s.coach_id ?? null,
+    };
+  }
+  if (caller.role === "coach") {
+    const s = (await sbSelect("coaches", `?id=eq.${enc(caller.id)}&select=school_id`))[0] || {};
+    return { role: "coach", actor_id: caller.id, coach_id: caller.id, school_id: s.school_id ?? null };
+  }
+  return { role: "anon" };
+}
+
+// Keep only the path of a route — query strings / fragments can carry tokens/ids.
+const stripQuery = (r) => (typeof r === "string" ? r.split(/[?#]/)[0] : r);
 
 // ── coach-athlete-fields (dashboard polling one athlete's program) ───────────
 async function coachAthleteFields(req, res, body) {

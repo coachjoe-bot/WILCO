@@ -82,6 +82,80 @@ SELECT * FROM v_ai_cost_by_user ORDER BY cost_usd DESC LIMIT 20;
 SELECT day, SUM(cost_usd) FROM v_ai_cost_daily GROUP BY day ORDER BY day DESC LIMIT 30;
 ```
 
+---
+
+# WILCO Reliability — Error Data Schema (Phase 1.5)
+
+Contract for reading WILCO's **error / "technical difficulties"** data — the
+reliability counterpart to the cost ledger above. Same read model: Supabase
+Postgres, **service-role key** (RLS denies anon all access), read the **views**.
+
+Migration: `supabase/migrations/20260625_error_events.sql`.
+
+## `error_events` — the reliability ledger (one row per captured failure)
+Captures client JS crashes, unhandled promise rejections, the client being unable
+to reach our server, and unexpected **server 5xx** in `api/*`. **Metadata only** —
+the `message` is sanitized + truncated server-side; no PINs/tokens/emails/content.
+
+**Not in here (by design):** AI/Claude HTTP errors — those live in
+`usage_costs.status` (Phase 1). The only AI-adjacent row here is
+`area='ai', error_type='network'` = "the client couldn't reach our server at all"
+(which produces no `usage_costs` row). So the two tables never double-count.
+
+| column | type | notes |
+|---|---|---|
+| `id` | bigint | PK |
+| `created_at` | timestamptz | when observed |
+| `source` | text | `client` (browser) \| `server` (api/*) |
+| `severity` | text | `info` \| `warn` \| `error` \| `fatal` |
+| `area` | text | coarse area: `auth`,`workout_log`,`coach_dashboard`,`billing`,`ai`,`sync`,`nav`,`data`,`other` |
+| `route` | text | client screen or api path, **query string stripped** |
+| `component` | text | finer locus (component/function), optional |
+| `error_type` | text | `TypeError`,`NetworkError`,`network`,`http_502`,`unhandledrejection`,… |
+| `message` | text | **sanitized + truncated** (~500 chars) |
+| `status_code` | int | HTTP status when applicable |
+| `role` | text | `athlete` \| `coach` \| `anon` (pre-login / auth-broken) |
+| `actor_id` | uuid | athletes.id / coaches.id (server-verified; null when anon) |
+| `athlete_id` | uuid | ownership column for scoped reads; null for coach/anon |
+| `school_id` / `coach_id` / `tier` | uuid / uuid / text | **snapshot** at write time (null when anon) |
+| `app_version` | text | client build id |
+| `user_agent` | text | read server-side, truncated |
+| `fingerprint` | text | stable hash(area\|type\|message-prefix) for grouping duplicates |
+| `meta` | jsonb | small sanitized extras (e.g. top stack frame), size-capped |
+
+## Views (read these)
+
+| view | grain | key fields |
+|---|---|---|
+| `v_errors` | per event | all columns + UTC `day` |
+| `v_errors_by_area` | per area | `events`, severity split, `athletes_affected`, first/last seen |
+| `v_errors_daily` | per day × severity | `events`, `athletes_affected` — the trend line |
+| `v_errors_by_fingerprint` | per distinct issue | `events`, `athletes_affected`, `worst_severity`, sample message — **triage view** |
+| `v_errors_by_school` | per school | `events`, `hard_errors`, `athletes_affected` (dashboard scope) |
+| `v_ai_reliability_daily` | per day | `ai_calls`, `client_unreachable`, `unreachable_rate` (joins `usage_costs`) |
+
+## Error COUNTS now, true RATES later
+These views are **counts + trends**, which is honest. A true per-feature error
+*rate* needs a denominator (attempts per feature). We only have that today for AI
+(every call is a `usage_costs` row → `v_ai_reliability_daily`). General per-feature
+rates arrive with **Phase 2 (`usage_events`)** as the denominator.
+
+## Example queries
+```sql
+-- Top issues to fix, ranked by how many athletes they hit (last 7 days)
+SELECT * FROM v_errors_by_fingerprint
+WHERE last_seen > now() - interval '7 days'
+ORDER BY athletes_affected DESC, events DESC LIMIT 20;
+
+-- Reliability trend: hard errors per day
+SELECT day, SUM(events) FILTER (WHERE severity IN ('error','fatal')) AS hard_errors
+FROM v_errors_daily GROUP BY day ORDER BY day DESC LIMIT 30;
+
+-- Where is the app breaking
+SELECT * FROM v_errors_by_area ORDER BY events DESC;
+```
+
 ## Not here yet (future phases)
-Engagement/session events, app errors, non-AI costs (email), materialized daily
-rollups. The ledger shape already accommodates them — see `SCALE-NOTES.md`.
+Engagement/session events (Phase 2 `usage_events` — also the denominator for true
+error rates), non-AI costs (email), materialized daily rollups. The ledger shapes
+already accommodate them — see `SCALE-NOTES.md`.

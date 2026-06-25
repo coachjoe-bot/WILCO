@@ -33,9 +33,22 @@ None are urgent at current volume.
 - **`count(*)` dashboards** get slow eventually — fine at thousands, but consider
   estimated counts / maintained counters at much larger scale.
 
+## Reliability system (error_events — Phase 1.5, BUILT)
+- **Materialize the rollups.** `v_errors_daily` / `v_errors_by_fingerprint` /
+  `v_ai_reliability_daily` recompute over all raw rows on every read. At volume,
+  convert to `MATERIALIZED VIEW`s refreshed nightly (piggyback `trigger-proof-feed`
+  or pg_cron), and point the agent at the rollups for trends.
+- **Retention / pruning.** Same 90-day policy as `usage_costs`:
+  `DELETE FROM error_events WHERE created_at < now() - interval '90 days';` Wire to
+  a cron. Error rows can spike in bursts, so this matters sooner than cost rows.
+- **True per-feature error RATES need a denominator.** Counts ship now; rates wait
+  on Phase 2 `usage_events` (attempts per feature). AI is the exception — it already
+  has a denominator via `usage_costs` (`v_ai_reliability_daily`).
+- **Ingestion rides `api/identity` (log-error), zero new functions** — Vercel stays
+  at 12/12. The IP rate-limit (60/15min) writes a `rate_limits` row per error POST;
+  that table's unbounded-growth cleanup (above) covers it.
+
 ## Future phases (planned, not built)
-- **Phase 1.5 Reliability** — `error_events` table (same conventions as
-  `usage_costs`) + client error handler + `api/*` error capture.
 - **Phase 2 Engagement** — `usage_events` (app opens/sessions, feature views) for
   true DAU/sessions + activation funnel + feature-adoption breadth.
 - **Coach dashboard reads** — route `usage_costs` through `api/data.js`'s scoped
