@@ -80,6 +80,16 @@ const sbUpdateWhere = async (table,params,data) => {
   }
   return dataApi("update",table,{params,data});
 };
+// Scoped READ through the gateway (api/data.js). The server forces ownership
+// scoping (athlete -> own rows; coach -> their athletes; master -> all), so the
+// anon key can be denied SELECT on these PII tables. Falls back to a direct anon
+// read before the database is locked (then the fallback simply stops returning data).
+const sbRead = async (table,params="") => {
+  if(!CURRENT_AUTH){
+    return sbGet(table,params);
+  }
+  return dataApi("read",table,{params});
+};
 // Insert-or-update on a conflict column (e.g. "athlete_id").
 const sbUpsert = async (table,data,conflict) => {
   if(!CURRENT_AUTH){
@@ -1974,7 +1984,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         const storedMsgs = storedChat ? JSON.parse(storedChat) : null;
         if(storedMsgs?.length>0){
           setMessages(storedMsgs);
-          const logs = tier!=="free" ? await sbGet("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=100&select=*`) : [];
+          const logs = tier!=="free" ? await sbRead("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=100&select=*`) : [];
           if(logs&&logs.length>0) setWorkoutHistory(logs);
           setHistoryLoaded(true);
           return;
@@ -2003,7 +2013,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         registerPushSubscription(freshAthlete?.[0]?.id||athlete.id);
 
         // Free tier: no session memory — skip loading workout history
-        const logs = tier!=="free" ? await sbGet("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=100&select=*`) : [];
+        const logs = tier!=="free" ? await sbRead("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=100&select=*`) : [];
         if(logs&&logs.length>0) setWorkoutHistory(logs);
 
         const lastLog = logs?.[0];
@@ -2085,7 +2095,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       let manualMap = {};
       if(parsed.exercises?.length>0 || parsed.pr_attempts?.length>0){
         const [existingPRs, existingManual] = await Promise.all([
-          sbGet("prs",`?athlete_id=eq.${updatedAthlete.id}`),
+          sbRead("prs",`?athlete_id=eq.${updatedAthlete.id}`),
           sbGet("manual_one_rms",`?athlete_id=eq.${updatedAthlete.id}`),
         ]);
         const prMap = {};
@@ -4552,11 +4562,13 @@ function CoachDashboard({coach,onLogout}) {
     setLoading(true);
     try {
       // athletes/coaches/schools are RLS-protected — fetch them server-side (role-scoped).
-      // workouts/prs remain direct reads.
+      // workouts/prs now also go through the gateway, scoped to this coach's athletes
+      // server-side (master -> all). The client-side filter below is kept as a harmless
+      // belt-and-suspenders; the server has already narrowed the result set.
       const [dash,w,p] = await Promise.all([
         idApi("coach-dashboard",{coachId:coach.id,pin:coach.pin}),
-        sbGet("workouts","?order=created_at.desc&select=*"),
-        sbGet("prs","?order=created_at.desc&select=*"),
+        sbRead("workouts","?order=created_at.desc&select=*"),
+        sbRead("prs","?order=created_at.desc&select=*"),
       ]);
       const a  = dash.athletes||[];
       const c  = dash.coaches||[];
@@ -4587,7 +4599,7 @@ function CoachDashboard({coach,onLogout}) {
     setRecalcStatus("running");
     try {
       // Fetch every workout ever logged (need all history, not just what's loaded)
-      const allWorkouts = await sbGet("workouts","?select=*&order=created_at.asc");
+      const allWorkouts = await sbRead("workouts","?select=*&order=created_at.asc");
       if(!Array.isArray(allWorkouts)) throw new Error("Could not load workouts");
       let done = 0;
       for(const ath of athletes){

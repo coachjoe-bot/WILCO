@@ -22,7 +22,7 @@
 //       PIN against the coaches table), so athlete-vs-athlete tampering — the
 //       high-volume vector, including minors — is fully removed here.
 
-import { applyCors, httpErr, str, sbWrite, authCaller } from "./_supa.js";
+import { applyCors, httpErr, str, sbWrite, sbSelect, authCaller } from "./_supa.js";
 
 const enc = encodeURIComponent;
 
@@ -33,6 +33,18 @@ const WRITABLE = new Set([
   "legal_acceptances", "deletion_requests", "athlete_context",
   "push_subscriptions", "proof_digests",
 ]);
+
+// ─── Phase 1b(b): scoped READS ────────────────────────────────────────────────
+// Tables the app reads through this gateway with per-row OWNERSHIP scoping, so we
+// can deny the anon key SELECT on them (they hold athletes' — incl. minors' — PII).
+// Each maps to the column that identifies the owning athlete. The server forces an
+// ownership filter onto every read; the client's own filters are ANDed on top
+// (PostgREST ANDs repeated column filters), so a forged client filter can only ever
+// NARROW to rows the caller already owns — never widen.
+const READ_OWN_COL = {
+  workouts: "athlete_id",
+  prs: "athlete_id",
+};
 
 // Tables an ATHLETE caller may write, each mapped to the column that must equal
 // their own id. Any table NOT listed here is denied outright for athlete callers.
@@ -62,6 +74,44 @@ export default async function handler(req, res) {
 
   try {
     const caller = await authCaller(body.auth);
+
+    // ── Phase 1b(b): scoped READ ─────────────────────────────────────────────
+    // Routed here so the anon key can be denied SELECT on these PII tables. The
+    // server forces an ownership scope; athletes see only their own rows, coaches
+    // see only their athletes' rows (master sees all — mirrors coach-dashboard).
+    if (body.op === "read") {
+      const rtable = String(body.table || "");
+      const col = READ_OWN_COL[rtable];
+      if (!col) throw httpErr(400, `Table not readable: ${rtable}`);
+
+      let scope = "";
+      if (caller.role === "athlete") {
+        scope = `&${col}=eq.${enc(caller.id)}`;
+      } else if (caller.role === "coach") {
+        // The DB role (master/admin/regular) is the source of truth for breadth —
+        // authCaller only proves the caller IS a coach, not which kind.
+        const me = (await sbSelect("coaches", `?id=eq.${enc(caller.id)}&select=id,role`))[0];
+        if (!me) throw httpErr(401, "Not authorized");
+        if (me.role !== "master") {
+          // Non-master coaches (incl. admins) see only their own athletes' rows —
+          // exactly the set coach-dashboard returns and the client used to filter to.
+          const aths = await sbSelect("athletes", `?coach_id=eq.${enc(caller.id)}&select=id`);
+          const ids = aths.map((a) => a.id);
+          if (ids.length === 0) return res.status(200).json([]);
+          scope = `&${col}=in.(${ids.map((id) => `"${id}"`).join(",")})`;
+        }
+        // master: no scope → all rows.
+      } else {
+        throw httpErr(403, "This account can't read that data");
+      }
+
+      // Client's params (order/limit/select/own filters) ride along; the forced
+      // ownership scope is ANDed on top so it can only narrow, never widen.
+      let query = typeof body.params === "string" && body.params ? body.params : "?select=*";
+      if (!query.startsWith("?")) query = "?" + query;
+      const json = await sbSelect(rtable, query + scope);
+      return res.status(200).json(json);
+    }
 
     const table = String(body.table || "");
     if (!WRITABLE.has(table)) throw httpErr(400, `Table not writable: ${table}`);
