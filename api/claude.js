@@ -14,7 +14,9 @@
 //
 // POST { auth:{role,id,pin}, model?, max_tokens?, system?, messages:[...] }
 
-import { applyCors, httpErr, authCaller, rateLimit } from "./_supa.js";
+import { applyCors, httpErr, authCaller, rateLimit, sbSelect, sbInsert } from "./_supa.js";
+
+const enc = encodeURIComponent;
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY || process.env.ANTHROPIC_API_KEY;
@@ -59,6 +61,56 @@ const MAX_TOKENS_CAP = 1500;
 // session's spend. Every call (success or not) counts — each one costs money.
 const RATE = { max: 100, windowMin: 15 };
 
+// ─── COST TRACKING (Phase 1) ──────────────────────────────────────────────────
+// Every call is logged to usage_costs (token counts + metadata, NO content) so we
+// can answer "what does each user/feature/school cost us in Claude spend." Cost in
+// $ is computed at read time from the ai_pricing table — see the migration.
+// Logging is best-effort: a failure here must NEVER break or slow the user's AI
+// response, so it's wrapped in try/catch and the snapshot read runs concurrently
+// with the Anthropic call (so it adds ~no wall-clock).
+const FEATURES = new Set([
+  "workout_parse", "joebot_chat", "program_extract", "program_generate",
+  "pr_ack", "goal_parse", "video_form_review", "monthly_recap",
+]);
+
+// Snapshot the segmentation fields AT CALL TIME so cost stays correctly attributed
+// even if the athlete later changes tier/school, and the future coach dashboard can
+// scope by a single indexed column. Returns null on any failure (caller swallows).
+async function loadSnapshot(caller) {
+  if (caller.role === "athlete") {
+    const rows = await sbSelect("athletes", `?id=eq.${enc(caller.id)}&select=tier,school_id,coach_id`);
+    return rows[0] || null;
+  }
+  if (caller.role === "coach") {
+    const rows = await sbSelect("coaches", `?id=eq.${enc(caller.id)}&select=school_id`);
+    return rows[0] || null;
+  }
+  return null;
+}
+
+async function logUsage({ caller, feature, model, data, status, latency_ms, snapP }) {
+  const snap = (await snapP) || {};
+  const u = (data && data.usage) || {};
+  await sbInsert("usage_costs", {
+    source: "claude",
+    feature,
+    role: caller.role,
+    actor_id: caller.id,
+    athlete_id: caller.role === "athlete" ? caller.id : null,
+    school_id: snap.school_id ?? null,
+    coach_id: caller.role === "coach" ? caller.id : (snap.coach_id ?? null),
+    tier: snap.tier ?? null,
+    // Anthropic echoes the resolved model id; fall back to what we requested.
+    model: (data && data.model) || model,
+    input_tokens: u.input_tokens ?? null,
+    output_tokens: u.output_tokens ?? null,
+    cache_read_tokens: u.cache_read_input_tokens ?? null,
+    cache_write_tokens: u.cache_creation_input_tokens ?? null,
+    latency_ms,
+    status,
+  });
+}
+
 export default async function handler(req, res) {
   if (applyCors(req, res)) return;
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -77,6 +129,11 @@ export default async function handler(req, res) {
     // 2) Per-user rate limit — a compromised account can't burn the bill unbounded.
     await rateLimit(`claude:${caller.role}:${caller.id}`, RATE);
 
+    // Cost tracking: validate the feature label and kick off the snapshot read NOW
+    // so it overlaps the Anthropic call below (never throws — caller swallows).
+    const feature = FEATURES.has(String(body.feature || "")) ? body.feature : "other";
+    const snapP = loadSnapshot(caller).catch(() => null);
+
     // 3) Never trust the client's model / token count — clamp both.
     const reqModel = String(body.model || "");
     const model = ALLOWED_MODELS.has(reqModel) ? reqModel : DEFAULT_MODEL;
@@ -91,6 +148,7 @@ export default async function handler(req, res) {
     const payload = { model, max_tokens, messages: body.messages, ...modelParams(model) };
     if (typeof body.system === "string" && body.system) payload.system = body.system;
 
+    const startedAt = Date.now();
     const r = await fetch(ANTHROPIC_URL, {
       method: "POST",
       headers: {
@@ -100,8 +158,20 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify(payload),
     });
+    const latency_ms = Date.now() - startedAt;
 
     const data = await r.json().catch(() => ({}));
+
+    // Best-effort cost log. Awaited so the serverless fn doesn't freeze mid-write,
+    // but any failure is swallowed — logging must never break the AI response.
+    try {
+      await logUsage({
+        caller, feature, model, data, latency_ms,
+        status: r.ok ? "ok" : `error_${r.status}`,
+        snapP,
+      });
+    } catch { /* tracking is non-critical */ }
+
     return res.status(r.status).json(data);
   } catch (e) {
     return res.status(e.status || 500).json({ error: e.message || "Server error" });

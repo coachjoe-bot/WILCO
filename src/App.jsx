@@ -232,7 +232,7 @@ const groupIntoSessions = (workouts, gapMs = 3*60*60*1000) => {
 // `model` defaults to Sonnet 4.6 (coaching voice / anything athletes read).
 // Pass "claude-haiku-4-5" ONLY for mechanical, never-seen extraction calls
 // (parseWorkout, goal parsing) to cut cost ~3x. The server still allowlists it.
-const askClaude = async (system, user, maxTokens=600, images=[], model="claude-sonnet-4-6") => {
+const askClaude = async (system, user, maxTokens=600, images=[], model="claude-sonnet-4-6", feature="other") => {
   const content = [];
   for(const img of images){
     content.push({type:"image",source:{type:"base64",media_type:"image/jpeg",data:img}});
@@ -241,12 +241,14 @@ const askClaude = async (system, user, maxTokens=600, images=[], model="claude-s
   // Routes through our authenticated server proxy (api/claude.js): it verifies
   // CURRENT_AUTH, rate-limits per user, and holds the Anthropic key. Same-origin,
   // so no Authorization header is needed.
+  // `feature` labels the call for cost tracking (usage_costs) — server-side it's
+  // validated against an allowlist; an unknown value is stored as "other".
   const r = await fetch("/api/claude",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
     // Model is a hint only — the server (api/claude.js) allowlists it, picks the
     // real model + inference params, and ignores anything unexpected.
-    body:JSON.stringify({auth:CURRENT_AUTH,model,max_tokens:maxTokens,system,messages:[{role:"user",content}]})
+    body:JSON.stringify({auth:CURRENT_AUTH,model,max_tokens:maxTokens,system,messages:[{role:"user",content}],feature})
   });
   const d = await r.json();
   if(d.error) throw new Error(typeof d.error==="string"?d.error:d.error.message);
@@ -256,7 +258,7 @@ const askClaude = async (system, user, maxTokens=600, images=[], model="claude-s
 const extractProgramText = async (message) => {
   const text = await askClaude(
     "Extract the training program from this athlete message. Return only the program content — days, exercises, sets, reps, weights. Clean formatting. No intro, no commentary, no explanation.",
-    message, 800
+    message, 800, [], "claude-sonnet-4-6", "program_extract"
   );
   return text?.trim() || message;
 };
@@ -291,7 +293,7 @@ Rules:
 - If weight is given in kg (e.g. "100kg squat"), set unit:"kg".
 - "pr_attempts": include an entry with reps:1 and achieved:true whenever the athlete reports an ACTUAL (not estimated) 1-rep max for a lift — either because they just performed a true 1RM single in this session, OR because they are simply telling you their current actual max for a lift (e.g. "my real squat max is 405", "current bench 1RM is 275", "just hit a 315 deadlift max"). This applies even if no other exercises were logged in the message. If they describe a failed attempt at a 1RM, set achieved:false.`;
   // Mechanical extraction → Haiku (athlete never sees this raw JSON; ~3x cheaper).
-  const text = await askClaude(sys,`Athlete: ${name} (${sport})\nMessage: ${message}`,1000,[],"claude-haiku-4-5");
+  const text = await askClaude(sys,`Athlete: ${name} (${sport})\nMessage: ${message}`,1000,[],"claude-haiku-4-5","workout_parse");
   try { return JSON.parse(text.replace(/```json|```/g,"").trim()); }
   catch { return {exercises:[],run_data:null,practice_data:null,pain_flags:[],equipment_issues:[],questions:[],pr_attempts:[],session_feel:null,general_notes:message,is_program_update:false,is_temp_program_update:false,is_program_revert:false}; }
 };
@@ -412,7 +414,7 @@ SPORT PRACTICE + TRAINING LOAD:
     contextMemory = `\n\nATHLETE CONTEXT (from monthly recap history — preferences, injuries, goals stated over time):\n${athleteContext}\nUse this as background — do not repeat it back, just let it inform your responses.`;
   }
 
-  return askClaude(sys+goalsContext+contextMemory,`${hist}\n\n${athlete.name}: ${message}`,450);
+  return askClaude(sys+goalsContext+contextMemory,`${hist}\n\n${athlete.name}: ${message}`,450,[],"claude-sonnet-4-6","joebot_chat");
 };
 
 // ─── 1RM PROPAGATION ─────────────────────────────────────────────────────────
@@ -733,7 +735,7 @@ function MonthlyRecapModal({athlete, digest, onClose, onContextSaved, workoutHis
       const summary = await askClaude(
         `You are Coach Joe Thomas. An athlete just completed a monthly recap dialogue. Summarize what you heard and state any program changes needed. Be direct and specific. If program changes are needed, be explicit about what changes to make. End with a brief forward-looking statement.${programInfo}`,
         `Athlete: ${athlete.name} (${athlete.sport})\n\nMonthly report context:\n${JSON.stringify(c)}\n\nReflection answers:\n${answersText}`,
-        600
+        600, [], "claude-sonnet-4-6", "monthly_recap"
       );
 
       // Determine if program changes are needed
@@ -743,7 +745,7 @@ function MonthlyRecapModal({athlete, digest, onClose, onContextSaved, workoutHis
         const updatedProgram = await askClaude(
           `You are Coach Joe Thomas. Based on this month's recap and athlete feedback, update their training program. Return ONLY the updated program text — preserve the existing structure and format but incorporate the changes. No intro, no commentary.`,
           `Current program:\n${athlete.program_text}\n\nAthlete feedback:\n${answersText}\n\nMonth context:\n${JSON.stringify(c)}`,
-          1000
+          1000, [], "claude-sonnet-4-6", "program_generate"
         );
         if(updatedProgram && updatedProgram.trim().length > 60){
           newProgramText = updatedProgram.trim();
@@ -1960,7 +1962,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       const b64 = await new Promise((res,rej)=>{reader.onload=()=>res(reader.result.split(",")[1]);reader.onerror=rej;reader.readAsDataURL(file);});
       const extracted = await askClaude(
         "You are reading a photo of an athlete's training program. Extract the full program text exactly as written. Preserve all structure — exercises, sets, reps, weights, days, weeks. Output plain text only, no commentary.",
-        "Extract the training program from this image.",600,[b64]
+        "Extract the training program from this image.",600,[b64],"claude-sonnet-4-6","program_extract"
       );
       if(extracted) setAthleteProgramText(prev=>prev?prev+"\n\n"+extracted:extracted);
     } catch(err){ setAthleteProgramMsg("Couldn't read that image. Try a clearer photo."); }
@@ -2193,7 +2195,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           const propagationNote = propagationLog.length>0 ? `\n\nI've updated your future ${propagationLog.map(l=>l.split(":")[0]).join(", ")} targets based on your new max.` : "";
           const prReply = await askClaude(
             "You are Coach Joe Thomas. An athlete just hit a new PR. Acknowledge it directly -- short, punchy, in Coach Joe's voice. Atta boy/girl is appropriate here.",
-            `Athlete: ${updatedAthlete.name} (${updatedAthlete.sport})\nNew PRs:\n${prCallout}`,150
+            `Athlete: ${updatedAthlete.name} (${updatedAthlete.sport})\nNew PRs:\n${prCallout}`,150,[],"claude-sonnet-4-6","pr_ack"
           );
           setMessages(prev=>[...prev,{role:"assistant",content:prReply+propagationNote}]);
         } catch(e){
@@ -2232,7 +2234,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // Parse goal from athlete's response
         const goalJson = await askClaude(
           `Extract training goal info from this athlete message. Return ONLY valid JSON:\n{"goal_text":string,"goal_type":"strength"|"sport_performance"|"weight_loss"|"endurance"|"body_composition"|"general"|"other","target_metric":string|null,"target_value":number|null,"target_date":string|null}\ngoal_type: pick the best match. target_date: ISO date string if mentioned, else null.`,
-          `Athlete: ${athlete.name}\nMessage: ${msg}`,200,[],"claude-haiku-4-5"
+          `Athlete: ${athlete.name}\nMessage: ${msg}`,200,[],"claude-haiku-4-5","goal_parse"
         );
         try {
           const parsed = JSON.parse(goalJson.replace(/```json|```/g,"").trim());
@@ -2487,7 +2489,7 @@ Fix these:
 
 Keep it under 200 words. No fluff. If the frames are unclear, use the clearest one.`;
 
-      const analysis = await askClaude(sys, `Here are ${frames.length} frames from ${athlete.name}'s workout video. Analyze their form.`, 400, frames);
+      const analysis = await askClaude(sys, `Here are ${frames.length} frames from ${athlete.name}'s workout video. Analyze their form.`, 400, frames, "claude-sonnet-4-6", "video_form_review");
 
       updateMsg(analysis);
       await sbInsert("workouts",{
@@ -5424,7 +5426,7 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
       const b64 = await new Promise((res,rej)=>{reader.onload=()=>res(reader.result.split(",")[1]);reader.onerror=rej;reader.readAsDataURL(file);});
       const extracted = await askClaude(
         "You are reading a photo of an athlete's training program. Extract the full program text exactly as written. Preserve all structure — exercises, sets, reps, weights, days, weeks. Output plain text only, no commentary.",
-        "Extract the training program from this image.",600,[b64]
+        "Extract the training program from this image.",600,[b64],"claude-sonnet-4-6","program_extract"
       );
       if(extracted) setProgramText(prev=>prev?prev+"\n\n"+extracted:extracted);
     } catch(err){ setProgramError("Couldn't read that image. Try a clearer photo."); }
