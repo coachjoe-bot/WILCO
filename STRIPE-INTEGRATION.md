@@ -1,7 +1,15 @@
-# Stripe Integration — Status & Morning Checklist
+# Stripe Integration — Status & Runbook
 
-Built on branch **`feature/stripe-integration`** (committed locally, **not pushed, not deployed**).
-The production app on `app.trainwilco.com` is untouched.
+**STATUS (updated 2026-06-25): LIVE in production.** Merged to `main` and serving on
+`app.trainwilco.com`. `STRIPE_MODE` defaults to **live** (`api/_stripe.js`), and the
+subscription endpoints (`create-subscription`, `stripe-webhook`, `subscription-manage`,
+`validate-gift-code`) are all on `main`. The checklist below is retained as the
+**test/setup runbook** and historical record — not a list of open work.
+
+> Re-verify once if you haven't personally confirmed: the
+> `20260619_stripe_subscriptions.sql` migration is applied in Supabase, and a **live**
+> webhook endpoint + signing secret are configured in Vercel (`customer.subscription.*`,
+> `invoice.paid`).
 
 ## What's done (code-complete, build passes)
 - **Onboarding restructured** (`src/App.jsx`): plan selection moved to the last data step
@@ -23,10 +31,13 @@ The production app on `app.trainwilco.com` is untouched.
   authoritative writer of subscription state.
 - **DB migration**: `supabase/migrations/20260619_stripe_subscriptions.sql`.
 
-## ⚠️ Not done by me on purpose (needs you / can't be verified without keys)
-- **Nothing was tested end-to-end** — no test keys were available. See testing steps below.
-- **Migration not applied** — I can't run DDL against Supabase.
-- **No live Stripe objects created**, nothing pushed/deployed.
+## Build-time caveats (historical — resolved by going live)
+These were the open items when this was first built on a branch; the integration has
+since been deployed live. Re-verify any you haven't personally confirmed:
+- **End-to-end testing** — run the test-mode steps below before/after major changes.
+- **Migration** `20260619_stripe_subscriptions.sql` — confirm it's applied in Supabase.
+- **Live Stripe objects + webhook** — confirm the live webhook endpoint + signing
+  secret exist in Vercel.
 
 ---
 

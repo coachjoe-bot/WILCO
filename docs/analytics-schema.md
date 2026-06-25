@@ -220,7 +220,10 @@ attribute the anon prefix without prior rows being rewritten.
 | `v_error_rate_by_area_daily` | per day × area | `attempts`, `errors`, `hard_errors`, `error_rate` (**joins `error_events`**) |
 
 `mv_daily_active_athletes` is a **materialized** rollup (one row per athlete per
-active day) — the scale primitive behind `v_dau`/`v_wau`/`v_mau`. Refresh nightly:
+active day) — the scale primitive behind `v_dau`/`v_wau`/`v_mau`. It is refreshed
+**automatically nightly** (00:15 UTC) by the pg_cron job `engagement-rollups-nightly`
+(migration `20260625_engagement_rollup_cron.sql`), which also prunes `usage_events`
+older than 90 days. Manual refresh if ever needed:
 `REFRESH MATERIALIZED VIEW CONCURRENTLY mv_daily_active_athletes;`
 
 ## Error COUNTS became RATES
