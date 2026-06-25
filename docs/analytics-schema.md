@@ -156,6 +156,93 @@ SELECT * FROM v_errors_by_area ORDER BY events DESC;
 ```
 
 ## Not here yet (future phases)
-Engagement/session events (Phase 2 `usage_events` — also the denominator for true
-error rates), non-AI costs (email), materialized daily rollups. The ledger shapes
-already accommodate them — see `SCALE-NOTES.md`.
+Non-AI costs (email). The ledger shapes already accommodate them — see
+`SCALE-NOTES.md`.
+
+---
+
+# WILCO Engagement — Usage Data Schema (Phase 2)
+
+Contract for reading WILCO's **engagement / usage** data — the third leg of the
+stack (cost + reliability + engagement). Same read model: Supabase Postgres,
+**service-role key** (RLS denies anon all access), read the **views**.
+
+Migration: `supabase/migrations/20260625_usage_events.sql`.
+
+## `usage_events` — the engagement ledger (one row per captured event)
+A curated **allowlist** of high-value events — app opens, sessions, key actions,
+key screen views — NOT every tap. Events are **batched** on the client and flushed
+together. **Metadata only** — no chat/workout content, no PINs/tokens/emails.
+
+This table is also the **denominator** the other ledgers were missing: it shares
+`error_events`'s coarse `area` vocabulary, so per-feature error *rates* (not just
+counts) become computable — see `v_error_rate_by_area_daily`.
+
+| column | type | notes |
+|---|---|---|
+| `id` | bigint | PK |
+| `created_at` | timestamptz | **server** receive time; client flushes frequently so it tracks event time to ~30s |
+| `source` | text | `client` (browser); `server` reserved |
+| `event_name` | text | the granular verb — allowlisted (see below) |
+| `area` | text | coarse area, **same set as `error_events.area`** (`auth`,`workout_log`,`coach_dashboard`,`billing`,`ai`,`sync`,`nav`,`other`) |
+| `session_id` | text | client-generated UUID; new on app open + after ~30min idle |
+| `route` | text | client screen/path, **query string stripped** |
+| `role` | text | `athlete` \| `coach` \| `anon` (pre-login) |
+| `actor_id` | uuid | athletes.id / coaches.id (server-verified; null when anon) |
+| `athlete_id` | uuid | ownership column for scoped reads; null for coach/anon |
+| `school_id` / `coach_id` / `tier` | uuid / uuid / text | **snapshot** at write time (null when anon) |
+| `app_version` | text | client build id |
+| `user_agent` | text | read server-side, truncated |
+| `meta` | jsonb | small sanitized extras (e.g. `{"screen":"log"}`), size-capped |
+
+**Event names (allowlist):** `app_open`, `session_start`, `login`, `signup_start`,
+`signup_complete`, `workout_logged`, `chat_opened`, `chat_message_sent`,
+`screen_view`, `coach_dashboard_view`. (Off-list events are dropped server-side.)
+
+**Sessions & anon stitching:** pre-login events (`app_open`, `session_start`,
+`signup_start`) log as `role='anon'` with only a random `session_id`. When the user
+logs in, the `login` event carries the **same** `session_id`, so the agent can
+attribute the anon prefix without prior rows being rewritten.
+
+## Views (read these)
+
+| view | grain | key fields |
+|---|---|---|
+| `v_usage` | per event | all columns + UTC `day` |
+| `v_dau` | per day | `dau`, `sessions`, `events` (built on the matview) |
+| `v_wau` / `v_mau` | single row | trailing-7 / trailing-30 distinct active athletes |
+| `v_stickiness_daily` | per day | `dau`, `mau_trailing_30`, `stickiness` (DAU/MAU) |
+| `v_sessions_daily` | per day | `sessions`, `events`, `events_per_session` |
+| `v_feature_adoption` | per event | `athletes`, `sessions`, `events`, first/last seen — breadth |
+| `v_feature_adoption_daily` | per day × event | `athletes`, `events` — adoption trend |
+| `v_activation_funnel` | single row | `signup_started_sessions` → `accounts_created` → `logged_first_workout` → `used_chat` |
+| `v_engagement_by_school` | per school | `athletes_active`, `sessions`, `events` (dashboard scope) |
+| `v_error_rate_by_area_daily` | per day × area | `attempts`, `errors`, `hard_errors`, `error_rate` (**joins `error_events`**) |
+
+`mv_daily_active_athletes` is a **materialized** rollup (one row per athlete per
+active day) — the scale primitive behind `v_dau`/`v_wau`/`v_mau`. Refresh nightly:
+`REFRESH MATERIALIZED VIEW CONCURRENTLY mv_daily_active_athletes;`
+
+## Error COUNTS became RATES
+The Phase-1.5 promise is now kept. `v_error_rate_by_area_daily` divides
+`error_events` by `usage_events` attempts on `(area, day)`. AI also still has its
+call-grained denominator via `usage_costs` (`v_ai_reliability_daily`).
+
+## Example queries
+```sql
+-- DAU trend, last 30 days
+SELECT * FROM v_dau LIMIT 30;
+
+-- WAU / MAU right now
+SELECT (SELECT wau FROM v_wau) AS wau, (SELECT mau FROM v_mau) AS mau;
+
+-- Activation funnel
+SELECT * FROM v_activation_funnel;
+
+-- Where is the app breaking, as a RATE (last 7 days)
+SELECT area, SUM(attempts) attempts, SUM(errors) errors,
+       ROUND(SUM(errors)::numeric/NULLIF(SUM(attempts),0),4) AS error_rate
+FROM v_error_rate_by_area_daily
+WHERE day > now() - interval '7 days'
+GROUP BY area ORDER BY error_rate DESC;
+```

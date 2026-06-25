@@ -178,6 +178,111 @@ function installErrorReporting(){
   });
 }
 
+// ─── ENGAGEMENT TRACKING (Phase 2) ────────────────────────────────────────────
+// Best-effort, BATCHED capture of a curated allowlist of engagement events
+// (app_open, sessions, key actions, key screen views) to usage_events via
+// api/identity (log-events). Mirrors reportError: never awaited on a user path,
+// never throws — a tracking failure must stay invisible to the user. Three volume
+// guards: events are buffered and flushed N-at-a-time / on a timer / on page-hide
+// (one request per flush, not per event); identical events are deduped within a
+// short window; a hard per-page-load cap stops any runaway loop. `auth` is sent
+// when known but OPTIONAL — pre-login events (app_open/session_start/signup_start)
+// still log (as 'anon' server-side), which is the whole point. The server is the
+// authority: it allowlists event_name, derives all attribution, and writes with the
+// service key — the browser cannot touch usage_events with the anon key (RLS).
+
+// Sessions are client-defined: a random id minted on app open and after ~30min idle,
+// kept in sessionStorage. The unit for "sessions/day" and for ordering a visit's
+// events (the activation funnel).
+const SESSION_KEY = "wilco_session";
+const SESSION_IDLE_MS = 30 * 60 * 1000;   // 30min idle -> new session
+function rollSession(){
+  const now = Date.now();
+  let s = null;
+  try { s = JSON.parse(sessionStorage.getItem(SESSION_KEY) || "null"); } catch { /* private mode */ }
+  if(s && s.id && (now - s.last) < SESSION_IDLE_MS){
+    s.last = now;
+    try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch { /* ignore */ }
+    return { id: s.id, isNew: false };
+  }
+  const id = (typeof crypto!=="undefined" && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : `s_${now}_${Math.random().toString(36).slice(2)}`;
+  try { sessionStorage.setItem(SESSION_KEY, JSON.stringify({ id, last: now })); } catch { /* ignore */ }
+  return { id, isNew: true };
+}
+
+const _evBuf = [];           // pending events, flushed in one request
+let _evTimer = null;
+const EV_FLUSH_MS = 30000;   // time-based flush (also keeps created_at ~30s accurate)
+const EV_FLUSH_AT = 20;      // size-based flush
+const EV_MAX_PER_LOAD = 200; // runaway guard
+let _evSent = 0;
+const _evSeen = new Map();    // event+meta -> last-sent ms (collapse double-fires)
+const EV_DEDUP_MS = 2000;
+
+function _enqueueEvent(event_name, area, meta, session_id){
+  _evBuf.push({
+    event_name,
+    area: area || null,
+    session_id,
+    route: typeof location!=="undefined" ? location.pathname : null,
+    app_version: APP_VERSION,
+    meta: meta || null,
+  });
+  _evSent++;
+  if(_evBuf.length >= EV_FLUSH_AT){ flushEvents(); return; }
+  if(!_evTimer && typeof setTimeout!=="undefined"){ _evTimer = setTimeout(flushEvents, EV_FLUSH_MS); }
+}
+
+// Record one engagement event. event_name must be in the server's allowlist (off-
+// list events are dropped server-side). area uses the error_events vocabulary so
+// the two ledgers can be joined for per-feature error rates.
+function track(event_name, area=null, meta=null){
+  try{
+    if(typeof window==="undefined") return;
+    if(_evSent >= EV_MAX_PER_LOAD) return;
+    const now = Date.now();
+    const key = `${event_name}|${meta?JSON.stringify(meta):""}`;
+    const last = _evSeen.get(key);
+    if(last && now-last < EV_DEDUP_MS) return;   // identical + recent -> drop
+    _evSeen.set(key, now);
+
+    const { id, isNew } = rollSession();
+    // A brand-new session implies a session_start; emit it once, ahead of the event
+    // that opened the session (so a visit's events stay correctly ordered).
+    if(isNew && event_name!=="session_start") _enqueueEvent("session_start","nav",null,id);
+    _enqueueEvent(event_name, area, meta, id);
+  }catch{ /* tracking must never throw */ }
+}
+
+// Flush the buffer in a single request. keepalive so it still goes out if the page
+// is unloading; result is ignored (fire-and-forget).
+function flushEvents(){
+  try{
+    if(_evTimer){ clearTimeout(_evTimer); _evTimer = null; }
+    if(_evBuf.length === 0) return;
+    const events = _evBuf.splice(0, _evBuf.length);
+    fetch("/api/identity",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({ action:"log-events", auth:CURRENT_AUTH, events }),
+      keepalive:true,
+    }).catch(()=>{});
+  }catch{ /* never throw */ }
+}
+
+// Register once (idempotent). Fires app_open and flushes on page-hide (the reliable
+// "user is leaving" signal on mobile — visibilitychange fires where unload doesn't).
+let _evInstalled = false;
+function installEngagementTracking(){
+  if(_evInstalled || typeof window==="undefined") return;
+  _evInstalled = true;
+  track("app_open","nav");
+  window.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="hidden") flushEvents(); });
+  window.addEventListener("pagehide",()=>{ flushEvents(); });
+}
+
 // ─── UTILITIES ────────────────────────────────────────────────────────────────
 // Compare dates at midnight local time — fixes the "-1d" timezone bug
 const daysBetween = (date) => {
@@ -953,7 +1058,7 @@ export default function WilcoApp() {
 
   // Install global error reporting once, on mount (before any early return so the
   // hook order stays stable). Captures uncaught errors + unhandled rejections.
-  useEffect(()=>{ installErrorReporting(); },[]);
+  useEffect(()=>{ installErrorReporting(); installEngagementTracking(); },[]);
 
   if(view==="athlete"&&athlete) return <AthleteView athlete={athlete} onLogout={()=>{setAthlete(null);setView("home");}}/>;
   if(view==="coach"&&coach) return <CoachDashboard coach={coach} onLogout={()=>{setCoach(null);setView("home");}}/>;
@@ -1181,6 +1286,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
   const [athleteRow,setAthleteRow] = useState(null); // created athlete (exists before payment)
   const [showConsent,setShowConsent] = useState(false); // T&C + Privacy consent overlay
   const setD = (k,v) => setData(p=>({...p,[k]:v}));
+  useEffect(()=>{ track("signup_start","auth"); },[]); // activation-funnel top (pre-login)
 
   // Total steps shown in the header. Plan selection is the last data step; paid tiers
   // add a payment step; school athletes skip both plan and payment.
@@ -1216,6 +1322,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
     } catch(e){ setErr("Error: "+(e.message||"could not create account")); return null; }
     if(!newAthlete){ setErr("Error creating your account. Try again."); return null; }
     CURRENT_AUTH={role:"athlete",id:newAthlete.id,pin:data.pin}; // authenticate subsequent writes
+    track("signup_complete","auth");
     try {
       await sbUpdate("athletes",newAthlete.id,{
         goal:data.goal||"strength",
@@ -1722,7 +1829,7 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
     setLoading(true); setErr("");
     try {
       const res = await idApi("athlete-login",{name:name.trim(),pin});
-      if(res.athlete){CURRENT_AUTH={role:"athlete",id:res.athlete.id,pin};setAthlete({...res.athlete,pin});setView("athlete");}
+      if(res.athlete){CURRENT_AUTH={role:"athlete",id:res.athlete.id,pin};track("login","auth",{role:"athlete"});setAthlete({...res.athlete,pin});setView("athlete");}
       else if(res.reason==="wrong_pin") setErr("Wrong PIN. Try again.");
       else setErr("Name not found. Check spelling or sign up as a new athlete.");
     } catch(e){setErr(e.message||"Connection error. Check your internet.");}
@@ -1828,7 +1935,7 @@ function CoachLoginScreen({setView,setCoach,setErr,err}) {
     setLoading(true); setErr("");
     try {
       const res = await idApi("coach-login",{pin});
-      if(res.coach){CURRENT_AUTH={role:"coach",id:res.coach.id,pin};setCoach({...res.coach,pin});setView("coach");}
+      if(res.coach){CURRENT_AUTH={role:"coach",id:res.coach.id,pin};track("login","auth",{role:"coach"});setCoach({...res.coach,pin});setView("coach");}
       else setErr("PIN not found. Check your PIN or set up your coach account first.");
     } catch(e){setErr(e.message||"Connection error.");}
     setLoading(false);
@@ -1940,7 +2047,7 @@ function CoachSetupScreen({setView,setCoach,setErr,err}) {
     setLoading(true); setErr("");
     try {
       await idApi("set-coach-pin",{coachId:coachRecord.id,accessCode:code.trim().toUpperCase(),pin});
-      CURRENT_AUTH={role:"coach",id:coachRecord.id,pin};setCoach({...coachRecord,pin});setView("coach");
+      CURRENT_AUTH={role:"coach",id:coachRecord.id,pin};track("login","auth",{role:"coach"});setCoach({...coachRecord,pin});setView("coach");
     } catch(e){setErr("Connection error.");}
     setLoading(false);
   };
@@ -2021,6 +2128,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const athletePhotoRef = useRef(null);
   const isMobile = useIsMobile();
   const chatStorageKey = `wilco_chat_${athlete.id}_${new Date().toLocaleDateString()}`;
+  useEffect(()=>{ track("chat_opened","ai"); },[]); // athlete's main surface is the chat
 
   const saveAthleteProgram = async () => {
     if(athleteProgramSaving) return;
@@ -2144,6 +2252,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
 
   const finalizeWorkout = async (parsed, msg, reply, updatedAthlete, isNewSession, addReply) => {
     const tier = updatedAthlete.tier||"free";
+    // Activation event — fired for ALL tiers (free tier logs but isn't persisted, so
+    // tracking here, before the tier gate below, keeps the funnel honest).
+    track("workout_logged","workout_log",{ persisted: tier!=="free" });
     try {
       const parsedFinal = isNewSession ? {...parsed,new_session:true} : parsed;
       // Free tier: no memory — don't persist workouts or PRs
@@ -2305,6 +2416,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const send = async () => {
     const msg = input.trim();
     if(!msg||loading||videoLoading||!historyLoaded) return;
+    track("chat_message_sent","ai");
 
     // ── Goal collection flow (first chat only) ──────────────────────────────
     if(goalCollectionActive){
@@ -2607,13 +2719,13 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
           {saved&&<div style={{background:"#0a1e0a",border:`1px solid ${C.green}`,borderRadius:8,padding:"4px 8px",color:C.green,fontSize:11,fontWeight:600,flexShrink:0}}>✓</div>}
           {(athlete.tier||"free")!=="free"&&(
-            <button onClick={()=>setShowProgram(true)} title="View or edit your training program"
+            <button onClick={()=>{track("screen_view","nav",{screen:"program"});setShowProgram(true);}} title="View or edit your training program"
               style={{background:athlete.temp_program_text?`${C.gold}15`:athlete.program_text?"#0a0e1e":C.navy3,border:`1px solid ${athlete.temp_program_text?C.gold:athlete.program_text?C.blue:C.border}`,borderRadius:8,padding:"4px 10px",color:athlete.temp_program_text?C.gold:athlete.program_text?C.blue:C.muted,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
               {athlete.temp_program_text?"✈️ Temp Program":"📋 "+(athlete.program_text?"Program":"Add Program")}
             </button>
           )}
-          {(athlete.tier||"free")!=="free"&&<button onClick={()=>setShowLog(true)} style={{background:C.navy3,border:`1px solid ${C.gold}`,color:C.gold,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>MY LOG</button>}
-          {(athlete.tier||"free")!=="free"&&<button onClick={()=>setShowProgress(true)} style={{background:C.navy3,border:`1px solid ${C.blue}`,color:C.blue,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>PROGRESS</button>}
+          {(athlete.tier||"free")!=="free"&&<button onClick={()=>{track("screen_view","nav",{screen:"log"});setShowLog(true);}} style={{background:C.navy3,border:`1px solid ${C.gold}`,color:C.gold,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>MY LOG</button>}
+          {(athlete.tier||"free")!=="free"&&<button onClick={()=>{track("screen_view","nav",{screen:"progress"});setShowProgress(true);}} style={{background:C.navy3,border:`1px solid ${C.blue}`,color:C.blue,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>PROGRESS</button>}
           <button onClick={()=>setShowSettings(true)} title="Settings" style={{background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:14,lineHeight:1}}>⚙</button>
           {!isMobile&&<button onClick={onLogout} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12}}>Log Out</button>}
         </div>
@@ -4605,6 +4717,7 @@ function CoachDashboard({coach,onLogout}) {
   const [reportSearch,setReportSearch] = useState("");
   const [reportFlagFilter,setReportFlagFilter] = useState(false);
   const [selectedDigest,setSelectedDigest] = useState(null);
+  useEffect(()=>{ track("coach_dashboard_view","coach_dashboard"); },[]);
   const isMobile = useIsMobile();
   const [selectMode,setSelectMode] = useState(false);
   const [selectedIds,setSelectedIds] = useState(new Set());

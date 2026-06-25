@@ -15,7 +15,7 @@
 import {
   applyCors, httpErr, str, pin4, clientIp, stripPin,
   sbSelect, sbWrite, rateLimit, rateLimitReset, verifyPin, hashPin,
-  authCaller, logError,
+  authCaller, logError, logEvents,
 } from "./_supa.js";
 
 const enc = encodeURIComponent;
@@ -43,6 +43,7 @@ export default async function handler(req, res) {
       case "create-athlete":       return await createAthleteAction(req, res, body);
       case "set-coach-pin":        return await setCoachPinAction(req, res, body);
       case "log-error":            return await logErrorAction(req, res, body);
+      case "log-events":           return await logEventsAction(req, res, body);
       default:                     return res.status(400).json({ error: "Unknown action" });
     }
   } catch (e) {
@@ -251,6 +252,43 @@ async function logErrorAction(req, res, body) {
     user_agent: req.headers["user-agent"],
     ...enrich,
   });
+
+  return res.status(200).json({ ok: true });
+}
+
+// ── log-events (Phase 2 engagement ingestion) ────────────────────────────────
+// The single engagement-capture entry point for the browser. Batched: the client
+// buffers allowlisted events and flushes an ARRAY here (on a timer / when full / on
+// page-hide), so this is ~one request per flush, not one per event. Like log-error
+// it accepts UNAUTHENTICATED callers (app_open / session_start / signup_start are
+// captured pre-login) — auth is OPTIONAL ENRICHMENT, never a gate.
+//
+// Same lockdown as log-error: the browser cannot touch usage_events with the anon
+// key (RLS denies it). It POSTs metadata here; the server validates against the
+// EVENT_NAMES allowlist, rate-limits per IP, derives ALL attribution server-side,
+// and bulk-writes with the SERVICE key. Always returns 200 — fire-and-forget.
+async function logEventsAction(req, res, body) {
+  // Bound abuse / storage-flooding. A batch carries many events, so this caps
+  // batches/IP (event volume is additionally capped per-batch in logEvents()).
+  try {
+    await rateLimit(`log-events:${clientIp(req)}`, { max: 120, windowMin: 15 });
+  } catch {
+    return res.status(200).json({ ok: true, dropped: "rate_limited" });
+  }
+
+  const events = Array.isArray(body.events) ? body.events : [];
+
+  // Optional auth enrichment — SOFT: bad creds fall back to anon (pre-login events
+  // are the whole point), exactly like log-error.
+  let enrich = { role: "anon" };
+  if (body.auth && typeof body.auth === "object") {
+    try {
+      enrich = await enrichFromCaller(await authCaller(body.auth));
+    } catch { /* keep anon */ }
+  }
+
+  // user_agent is read server-side (never trusted from the client body).
+  await logEvents(events, { ...enrich, user_agent: req.headers["user-agent"] });
 
   return res.status(200).json({ ok: true });
 }

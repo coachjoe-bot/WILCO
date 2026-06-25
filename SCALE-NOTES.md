@@ -48,8 +48,30 @@ None are urgent at current volume.
   at 12/12. The IP rate-limit (60/15min) writes a `rate_limits` row per error POST;
   that table's unbounded-growth cleanup (above) covers it.
 
+## Engagement system (usage_events — Phase 2, BUILT)
+- **Highest-volume ledger by far** (every session/key-action vs. one row per AI call
+  or crash). Volume is contained at the source: a curated event ALLOWLIST (off-list
+  events dropped server-side) + client-side BATCHING (events buffered, flushed
+  N-at-a-time / on a timer / on page-hide → ~one request per flush, not per event).
+- **Daily rollup is already materialized.** `mv_daily_active_athletes` (one row per
+  athlete per active day) is the scale primitive behind `v_dau`/`v_wau`/`v_mau`/
+  `v_stickiness_daily`, so active-user math never scans raw. **Still TODO: wire the
+  nightly `REFRESH MATERIALIZED VIEW CONCURRENTLY mv_daily_active_athletes;`** to the
+  daily cron (`trigger-proof-feed`) or pg_cron. The other engagement views
+  (`v_sessions_daily`, `v_feature_adoption*`, `v_error_rate_by_area_daily`) still
+  recompute over raw — materialize them too if they get slow.
+- **Retention matters MOST here.** Same 90-day raw prune, but the matview retains
+  aggregate history indefinitely so pruning raw is safe:
+  `DELETE FROM usage_events WHERE created_at < now() - interval '90 days';` Wire to a
+  cron alongside the matview refresh.
+- **Ingestion rides `api/identity` (log-events), zero new functions** — Vercel stays
+  at 12/12. Per-IP rate-limit (120 batches/15min) writes a `rate_limits` row per
+  POST; covered by that table's cleanup (above).
+- **Denominator is now live.** `v_error_rate_by_area_daily` joins `error_events` to
+  `usage_events` on `(area, day)` — true per-feature error RATES (closes the
+  Phase-1.5 "rates wait on Phase 2" note above).
+
 ## Future phases (planned, not built)
-- **Phase 2 Engagement** — `usage_events` (app opens/sessions, feature views) for
-  true DAU/sessions + activation funnel + feature-adoption breadth.
-- **Coach dashboard reads** — route `usage_costs` through `api/data.js`'s scoped
-  `read` op (add to `READ_OWN_COL`), scoped by `school_id`/`coach_id` snapshots.
+- **Coach dashboard reads** — route `usage_costs` / `error_events` / `usage_events`
+  through `api/data.js`'s scoped `read` op (add to `READ_OWN_COL`), scoped by
+  `school_id`/`coach_id` snapshots.

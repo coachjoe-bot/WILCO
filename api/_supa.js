@@ -249,3 +249,76 @@ export async function logError(e = {}) {
     });
   } catch { /* reliability logging must never break anything */ }
 }
+
+// ── Engagement logging (Phase 2) ──────────────────────────────────────────────
+// Best-effort BATCH capture into usage_events. Mirrors logError: it NEVER throws
+// and NEVER blocks the user path. Metadata only — no chat/workout content. This is
+// the highest-volume ledger, so it's defended on three sides: a curated EVENT_NAMES
+// allowlist (off-list events are dropped, not stored as 'other'), a per-batch row
+// cap, and a single bulk insert (PostgREST accepts an array body) so a flush of N
+// events is ONE write, not N.
+//
+// The CALLER supplies server-derived attribution (role/actor_id/athlete_id/snapshots)
+// — never let those come from the client body, or per-athlete/per-school dashboard
+// numbers could be forged. created_at is left to the DB default (server receive
+// time); the client flushes frequently so it tracks event time to ~30s.
+
+// Curated allowlist — adding an event is a code change here, never a migration.
+export const EVENT_NAMES = new Set([
+  "app_open", "session_start", "login", "signup_start", "signup_complete",
+  "workout_logged", "chat_opened", "chat_message_sent", "screen_view",
+  "coach_dashboard_view",
+]);
+// Coarse area vocabulary — SAME set as error_events so v_error_rate_by_area_daily
+// can divide errors by attempts on (area, day).
+const AREAS = new Set([
+  "auth", "workout_log", "coach_dashboard", "billing", "ai", "sync", "nav", "other",
+]);
+
+const MAX_EVENTS_PER_BATCH = 50;
+
+// Build one sanitized usage_events row from a client-supplied event + the caller's
+// server-derived attribution. Returns null if the event_name isn't allowlisted.
+function buildEventRow(ev, attribution) {
+  if (!ev || typeof ev !== "object") return null;
+  if (!EVENT_NAMES.has(ev.event_name)) return null;        // off-list → drop
+
+  let meta = null;
+  if (ev.meta && typeof ev.meta === "object") {
+    try { if (JSON.stringify(ev.meta).length <= 1000) meta = ev.meta; } catch { /* unserializable */ }
+  }
+
+  return {
+    source: "client",
+    event_name: ev.event_name,
+    area: AREAS.has(ev.area) ? ev.area : null,
+    session_id: clip(ev.session_id, 64),
+    route: clip(stripQueryStr(ev.route), 120),
+    app_version: clip(ev.app_version, 40),
+    meta,
+    // Server-derived — client-supplied role/ids/snapshots are intentionally ignored.
+    role: attribution.role === "athlete" || attribution.role === "coach" ? attribution.role : "anon",
+    actor_id: attribution.actor_id ?? null,
+    athlete_id: attribution.athlete_id ?? null,
+    school_id: attribution.school_id ?? null,
+    coach_id: attribution.coach_id ?? null,
+    tier: clip(attribution.tier, 20),
+    user_agent: clip(attribution.user_agent, 200),
+  };
+}
+
+// Insert a batch of engagement events in one write. Swallows all failures.
+export async function logEvents(events, attribution = { role: "anon" }) {
+  try {
+    if (!Array.isArray(events) || events.length === 0) return;
+    const rows = events
+      .slice(0, MAX_EVENTS_PER_BATCH)
+      .map((ev) => buildEventRow(ev, attribution))
+      .filter(Boolean);
+    if (rows.length === 0) return;
+    await sbInsert("usage_events", rows);   // array body => bulk insert
+  } catch { /* engagement logging must never break anything */ }
+}
+
+// Keep only the path of a route — query strings / fragments can carry tokens/ids.
+const stripQueryStr = (r) => (typeof r === "string" ? r.split(/[?#]/)[0] : r);
