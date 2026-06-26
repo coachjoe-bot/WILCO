@@ -818,203 +818,227 @@ const registerPushSubscription = async (athleteId) => {
   } catch(_) {}
 };
 
-// ─── MONTHLY RECAP MODAL ─────────────────────────────────────────────────────
-function MonthlyRecapModal({athlete, digest, onClose, onContextSaved, workoutHistory}) {
-  const isMobile = useIsMobile();
-  const [phase, setPhase] = useState("report"); // "report" | "dialogue" | "acting"
+// ─── PROOF CHAT MODAL ────────────────────────────────────────────────────────
+// Guided check-in for BOTH weekly and monthly digests (spec §8/§9). Renders the
+// digest's sections[] as an opening report, then walks the code-built ranked
+// question bank (content_json.questions): the top non-deeper questions first, a
+// "Go deeper" button reveals the rest, then a hard stop. On completion it does ONE
+// Haiku extraction over the answers and persists: hard facts -> tables (weight,
+// goals, height/ask flags), soft notes -> bounded athlete_context, and an optional
+// injury-protective program tweak. Backward-compatible with legacy digests.
+function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead, workoutHistory}) {
+  const [phase, setPhase] = useState("report"); // report | dialogue | acting | done
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [questionIndex, setQuestionIndex] = useState(0);
-  const [reflectionAnswers, setReflectionAnswers] = useState([]);
-  const [programPending, setProgramPending] = useState(null); // {description, newText}
+  const [showDeeper, setShowDeeper] = useState(false);
+  const [askedIdx, setAskedIdx] = useState(0);          // index into the active question list
+  const [answers, setAnswers] = useState([]);
+  const [programPending, setProgramPending] = useState(null);
   const bottomRef = useRef(null);
-  const monthLabel = digest?.label || "MONTHLY RECAP";
-  const c = digest?.content_json || {};
 
-  // Reflection questions — Claude generates contextually, but we use these as the base
-  const questions = [
-    "What felt like it was working this month?",
-    "What felt off or wasn't working?",
-    "Anything you want more of? Less of?",
-    "Any injuries, soreness, or limitations I should know about going forward?",
-    "Anything else on your mind about your training?",
-    ...(athlete.height_finalized
-      ? ["Any changes to your weight since you signed up?"]
-      : ["Quick check — any changes to your height or weight since you signed up?"]),
-  ];
+  const c = digest?.content_json || {};
+  const isMonthly = digest?.digest_type === "monthly";
+  const label = digest?.label || (isMonthly ? "MONTHLY RECAP" : "WEEKLY DIGEST");
+
+  // Sections: prefer the new sections[] shape; fall back to legacy keyed fields.
+  const sections = Array.isArray(c.sections) && c.sections.length
+    ? c.sections
+    : [
+        ["week_vs_week","THIS WEEK VS LAST"],["month_summary","THIS MONTH"],["consistency","CONSISTENCY"],
+        ["goal_progress","GOAL PROGRESS"],["month_patterns","PATTERNS"],["trend_callouts","TRENDS"],
+        ["plateau_flag","PLATEAU FLAG"],["unresolved_plateaus","PLATEAUS"],["encouragement","FROM COACH JOE"],
+        ["focus_next_week","FOCUS NEXT WEEK"],
+      ].filter(([k])=>c[k]).map(([k,labelTxt])=>({label:labelTxt,body:c[k]}));
+
+  // Questions: new bank, else a small legacy default.
+  const allQuestions = Array.isArray(c.questions) && c.questions.length
+    ? c.questions
+    : [
+        {id:"working",kind:"context",deeper:false,text:"What felt like it was working?"},
+        {id:"off",kind:"context",deeper:false,text:"What felt off or wasn't working?"},
+        {id:"injury",kind:"injury",deeper:false,text:"Anything banged up I should know about?"},
+        {id:"more_less",kind:"context",deeper:true,text:"Anything you want more of? Less of?"},
+      ];
+  const topQuestions = allQuestions.filter(q=>!q.deeper);
+  const deeperQuestions = allQuestions.filter(q=>q.deeper);
+  const activeQuestions = showDeeper ? [...topQuestions, ...deeperQuestions] : topQuestions;
 
   useEffect(()=>{
-    // Build the opening report message
-    const sections = [];
-    if(c.opening_message) sections.push(c.opening_message);
-    if(c.month_summary) sections.push(`**THIS MONTH**\n${c.month_summary}`);
-    if(c.goal_progress) sections.push(`**GOAL PROGRESS**\n${c.goal_progress}`);
-    if(c.month_patterns) sections.push(`**PATTERNS**\n${c.month_patterns}`);
-    if(c.unresolved_plateaus) sections.push(`**PLATEAUS TO ADDRESS**\n${c.unresolved_plateaus}`);
-    if(c.encouragement) sections.push(c.encouragement);
-    const reportText = sections.join("\n\n") || "Here's your monthly summary.";
-    setMessages([{role:"assistant",content:reportText + "\n\n---\nLet me ask you a few questions before we adjust your program."}]);
-  },[]);
+    const intro = c.intro ? c.intro + "\n\n" : "";
+    const body = sections.map(s=>`**${s.label}**\n${s.body}`).join("\n\n") || "Here's your check-in.";
+    setMessages([{role:"assistant",content:intro + body}]);
+  },[]); // eslint-disable-line
+  useEffect(()=>{ bottomRef.current?.scrollIntoView({behavior:"smooth"}); },[messages,loading,programPending]);
 
-  useEffect(()=>{ bottomRef.current?.scrollIntoView({behavior:"smooth"}); },[messages,loading]);
+  const liftSeries = (lift) => {
+    const norm = s=>String(s||"").toLowerCase().replace(/[^a-z]/g,"");
+    const target = norm(lift);
+    const pts = [];
+    [...(workoutHistory||[])].sort((a,b)=>new Date(a.created_at)-new Date(b.created_at)).forEach(w=>{
+      const pd = typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return {};}})():(w.parsed_data||{});
+      (pd.exercises||[]).forEach(e=>{
+        if(!e.name||!e.weight||e.unit==="bodyweight") return;
+        const n=norm(e.name);
+        if(n!==target && !n.includes(target) && !target.includes(n)) return;
+        const wl=e.unit==="kg"?e.weight*2.205:e.weight;
+        const e1rm=(!e.reps||e.reps<=1)?Math.round(wl):Math.round(wl*(1+e.reps/30));
+        pts.push({y:e1rm,label:new Date(w.created_at).toLocaleDateString("en-US",{month:"numeric",day:"numeric"})});
+      });
+    });
+    return pts.slice(-8);
+  };
 
   const startDialogue = () => {
     setPhase("dialogue");
-    setMessages(prev=>[...prev,{role:"assistant",content:questions[0]}]);
-    setQuestionIndex(0);
+    setAskedIdx(0);
+    setMessages(prev=>[...prev,{role:"assistant",content:activeQuestions[0].text}]);
   };
 
   const sendMessage = async () => {
     const msg = input.trim();
-    if(!msg||loading) return;
+    if(!msg||loading||phase!=="dialogue") return;
     setInput("");
-    const newMsgs = [...messages,{role:"user",content:msg}];
-    setMessages(newMsgs);
-    setLoading(true);
+    setMessages(prev=>[...prev,{role:"user",content:msg}]);
+    const q = activeQuestions[askedIdx];
+    const newAnswers = [...answers,{id:q.id,kind:q.kind,q:q.text,a:msg,meta:q.meta||null}];
+    setAnswers(newAnswers);
 
-    const currentQ = questions[questionIndex];
-    const newAnswers = [...reflectionAnswers,{q:currentQ,a:msg}];
-    setReflectionAnswers(newAnswers);
-
-    // Handle height/weight question
-    const isHeightQuestion = questionIndex === questions.length - 1;
-    if(isHeightQuestion){
-      const lowerMsg = msg.toLowerCase();
-      const doneGrowing = /done growing|fully grown|same height|no change|no i'm|nope/i.test(lowerMsg);
-      if(doneGrowing && !athlete.height_finalized){
-        try{
-          await sbUpdate("athletes",athlete.id,{height_finalized:true});
-        }catch(_){}
-      }
-      // Extract weight update if mentioned
-      const weightMatch = lowerMsg.match(/(\d+)\s*(lbs?|pounds?|kg)/i);
-      if(weightMatch){
-        const newWeight = parseInt(weightMatch[1]);
-        const unit = /kg/.test(weightMatch[2]) ? "kg" : "lbs";
-        try{
-          await sbUpdate("athletes",athlete.id,{weight:newWeight});
-        }catch(_){}
-      }
-    }
-
-    const nextQIdx = questionIndex + 1;
-    if(nextQIdx < questions.length){
-      setQuestionIndex(nextQIdx);
-      setLoading(false);
-      setMessages(prev=>[...prev,{role:"assistant",content:questions[nextQIdx]}]);
+    const nextIdx = askedIdx + 1;
+    if(nextIdx < activeQuestions.length){
+      setAskedIdx(nextIdx);
+      setMessages(prev=>[...prev,{role:"assistant",content:activeQuestions[nextIdx].text}]);
+    } else if(!showDeeper && deeperQuestions.length){
+      // Offer go-deeper rather than ending immediately.
+      setMessages(prev=>[...prev,{role:"assistant",content:"That's the short version. Want to go deeper, or wrap it here?"}]);
+      setPhase("deeper-offer");
     } else {
-      // All questions answered — move to acting phase
-      await generateActingPhase(newAnswers);
+      await finish(newAnswers);
     }
   };
 
-  const generateActingPhase = async (answers) => {
+  const goDeeper = () => {
+    setShowDeeper(true);
+    setPhase("dialogue");
+    const nextIdx = topQuestions.length; // first deeper question
+    setAskedIdx(nextIdx);
+    setMessages(prev=>[...prev,{role:"assistant",content:deeperQuestions[0].text}]);
+  };
+
+  const finish = async (finalAnswers) => {
     setPhase("acting");
-    try {
-      const answersText = answers.map(a=>`Q: ${a.q}\nA: ${a.a}`).join("\n\n");
-      const programInfo = athlete.program_text ? `\n\nCURRENT PROGRAM:\n${athlete.program_text}` : "\n\nNo program currently set.";
-
-      const summary = await askClaude(
-        `You are Coach Joe Thomas. An athlete just completed a monthly recap dialogue. Summarize what you heard and state any program changes needed. Be direct and specific. If program changes are needed, be explicit about what changes to make. End with a brief forward-looking statement.${programInfo}`,
-        `Athlete: ${athlete.name} (${athlete.sport})\n\nMonthly report context:\n${JSON.stringify(c)}\n\nReflection answers:\n${answersText}`,
-        600, [], "claude-sonnet-4-6", "monthly_recap"
+    setLoading(true);
+    const qaText = finalAnswers.map(a=>`[${a.kind}] Q: ${a.q}\nA: ${a.a}`).join("\n\n");
+    let ex = {};
+    try{
+      const raw = await askClaude(
+        `Extract structured updates from an athlete's check-in answers. Return ONLY JSON, no markdown: {"weight_lbs":number|null,"set_height_finalized":boolean,"stop_asking_weight":boolean,"goal_update":string|null,"injury_note":string|null,"apply_injury_change":boolean,"soft_notes":string}. weight_lbs only if they stated a new bodyweight number. set_height_finalized true if they say done growing / same height / no change. stop_asking_weight true if they ask to stop being asked about weight. apply_injury_change true ONLY if they agreed to apply a protective program change. injury_note = any injury/pain/limitation, else null. soft_notes = a 1-2 sentence summary of feelings/preferences worth remembering.`,
+        qaText, 500, [], "claude-haiku-4-5", "proof_answer_extract"
       );
+      ex = JSON.parse(String(raw).replace(/```json|```/g,"").trim()) || {};
+    }catch(_){ ex = {}; }
 
-      // Determine if program changes are needed
-      const programChangeNeeded = athlete.program_text && /program|change|adjust|modify|update|add|remove|reduce|increase/i.test(answersText);
-      let newProgramText = null;
-      if(programChangeNeeded){
-        const updatedProgram = await askClaude(
-          `You are Coach Joe Thomas. Based on this month's recap and athlete feedback, update their training program. Return ONLY the updated program text — preserve the existing structure and format but incorporate the changes. No intro, no commentary.`,
-          `Current program:\n${athlete.program_text}\n\nAthlete feedback:\n${answersText}\n\nMonth context:\n${JSON.stringify(c)}`,
+    // Hard facts -> structured tables (each guarded; new columns no-op pre-migration)
+    try{ if(ex.weight_lbs && ex.weight_lbs>50 && ex.weight_lbs<600) await sbUpdate("athletes",athlete.id,{weight_lbs:Math.round(ex.weight_lbs)}); }catch(_){}
+    try{ if(ex.set_height_finalized && athlete.height_finalized===false) await sbUpdate("athletes",athlete.id,{height_finalized:true}); }catch(_){}
+    try{ if(ex.stop_asking_weight) await sbUpdate("athletes",athlete.id,{ask_weight:false}); }catch(_){}
+    try{ if(ex.goal_update && ex.goal_update.length>3) await sbInsert("athlete_goals",{athlete_id:athlete.id,goal_text:ex.goal_update,goal_type:"self_reported"}); }catch(_){}
+
+    // Optional injury-protective program tweak (respects program_locked).
+    const wantsChange = ex.apply_injury_change && athlete.program_text && !athlete.program_locked && !athlete.temp_program_text;
+    if(wantsChange){
+      try{
+        const updated = await askClaude(
+          `You are Coach Joe Thomas. Apply a small, safe injury-protective adjustment to this athlete's program based on their check-in. Return ONLY the full updated program text — preserve structure/format, change only what's needed. No commentary.`,
+          `Current program:\n${athlete.program_text}\n\nCheck-in:\n${qaText}`,
           1000, [], "claude-sonnet-4-6", "program_generate"
         );
-        if(updatedProgram && updatedProgram.trim().length > 60){
-          newProgramText = updatedProgram.trim();
-        }
-      }
+        if(updated && updated.trim().length>60) setProgramPending({newText:updated.trim()});
+      }catch(_){}
+    }
 
-      setLoading(false);
-      setMessages(prev=>[...prev,{role:"assistant",content:summary}]);
+    const closing = ex.injury_note
+      ? "Logged it. I'll keep that front of mind. Keep putting in the work."
+      : "That's a wrap. Keep putting in the work.";
+    setLoading(false);
+    setMessages(prev=>[...prev,{role:"assistant",content:closing}]);
 
-      if(newProgramText && !athlete.program_locked){
-        setProgramPending({description:"Update program based on monthly recap", newText:newProgramText});
-      } else {
-        await saveContextAndClose(answers, summary, null);
-      }
-    } catch(e){
-      setLoading(false);
-      setMessages(prev=>[...prev,{role:"assistant",content:"That's a wrap on your monthly recap. Keep putting in the work."}]);
-      await saveContextAndClose(answers, "", null);
+    if(!wantsChange || !setProgramPending){
+      await persistAndClose(finalAnswers, ex, null);
     }
   };
 
   const applyProgramChange = async (apply) => {
+    let applied = null;
     if(apply && programPending?.newText){
       try{
         await sbUpdate("athletes",athlete.id,{program_text:programPending.newText});
-        setMessages(prev=>[...prev,{role:"assistant",content:"📋 Program updated based on your feedback."}]);
+        applied = programPending.newText;
+        setMessages(prev=>[...prev,{role:"assistant",content:"📋 Program updated to protect that area."}]);
       }catch(_){}
     }
-    await saveContextAndClose(reflectionAnswers, "", apply ? programPending?.newText : null);
     setProgramPending(null);
+    await persistAndClose(answers, {}, applied);
   };
 
-  const saveContextAndClose = async (answers, summary, newProgram) => {
-    // Build athlete_context summary
-    const answersText = answers.map(a=>`${a.q}: ${a.a}`).join("; ");
-    const injuryMentioned = answers.some(a=>/injur|sore|pain|hurt|chronic|limitation/i.test(a.a));
-    const contextContent = `Monthly recap ${new Date().toLocaleDateString("en-US",{month:"long",year:"numeric"})}:\n${answersText}${newProgram ? "\n\nProgram updated this month." : ""}${summary ? "\n\nCoach summary: "+summary.slice(0,400) : ""}`;
-    try {
-      // Upsert athlete_context (overwrite unless is_long_term)
-      await sbUpsert("athlete_context",{athlete_id:athlete.id,content:contextContent,is_long_term:injuryMentioned,updated_at:new Date().toISOString()},"athlete_id");
-      if(onContextSaved) onContextSaved(contextContent);
-    }catch(_){}
-
-    // Mark digest as read
+  const persistAndClose = async (finalAnswers, ex, newProgram) => {
+    const injuryMentioned = !!ex.injury_note || finalAnswers.some(a=>/injur|sore|pain|hurt|tweak|limitation/i.test(a.a));
+    const soft = ex.soft_notes || finalAnswers.map(a=>`${a.q}: ${a.a}`).join("; ");
+    const content = `${isMonthly?"Monthly":"Weekly"} check-in ${new Date().toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"})}:\n${soft}${ex.injury_note?`\nInjury: ${ex.injury_note}`:""}${newProgram?"\nProgram updated this check-in.":""}`;
     try{
-      await sbUpdateWhere("proof_digests",`?athlete_id=eq.${athlete.id}&digest_type=eq.monthly`,{is_read:true});
+      await sbUpsert("athlete_context",{athlete_id:athlete.id,content,is_long_term:injuryMentioned,updated_at:new Date().toISOString()},"athlete_id");
+      if(onContextSaved) onContextSaved(content);
     }catch(_){}
-
-    onClose();
+    try{
+      if(digest?.id){ await sbUpdate("proof_digests",digest.id,{is_read:true}); if(onDigestRead) onDigestRead({...digest,is_read:true}); }
+    }catch(_){}
+    setPhase("done");
   };
 
   return (
     <div style={{position:"fixed",inset:0,zIndex:500,background:C.navy,display:"flex",flexDirection:"column",maxWidth:600,margin:"0 auto"}}>
       <style>{GS}</style>
-      {/* Header */}
       <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
         <div>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:C.gold,letterSpacing:2}}>{monthLabel}</div>
-          <div style={{color:C.muted,fontSize:11}}>Monthly Check-In · {athlete.name}</div>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:C.gold,letterSpacing:2}}>{label}</div>
+          <div style={{color:C.muted,fontSize:11}}>{isMonthly?"Monthly":"Weekly"} Check-In · {athlete.name}</div>
         </div>
         <button onClick={onClose} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:13}}>✕ Close</button>
       </div>
 
-      {/* Messages */}
       <div style={{flex:1,overflowY:"auto",padding:"16px",display:"flex",flexDirection:"column",gap:10}}>
         {messages.map((m,i)=>(
           <div key={i} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
-            <div style={{
-              maxWidth:"85%",background:m.role==="user"?C.gold:C.navy2,
-              color:m.role==="user"?"#000":C.text,borderRadius:12,padding:"10px 14px",
-              fontSize:14,lineHeight:1.6,whiteSpace:"pre-wrap",
-              border:m.role==="user"?"none":`1px solid ${C.border}`
-            }}>
+            <div style={{maxWidth:"85%",background:m.role==="user"?C.gold:C.navy2,color:m.role==="user"?"#000":C.text,borderRadius:12,padding:"10px 14px",fontSize:14,lineHeight:1.6,whiteSpace:"pre-wrap",border:m.role==="user"?"none":`1px solid ${C.border}`}}>
               {m.content}
             </div>
           </div>
         ))}
+
+        {/* Monthly: embedded est-1RM progress charts (reused LineChart) */}
+        {phase==="report"&&isMonthly&&Array.isArray(c.charts)&&c.charts.length>0&&(
+          <div style={{display:"flex",flexDirection:"column",gap:12,marginTop:4}}>
+            {c.charts.map((ch,i)=>{
+              const data=liftSeries(ch.lift);
+              if(data.length<2) return null;
+              return (
+                <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:"12px 14px"}}>
+                  <div style={{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:6,textTransform:"uppercase"}}>{ch.lift} · est. 1RM</div>
+                  <LineChart data={data} unit=" lb"/>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         {loading&&<div style={{display:"flex",gap:6,padding:"10px 14px"}}>
           {[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:C.muted,animation:"pulse 1.2s ease-in-out infinite",animationDelay:`${i*0.2}s`}}/>)}
         </div>}
 
-        {/* Program change confirmation */}
         {programPending&&!loading&&(
           <div style={{background:C.navy3,border:`1px solid ${C.gold}`,borderRadius:12,padding:14,margin:"6px 0"}}>
             <div style={{color:C.gold,fontSize:13,fontWeight:700,marginBottom:8}}>📋 Suggested program update</div>
-            <div style={{color:C.muted2,fontSize:12,marginBottom:10}}>Based on your feedback this month, I have program adjustments ready. Apply them now?</div>
+            <div style={{color:C.muted2,fontSize:12,marginBottom:10}}>I have a protective adjustment ready based on your check-in. Apply it now?</div>
             <div style={{display:"flex",gap:8}}>
               <button onClick={()=>applyProgramChange(true)} style={{flex:1,background:C.gold,color:"#000",border:"none",borderRadius:8,padding:"10px",fontWeight:700,cursor:"pointer",fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14}}>Yes — Apply</button>
               <button onClick={()=>applyProgramChange(false)} style={{flex:1,background:"transparent",color:C.muted,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px",cursor:"pointer",fontSize:13}}>Skip</button>
@@ -1022,7 +1046,6 @@ function MonthlyRecapModal({athlete, digest, onClose, onContextSaved, workoutHis
           </div>
         )}
 
-        {/* Start dialogue CTA */}
         {phase==="report"&&messages.length>0&&!loading&&(
           <div style={{textAlign:"center",marginTop:8}}>
             <button onClick={startDialogue} style={{background:C.gold,color:"#000",border:"none",borderRadius:12,padding:"12px 28px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:16,cursor:"pointer"}}>
@@ -1030,10 +1053,22 @@ function MonthlyRecapModal({athlete, digest, onClose, onContextSaved, workoutHis
             </button>
           </div>
         )}
+
+        {phase==="deeper-offer"&&!loading&&(
+          <div style={{display:"flex",gap:8,marginTop:4}}>
+            <button onClick={goDeeper} style={{flex:1,background:C.gold,color:"#000",border:"none",borderRadius:10,padding:"11px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14,cursor:"pointer"}}>Go deeper →</button>
+            <button onClick={()=>finish(answers)} style={{flex:1,background:"transparent",color:C.muted,border:`1px solid ${C.border}`,borderRadius:10,padding:"11px",cursor:"pointer",fontSize:13}}>Wrap it here</button>
+          </div>
+        )}
+
+        {phase==="done"&&!loading&&(
+          <div style={{textAlign:"center",marginTop:8}}>
+            <button onClick={onClose} style={{background:"transparent",color:C.gold,border:`1px solid ${C.gold}`,borderRadius:10,padding:"11px 28px",cursor:"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>Done ✓</button>
+          </div>
+        )}
         <div ref={bottomRef}/>
       </div>
 
-      {/* Input */}
       {phase==="dialogue"&&!programPending&&(
         <div style={{padding:"12px 16px",borderTop:`1px solid ${C.border}`,background:C.navy2,flexShrink:0,display:"flex",gap:8}}>
           <input
@@ -2117,7 +2152,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [athleteGoals,setAthleteGoals] = useState([]);
   const [athleteContext,setAthleteContext] = useState(null);
   const [proofDigest,setProofDigest] = useState(null);
-  const [showMonthlyRecap,setShowMonthlyRecap] = useState(false);
+  const [showProofChat,setShowProofChat] = useState(false);
   const [goalCollectionActive,setGoalCollectionActive] = useState(false);
   const [athleteProgramText,setAthleteProgramText] = useState(athlete.program_text||"");
   const [athleteProgramSaving,setAthleteProgramSaving] = useState(false);
@@ -2843,7 +2878,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
       </div>
 
       {/* My Log Modal */}
-      {showLog&&<MyLogModal workoutHistory={workoutHistory} athlete={athlete} onClose={()=>setShowLog(false)} proofDigest={proofDigest} onDigestRead={(d)=>setProofDigest(d)} onOpenMonthlyRecap={()=>{setShowLog(false);setShowMonthlyRecap(true);}} setWorkoutHistory={setWorkoutHistory}/>}
+      {showLog&&<MyLogModal workoutHistory={workoutHistory} athlete={athlete} onClose={()=>setShowLog(false)} proofDigest={proofDigest} onDigestRead={(d)=>setProofDigest(d)} onOpenProofChat={()=>{setShowLog(false);setShowProofChat(true);}} setWorkoutHistory={setWorkoutHistory}/>}
 
       {/* Program View Modal */}
       {showProgram&&(
@@ -2929,14 +2964,15 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         />
       )}
 
-      {/* Monthly Recap Modal */}
-      {showMonthlyRecap&&proofDigest&&(
-        <MonthlyRecapModal
+      {/* Proof Feed Check-In Modal (weekly + monthly guided chat) */}
+      {showProofChat&&proofDigest&&(
+        <ProofChatModal
           athlete={athlete}
           digest={proofDigest}
           workoutHistory={workoutHistory}
-          onClose={()=>setShowMonthlyRecap(false)}
+          onClose={()=>setShowProofChat(false)}
           onContextSaved={(ctx)=>setAthleteContext(ctx)}
+          onDigestRead={(d)=>setProofDigest(d)}
         />
       )}
 
@@ -2957,7 +2993,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
 }
 
 // ─── MY LOG MODAL ─────────────────────────────────────────────────────────────
-function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead, onOpenMonthlyRecap, setWorkoutHistory}) {
+function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead, onOpenProofChat, setWorkoutHistory}) {
   const [tab,setTab] = useState("workouts");
   const [editSession,setEditSession] = useState(null);
   const painKey = `wilco_resolved_pain_${athlete.id}`;
@@ -3135,54 +3171,40 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                   if(onDigestRead) onDigestRead({...d,is_read:true});
                 }catch(_){}
               };
+              // New shape: sections[]. Legacy fallback: keyed fields.
+              const sections = Array.isArray(c.sections)&&c.sections.length
+                ? c.sections
+                : [
+                    ["week_vs_week","THIS WEEK VS LAST"],["month_summary","THIS MONTH"],["consistency","CONSISTENCY"],
+                    ["trend_callouts","TRENDS"],["plateau_flag","PLATEAU FLAG"],["encouragement","FROM COACH JOE"],
+                    ["focus_next_week","FOCUS NEXT WEEK"],
+                  ].filter(([k])=>c[k]).map(([k,labelTxt])=>({label:labelTxt,body:c[k]}));
+              const hasQuestions = Array.isArray(c.questions)&&c.questions.length>0;
 
-              if(isMonthly){
-                // Monthly recap card — tap to open interactive chat
-                return (
-                  <div>
-                    <button onClick={()=>{markRead();onOpenMonthlyRecap&&onOpenMonthlyRecap();}} style={{width:"100%",background:C.navy2,border:`1px solid ${C.gold}40`,borderRadius:14,padding:18,textAlign:"left",cursor:"pointer",display:"block",transition:"border-color 0.15s"}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
-                        <div>
-                          <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:2,marginBottom:4}}>
-                            {d.label}
-                          </div>
-                          <div style={{color:C.muted,fontSize:11}}>Monthly Recap · Tap to open check-in</div>
-                        </div>
-                        <div style={{display:"flex",alignItems:"center",gap:6}}>
-                          {!d.is_read&&<div style={{width:7,height:7,borderRadius:"50%",background:C.gold,flexShrink:0}}/>}
-                          {d.has_plateau&&<div style={{background:"rgba(239,68,68,0.15)",border:"1px solid rgba(239,68,68,0.4)",borderRadius:4,padding:"2px 6px",color:"#ef4444",fontSize:10,fontWeight:700}}>PLATEAU</div>}
-                        </div>
-                      </div>
-                      {c.month_summary&&<div style={{color:C.text,fontSize:13,lineHeight:1.6,marginBottom:10}}>{c.month_summary}</div>}
-                      <div style={{color:C.gold,fontSize:12,fontWeight:700,letterSpacing:1,marginTop:8}}>TAP TO START CHECK-IN →</div>
-                    </button>
-                  </div>
-                );
-              }
-
-              // Weekly digest card — read-only
               return (
-                <div onClick={markRead} style={{cursor:!d.is_read?"pointer":"default"}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-                    <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:2}}>{d.label}</div>
-                    <div style={{display:"flex",alignItems:"center",gap:6}}>
-                      {!d.is_read&&<div style={{width:7,height:7,borderRadius:"50%",background:C.gold}}/>}
-                      {d.has_plateau&&<div style={{background:"rgba(239,68,68,0.15)",border:"1px solid rgba(239,68,68,0.4)",borderRadius:4,padding:"2px 6px",color:"#ef4444",fontSize:10,fontWeight:700}}>PLATEAU</div>}
-                      {d.has_pain&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:4,padding:"2px 6px",color:"#ef4444",fontSize:10}}>PAIN FLAG</div>}
+                <div>
+                  {/* Tap-to-open guided check-in card (weekly + monthly) */}
+                  <button onClick={()=>{markRead();onOpenProofChat&&onOpenProofChat();}} style={{width:"100%",background:C.navy2,border:`1px solid ${C.gold}40`,borderRadius:14,padding:18,textAlign:"left",cursor:"pointer",display:"block",marginBottom:14}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+                      <div>
+                        <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:2,marginBottom:4}}>{d.label}</div>
+                        <div style={{color:C.muted,fontSize:11}}>{isMonthly?"Monthly":"Weekly"} check-in · Coach Joe</div>
+                      </div>
+                      <div style={{display:"flex",alignItems:"center",gap:6}}>
+                        {!d.is_read&&<div style={{width:7,height:7,borderRadius:"50%",background:C.gold,flexShrink:0}}/>}
+                        {d.has_plateau&&<div style={{background:"rgba(239,68,68,0.15)",border:"1px solid rgba(239,68,68,0.4)",borderRadius:4,padding:"2px 6px",color:"#ef4444",fontSize:10,fontWeight:700}}>PLATEAU</div>}
+                        {d.has_pain&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:4,padding:"2px 6px",color:"#ef4444",fontSize:10}}>PAIN</div>}
+                      </div>
                     </div>
-                  </div>
-                  {[
-                    {key:"week_vs_week",label:"THIS WEEK VS LAST"},
-                    {key:"consistency",label:"CONSISTENCY"},
-                    {key:"workouts_logged",label:"WORKOUTS LOGGED"},
-                    {key:"trend_callouts",label:"TRENDS"},
-                    {key:"plateau_flag",label:"PLATEAU FLAG",color:"#ef4444"},
-                    {key:"encouragement",label:"FROM COACH JOE"},
-                    {key:"focus_next_week",label:"FOCUS NEXT WEEK"},
-                  ].filter(s=>c[s.key]).map((s,i)=>(
-                    <div key={i} style={{background:C.navy2,border:`1px solid ${s.color?`${s.color}30`:C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
-                      <div style={{color:s.color||C.muted,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:6}}>{s.label}</div>
-                      <div style={{color:C.text,fontSize:13,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{c[s.key]}</div>
+                    {(c.intro||sections[0]?.body)&&<div style={{color:C.text,fontSize:13,lineHeight:1.6,marginBottom:10}}>{c.intro||sections[0].body}</div>}
+                    {hasQuestions&&<div style={{color:C.gold,fontSize:12,fontWeight:700,letterSpacing:1}}>TAP TO START CHECK-IN →</div>}
+                  </button>
+
+                  {/* At-a-glance read of the digest sections */}
+                  {sections.map((s,i)=>(
+                    <div key={i} style={{background:C.navy2,border:`1px solid ${s.flag==="warn"?"rgba(239,68,68,0.3)":C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
+                      <div style={{color:s.flag==="warn"?"#ef4444":C.muted,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:6}}>{s.label}</div>
+                      <div style={{color:C.text,fontSize:13,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{s.body}</div>
                     </div>
                   ))}
                 </div>
