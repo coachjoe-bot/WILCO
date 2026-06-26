@@ -261,7 +261,27 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, ...results });
     }
 
-    // ── Scheduler sweep ──
+    // ── Cron single-target fanout (the scalable path; pg_cron fires one request
+    //    per due id so no invocation ever loops the whole roster) ──
+    if (body.athlete_id) {
+      const rows = await sbSelect("athletes", `?id=eq.${encodeURIComponent(body.athlete_id)}&select=*`);
+      const athlete = rows[0];
+      if (!athlete) return res.status(404).json({ error: "Athlete not found" });
+      if (athlete.proof_enabled === false || athlete.last_proof_run_date === todayStr()) {
+        return res.status(200).json({ ok: false, skipped: true });
+      }
+      const batch = await fetchBatch([athlete.id]);
+      return res.status(200).json({ ok: true, athlete: await runAthlete(athlete, batch) });
+    }
+    if (body.coach_id) {
+      const roster = await sbSelect("athletes", `?coach_id=eq.${encodeURIComponent(body.coach_id)}&select=*`);
+      const rosterBatch = await fetchBatch(roster.map((a) => a.id));
+      const coaches = await sbSelect("coaches", `?id=eq.${encodeURIComponent(body.coach_id)}&select=id,name,email,school_id`);
+      const coaches2 = await runCoachReports(roster, rosterBatch, coaches);
+      return res.status(200).json({ ok: true, coaches: coaches2 });
+    }
+
+    // ── Scheduler sweep (backstop; Phase 6 pg_cron prefers the fanout above) ──
     const now = new Date().toISOString();
     const due = await sbSelect("athletes", `?next_proof_due_at=lte.${now}&select=*&order=created_at.asc`);
 

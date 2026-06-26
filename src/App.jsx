@@ -3856,6 +3856,43 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
   const [deleteBusy,setDeleteBusy] = useState(false);
   const [deleteMsg,setDeleteMsg] = useState("");
 
+  // ── Proof Feed schedule (Phase 6) ──────────────────────────────────────────
+  const [proofEnabled,setProofEnabled] = useState(athlete.proof_enabled!==false);
+  const [proofDow,setProofDow] = useState(athlete.proof_schedule_dow ?? 0);      // 0=Sun..6=Sat
+  const [proofHour,setProofHour] = useState(athlete.proof_schedule_hour ?? 8);   // 0..23 local
+  const [proofSaveMsg,setProofSaveMsg] = useState("");
+  const [proofSaving,setProofSaving] = useState(false);
+  const [runningNow,setRunningNow] = useState(false);
+  const [runNowMsg,setRunNowMsg] = useState("");
+  const DOW = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+  const tz = (()=>{ try{ return Intl.DateTimeFormat().resolvedOptions().timeZone||"America/New_York"; }catch{ return "America/New_York"; } })();
+
+  const saveProofSchedule = async () => {
+    if(proofSaving) return;
+    setProofSaving(true); setProofSaveMsg("");
+    try{
+      await sbUpdate("athletes",athlete.id,{proof_enabled:proofEnabled,proof_schedule_dow:proofDow,proof_schedule_hour:proofHour,proof_timezone:tz});
+      onCoachUpdate&&onCoachUpdate({proof_enabled:proofEnabled,proof_schedule_dow:proofDow,proof_schedule_hour:proofHour,proof_timezone:tz});
+      setProofSaveMsg("Saved.");
+    }catch(e){ setProofSaveMsg("Couldn't save — try again."); }
+    setProofSaving(false);
+    setTimeout(()=>setProofSaveMsg(""),4000);
+  };
+
+  const runProofNow = async () => {
+    if(runningNow) return;
+    setRunningNow(true); setRunNowMsg("");
+    try{
+      const r = await fetch("/api/trigger-proof-feed",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth:CURRENT_AUTH,run_now:true})});
+      const j = await r.json().catch(()=>({}));
+      if(!r.ok) setRunNowMsg(j.error||"Couldn't generate right now.");
+      else if(j.ok===false) setRunNowMsg(j.reason||"Already generated today.");
+      else setRunNowMsg("✓ Your Proof Feed is ready — check My Log → Proof.");
+    }catch(e){ setRunNowMsg("Connection error."); }
+    setRunningNow(false);
+    setTimeout(()=>setRunNowMsg(""),6000);
+  };
+
   // Queue an account deletion. We do NOT delete anything here — just log the
   // request. The process-deletions edge function hard-deletes after the 30-day
   // window (Privacy Policy §4/§5). scheduled_deletion_at defaults to now()+30d.
@@ -3960,6 +3997,40 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
           <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>LOGGED IN AS</div>
           <div style={{color:C.text,fontWeight:600,fontSize:14}}>{athlete.name}</div>
           <div style={{color:C.muted,fontSize:11}}>{athlete.sport}</div>
+        </div>
+
+        {/* Proof Feed schedule (Phase 6) */}
+        <div style={{marginBottom:16}}>
+          <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>PROOF FEED</div>
+          <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px"}}>
+            <label style={{display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",marginBottom:proofEnabled?12:0}}>
+              <span style={{color:C.text,fontSize:13}}>Weekly digest from Coach Joe</span>
+              <input type="checkbox" checked={proofEnabled} onChange={e=>setProofEnabled(e.target.checked)} style={{width:18,height:18,accentColor:C.gold,cursor:"pointer"}}/>
+            </label>
+            {proofEnabled&&(
+              <div style={{display:"flex",gap:8,marginBottom:10}}>
+                <div style={{flex:1}}>
+                  <label style={{color:C.muted,fontSize:10,letterSpacing:1,display:"block",marginBottom:4}}>DAY</label>
+                  <select value={proofDow} onChange={e=>setProofDow(parseInt(e.target.value))} style={{width:"100%",background:C.navy,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 10px",color:C.text,fontSize:13,outline:"none"}}>
+                    {DOW.map((d,i)=><option key={i} value={i}>{d}</option>)}
+                  </select>
+                </div>
+                <div style={{flex:1}}>
+                  <label style={{color:C.muted,fontSize:10,letterSpacing:1,display:"block",marginBottom:4}}>TIME</label>
+                  <select value={proofHour} onChange={e=>setProofHour(parseInt(e.target.value))} style={{width:"100%",background:C.navy,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 10px",color:C.text,fontSize:13,outline:"none"}}>
+                    {Array.from({length:24},(_,h)=><option key={h} value={h}>{h===0?"12 AM":h<12?`${h} AM`:h===12?"12 PM":`${h-12} PM`}</option>)}
+                  </select>
+                </div>
+              </div>
+            )}
+            {proofEnabled&&<div style={{color:C.muted,fontSize:10,marginBottom:10}}>Your timezone: {tz}</div>}
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={saveProofSchedule} disabled={proofSaving} style={{flex:1,background:proofSaving?C.navy:C.navy,border:`1px solid ${C.border}`,color:C.text,borderRadius:8,padding:"9px",cursor:proofSaving?"default":"pointer",fontSize:13,fontWeight:600}}>{proofSaving?"Saving...":"Save schedule"}</button>
+              <button onClick={runProofNow} disabled={runningNow} style={{flex:1,background:runningNow?C.navy3:C.gold,border:"none",color:runningNow?C.muted:"#000",borderRadius:8,padding:"9px",cursor:runningNow?"default":"pointer",fontSize:13,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>{runningNow?"Generating...":"Run now"}</button>
+            </div>
+            {proofSaveMsg&&<div style={{color:proofSaveMsg==="Saved."?C.green:C.red,fontSize:11,marginTop:8,textAlign:"center"}}>{proofSaveMsg}</div>}
+            {runNowMsg&&<div style={{color:runNowMsg.startsWith("✓")?C.green:C.muted,fontSize:11,marginTop:8,textAlign:"center",lineHeight:1.4}}>{runNowMsg}</div>}
+          </div>
         </div>
 
         {/* Plan / subscription */}
