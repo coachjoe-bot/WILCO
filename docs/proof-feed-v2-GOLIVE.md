@@ -1,12 +1,29 @@
 # Proof Feed v2 — Go-Live Checklist (for Will)
 
-All six phases are **code-complete and building green** on branch
-`feature/proof-feed-v2` (nothing pushed, nothing deployed). This file is the only
-thing left that needs **you** — code can't apply migrations, set secrets, deploy,
-or eyeball real output.
+> **STATUS: ✅ LIVE on app.trainwilco.com since 2026-06-26.** All six phases
+> deployed (`main`), migration applied, pg_cron scheduled, run-now verified
+> end-to-end (digest generated, Sonnet call ok, cost logged, Step 5 clean). The
+> checklist below is kept as a record + reference. For the current architecture and
+> "where to tweak," see the `project-wilco-proof-feed-v2` memory note.
+>
+> **Deviations from the plan worth remembering:**
+> - **pg_cron secret:** Supabase rejected `ALTER DATABASE postgres SET app.*`
+>   (error 42501), so the engine URL + `CRON_SECRET` are **hardcoded inside the two
+>   `proof_feed_dispatch_*` SQL functions** (not `current_setting`). Rotating
+>   `CRON_SECRET` ⇒ update the Vercel env var **and** re-run those two functions.
+> - **proof_digests.athlete_id** was `NOT NULL`; the migration drops that so
+>   team-aggregate coach reports (null athlete_id) can be inserted.
+> - Post-launch fixes (all live): run-now refreshes the Proof tab; digest loads even
+>   when restoring today's cached chat; the check-in answers clarifying questions
+>   (one follow-up each); check-in is once per report (`content_json.checkin_done`);
+>   injury question + plan share one focus and state the concrete change.
+>
+> **Future minor tweaks:** digest prose → `api/_proof.js` (`COACH_VOICE` + each
+> generator's `system` string); questions → `buildQuestionBank()` /
+> `monthlyExtraQuestions()` there; schedule cadence → the two cron jobs.
 
-Do the steps in order. Each is safe; the app keeps working between them (the Proof
-Feed feature is dormant until the engine runs).
+Original step-by-step (each was safe; app kept working between them — the feature
+was dormant until the engine ran):
 
 ---
 

@@ -5,7 +5,9 @@ session should be able to implement from this doc alone. Read it top to bottom,
 then start at **Phase 0**.
 
 Companion docs: `docs/analytics-schema.md` (cost/usage/engagement ledgers).
-Status as of writing: **designed, approved by Will, not yet implemented.**
+Status: **LIVE on app.trainwilco.com since 2026-06-26** (all 6 phases). This is the
+original design spec; for the as-built state, deviations, and where to make future
+tweaks see `docs/proof-feed-v2-GOLIVE.md`.
 
 ---
 
