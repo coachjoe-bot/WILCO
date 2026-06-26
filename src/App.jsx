@@ -2951,6 +2951,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           athlete={athlete}
           onClose={()=>setShowSettings(false)}
           onCoachUpdate={(updates)=>setAthlete(prev=>({...prev,...updates}))}
+          onProofRefresh={(d)=>setProofDigest(d)}
           onLogout={onLogout}
         />
       )}
@@ -3836,7 +3837,7 @@ function ProfileCompletionModal({athlete, onClose, onSave}) {
 }
 
 // ─── SETTINGS MODAL ───────────────────────────────────────────────────────────
-function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
+function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogout}) {
   const [coachName,setCoachName] = useState(athlete.coach_name||"");
   const [coachEmail,setCoachEmail] = useState(athlete.coach_email||"");
   const [weightUnit,setWeightUnit] = useState(athlete.weight_unit||"lbs");
@@ -3887,7 +3888,15 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onLogout}) {
       const j = await r.json().catch(()=>({}));
       if(!r.ok) setRunNowMsg(j.error||"Couldn't generate right now.");
       else if(j.ok===false) setRunNowMsg(j.reason||"Already generated today.");
-      else setRunNowMsg("✓ Your Proof Feed is ready — check My Log → Proof.");
+      else {
+        setRunNowMsg("✓ Your Proof Feed is ready — check My Log → Proof.");
+        // Pull the just-generated digest into the app so the Proof tab shows it
+        // without a manual reload.
+        try{
+          const rows = await sbRead("proof_digests",`?athlete_id=eq.${athlete.id}&digest_type=in.(weekly,monthly)&order=generated_at.desc&limit=1`);
+          if(Array.isArray(rows)&&rows[0]&&onProofRefresh) onProofRefresh(rows[0]);
+        }catch(_){}
+      }
     }catch(e){ setRunNowMsg("Connection error."); }
     setRunningNow(false);
     setTimeout(()=>setRunNowMsg(""),6000);
