@@ -53,6 +53,11 @@ ALTER TABLE proof_digests DROP CONSTRAINT IF EXISTS proof_digests_digest_type_ch
 ALTER TABLE proof_digests ADD CONSTRAINT proof_digests_digest_type_check
   CHECK (digest_type IN ('weekly','monthly','weekly_coach','monthly_coach'));
 
+-- 3b. The team-aggregate coach reports (weekly_coach/monthly_coach) are about the
+-- whole roster, not one athlete, so they store athlete_id = NULL. Relax the NOT
+-- NULL (the FK + ON DELETE CASCADE stay; per-athlete digests still set it).
+ALTER TABLE proof_digests ALTER COLUMN athlete_id DROP NOT NULL;
+
 -- ── 4. Scale index: the "athletes due now" query ─────────────────────────────
 -- Beyond the spec, for scalability: the engine/pg_cron selects athletes where
 -- proof is enabled and next_proof_due_at <= now(). A partial index on that column
@@ -78,3 +83,5 @@ CREATE INDEX IF NOT EXISTS athletes_proof_due_idx
 -- ALTER TABLE proof_digests DROP CONSTRAINT IF EXISTS proof_digests_digest_type_check;
 -- ALTER TABLE proof_digests ADD CONSTRAINT proof_digests_digest_type_check
 --   CHECK (digest_type IN ('weekly','monthly','monthly_coach'));
+-- DELETE FROM proof_digests WHERE athlete_id IS NULL;  -- remove coach reports first
+-- ALTER TABLE proof_digests ALTER COLUMN athlete_id SET NOT NULL;

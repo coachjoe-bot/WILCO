@@ -942,7 +942,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
     try{ if(ex.weight_lbs && ex.weight_lbs>50 && ex.weight_lbs<600) await sbUpdate("athletes",athlete.id,{weight_lbs:Math.round(ex.weight_lbs)}); }catch(_){}
     try{ if(ex.set_height_finalized && athlete.height_finalized===false) await sbUpdate("athletes",athlete.id,{height_finalized:true}); }catch(_){}
     try{ if(ex.stop_asking_weight) await sbUpdate("athletes",athlete.id,{ask_weight:false}); }catch(_){}
-    try{ if(ex.goal_update && ex.goal_update.length>3) await sbInsert("athlete_goals",{athlete_id:athlete.id,goal_text:ex.goal_update,goal_type:"self_reported"}); }catch(_){}
+    try{ if(ex.goal_update && ex.goal_update.length>3) await sbInsert("athlete_goals",{athlete_id:athlete.id,goal_text:ex.goal_update}); }catch(_){}
 
     // Optional injury-protective program tweak (respects program_locked).
     const wantsChange = ex.apply_injury_change && athlete.program_text && !athlete.program_locked && !athlete.temp_program_text;
