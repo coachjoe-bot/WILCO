@@ -4804,11 +4804,16 @@ function CoachDashboard({coach,onLogout}) {
       setAllCoaches(Array.isArray(c)?c:[]);
       setSchool(Array.isArray(s)&&s.length>0?s[0]:null);
       setAllSchools(Array.isArray(sc)?sc:[]);
-      // Load proof digests for this coach's athletes
+      // Load proof digests: per-athlete digests for this coach's athletes, plus the
+      // team-aggregate coach reports (athlete_id is null on those, so they're fetched
+      // by digest_type — the gateway scopes both reads to this coach by coach_id).
       if(ids.length>0){
         const idList = ids.map(id=>`"${id}"`).join(",");
-        const digests = await sbRead("proof_digests",`?athlete_id=in.(${idList})&order=generated_at.desc&select=*`);
-        setAllDigests(Array.isArray(digests)?digests:[]);
+        const [perAthlete, teamReports] = await Promise.all([
+          sbRead("proof_digests",`?athlete_id=in.(${idList})&order=generated_at.desc&select=*`),
+          sbRead("proof_digests",`?digest_type=in.(weekly_coach,monthly_coach)&order=generated_at.desc&select=*`),
+        ]);
+        setAllDigests([...(Array.isArray(perAthlete)?perAthlete:[]),...(Array.isArray(teamReports)?teamReports:[])]);
       }
     } catch(e){console.error(e);}
     setLoading(false);
@@ -5151,9 +5156,10 @@ function CoachDashboard({coach,onLogout}) {
             {/* ── REPORTS TAB ── */}
             {activeTab==="reports"&&(()=>{
               const athleteById = Object.fromEntries(athletes.map(a=>[a.id,a]));
-              // Exclude coach-facing monthly reports from the main list — they are shown inline
-              const displayDigests = allDigests.filter(d=>d.digest_type!=="monthly_coach");
-              const coachDigests = allDigests.filter(d=>d.digest_type==="monthly_coach");
+              // Team-aggregate coach reports vs per-athlete digests.
+              const teamReports = allDigests.filter(d=>d.digest_type==="weekly_coach"||d.digest_type==="monthly_coach");
+              const displayDigests = allDigests.filter(d=>d.digest_type==="weekly"||d.digest_type==="monthly");
+              const latestTeamReport = teamReports[0]||null; // ordered desc by generated_at
 
               let filtered = displayDigests;
               if(reportFilter==="weekly") filtered = filtered.filter(d=>d.digest_type==="weekly");
@@ -5165,9 +5171,19 @@ function CoachDashboard({coach,onLogout}) {
               });
 
               if(selectedDigest){
-                const a = athleteById[selectedDigest.athlete_id];
                 const c = selectedDigest.content_json||{};
-                const isMonthly = selectedDigest.digest_type==="monthly";
+                const isTeam = selectedDigest.digest_type==="weekly_coach"||selectedDigest.digest_type==="monthly_coach";
+                const a = isTeam ? null : athleteById[selectedDigest.athlete_id];
+                // New shape: sections[]. Legacy fallback: keyed fields.
+                const sections = Array.isArray(c.sections)&&c.sections.length
+                  ? c.sections
+                  : [
+                      ["opening_message","OPENING"],["week_vs_week","THIS WEEK VS LAST"],["month_summary","MONTH SUMMARY"],
+                      ["consistency","CONSISTENCY"],["goal_progress","GOAL PROGRESS"],["month_patterns","PATTERNS"],
+                      ["trend_callouts","TRENDS"],["plateau_flag","PLATEAU FLAG"],["unresolved_plateaus","PLATEAUS"],
+                      ["encouragement","FROM COACH JOE"],["focus_next_week","FOCUS NEXT WEEK"],
+                    ].filter(([k])=>c[k]).map(([k,l])=>({label:l,body:c[k]}));
+                const ol = c.outliers||{};
                 return (
                   <div style={{maxWidth:700}}>
                     <button onClick={()=>setSelectedDigest(null)} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:12,marginBottom:14}}>← Back to Reports</button>
@@ -5175,62 +5191,36 @@ function CoachDashboard({coach,onLogout}) {
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
                         <div>
                           <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>{selectedDigest.label}</div>
-                          <div style={{color:C.muted,fontSize:12}}>{a?.name||"Unknown"} · {a?.sport||""}</div>
+                          <div style={{color:C.muted,fontSize:12}}>{isTeam?"Team report":`${a?.name||"Unknown"} · ${a?.sport||""}`}</div>
                         </div>
                         <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"flex-end"}}>
                           {selectedDigest.has_plateau&&<div style={{background:"rgba(239,68,68,0.15)",border:"1px solid rgba(239,68,68,0.4)",borderRadius:4,padding:"2px 7px",color:"#ef4444",fontSize:10,fontWeight:700}}>PLATEAU</div>}
-                          {selectedDigest.has_pain&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:4,padding:"2px 7px",color:"#ef4444",fontSize:10}}>PAIN FLAG</div>}
-                          {selectedDigest.has_missed&&<div style={{background:"rgba(100,116,139,0.2)",border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 7px",color:C.muted,fontSize:10}}>MISSED SESSIONS</div>}
+                          {selectedDigest.has_pain&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:4,padding:"2px 7px",color:"#ef4444",fontSize:10}}>{isTeam?"INJURIES":"PAIN FLAG"}</div>}
+                          {selectedDigest.has_missed&&<div style={{background:"rgba(100,116,139,0.2)",border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 7px",color:C.muted,fontSize:10}}>{isTeam?"AT-RISK":"MISSED SESSIONS"}</div>}
                         </div>
                       </div>
-                      {isMonthly?(
-                        [
-                          {key:"opening_message",label:"OPENING"},
-                          {key:"month_summary",label:"MONTH SUMMARY"},
-                          {key:"goal_progress",label:"GOAL PROGRESS"},
-                          {key:"month_patterns",label:"PATTERNS"},
-                          {key:"unresolved_plateaus",label:"PLATEAUS"},
-                          {key:"encouragement",label:"FROM COACH JOE"},
-                        ]
-                      ):(
-                        [
-                          {key:"week_vs_week",label:"THIS WEEK VS LAST"},
-                          {key:"consistency",label:"CONSISTENCY"},
-                          {key:"workouts_logged",label:"WORKOUTS LOGGED"},
-                          {key:"trend_callouts",label:"TRENDS"},
-                          {key:"plateau_flag",label:"PLATEAU FLAG",color:"#ef4444"},
-                          {key:"encouragement",label:"FROM COACH JOE"},
-                          {key:"focus_next_week",label:"FOCUS NEXT WEEK"},
-                        ]
-                      ).filter(s=>c[s.key]).map((s,i)=>(
-                        <div key={i} style={{background:C.navy3,border:`1px solid ${s.color?`${s.color}30`:C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
-                          <div style={{color:s.color||C.muted,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:6}}>{s.label}</div>
-                          <div style={{color:C.text,fontSize:13,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{c[s.key]}</div>
+                      {c.intro&&<div style={{color:C.text,fontSize:13,lineHeight:1.65,marginBottom:12,fontStyle:"italic"}}>{c.intro}</div>}
+                      {sections.map((s,i)=>(
+                        <div key={i} style={{background:C.navy3,border:`1px solid ${s.flag==="warn"?"rgba(239,68,68,0.3)":C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
+                          <div style={{color:s.flag==="warn"?"#ef4444":C.muted,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:6}}>{s.label}</div>
+                          <div style={{color:C.text,fontSize:13,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{s.body}</div>
                         </div>
                       ))}
-                      {/* Monthly coach report if available */}
-                      {isMonthly&&(()=>{
-                        const cr = coachDigests.find(d=>d.athlete_id===selectedDigest.athlete_id);
-                        if(!cr) return null;
-                        const cc = cr.content_json||{};
-                        return (
-                          <div style={{marginTop:14,borderTop:`1px solid ${C.border}`,paddingTop:14}}>
-                            <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:2,marginBottom:10}}>COACH REPORT</div>
-                            {cc.coach_summary&&<div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
-                              <div style={{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:6}}>SUMMARY</div>
-                              <div style={{color:C.text,fontSize:13,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{cc.coach_summary}</div>
-                            </div>}
-                            {cc.flags?.length>0&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:10,padding:"10px 14px",marginBottom:8}}>
-                              <div style={{color:"#ef4444",fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:4}}>FLAGS</div>
-                              <div style={{color:C.text,fontSize:13}}>{cc.flags.join(", ")}</div>
-                            </div>}
-                            {cc.program_changes&&<div style={{background:"rgba(16,185,129,0.1)",border:"1px solid rgba(16,185,129,0.3)",borderRadius:10,padding:"10px 14px"}}>
-                              <div style={{color:C.green,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:4}}>PROGRAM CHANGES</div>
-                              <div style={{color:C.text,fontSize:13}}>{cc.program_changes}</div>
-                            </div>}
-                          </div>
-                        );
-                      })()}
+                      {/* Team report: outliers + coach actions */}
+                      {isTeam&&(ol.mostImproved?.length>0||ol.atRisk?.length>0||ol.volumeCratered?.length>0)&&(
+                        <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
+                          <div style={{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:8}}>FLAGGED OUTLIERS</div>
+                          {ol.mostImproved?.length>0&&<div style={{color:C.text,fontSize:13,marginBottom:4}}><span style={{color:C.green}}>↑ Most improved:</span> {ol.mostImproved.map(o=>`${o.name} (+${o.delta})`).join(", ")}</div>}
+                          {ol.atRisk?.length>0&&<div style={{color:C.text,fontSize:13,marginBottom:4}}><span style={{color:"#ef4444"}}>⚠ At risk:</span> {ol.atRisk.join(", ")}</div>}
+                          {ol.volumeCratered?.length>0&&<div style={{color:C.text,fontSize:13}}><span style={{color:C.gold}}>↓ Volume cratered:</span> {ol.volumeCratered.map(o=>`${o.name} (${o.gap}%)`).join(", ")}</div>}
+                        </div>
+                      )}
+                      {isTeam&&Array.isArray(c.actions)&&c.actions.length>0&&(
+                        <div style={{background:"rgba(16,185,129,0.1)",border:"1px solid rgba(16,185,129,0.3)",borderRadius:10,padding:"12px 14px"}}>
+                          <div style={{color:C.green,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:6}}>COACH ACTIONS</div>
+                          <ul style={{margin:0,paddingLeft:16,color:C.text,fontSize:13,lineHeight:1.7}}>{c.actions.map((act,i)=><li key={i}>{act}</li>)}</ul>
+                        </div>
+                      )}
                     </div>
                   </div>
                 );
@@ -5292,6 +5282,20 @@ function CoachDashboard({coach,onLogout}) {
                         ))}
                       </div>
                     </div>
+                  )}
+                  {/* Team aggregate report (Coach Joe's read on the whole roster) */}
+                  {latestTeamReport&&(
+                    <button onClick={()=>setSelectedDigest(latestTeamReport)} style={{width:"100%",background:C.navy2,border:`1px solid ${C.gold}40`,borderRadius:14,padding:16,textAlign:"left",cursor:"pointer",display:"block",marginBottom:16}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>TEAM REPORT</div>
+                        <div style={{display:"flex",gap:6}}>
+                          {latestTeamReport.has_pain&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:4,padding:"2px 6px",color:"#ef4444",fontSize:10}}>INJURIES</div>}
+                          {latestTeamReport.has_missed&&<div style={{background:`${C.navy3}`,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 6px",color:C.muted,fontSize:10}}>AT-RISK</div>}
+                        </div>
+                      </div>
+                      {latestTeamReport.content_json?.intro&&<div style={{color:C.text,fontSize:13,lineHeight:1.6,marginBottom:8}}>{latestTeamReport.content_json.intro}</div>}
+                      <div style={{color:C.gold,fontSize:12,fontWeight:700,letterSpacing:1}}>OPEN REPORT →</div>
+                    </button>
                   )}
                   {/* Filters */}
                   <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:14}}>

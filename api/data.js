@@ -98,12 +98,20 @@ export default async function handler(req, res) {
         const me = (await sbSelect("coaches", `?id=eq.${enc(caller.id)}&select=id,role`))[0];
         if (!me) throw httpErr(401, "Not authorized");
         if (me.role !== "master") {
-          // Non-master coaches (incl. admins) see only their own athletes' rows —
-          // exactly the set coach-dashboard returns and the client used to filter to.
-          const aths = await sbSelect("athletes", `?coach_id=eq.${enc(caller.id)}&select=id`);
-          const ids = aths.map((a) => a.id);
-          if (ids.length === 0) return res.status(200).json([]);
-          scope = `&${col}=in.(${ids.map((id) => `"${id}"`).join(",")})`;
+          // proof_digests carry the owning coach_id on BOTH per-athlete digests and
+          // the team-aggregate coach reports (weekly_coach/monthly_coach, which have
+          // a NULL athlete_id). Scope those by coach_id so a coach gets their whole
+          // report set — athlete-id membership would drop the aggregate rows.
+          if (rtable === "proof_digests") {
+            scope = `&coach_id=eq.${enc(caller.id)}`;
+          } else {
+            // Other PII tables: non-master coaches (incl. admins) see only their own
+            // athletes' rows — the set coach-dashboard returns and the client filtered to.
+            const aths = await sbSelect("athletes", `?coach_id=eq.${enc(caller.id)}&select=id`);
+            const ids = aths.map((a) => a.id);
+            if (ids.length === 0) return res.status(200).json([]);
+            scope = `&${col}=in.(${ids.map((id) => `"${id}"`).join(",")})`;
+          }
         }
         // master: no scope → all rows.
       } else {
