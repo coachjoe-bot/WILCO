@@ -71,6 +71,9 @@ const RATE = { max: 100, windowMin: 15 };
 const FEATURES = new Set([
   "workout_parse", "joebot_chat", "program_extract", "program_generate",
   "pr_ack", "goal_parse", "video_form_review", "monthly_recap",
+  // Proof Feed engine (server-side, via askClaudeServer in _supa.js). Listed here
+  // too so the cost-feature vocabulary stays in one place across both AI paths.
+  "proof_weekly", "proof_monthly", "proof_coach",
 ]);
 
 // Snapshot the segmentation fields AT CALL TIME so cost stays correctly attributed

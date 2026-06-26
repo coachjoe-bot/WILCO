@@ -137,6 +137,83 @@ export async function sbWrite({ method, table, query = "", body, prefer = "retur
   return json;
 }
 
+// ── Server-side Claude call (background jobs) ────────────────────────────────
+// For trusted server-to-server work (the Proof Feed engine) that runs with NO
+// browser in the loop, so it can't use the same-origin client proxy api/claude.js.
+// It calls Anthropic directly with the server key AND logs usage_costs itself, so
+// background AI spend is attributed exactly like the proxy's (Phase 1 cost ledger).
+//
+// Inference params are pinned the SAME as api/claude.js: Sonnet 4.6, effort "low",
+// thinking off — a version bump must not silently raise the cost of a daily job.
+//
+// `attribution` carries who the work is FOR (the athlete), so cost rolls up per
+// athlete/school just like a user-initiated call. Cost logging is best-effort and
+// never blocks the result. Throws on an Anthropic error so the caller can record a
+// per-item failure; returns the assistant text on success.
+export async function askClaudeServer({
+  system,
+  user,
+  maxTokens = 1200,
+  feature = "other",
+  attribution = {},
+}) {
+  const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY || process.env.ANTHROPIC_API_KEY;
+  const model = "claude-sonnet-4-6";
+
+  const startedAt = Date.now();
+  let data = {};
+  let status = "ok";
+  try {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: maxTokens,
+        output_config: { effort: "low" },
+        thinking: { type: "disabled" },
+        system,
+        messages: [{ role: "user", content: user }],
+      }),
+    });
+    data = await r.json().catch(() => ({}));
+    status = r.ok ? "ok" : `error_${r.status}`;
+  } catch (e) {
+    status = "error_network";
+    data = { error: { message: e.message } };
+  }
+  const latency_ms = Date.now() - startedAt;
+
+  // Best-effort cost log — mirrors api/claude.js logUsage() row shape exactly.
+  try {
+    const u = (data && data.usage) || {};
+    await sbInsert("usage_costs", {
+      source: "claude",
+      feature,
+      role: attribution.role || "athlete",
+      actor_id: attribution.actor_id ?? null,
+      athlete_id: attribution.athlete_id ?? null,
+      school_id: attribution.school_id ?? null,
+      coach_id: attribution.coach_id ?? null,
+      tier: attribution.tier ?? null,
+      model: (data && data.model) || model,
+      input_tokens: u.input_tokens ?? null,
+      output_tokens: u.output_tokens ?? null,
+      cache_read_tokens: u.cache_read_input_tokens ?? null,
+      cache_write_tokens: u.cache_creation_input_tokens ?? null,
+      latency_ms,
+      status,
+    });
+  } catch { /* cost tracking is non-critical — never break the job */ }
+
+  if (data && data.error) throw httpErr(502, data.error.message || "AI call failed");
+  return data.content?.[0]?.text || "";
+}
+
 // ── Rate limiting (backed by the `rate_limits` table) ────────────────────────
 // Counts attempts for `key` within the window; throws 429 when over `max`.
 // Stateless functions can't hold counters in memory, so we use the DB.
