@@ -205,7 +205,9 @@ async function fetchBatch(ids) {
     sbSelect("athlete_goals", `?athlete_id=in.(${idList})&select=*&order=created_at.desc`),
     sbSelect("prs", `?athlete_id=in.(${idList})&select=*`),
     sbSelect("manual_one_rms", `?athlete_id=in.(${idList})&select=*`),
-    sbSelect("program_prescriptions", `?athlete_id=in.(${idList})&select=*`),
+    // program_prescriptions only exists after the Phase 1 migration — tolerate its
+    // absence so deploying code before the migration can't hard-fail the run.
+    sbSelect("program_prescriptions", `?athlete_id=in.(${idList})&select=*`).catch(() => []),
   ]);
   return { workouts, goals, prs, manual, prescriptions };
 }
