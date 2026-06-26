@@ -2213,6 +2213,12 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           setMessages(storedMsgs);
           const logs = tier!=="free" ? await sbRead("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=100&select=*`) : [];
           if(logs&&logs.length>0) setWorkoutHistory(logs);
+          // Even when we restore today's cached chat, still load the latest proof
+          // digest so the Proof tab isn't empty (this path used to skip it).
+          try{
+            const dr = await sbRead("proof_digests",`?athlete_id=eq.${athlete.id}&digest_type=in.(weekly,monthly)&order=generated_at.desc&limit=1`);
+            if(Array.isArray(dr)&&dr.length>0) setProofDigest(dr[0]);
+          }catch(_){}
           setHistoryLoaded(true);
           return;
         }
