@@ -836,6 +836,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
   const [answers, setAnswers] = useState([]);
   const [programPending, setProgramPending] = useState(null);
   const bottomRef = useRef(null);
+  const followedUpRef = useRef(new Set()); // question ids that already got their one follow-up
 
   const c = digest?.content_json || {};
   const isMonthly = digest?.digest_type === "monthly";
@@ -901,6 +902,30 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
     setInput("");
     setMessages(prev=>[...prev,{role:"user",content:msg}]);
     const q = activeQuestions[askedIdx];
+
+    // If the athlete asks a clarifying question back (e.g. "what tweak?"), answer it
+    // in Coach Joe's voice and re-ask — a SINGLE natural follow-up per question, then
+    // it counts as answered (never open-ended; spec §8 hard-stop still holds).
+    const isClarifying = msg.trim().endsWith("?") || /^(what|why|how|which|who|when|where|can you|could you|explain|tell me|wdym|huh|like what|such as|meaning)\b/i.test(msg.trim());
+    if(isClarifying && !followedUpRef.current.has(q.id)){
+      followedUpRef.current.add(q.id);
+      setLoading(true);
+      try{
+        const reply = await askClaude(
+          `You are Coach Joe Thomas — direct, specific, no fluff. The athlete asked a clarifying question during their weekly check-in. Answer it directly and concisely (1-3 sentences) using the digest context below. If they're asking what program change you meant, give the concrete change (sets/%/exercise swap). Do NOT ask a new question. Do NOT restate the whole digest.`,
+          `Digest sections:\n${JSON.stringify(c.sections||c)}\n\nThe question I just asked: "${q.text}"\nThe athlete asked back: "${msg}"`,
+          280,[],"claude-sonnet-4-6","joebot_chat"
+        );
+        setLoading(false);
+        if(reply&&reply.trim()) setMessages(prev=>[...prev,{role:"assistant",content:reply.trim()}]);
+        setMessages(prev=>[...prev,{role:"assistant",content:q.text}]); // re-ask the same question
+      }catch(_){
+        setLoading(false);
+        setMessages(prev=>[...prev,{role:"assistant",content:q.text}]);
+      }
+      return; // stay on this question; their next message is the real answer
+    }
+
     const newAnswers = [...answers,{id:q.id,kind:q.kind,q:q.text,a:msg,meta:q.meta||null}];
     setAnswers(newAnswers);
 
