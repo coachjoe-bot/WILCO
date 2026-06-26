@@ -154,11 +154,25 @@ export async function askClaudeServer({
   system,
   user,
   maxTokens = 1200,
+  model = "claude-sonnet-4-6",
   feature = "other",
   attribution = {},
 }) {
   const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY || process.env.ANTHROPIC_API_KEY;
-  const model = "claude-sonnet-4-6";
+
+  // Inference params chosen per model, matching api/claude.js modelParams():
+  // Sonnet 4.6 pins effort low + thinking off (cheap/fast, no quality loss for our
+  // calls). effort is INVALID on Haiku 4.5 — it must receive neither field.
+  const payload = {
+    model,
+    max_tokens: maxTokens,
+    system,
+    messages: [{ role: "user", content: user }],
+  };
+  if (model === "claude-sonnet-4-6") {
+    payload.output_config = { effort: "low" };
+    payload.thinking = { type: "disabled" };
+  }
 
   const startedAt = Date.now();
   let data = {};
@@ -171,14 +185,7 @@ export async function askClaudeServer({
         "x-api-key": ANTHROPIC_KEY,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify({
-        model,
-        max_tokens: maxTokens,
-        output_config: { effort: "low" },
-        thinking: { type: "disabled" },
-        system,
-        messages: [{ role: "user", content: user }],
-      }),
+      body: JSON.stringify(payload),
     });
     data = await r.json().catch(() => ({}));
     status = r.ok ? "ok" : `error_${r.status}`;

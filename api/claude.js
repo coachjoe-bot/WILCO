@@ -73,7 +73,9 @@ const FEATURES = new Set([
   "pr_ack", "goal_parse", "video_form_review", "monthly_recap",
   // Proof Feed engine (server-side, via askClaudeServer in _supa.js). Listed here
   // too so the cost-feature vocabulary stays in one place across both AI paths.
-  "proof_weekly", "proof_monthly", "proof_coach",
+  // proof_answer_extract runs from the CLIENT (guided-chat answer parsing) through
+  // this proxy, so it MUST be allowlisted here or it would fall back to "other".
+  "proof_weekly", "proof_monthly", "proof_coach", "program_parse", "proof_answer_extract",
 ]);
 
 // Snapshot the segmentation fields AT CALL TIME so cost stays correctly attributed
