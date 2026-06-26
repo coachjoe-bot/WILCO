@@ -333,10 +333,13 @@ function athleteArchetype(a) {
 // Built in CODE (deterministic, never open-ended, hard stop). Ranked; `deeper:true`
 // items are hidden behind "Go deeper". `kind` tells the client how to persist the
 // answer. meta carries the values the answer may update.
-export function buildQuestionBank(brief, athlete, windowType) {
+// opts: { activeInjury, injuryChange } — the SAME injury area + concrete change the
+// digest's injury_plan addresses, so the question never mismatches the prose.
+export function buildQuestionBank(brief, athlete, opts = {}) {
   const q = [];
   const inj = brief.injuries || { active: [], recurring: [] };
-  const activeInjury = inj.active[0] || null;
+  const activeInjury = opts.activeInjury || inj.active[0] || null;
+  const injuryChange = opts.injuryChange || null;
   const volGap = brief.volume?.material ? brief.volume : null;
   const gapLifts = volGap ? volGap.byLift.filter((l) => l.volumeGapPct >= 15).slice(0, 2).map((l) => l.lift) : [];
 
@@ -345,13 +348,19 @@ export function buildQuestionBank(brief, athlete, windowType) {
     const bw = brief.identity.bodyweight ? `${brief.identity.bodyweight} lbs` : "what we have on file";
     q.push({ id: "weight", kind: "weight", deeper: false, text: `Bodyweight still ${bw}, or has it moved?` });
   }
-  // 2. injury status
+  // 2. injury status — same area the digest addresses
   q.push(activeInjury
     ? { id: "injury", kind: "injury", deeper: false, meta: { area: activeInjury }, text: `That ${activeInjury} — cleared, lingering, or still sharp?` }
     : { id: "injury", kind: "injury", deeper: false, text: `Anything banged up I should know about?` });
-  // 3. injury plan apply (only if active injury)
+  // 3. injury plan apply (only if active injury) — state the SPECIFIC change
   if (activeInjury) {
-    q.push({ id: "injury_apply", kind: "injury_apply", deeper: false, meta: { area: activeInjury }, text: `I'd protect that ${activeInjury} with a small program tweak — want me to apply it next week, keep it as written, or adjust?` });
+    q.push({
+      id: "injury_apply", kind: "injury_apply", deeper: false,
+      meta: { area: activeInjury, change: injuryChange || null },
+      text: injuryChange
+        ? `To protect that ${activeInjury} I'd ${injuryChange}. Apply it next week, keep it as written, or adjust?`
+        : `I'd protect that ${activeInjury} with a targeted change next week — want the specifics applied, kept as written, or adjusted?`,
+    });
   }
   // 4. volume gap (only if material)
   if (gapLifts.length) {
@@ -369,13 +378,15 @@ export function buildQuestionBank(brief, athlete, windowType) {
   } else {
     q.push({ id: "delivery", kind: "context", deeper: true, text: `Anything about how I deliver these — more detail, less, different focus?` });
   }
+  return q;
+}
 
-  if (windowType === "monthly") {
-    // Monthly-specific (appended to the deeper set; monthly shows top 8 first).
-    q.push({ id: "month_review", kind: "context", deeper: true, text: `Looking at the whole month — what genuinely worked, and what didn't?` });
-    if (volGap) q.push({ id: "month_volume", kind: "context", deeper: true, meta: { gapPct: volGap.rolledGapPct }, text: `The volume gap is the headline this month — what's the real cause? I want the next block built honestly.` });
-    q.push({ id: "month_avail", kind: "context", deeper: true, text: `Any bodyweight or training-availability change heading into the next block?` });
-  }
+// Monthly-only extra questions (appended after the weekly bank for the monthly recap).
+export function monthlyExtraQuestions(brief) {
+  const volGap = brief.volume?.material ? brief.volume : null;
+  const q = [{ id: "month_review", kind: "context", deeper: true, text: `Looking at the whole month — what genuinely worked, and what didn't?` }];
+  if (volGap) q.push({ id: "month_volume", kind: "context", deeper: true, meta: { gapPct: volGap.rolledGapPct }, text: `The volume gap is the headline this month — what's the real cause? I want the next block built honestly.` });
+  q.push({ id: "month_avail", kind: "context", deeper: true, text: `Any bodyweight or training-availability change heading into the next block?` });
   return q;
 }
 
@@ -400,14 +411,16 @@ export async function generateWeekly(athlete, brief, deps) {
 
   const system = `${COACH_VOICE}
 You are writing this week's Proof Feed digest. Return ONLY JSON with these keys (string or null — null when there's nothing real to say):
-{"week_vs_week":..,"volume_headline":..,"program_load":..,"prs_progress":..,"injury_plan":..,"goal_progress":..,"focus_next_week":..}
+{"week_vs_week":..,"volume_headline":..,"program_load":..,"prs_progress":..,"injury_plan":..,"injury_focus":..,"injury_change":..,"goal_progress":..,"focus_next_week":..}
 - week_vs_week: punchy — lifts that moved, est-1RM deltas, block context.
 - volume_headline: ONLY if the volume gap is material — make it the headline, name the set/rep shortfall by lift, allow that it may be intentional auto-regulation but name it. Else null.
 - program_load: where loads track vs prescribed %. null if no program.
 - prs_progress: new PRs / block bests. null if none.
 - injury_plan: ONLY if an injury is active — a warning PLUS a concrete example program change (e.g. cap a lift ~80%, swap to a variation, add prehab with real sets). Else null.
+- injury_focus: if an injury is active, the SINGLE body area you are addressing (e.g. "left pec", "right knee"). MUST be the same area injury_plan and focus_next_week talk about — pick one and stay consistent across all three. Else null.
+- injury_change: if an injury is active, the SPECIFIC change you'd make, concrete enough to apply verbatim — name exercises, sets/reps, and %s (e.g. "cap pressing at 80% 1RM, swap flat bench for floor press 4x6, add band pull-aparts 3x20"). No vague "a small tweak". Else null.
 - goal_progress: vs stated goals. null if none.
-- focus_next_week: one specific directive.`;
+- focus_next_week: one specific directive (consistent with injury_focus if an injury is active).`;
 
   const user = `BRIEF (JSON):\n${JSON.stringify({ ...brief, volume: v ? { ...v, note: volNote } : null }, null, 1)}`;
 
@@ -433,12 +446,16 @@ You are writing this week's Proof Feed digest. Return ONLY JSON with these keys 
     ? `${brief.identity.name.split(" ")[0]} — here's your week.`
     : `${brief.identity.name.split(" ")[0]}, quick check-in on your week.`;
 
+  // Drive the injury questions from the SAME area + change the prose addresses.
+  const activeInjury = obj.injury_focus || (brief.injuries.active || [])[0] || null;
+  const injuryChange = obj.injury_change || null;
+
   return {
     label: `WEEKLY DIGEST — ${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}`,
     contentJson: {
       intro,
       sections,
-      questions: buildQuestionBank(brief, athlete, "weekly"),
+      questions: buildQuestionBank(brief, athlete, { activeInjury, injuryChange }),
       charts: null,
       flags: { has_plateau: brief.plateaus.length > 0, has_pain: (brief.injuries.active || []).length > 0, has_missed: brief.sessions.thisWeek === 0, volume_gap: !!v?.material },
     },
@@ -480,7 +497,8 @@ Keep each to 1-3 punchy sentences. New information only.`;
     contentJson: {
       intro: `${brief.identity.name.split(" ")[0]}, let's zoom out on the month.`,
       sections: [...weekly.contentJson.sections, ...monthSections],
-      questions: buildQuestionBank(brief, athlete, "monthly"),
+      // Reuse the weekly bank (already carries the injury focus/change) + month extras.
+      questions: [...weekly.contentJson.questions, ...monthlyExtraQuestions(brief)],
       charts: charts.length ? charts : null,
       flags: weekly.contentJson.flags,
     },

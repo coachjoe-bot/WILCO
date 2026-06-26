@@ -827,7 +827,8 @@ const registerPushSubscription = async (athleteId) => {
 // goals, height/ask flags), soft notes -> bounded athlete_context, and an optional
 // injury-protective program tweak. Backward-compatible with legacy digests.
 function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead, workoutHistory}) {
-  const [phase, setPhase] = useState("report"); // report | dialogue | acting | done
+  const alreadyDone = !!(digest?.content_json?.checkin_done);
+  const [phase, setPhase] = useState(alreadyDone ? "done" : "report"); // report | dialogue | acting | done
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -1014,8 +1015,14 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
       await sbUpsert("athlete_context",{athlete_id:athlete.id,content,is_long_term:injuryMentioned,updated_at:new Date().toISOString()},"athlete_id");
       if(onContextSaved) onContextSaved(content);
     }catch(_){}
+    // Mark the digest read AND lock the check-in so it can't be re-run (once per
+    // progress report). checkin_done is stored in content_json (no migration needed).
     try{
-      if(digest?.id){ await sbUpdate("proof_digests",digest.id,{is_read:true}); if(onDigestRead) onDigestRead({...digest,is_read:true}); }
+      if(digest?.id){
+        const updated = {...c, checkin_done:true};
+        await sbUpdate("proof_digests",digest.id,{is_read:true,content_json:updated});
+        if(onDigestRead) onDigestRead({...digest,is_read:true,content_json:updated});
+      }
     }catch(_){}
     setPhase("done");
   };
@@ -1088,6 +1095,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
 
         {phase==="done"&&!loading&&(
           <div style={{textAlign:"center",marginTop:8}}>
+            <div style={{color:C.muted,fontSize:12,marginBottom:10}}>✓ Check-in complete for this report{alreadyDone?" — you've already done this one.":"."}</div>
             <button onClick={onClose} style={{background:"transparent",color:C.gold,border:`1px solid ${C.gold}`,borderRadius:10,padding:"11px 28px",cursor:"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>Done ✓</button>
           </div>
         )}
@@ -3229,7 +3237,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                       </div>
                     </div>
                     {(c.intro||sections[0]?.body)&&<div style={{color:C.text,fontSize:13,lineHeight:1.6,marginBottom:10}}>{c.intro||sections[0].body}</div>}
-                    {hasQuestions&&<div style={{color:C.gold,fontSize:12,fontWeight:700,letterSpacing:1}}>TAP TO START CHECK-IN →</div>}
+                    {hasQuestions&&<div style={{color:c.checkin_done?C.muted:C.gold,fontSize:12,fontWeight:700,letterSpacing:1}}>{c.checkin_done?"✓ CHECK-IN COMPLETE — TAP TO REVIEW":"TAP TO START CHECK-IN →"}</div>}
                   </button>
 
                   {/* At-a-glance read of the digest sections */}
