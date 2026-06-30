@@ -16,11 +16,9 @@
 //               caller's own rows — PostgREST ANDs repeated column filters, so a
 //               mismatched id matches zero rows (a silent no-op, not a cross-write).
 //
-// NOTE: COACH-role writes are NOT yet per-row scoped (the coach/admin/school
-//       hierarchy needs its own mapping — next follow-up). This is acceptable
-//       because athletes CANNOT assume the coach role (authCaller verifies a coach
-//       PIN against the coaches table), so athlete-vs-athlete tampering — the
-//       high-volume vector, including minors — is fully removed here.
+// COACH-role writes ARE now per-row scoped too (see the "Coach write scoping" block):
+//       master → all; admin → their school; regular coach → their own roster only.
+//       schools are master-only, and coaches-table writes are admin-only (own school).
 
 import { applyCors, httpErr, str, sbWrite, sbSelect, authCaller, logError, authThrottle, clientIp } from "./_supa.js";
 
