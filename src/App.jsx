@@ -3099,7 +3099,6 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           <div style={{display:"flex",alignItems:"center",gap:6,marginTop:2,flexWrap:"wrap"}}>
             <div style={{color:C.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
                 {athlete.name} · {athlete.sport}
-                {(()=>{const wk=workoutHistory.filter(w=>(Date.now()-new Date(w.created_at))<=7*24*60*60*1000).length;return wk>0?<span style={{color:C.gold,fontWeight:700,marginLeft:6}}>{wk}W</span>:null;})()}
               </div>
             {(()=>{const t=TIERS[athlete.tier||"free"];return(<span style={{background:`${t.color}22`,border:`1px solid ${t.color}`,borderRadius:4,padding:"1px 6px",color:t.color,fontSize:9,fontWeight:700,letterSpacing:1,flexShrink:0}}>{t.badge}</span>);})()}
             {athlete.certified_badge_earned_at&&(()=>{const cnt=athlete.total_sessions_logged||0;const tier=cnt>=1000?"×4":cnt>=500?"×3":cnt>=250?"×2":"";return<span title="WILCO Certified" style={{background:`${C.gold}22`,border:`1px solid ${C.gold}`,borderRadius:4,padding:"1px 6px",color:C.gold,fontSize:9,fontWeight:700,letterSpacing:1,flexShrink:0}}>✦ CERTIFIED{tier?` ${tier}`:""}</span>;})()} 
