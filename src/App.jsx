@@ -111,21 +111,27 @@ const idApi = async (action,payload={}) => {
 };
 
 // ─── BIOMETRIC LOGIN (Face ID / Touch ID) ─────────────────────────────────────
-// Lets a returning athlete sign in with the device's biometric instead of re-typing
-// name + PIN. Built on the Web Authentication API (WebAuthn) with a PLATFORM
+// Lets a returning athlete OR coach sign in with the device's biometric instead of
+// re-typing name + PIN. Built on the Web Authentication API (WebAuthn) with a PLATFORM
 // authenticator and userVerification:"required", so the OS shows Face ID / Touch ID.
-// It is device-local and server-free: after a successful biometric assertion we read
-// the enrollment saved on THIS device and replay the normal athlete-login call — so
-// there are no new endpoints, no new tables, and nothing changes server-side.
+// Device-local and server-free: after a successful biometric assertion we read the
+// enrollment saved on THIS device and replay the normal login (athlete-login /
+// coach-login) — so there are no new endpoints, no new tables, nothing server-side.
 //
-// Security note: the enrollment (name + PIN) lives in localStorage and the biometric
-// assertion gates the auto sign-in. This matches the app's existing model (the client
-// already holds the plaintext PIN, and the PIN space is only 4 digits). It blocks the
-// realistic threat — someone else picking up the phone — because navigator.credentials
-// .get() forces a biometric check. A later hardening pass can bind the stored PIN to a
+// The prompt fires straight from the user's tap on "Athlete Login" / "Coach Login"
+// (a real user gesture, which WebAuthn requires) — like iOS trying Face ID the moment
+// you wake the phone, with no extra button. Enrollments are namespaced by role so the
+// athlete tap only triggers an athlete credential and the coach tap only a coach one.
+//
+// Security note: the enrollment (login secret) lives in localStorage, gated by the
+// biometric assertion. This matches the app's existing model (the client already holds
+// the plaintext PIN, and the PIN space is only 4 digits). It blocks the realistic
+// threat — someone else picking up the phone — because navigator.credentials.get()
+// forces a biometric check. A later hardening pass can bind the stored secret to a
 // WebAuthn PRF-derived key so localStorage alone is useless without the face/finger.
-const BIO_KEY = "wilco_biometric_v1";
-let bioOfferSkipped = false; // skip re-offering enrollment for the rest of this page load
+const BIO_PREFIX = "wilco_biometric_v1_";      // + role ("athlete" | "coach")
+const bioKey = (role) => BIO_PREFIX + role;
+const bioOfferSkipped = {};                    // role -> don't re-offer enrollment this page load
 
 const b64u = {
   enc: (buf) => { const b=new Uint8Array(buf); let s=""; for(let i=0;i<b.length;i++) s+=String.fromCharCode(b[i]); return btoa(s).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""); },
@@ -141,18 +147,20 @@ async function biometricSupported(){
   }catch{ return false; }
 }
 
-const getBioEnrollment = () => { try{ return JSON.parse(localStorage.getItem(BIO_KEY)||"null"); }catch{ return null; } };
-const setBioEnrollment = (e) => { try{ localStorage.setItem(BIO_KEY, JSON.stringify(e)); }catch{} };
-const clearBioEnrollment = () => { try{ localStorage.removeItem(BIO_KEY); }catch{} };
+const getBioEnrollment = (role) => { try{ return JSON.parse(localStorage.getItem(bioKey(role))||"null"); }catch{ return null; } };
+const setBioEnrollment = (role,e) => { try{ localStorage.setItem(bioKey(role), JSON.stringify(e)); }catch{} };
+const clearBioEnrollment = (role) => { try{ localStorage.removeItem(bioKey(role)); }catch{} };
 
-// Register a platform credential and remember this athlete's login on this device.
+// Register a platform credential and remember this user's login on this device.
 // Throws if the user cancels or the platform refuses (caller surfaces a message).
-async function biometricEnroll({athleteId, name, pin}){
+// `name` is the athlete's login name; coaches sign in with PIN only so it's omitted.
+async function biometricEnroll({role, userId, name, pin}){
+  const label = name || (role==="coach" ? "WILCO Coach" : "WILCO Athlete");
   const cred = await navigator.credentials.create({
     publicKey: {
       challenge: randBytes(32),
       rp: { name: "WILCO" }, // rp.id defaults to the current origin — correct for prod + localhost
-      user: { id: new TextEncoder().encode(String(athleteId)).slice(0,64), name, displayName: name },
+      user: { id: new TextEncoder().encode(String(userId)).slice(0,64), name: label, displayName: label },
       pubKeyCredParams: [{type:"public-key",alg:-7},{type:"public-key",alg:-257}],
       authenticatorSelection: { authenticatorAttachment:"platform", userVerification:"required", residentKey:"preferred" },
       timeout: 60000,
@@ -160,13 +168,13 @@ async function biometricEnroll({athleteId, name, pin}){
     },
   });
   if(!cred) throw new Error("Face ID setup was cancelled.");
-  setBioEnrollment({ credentialId: b64u.enc(cred.rawId), athleteId, name, pin, enabledAt: Date.now() });
+  setBioEnrollment(role, { credentialId: b64u.enc(cred.rawId), role, userId, name: name||null, pin, enabledAt: Date.now() });
   return true;
 }
 
-// Prompt the platform biometric; on success return the stored {name, pin}.
-async function biometricAssert(){
-  const e = getBioEnrollment();
+// Prompt the platform biometric for `role`; on success return the stored enrollment.
+async function biometricAssert(role){
+  const e = getBioEnrollment(role);
   if(!e) throw new Error("Face ID isn't set up on this device.");
   const assertion = await navigator.credentials.get({
     publicKey: {
@@ -177,22 +185,26 @@ async function biometricAssert(){
     },
   });
   if(!assertion) throw new Error("Face ID was cancelled.");
-  return { name: e.name, pin: e.pin };
+  return e;
 }
 
-// Full biometric sign-in: biometric prompt -> replay stored login -> athlete record.
+// Full biometric sign-in for `role`: prompt -> replay stored login -> record (with pin).
 // On stale creds (PIN changed / account gone) the enrollment is forgotten so the user
-// falls back to PIN cleanly. Returns the athlete object (with pin) for setAthlete().
-async function biometricLogin(){
-  const { name, pin } = await biometricAssert();
-  const res = await idApi("athlete-login",{ name, pin });
-  if(!res.athlete){
-    clearBioEnrollment();
-    throw new Error("Saved Face ID sign-in is out of date — please log in with your PIN.");
+// falls back to PIN cleanly. Returns the athlete/coach object (with pin) for setState.
+async function biometricLogin(role){
+  const e = await biometricAssert(role);
+  if(role==="coach"){
+    const res = await idApi("coach-login",{ pin: e.pin });
+    if(!res.coach){ clearBioEnrollment("coach"); throw new Error("Saved Face ID sign-in is out of date — please log in with your PIN."); }
+    CURRENT_AUTH = { role:"coach", id:res.coach.id, pin:e.pin };
+    track("login","auth",{ role:"coach", method:"biometric" });
+    return { ...res.coach, pin:e.pin };
   }
-  CURRENT_AUTH = { role:"athlete", id:res.athlete.id, pin };
+  const res = await idApi("athlete-login",{ name: e.name, pin: e.pin });
+  if(!res.athlete){ clearBioEnrollment("athlete"); throw new Error("Saved Face ID sign-in is out of date — please log in with your PIN."); }
+  CURRENT_AUTH = { role:"athlete", id:res.athlete.id, pin:e.pin };
   track("login","auth",{ role:"athlete", method:"biometric" });
-  return { ...res.athlete, pin };
+  return { ...res.athlete, pin:e.pin };
 }
 
 // ─── RELIABILITY / ERROR REPORTING (Phase 1.5) ────────────────────────────────
@@ -1245,7 +1257,7 @@ export default function WilcoApp() {
           <div style={{fontFamily:"'Bebas Neue'",fontSize:56,color:C.gold,letterSpacing:6,lineHeight:1}}>WILCO</div>
           <div style={{color:C.muted,fontSize:12,letterSpacing:4,marginTop:4}}>COACH JOE-BOT</div>
         </div>
-        {view==="home"      && <HomeScreen setView={setView} setAthlete={setAthlete}/>}
+        {view==="home"      && <HomeScreen setView={setView} setAthlete={setAthlete} setCoach={setCoach}/>}
         {view==="signup"    && <SignupScreen setView={setView} setAthlete={setAthlete} setErr={setErr} err={err}/>}
         {view==="login"     && <LoginScreen setView={setView} setAthlete={setAthlete} setErr={setErr} err={err}/>}
         {view==="coachLogin"&& <CoachLoginScreen setView={setView} setCoach={setCoach} setErr={setErr} err={err}/>}
@@ -1256,34 +1268,34 @@ export default function WilcoApp() {
 }
 
 // ─── HOME SCREEN ──────────────────────────────────────────────────────────────
-function HomeScreen({setView,setAthlete}) {
-  const [bio,setBio] = useState(false);   // enrolled on this device AND platform supports it
+function HomeScreen({setView,setAthlete,setCoach}) {
+  const [supported,setSupported] = useState(false);
   const [busy,setBusy] = useState(false);
-  const [bioErr,setBioErr] = useState("");
-  useEffect(()=>{ let on=true; (async()=>{ if(getBioEnrollment() && await biometricSupported() && on) setBio(true); })(); return ()=>{on=false;}; },[]);
-  const faceLogin = async () => {
-    setBusy(true); setBioErr("");
-    try{ const a = await biometricLogin(); setAthlete(a); setView("athlete"); }
-    catch(e){
-      if(!getBioEnrollment()){ setBio(false); setBioErr("Face ID is no longer set up — use your PIN."); }
-      else setBioErr(e.message||"Face ID sign-in failed. Use your PIN.");
+  useEffect(()=>{ let on=true; (async()=>{ const ok = await biometricSupported(); if(on) setSupported(ok); })(); return ()=>{on=false;}; },[]);
+
+  // Tapping a login button: if this device has a saved biometric login for that role,
+  // fire Face ID right here inside the tap gesture (WebAuthn needs one). On success go
+  // straight in; on cancel/failure/stale fall through to the normal PIN form.
+  const start = async (role) => {
+    if(supported && getBioEnrollment(role)){
+      setBusy(true);
+      try{
+        const rec = await biometricLogin(role);
+        if(role==="coach"){ setCoach(rec); setView("coach"); } else { setAthlete(rec); setView("athlete"); }
+        return; // navigated in
+      }catch(_){ /* cancelled / failed / stale -> show the manual form */ }
+      finally{ setBusy(false); }
     }
-    setBusy(false);
+    setView(role==="coach" ? "coachLogin" : "login");
   };
+
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
-      {bio && <>
-        <button onClick={faceLogin} disabled={busy} style={btn(C.gold,"#000",{opacity:busy?0.7:1,cursor:busy?"not-allowed":"pointer"})}>
-          {busy?"Verifying…":"Sign in with Face ID"}
-        </button>
-        {bioErr&&<div style={{color:C.red,fontSize:12,textAlign:"center"}}>{bioErr}</div>}
-        <div style={{height:1,background:C.border,margin:"4px 0"}}/>
-      </>}
-      <button onClick={()=>setView("login")} style={bio?btn(C.navy2,C.muted2,{border:`1px solid ${C.border}`}):btn(C.gold,"#000")}>Athlete Login</button>
-      <button onClick={()=>setView("signup")} style={btn("transparent",C.gold,{border:`2px solid ${C.gold}`})}>New Athlete Sign Up</button>
+      <button onClick={()=>start("athlete")} disabled={busy} style={btn(C.gold,"#000",{opacity:busy?0.7:1,cursor:busy?"not-allowed":"pointer"})}>Athlete Login</button>
+      <button onClick={()=>setView("signup")} disabled={busy} style={btn("transparent",C.gold,{border:`2px solid ${C.gold}`})}>New Athlete Sign Up</button>
       <div style={{height:1,background:C.border,margin:"8px 0"}}/>
-      <button onClick={()=>setView("coachLogin")} style={btn(C.navy2,C.muted2,{border:`1px solid ${C.border}`})}>Coach Login</button>
-      <button onClick={()=>setView("coachSetup")} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer",textAlign:"center",marginTop:4}}>
+      <button onClick={()=>start("coach")} disabled={busy} style={btn(C.navy2,C.muted2,{border:`1px solid ${C.border}`})}>Coach Login</button>
+      <button onClick={()=>setView("coachSetup")} disabled={busy} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer",textAlign:"center",marginTop:4}}>
         First time coach? Enter access code
       </button>
     </div>
@@ -2021,7 +2033,7 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
   const [bioBusy,setBioBusy] = useState(false);
   const [enrollFor,setEnrollFor] = useState(null);         // {athlete,name,pin} pending Face ID enrollment
 
-  useEffect(()=>{ let on=true; (async()=>{ if(getBioEnrollment() && await biometricSupported() && on) setBioReady(true); })(); return ()=>{on=false;}; },[]);
+  useEffect(()=>{ let on=true; (async()=>{ if(getBioEnrollment("athlete") && await biometricSupported() && on) setBioReady(true); })(); return ()=>{on=false;}; },[]);
 
   const enterApp = (athleteObj,pinVal) => { setAthlete({...athleteObj,pin:pinVal}); setView("athlete"); };
 
@@ -2034,7 +2046,7 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
         CURRENT_AUTH={role:"athlete",id:res.athlete.id,pin};track("login","auth",{role:"athlete"});
         // First successful PIN login on a biometric-capable device with no enrollment yet:
         // offer Face ID before entering. Otherwise go straight in.
-        if(!getBioEnrollment() && !bioOfferSkipped && await biometricSupported()){
+        if(!getBioEnrollment("athlete") && !bioOfferSkipped.athlete && await biometricSupported()){
           setEnrollFor({athlete:res.athlete,name:name.trim(),pin}); setLoading(false); return;
         }
         enterApp(res.athlete,pin);
@@ -2047,9 +2059,9 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
 
   const faceLogin = async () => {
     setBioBusy(true); setErr("");
-    try{ const a = await biometricLogin(); enterApp(a,a.pin); }
+    try{ const a = await biometricLogin("athlete"); enterApp(a,a.pin); }
     catch(e){
-      if(!getBioEnrollment()){ setBioReady(false); setErr("Face ID is no longer set up — log in with your PIN."); }
+      if(!getBioEnrollment("athlete")){ setBioReady(false); setErr("Face ID is no longer set up — log in with your PIN."); }
       else setErr(e.message||"Face ID sign-in failed. Use your PIN.");
     }
     setBioBusy(false);
@@ -2059,7 +2071,7 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
     if(!enrollFor) return;
     setBioBusy(true); setErr("");
     try{
-      await biometricEnroll({athleteId:enrollFor.athlete.id,name:enrollFor.name,pin:enrollFor.pin});
+      await biometricEnroll({role:"athlete",userId:enrollFor.athlete.id,name:enrollFor.name,pin:enrollFor.pin});
       track("biometric_enroll","auth",{role:"athlete"});
       enterApp(enrollFor.athlete,enrollFor.pin);
     }catch(e){
@@ -2070,7 +2082,7 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
     setBioBusy(false);
   };
 
-  const skipBio = () => { bioOfferSkipped = true; const e=enrollFor; setEnrollFor(null); if(e) enterApp(e.athlete,e.pin); };
+  const skipBio = () => { bioOfferSkipped.athlete = true; const e=enrollFor; setEnrollFor(null); if(e) enterApp(e.athlete,e.pin); };
 
   const sendRecovery = async () => {
     if(!recoveryName.trim()||!recoveryEmail.trim()){setErr("Enter your name and recovery email.");return;}
@@ -2119,16 +2131,6 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
       </div>
 
       {mode==="login"&&<>
-        {bioReady&&<>
-          <button onClick={faceLogin} disabled={bioBusy} style={btn(C.gold,"#000",{marginBottom:14,opacity:bioBusy?0.7:1,cursor:bioBusy?"not-allowed":"pointer"})}>
-            {bioBusy?"Verifying…":"Sign in with Face ID"}
-          </button>
-          <div style={{display:"flex",alignItems:"center",gap:10,margin:"0 0 16px"}}>
-            <div style={{height:1,background:C.border,flex:1}}/>
-            <span style={{color:C.muted,fontSize:11,letterSpacing:1}}>OR</span>
-            <div style={{height:1,background:C.border,flex:1}}/>
-          </div>
-        </>}
         <div style={{marginBottom:16}}>
           <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>YOUR NAME</label>
           <input value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&login()} placeholder="Exact name you signed up with" style={inp()}/>
@@ -2145,6 +2147,7 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
           {loading?"Checking...":"Let's Get to Work ->"}
         </button>
         <div style={{textAlign:"center",marginTop:12,display:"flex",flexDirection:"column",gap:6}}>
+          {bioReady&&<button onClick={faceLogin} disabled={bioBusy} style={{background:"none",border:"none",color:C.gold,fontSize:12,cursor:bioBusy?"default":"pointer"}}>{bioBusy?"Verifying…":"Use Face ID instead"}</button>}
           <button onClick={enterForgot} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>Forgot your PIN?</button>
           <button onClick={()=>setView("signup")} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>New athlete? Sign up here</button>
         </div>
@@ -2195,17 +2198,57 @@ function CoachLoginScreen({setView,setCoach,setErr,err}) {
   const [mode,setMode] = useState("login"); // "login" | "forgot"
   const [recoveryEmail,setRecoveryEmail] = useState("");
   const [recoverySent,setRecoverySent] = useState(false);
+  const [bioReady,setBioReady] = useState(false);   // enrolled on device + supported
+  const [bioBusy,setBioBusy] = useState(false);
+  const [enrollFor,setEnrollFor] = useState(null);  // {coach,pin} pending Face ID enrollment
+
+  useEffect(()=>{ let on=true; (async()=>{ if(getBioEnrollment("coach") && await biometricSupported() && on) setBioReady(true); })(); return ()=>{on=false;}; },[]);
+
+  const enterDash = (coachObj,pinVal) => { setCoach({...coachObj,pin:pinVal}); setView("coach"); };
 
   const login = async () => {
     if(pin.length!==4){setErr("Enter your 4-digit PIN.");return;}
     setLoading(true); setErr("");
     try {
       const res = await idApi("coach-login",{pin});
-      if(res.coach){CURRENT_AUTH={role:"coach",id:res.coach.id,pin};track("login","auth",{role:"coach"});setCoach({...res.coach,pin});setView("coach");}
+      if(res.coach){
+        CURRENT_AUTH={role:"coach",id:res.coach.id,pin};track("login","auth",{role:"coach"});
+        // First PIN login on a biometric-capable device with no enrollment yet: offer Face ID.
+        if(!getBioEnrollment("coach") && !bioOfferSkipped.coach && await biometricSupported()){
+          setEnrollFor({coach:res.coach,pin}); setLoading(false); return;
+        }
+        enterDash(res.coach,pin);
+      }
       else setErr("PIN not found. Check your PIN or set up your coach account first.");
     } catch(e){setErr(e.message||"Connection error.");}
     setLoading(false);
   };
+
+  const faceLogin = async () => {
+    setBioBusy(true); setErr("");
+    try{ const c = await biometricLogin("coach"); enterDash(c,c.pin); }
+    catch(e){
+      if(!getBioEnrollment("coach")){ setBioReady(false); setErr("Face ID is no longer set up — log in with your PIN."); }
+      else setErr(e.message||"Face ID sign-in failed. Use your PIN.");
+    }
+    setBioBusy(false);
+  };
+
+  const enableBio = async () => {
+    if(!enrollFor) return;
+    setBioBusy(true); setErr("");
+    try{
+      await biometricEnroll({role:"coach",userId:enrollFor.coach.id,pin:enrollFor.pin});
+      track("biometric_enroll","auth",{role:"coach"});
+      enterDash(enrollFor.coach,enrollFor.pin);
+    }catch(e){
+      setErr(e.message||"Couldn't set up Face ID. You can try again later.");
+      enterDash(enrollFor.coach,enrollFor.pin);
+    }
+    setBioBusy(false);
+  };
+
+  const skipBio = () => { bioOfferSkipped.coach = true; const e=enrollFor; setEnrollFor(null); if(e) enterDash(e.coach,e.pin); };
 
   const sendRecovery = async () => {
     if(!recoveryEmail.trim()){setErr("Enter your email address.");return;}
@@ -2223,6 +2266,26 @@ function CoachLoginScreen({setView,setCoach,setErr,err}) {
 
   const enterForgot = () => { setMode("forgot"); setErr(""); setRecoverySent(false); };
   const backToLogin = () => { setMode("login"); setErr(""); setRecoverySent(false); };
+
+  // Post-login offer to turn on Face ID for next time (shown once per app open).
+  if(enrollFor){
+    return (
+      <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24,textAlign:"center"}}>
+        <div style={{fontSize:34,marginBottom:12}}>⚡️</div>
+        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:22,letterSpacing:2,marginBottom:8}}>FASTER SIGN-IN</div>
+        <div style={{color:C.muted2,fontSize:13,lineHeight:1.6,marginBottom:20}}>
+          Use Face ID to sign in next time — no PIN to type. You can still use your PIN anytime.
+        </div>
+        {err&&<div style={{color:C.red,fontSize:12,marginBottom:12}}>{err}</div>}
+        <button onClick={enableBio} disabled={bioBusy} style={btn(C.gold,"#000",{opacity:bioBusy?0.7:1,cursor:bioBusy?"not-allowed":"pointer"})}>
+          {bioBusy?"Setting up…":"Enable Face ID"}
+        </button>
+        <div style={{marginTop:10}}>
+          <button onClick={skipBio} disabled={bioBusy} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>Not now</button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24}}>
@@ -2246,6 +2309,7 @@ function CoachLoginScreen({setView,setCoach,setErr,err}) {
           {loading?"Checking...":"Access Dashboard ->"}
         </button>
         <div style={{textAlign:"center",marginTop:12,display:"flex",flexDirection:"column",gap:6}}>
+          {bioReady&&<button onClick={faceLogin} disabled={bioBusy} style={{background:"none",border:"none",color:C.gold,fontSize:12,cursor:bioBusy?"default":"pointer"}}>{bioBusy?"Verifying…":"Use Face ID instead"}</button>}
           <button onClick={enterForgot} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>Forgot your PIN?</button>
           <button onClick={()=>setView("coachSetup")} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>First time? Enter access code</button>
         </div>
