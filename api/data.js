@@ -177,6 +177,7 @@ export default async function handler(req, res) {
     // ownFilter is appended to update/delete queries (stays "" for coach callers,
     // which preserves their existing behavior exactly).
     let ownFilter = "";
+    let coachIsMaster = false;
     if (caller.role === "athlete") {
       const col = ATHLETE_OWN_COL[table];
       if (!col) throw httpErr(403, "This account can't write that data");
@@ -209,6 +210,62 @@ export default async function handler(req, res) {
       }
     }
 
+    // ── Coach write scoping ───────────────────────────────────────────────────
+    // Mirrors the READ scoping above: a coach may only WRITE within their remit.
+    //   master → everything (no scope)
+    //   admin  → their school (coaches + athletes + those athletes' data)
+    //   coach  → their own roster only (athletes where coach_id == them, + that data)
+    // Without this, ANY coach could write ANY row — another coach's athletes, other
+    // schools, even create/delete coaches. ownFilter is ANDed onto update/delete so a
+    // forged client filter can only narrow; insert/upsert payloads are checked row-by-row.
+    if (caller.role === "coach") {
+      const me = (await sbSelect("coaches", `?id=eq.${enc(caller.id)}&select=id,role,school_id`))[0];
+      if (!me) throw httpErr(401, "Not authorized");
+      coachIsMaster = me.role === "master";
+      const isAdmin = me.role === "admin";
+
+      if (!coachIsMaster) {
+        const sid = me.school_id;
+        const writeRows = () => (Array.isArray(body.data) ? body.data : [body.data]);
+        // For insert/upsert, assert every row satisfies the ownership predicate.
+        const assertRows = (ok) => {
+          if (body.op !== "insert" && body.op !== "upsert") return;
+          for (const r of writeRows()) {
+            if (!r || typeof r !== "object") throw httpErr(400, `${body.op} requires data`);
+            if (!ok(r)) throw httpErr(403, "Cannot write another account's data");
+          }
+        };
+
+        if (table === "schools") {
+          // School records (tier, limits, codes) are master-only.
+          throw httpErr(403, "This account can't write that data");
+        } else if (table === "coaches") {
+          // Managing coaches is admin-only, and only within the admin's own school.
+          if (!isAdmin) throw httpErr(403, "This account can't write that data");
+          ownFilter = `&school_id=eq.${enc(sid)}`;
+          assertRows((r) => String(r.school_id) === String(sid));
+        } else if (table === "athletes") {
+          // admin → any athlete in their school; coach → only their own roster.
+          ownFilter = isAdmin ? `&school_id=eq.${enc(sid)}` : `&coach_id=eq.${enc(caller.id)}`;
+          assertRows((r) => (isAdmin ? String(r.school_id) === String(sid) : String(r.coach_id) === String(caller.id)));
+        } else {
+          // Athlete-owned data tables: scope to the coach's athlete set (the same set
+          // the read path returns), keyed by athlete_id.
+          const col = ATHLETE_OWN_COL[table];
+          if (!col) throw httpErr(403, "This account can't write that data");
+          const roster = isAdmin
+            ? await sbSelect("athletes", `?school_id=eq.${enc(sid)}&select=id`)
+            : await sbSelect("athletes", `?coach_id=eq.${enc(caller.id)}&select=id`);
+          const ids = roster.map((a) => String(a.id));
+          // Empty roster → a sentinel uuid that never matches a real row, so update/
+          // delete become safe no-ops and insert/upsert payloads are rejected below.
+          const inList = ids.length ? ids.map((id) => `"${id}"`).join(",") : `"00000000-0000-0000-0000-000000000000"`;
+          ownFilter = `&${col}=in.(${inList})`;
+          assertRows((r) => ids.includes(String(r[col])));
+        }
+      }
+    }
+
     if (body.op === "insert") {
       if (body.data == null || typeof body.data !== "object") throw httpErr(400, "insert requires data");
       const json = await sbWrite({ method: "POST", table, body: body.data });
@@ -236,6 +293,11 @@ export default async function handler(req, res) {
       // only ever land on the caller's own row. The app only upserts on athlete_id.
       if (caller.role === "athlete" && conflict !== ATHLETE_OWN_COL[table]) {
         throw httpErr(403, "Upsert not allowed on that key");
+      }
+      // Non-master coaches have no legitimate upsert path (the app never coach-upserts),
+      // and upsert applies no ownFilter — so block it rather than leave an unscoped write.
+      if (caller.role === "coach" && !coachIsMaster) {
+        throw httpErr(403, "Upsert not allowed for this account");
       }
       const json = await sbWrite({
         method: "POST",
