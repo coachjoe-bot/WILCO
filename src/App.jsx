@@ -4573,13 +4573,17 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
           </button>
         )}
 
-        {/* Legal — links to the publicly hosted documents on the marketing site. */}
-        <div style={{display:"flex",justifyContent:"center",gap:14,marginTop:18,marginBottom:4}}>
+        {/* Legal — links to the publicly hosted documents on the marketing site,
+            plus a support email so users have a direct way to reach us. */}
+        <div style={{display:"flex",justifyContent:"center",alignItems:"center",flexWrap:"wrap",gap:14,marginTop:18,marginBottom:4}}>
           <a href="https://trainwilco.com/terms" target="_blank" rel="noopener noreferrer"
             style={{color:C.muted,fontSize:12,textDecoration:"none"}}>Terms &amp; Conditions</a>
           <span style={{color:C.border,fontSize:12}}>·</span>
           <a href="https://trainwilco.com/privacy" target="_blank" rel="noopener noreferrer"
             style={{color:C.muted,fontSize:12,textDecoration:"none"}}>Privacy Policy</a>
+          <span style={{color:C.border,fontSize:12}}>·</span>
+          <a href="mailto:support@trainwilco.com"
+            style={{color:C.muted,fontSize:12,textDecoration:"none"}}>support@trainwilco.com</a>
         </div>
 
         {/* ── Danger zone — permanent account deletion ── */}
