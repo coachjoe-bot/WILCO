@@ -241,6 +241,26 @@ export async function rateLimitReset(key) {
   await sbDelete("rate_limits", `?key=eq.${encodeURIComponent(key)}`);
 }
 
+// ── Brute-force guard for the authenticated gateways ─────────────────────────
+// authCaller() verifies a 4-digit PIN, but the login endpoints are the only place
+// that throttles guesses — the data / claude gateways called authCaller with no
+// lockout, so a known athlete/coach id could be PIN-brute-forced through them.
+// This guards those paths WITHOUT penalizing legitimate users: it pre-checks the
+// failure count (refusing — and skipping the bcrypt work — once an IP is locked),
+// and returns a recordFailure() that the caller invokes ONLY when auth fails.
+// Successful requests record nothing, so a heavy real user is never throttled.
+export async function authThrottle(key, { max = 10, windowMin = 15 } = {}) {
+  const since = new Date(Date.now() - windowMin * 60_000).toISOString();
+  const rows = await sbSelect(
+    "rate_limits",
+    `?key=eq.${encodeURIComponent(key)}&created_at=gte.${encodeURIComponent(since)}&select=id`
+  );
+  if (rows.length >= max) {
+    throw httpErr(429, "Too many attempts. Please wait 15 minutes and try again.");
+  }
+  return async () => { try { await sbInsert("rate_limits", { key }); } catch { /* never block on logging */ } };
+}
+
 // ── Caller authentication ─────────────────────────────────────────────────────
 // Verify a request's `auth:{role,id,pin}` is a real athlete/coach with a matching
 // (bcrypt) PIN. Shared by the write gateway (api/data.js) and the Claude proxy
