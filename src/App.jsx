@@ -1178,7 +1178,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
   return (
     <div style={{position:"fixed",inset:0,zIndex:500,background:C.navy,display:"flex",flexDirection:"column",maxWidth:600,margin:"0 auto"}}>
       <style>{GS}</style>
-      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,paddingTop:"calc(12px + env(safe-area-inset-top, 0px))",paddingBottom:"12px",paddingLeft:"16px",paddingRight:"16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
         <div>
           <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:C.gold,letterSpacing:2}}>{label}</div>
           <div style={{color:C.muted,fontSize:11}}>{isMonthly?"Monthly":"Weekly"} Check-In · {athlete.name}</div>
