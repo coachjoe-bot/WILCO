@@ -14,7 +14,7 @@
 //
 // POST { auth:{role,id,pin}, model?, max_tokens?, system?, messages:[...] }
 
-import { applyCors, httpErr, authCaller, rateLimit, sbSelect, sbInsert, logError } from "./_supa.js";
+import { applyCors, httpErr, authCaller, rateLimit, sbSelect, sbInsert, logError, authThrottle, clientIp } from "./_supa.js";
 
 const enc = encodeURIComponent;
 
@@ -129,8 +129,16 @@ export default async function handler(req, res) {
 
   let caller = null;
   try {
+    // 0) Brute-force guard: lock an IP with too many recent failed PIN attempts
+    //    before doing bcrypt work; record only failures so real users aren't throttled.
+    const recordAuthFail = await authThrottle(`claude-authfail:${clientIp(req)}`);
     // 1) Require a real logged-in athlete/coach (bcrypt PIN verified server-side).
-    caller = await authCaller(body.auth);
+    try {
+      caller = await authCaller(body.auth);
+    } catch (e) {
+      if (e.status === 401) await recordAuthFail();
+      throw e;
+    }
 
     // 2) Per-user rate limit — a compromised account can't burn the bill unbounded.
     await rateLimit(`claude:${caller.role}:${caller.id}`, RATE);

@@ -22,7 +22,7 @@
 //       PIN against the coaches table), so athlete-vs-athlete tampering — the
 //       high-volume vector, including minors — is fully removed here.
 
-import { applyCors, httpErr, str, sbWrite, sbSelect, authCaller, logError } from "./_supa.js";
+import { applyCors, httpErr, str, sbWrite, sbSelect, authCaller, logError, authThrottle, clientIp } from "./_supa.js";
 
 const enc = encodeURIComponent;
 
@@ -78,7 +78,16 @@ export default async function handler(req, res) {
 
   let caller = null;
   try {
-    caller = await authCaller(body.auth);
+    // Brute-force guard: refuse once an IP has too many recent failed PIN attempts,
+    // and record THIS attempt only if it fails (legit callers send the right PIN and
+    // are never throttled). Must run before authCaller so a locked IP skips bcrypt.
+    const recordAuthFail = await authThrottle(`data-authfail:${clientIp(req)}`);
+    try {
+      caller = await authCaller(body.auth);
+    } catch (e) {
+      if (e.status === 401) await recordAuthFail();
+      throw e;
+    }
 
     // ── Phase 1b(b): scoped READ ─────────────────────────────────────────────
     // Routed here so the anon key can be denied SELECT on these PII tables. The
