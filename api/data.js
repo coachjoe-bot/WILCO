@@ -160,6 +160,12 @@ export default async function handler(req, res) {
       // ownership scope is ANDed on top so it can only narrow, never widen.
       let query = typeof body.params === "string" && body.params ? body.params : "?select=*";
       if (!query.startsWith("?")) query = "?" + query;
+      // Defense-in-depth: this read runs with the SERVICE key (bypasses RLS), so block
+      // PostgREST embeds (select=foo,bar(...)) — an embedded resource is fetched without
+      // RLS and could surface related rows/columns the public key is denied. The app's
+      // selects are always flat column lists; parentheses only ever mean an embed here.
+      const rawSelect = (/[?&]select=([^&]*)/i.exec(query) || [])[1] || "";
+      if (/[()]|%28|%29/i.test(rawSelect)) throw httpErr(400, "Embedded selects are not allowed");
       const json = await sbSelect(rtable, query + scope);
       return res.status(200).json(json);
     }
@@ -222,6 +228,15 @@ export default async function handler(req, res) {
     if (body.op === "upsert") {
       if (body.data == null || typeof body.data !== "object") throw httpErr(400, "upsert requires data");
       const conflict = str(body.conflict, { max: 120, name: "conflict" });
+      // Athlete upserts may ONLY conflict on their ownership column. The per-row check
+      // above forces the payload's ownership column to equal the caller, but on_conflict
+      // chooses WHICH existing row gets merged — so a conflict on a different unique key
+      // (e.g. "id") could overwrite ANOTHER athlete's row while the payload still claims
+      // the caller as owner. Pinning conflict to the ownership column means a merge can
+      // only ever land on the caller's own row. The app only upserts on athlete_id.
+      if (caller.role === "athlete" && conflict !== ATHLETE_OWN_COL[table]) {
+        throw httpErr(403, "Upsert not allowed on that key");
+      }
       const json = await sbWrite({
         method: "POST",
         table,
