@@ -66,6 +66,35 @@ const ATHLETE_OWN_COL = {
   deletion_requests: "athlete_id",
 };
 
+// ── Per-COLUMN allowlist for athlete writes to sensitive tables ───────────────
+// Row-ownership scoping (above) stops an athlete writing ANOTHER account's row, but
+// not WHICH COLUMNS they set on their OWN row. `athletes` holds coach/billing/role
+// fields an athlete must never self-set — tier escalation, program_locked, role,
+// pin, stripe ids. For any table listed here, every key in the write payload must be
+// allowlisted or the write is rejected: a hard server-side boundary independent of
+// what the client (or an AI extractor parsing free-text chat) sends. Columns NOT
+// listed are denied; tables not in this map keep plain row-only scoping.
+const ATHLETE_COL_ALLOW = {
+  athletes: {
+    cols: new Set([
+      // profile / onboarding (set during signup + profile completion)
+      "goal", "coach_name", "coach_email", "coach_id", "school_id",
+      "birthday", "age", "height_inches", "gender", "training_days_per_week",
+      "equipment", "position_or_event", "injury_history", "recruiting_intent",
+      // self-service settings + app-maintained state
+      "weight_lbs", "weight_unit", "height_finalized", "ask_weight",
+      "program_text", "temp_program_text", "first_chat_complete", "resolved_pain",
+      "proof_enabled", "proof_schedule_dow", "proof_schedule_hour", "proof_timezone",
+      // gamification counters the app maintains as the athlete logs sessions
+      "total_sessions_logged", "certified_badge_earned_at",
+      "tier",
+    ]),
+    // Value guards: an athlete may only ever DOWNGRADE their own tier to "free"
+    // (paid tiers are granted server-side by Stripe), never self-grant pro/elite.
+    values: { tier: (v) => v === "free" },
+  },
+};
+
 export default async function handler(req, res) {
   if (applyCors(req, res)) return;
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -153,6 +182,22 @@ export default async function handler(req, res) {
           if (!r || typeof r !== "object") throw httpErr(400, `${body.op} requires data`);
           if (String(r[col]) !== String(caller.id)) {
             throw httpErr(403, "Cannot write another account's data");
+          }
+        }
+      }
+      // Per-column allowlist on sensitive tables (e.g. athletes): reject any field
+      // the athlete isn't permitted to self-set, and enforce per-column value guards.
+      const colRule = ATHLETE_COL_ALLOW[table];
+      if (colRule && body.op !== "delete") {
+        const rows = Array.isArray(body.data) ? body.data : [body.data];
+        for (const r of rows) {
+          if (!r || typeof r !== "object") throw httpErr(400, `${body.op} requires data`);
+          for (const k of Object.keys(r)) {
+            if (k === col) continue; // ownership column — already validated above
+            if (!colRule.cols.has(k)) throw httpErr(403, `Field not editable: ${k}`);
+            if (colRule.values && colRule.values[k] && !colRule.values[k](r[k])) {
+              throw httpErr(403, `Value not allowed for ${k}`);
+            }
           }
         }
       }
