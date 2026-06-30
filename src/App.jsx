@@ -444,11 +444,18 @@ const toLbs = (weight, unit) => (unit==="kg" ? weight*2.205 : weight);
 // A "real session" has at least one parsed exercise or run_data (filters out pure Q&A messages)
 const isRealSession = (w) => w?.parsed_data?.exercises?.length > 0 || !!w?.parsed_data?.run_data;
 
-// Normalize exercise names so minor wording variations map to the same PR key.
-// Preserves meaningful distinctions (e.g. "Power Snatch" vs "Power Snatch from the Floor").
+// Normalize exercise names so wording variations map to the same key. Two passes:
+//  (1) expand common abbreviations + unify spellings;
+//  (2) strip EXECUTION/SETUP wording — tempo, pause and start-position qualifiers
+//      that describe HOW a lift was performed, not WHICH lift it is. So
+//      "Back Squat (paused)", "Pause Back Squat" and "Paused Back Squat" all collapse
+//      to "back squat", and "Power Snatch from the Floor" collapses to "power snatch".
+// Lift-DEFINING words (front/back, incline/decline/flat, close-/wide-grip, sumo/
+// deficit/romanian, hang/power/full, high-/low-bar) are deliberately PRESERVED so
+// genuinely different lifts never merge.
 const normalizeExName = (name) => {
   if(!name) return "";
-  return name.toLowerCase().trim()
+  let n = name.toLowerCase().trim()
     .replace(/\s+/g," ")
     .replace(/\bohp\b/g,"overhead press")
     .replace(/\bbb\b/g,"barbell")
@@ -457,9 +464,22 @@ const normalizeExName = (name) => {
     .replace(/\brdl\b/g,"romanian deadlift")
     .replace(/pull[ -]?ups?\b/g,"pull-up")
     .replace(/chin[ -]?ups?\b/g,"chin-up")
-    .replace(/push[ -]?ups?\b/g,"push-up")
-    .trim();
+    .replace(/push[ -]?ups?\b/g,"push-up");
+  // (2) Strip execution/setup qualifiers.
+  n = n
+    .replace(/\([^)]*\)/g," ")                                      // any parenthetical, e.g. "(paused)", "(tempo)"
+    .replace(/\b(?:from|off)(?:\s+(?:the|a))?\s+(?:floor|ground)\b/g," ") // "from the floor", "off the ground" (NOT "from the hang")
+    .replace(/\b(?:dead[\s-]?stop|touch[\s-]?and[\s-]?go|tng)\b/g," ")    // dead-stop / touch-and-go reps
+    .replace(/\b(?:paused?|tempo|slow|controlled|eccentric)\b/g," ")      // tempo/pause descriptors
+    .replace(/\bw\/?\b/g," ")                                       // dangling "w/" / "w" connector left by the above
+    .replace(/\s+/g," ").trim();
+  return n;
 };
+
+// Among raw names that share a normalized key, the shortest is almost always the
+// canonical display form ("Power Snatch" over "Power Snatch from the Floor",
+// "Back Squat" over "Paused Back Squat"). Used to label grouped exercises.
+const cleanerName = (a,b) => !a ? (b||"") : !b ? a : (b.length<a.length ? b : a);
 
 // Groups workout entries into sessions using time-gap logic.
 // Entries within gapMs of each other (same athlete) = same session.
@@ -552,6 +572,7 @@ Rules:
 - Populate "run_data" when the message describes any run, jog, cardio, or running workout. Set run_type to the best match. Calculate pace if distance and time are both given.
 - For interval runs, populate "intervals" array with one entry per repeat type.
 - Populate "exercises" for strength/lifting/conditioning work. Leave empty for pure runs.
+- Exercise "name": use a CANONICAL name = the core lift + equipment + any lift-DEFINING qualifier (front/back, incline/decline/flat, close-/wide-grip, sumo/deficit/romanian, hang/power/full, high-/low-bar). Do NOT put EXECUTION/SETUP descriptors in the name — tempo, pause/paused, "from the floor", dead-stop, touch-and-go, slow eccentric, etc. — those belong in "notes". So "paused back squat" → name:"Back Squat", notes:"paused"; "power snatch from the floor" → name:"Power Snatch". This keeps the same lift from being logged under several names. Use Title Case.
 - If the athlete mentions heart rate, bpm, avg HR, or max HR, populate heart_rate_avg and/or heart_rate_max in run_data.
 - Populate "practice_data" when the message describes a sport practice, game, scrimmage, team conditioning session, skill work, or film/walkthrough. Set practice_type to the best match. Intensity: light=walkthrough/film/skill_work (shooting, ball handling, passing drills — minimal physical exertion), moderate=half-speed/light practice, high=full practice, very_high=game/scrimmage/full-contact. Do NOT populate for gym workouts or standalone runs.
 - A single message may have BOTH practice_data AND exercises (e.g. athlete did practice then hit the weight room). Populate both when applicable.
@@ -3602,7 +3623,8 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
       const e1rm = bestE1RMForExercise(ex);
       if(!e1rm) return;
       const k=normalizeExName(ex.name);
-      if(!byEx[k]||e1rm>byEx[k].e1rm) byEx[k]={name:ex.name,e1rm,unit:ex.unit||"lbs"};
+      if(!byEx[k]) byEx[k]={name:ex.name,e1rm,unit:ex.unit||"lbs"};
+      else { byEx[k].name=cleanerName(byEx[k].name,ex.name); if(e1rm>byEx[k].e1rm) byEx[k].e1rm=e1rm; }
     });
   });
 
@@ -6208,6 +6230,7 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
                   const k = normalizeExName(ex.name);
                   const unit = ex.unit||"lbs";
                   if(!byEx[k]) byEx[k]={name:ex.name,unit,entries:[]};
+                  else byEx[k].name=cleanerName(byEx[k].name,ex.name);
                   const topSet = getExerciseSets(ex).reduce((b,s)=>epley1RM(toLbs(s.weight,unit),s.reps)>epley1RM(toLbs(b.weight,unit),b.reps)?s:b, {weight:ex.weight??0, reps:ex.reps||1});
                   byEx[k].entries.push({date:new Date(w.created_at),weight:topSet.weight,unit,reps:topSet.reps||1,e1rm});
                 });
