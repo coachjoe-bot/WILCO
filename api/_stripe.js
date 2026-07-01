@@ -186,17 +186,21 @@ export async function markGiftRedeemed(stripe, promotionCodeId, redeemer) {
   if (!gifterId) return;
   const gifter = await sbAthleteGet(gifterId);
   if (!gifter || !Array.isArray(gifter.gift_codes)) return;
-  const updated = gifter.gift_codes.map((g) =>
-    g.promotion_code_id === promotionCodeId ||
-    (g.code && promo.code && g.code.toUpperCase() === promo.code.toUpperCase())
-      ? {
-          ...g,
-          status: "redeemed",
-          redeemed_by: redeemer?.name || (redeemer?.id ? String(redeemer.id) : null),
-          redeemed_at: new Date().toISOString(),
-        }
-      : g
-  );
+  const who = redeemer?.name || (redeemer?.id ? String(redeemer.id) : null);
+  const now = new Date().toISOString();
+  const updated = gifter.gift_codes.map((g) => {
+    const match =
+      g.promotion_code_id === promotionCodeId ||
+      (g.code && promo.code && g.code.toUpperCase() === promo.code.toUpperCase());
+    if (!match) return g;
+    // Founder codes are unlimited/reusable — never flip them to "redeemed"; just
+    // tally the claim so the founder can see traction. (Stripe never caps them
+    // either, since they carry no max_redemptions.)
+    if (g.unlimited) {
+      return { ...g, redeemed_count: (g.redeemed_count || 0) + 1, last_redeemed_by: who, last_redeemed_at: now };
+    }
+    return { ...g, status: "redeemed", redeemed_by: who, redeemed_at: now };
+  });
   await sbAthletePatch(gifterId, { gift_codes: updated });
 }
 

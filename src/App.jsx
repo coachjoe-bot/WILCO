@@ -547,6 +547,16 @@ const normalizeExName = (name) => {
     .replace(/pull[ -]?ups?\b/g,"pull-up")
     .replace(/chin[ -]?ups?\b/g,"chin-up")
     .replace(/push[ -]?ups?\b/g,"push-up");
+  // (1b) Collapse simple English plurals on the head noun so "Deficit Deadlifts"
+  //      and "Deficit Deadlift" (or "Squats"/"Squat") don't split into two PRs.
+  //      Words ending in "ss" (press) are never plurals, so they're left alone.
+  n = n
+    .replace(/(ch|sh|x|z)es\b/g,"$1")   // snatches→snatch, crunches→crunch
+    .replace(/sses\b/g,"ss")            // presses→press
+    .replace(/([^s])s\b/g,"$1");        // deadlifts→deadlift, raises→raise, curls→curl
+  // (1c) "Bench" on its own means the bench press — merge it with "Bench Press"
+  //      (and "Incline Bench" with "Incline Bench Press", etc.).
+  n = n.replace(/\bbench\b(?!\s*press)/g,"bench press");
   // (2) Strip execution/setup qualifiers.
   n = n
     .replace(/\([^)]*\)/g," ")                                      // any parenthetical, e.g. "(paused)", "(tempo)"
@@ -3926,7 +3936,9 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   const prMap = {};
   Object.entries(byEx).forEach(([k,ex])=>{ prMap[k]={key:k,name:ex.name,unit:ex.unit,estimated:ex.e1rm,manual:null}; });
   manualRMs.forEach(m=>{
-    const k=m.normalized_exercise;
+    // Re-normalize the stored key so manual 1RMs saved before a normalizer update
+    // (e.g. under "bench" or a plural) still land on the current merged exercise key.
+    const k=normalizeExName(m.normalized_exercise);
     if(!prMap[k]) prMap[k]={key:k,name:m.exercise,unit:m.unit,estimated:0,manual:null};
     prMap[k].manual=m;
   });
@@ -4712,22 +4724,30 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
           {saving?"Saving...":"Save Changes →"}
         </button>
 
-        {/* Gift codes — unlock after the first real payment */}
-        {(currentTier==="pro"||currentTier==="elite")&&(
+        {/* Gift codes — single-use friend codes (on first payment) OR a reusable founder code */}
+        {(currentTier==="pro"||currentTier==="elite")&&(()=>{
+          const codes = Array.isArray(athlete.gift_codes)?athlete.gift_codes:[];
+          const hasFounder = codes.some(g=>g.unlimited);
+          const copyCode = (code)=>{try{navigator.clipboard.writeText(code);}catch(_){}}
+          return (
           <div style={{marginTop:4,marginBottom:16}}>
-            <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>GIFT WILCO TO 4 FRIENDS</div>
-            {Array.isArray(athlete.gift_codes)&&athlete.gift_codes.length>0 ? (
+            <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>{hasFounder?"YOUR FOUNDER GIFT CODE":"GIFT WILCO TO 4 FRIENDS"}</div>
+            {codes.length>0 ? (
               <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                <div style={{color:C.muted2,fontSize:11,marginBottom:2,lineHeight:1.5}}>Each code gives a friend their first month of Pro free. Single use.</div>
-                {athlete.gift_codes.map((g,i)=>{
-                  const redeemed = g.status==="redeemed";
+                <div style={{color:C.muted2,fontSize:11,marginBottom:2,lineHeight:1.5}}>{hasFounder?"Share this code with anyone — each person gets their first month of Pro free. Reusable, no limit.":"Each code gives a friend their first month of Pro free. Single use."}</div>
+                {codes.map((g,i)=>{
+                  const redeemed = g.status==="redeemed" && !g.unlimited;
                   return (
-                    <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"9px 12px"}}>
+                    <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:C.navy3,border:`1px solid ${g.unlimited?C.gold:C.border}`,borderRadius:10,padding:"9px 12px"}}>
                       <span style={{fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:15,color:redeemed?C.muted:C.gold,textDecoration:redeemed?"line-through":"none"}}>{g.code}</span>
-                      {redeemed
-                        ? <span style={{color:C.muted,fontSize:11}}>Claimed{g.redeemed_by?` by ${g.redeemed_by}`:""}</span>
-                        : <button onClick={()=>{try{navigator.clipboard.writeText(g.code);}catch(_){}}}
-                            style={{background:"none",border:`1px solid ${C.border}`,color:C.text,borderRadius:8,padding:"4px 10px",cursor:"pointer",fontSize:11,fontWeight:700}}>Copy</button>}
+                      {g.unlimited
+                        ? <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+                            {g.redeemed_count>0&&<span style={{color:C.muted,fontSize:11}}>{g.redeemed_count} claimed</span>}
+                            <button onClick={()=>copyCode(g.code)} style={{background:"none",border:`1px solid ${C.border}`,color:C.text,borderRadius:8,padding:"4px 10px",cursor:"pointer",fontSize:11,fontWeight:700}}>Copy</button>
+                          </div>
+                        : redeemed
+                          ? <span style={{color:C.muted,fontSize:11}}>Claimed{g.redeemed_by?` by ${g.redeemed_by}`:""}</span>
+                          : <button onClick={()=>copyCode(g.code)} style={{background:"none",border:`1px solid ${C.border}`,color:C.text,borderRadius:8,padding:"4px 10px",cursor:"pointer",fontSize:11,fontWeight:700}}>Copy</button>}
                     </div>
                   );
                 })}
@@ -4738,7 +4758,8 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
               </div>
             )}
           </div>
-        )}
+          );
+        })()}
 
         {/* Cancel / resume — real Stripe subscription control */}
         {hasStripeSub&&(
