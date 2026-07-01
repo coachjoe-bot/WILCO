@@ -3385,7 +3385,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
                   onChange={e=>setAthleteProgramText(e.target.value)}
                   placeholder="Paste or type your program here, or use the photo upload above..."
                   rows={10}
-                  style={{background:C.navy3,border:`1px solid ${athleteProgramText!==(athlete.program_text||"")?C.gold:C.border}`,borderRadius:12,padding:"12px 14px",color:C.text,fontSize:13,outline:"none",resize:"vertical",lineHeight:1.6,fontFamily:"'DM Sans'",transition:"border-color 0.15s"}}
+                  style={{flex:1,minHeight:180,background:C.navy3,border:`1px solid ${athleteProgramText!==(athlete.program_text||"")?C.gold:C.border}`,borderRadius:12,padding:"12px 14px",color:C.text,fontSize:13,outline:"none",resize:"none",lineHeight:1.6,fontFamily:"'DM Sans'",transition:"border-color 0.15s"}}
                 />
                 {athleteProgramMsg&&(
                   <div style={{color:athleteProgramMsg==="Saved."?C.green:C.red,fontSize:12,fontWeight:600,textAlign:"center"}}>
