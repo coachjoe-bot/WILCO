@@ -168,7 +168,13 @@ async function biometricEnroll({role, userId, name, pin}){
     },
   });
   if(!cred) throw new Error("Face ID setup was cancelled.");
-  setBioEnrollment(role, { credentialId: b64u.enc(cred.rawId), role, userId, name: name||null, pin, enabledAt: Date.now() });
+  // Remember which transports this credential lives on so sign-in can pin the request
+  // to the built-in (platform) authenticator and iOS goes straight to Face ID instead
+  // of offering the cross-device "scan QR / security key" flow. Falls back to internal
+  // since we requested a platform authenticator above.
+  let transports = ["internal"];
+  try{ const t = cred.response?.getTransports?.(); if(Array.isArray(t) && t.length) transports = t; }catch{}
+  setBioEnrollment(role, { credentialId: b64u.enc(cred.rawId), role, userId, name: name||null, pin, transports, enabledAt: Date.now() });
   return true;
 }
 
@@ -176,10 +182,14 @@ async function biometricEnroll({role, userId, name, pin}){
 async function biometricAssert(role){
   const e = getBioEnrollment(role);
   if(!e) throw new Error("Face ID isn't set up on this device.");
+  // Pin the request to the built-in authenticator (transports:["internal"]). Without
+  // this hint iOS Safari can't tell the passkey is local and falls back to the hybrid
+  // "scan QR / use a security key" flow instead of showing Face ID / Touch ID.
+  const transports = (Array.isArray(e.transports) && e.transports.length) ? e.transports : ["internal"];
   const assertion = await navigator.credentials.get({
     publicKey: {
       challenge: randBytes(32),
-      allowCredentials: [{ id: b64u.dec(e.credentialId), type:"public-key" }],
+      allowCredentials: [{ id: b64u.dec(e.credentialId), type:"public-key", transports }],
       userVerification: "required",
       timeout: 60000,
     },
@@ -1299,15 +1309,18 @@ export default function WilcoApp() {
 
 // ─── HOME SCREEN ──────────────────────────────────────────────────────────────
 function HomeScreen({setView,setAthlete,setCoach}) {
-  const [supported,setSupported] = useState(false);
   const [busy,setBusy] = useState(false);
-  useEffect(()=>{ let on=true; (async()=>{ const ok = await biometricSupported(); if(on) setSupported(ok); })(); return ()=>{on=false;}; },[]);
 
   // Tapping a login button: if this device has a saved biometric login for that role,
   // fire Face ID right here inside the tap gesture (WebAuthn needs one). On success go
   // straight in; on cancel/failure/stale fall through to the normal PIN form.
   const start = async (role) => {
-    if(supported && getBioEnrollment(role)){
+    // If this device has ever enrolled for this role, attempt Face ID immediately —
+    // don't gate on the async `supported` probe (a fast tap on cold load could still
+    // have it false and skip straight to the PIN form). A missing/removed authenticator
+    // just throws and falls through to the manual form below. This is the whole flow:
+    // tap the login button -> Face ID -> in, no PIN.
+    if(getBioEnrollment(role)){
       setBusy(true);
       try{
         const rec = await biometricLogin(role);
