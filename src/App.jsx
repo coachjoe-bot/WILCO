@@ -1775,17 +1775,27 @@ function PaymentStep({athleteId, pin, tier, billing, onSuccess}) {
 // ─── ATHLETE SIGNUP ───────────────────────────────────────────────────────────
 function SignupScreen({setView,setAthlete,setErr,err}) {
   const [step,setStep] = useState(1);
-  const [data,setData] = useState({name:"",sport:SPORTS[0],pin:"",confirmPin:"",email:"",goal:"strength",coachCode:"",coachName:"",coachEmail:"",tier:"free",billing:"monthly",birthday:"",heightFt:"",heightIn:"0",weight:"",gender:"",trainingDays:4,equipment:[],positionOrEvent:"",injuryHistory:"",recruitingIntent:"",graduationYear:""});
+  const [data,setData] = useState({name:"",sport:SPORTS[0],level:"self",pin:"",confirmPin:"",email:"",goal:"strength",coachCode:"",coachName:"",coachEmail:"",tier:"free",billing:"monthly",birthday:"",heightFt:"",heightIn:"0",weight:"",gender:"",trainingDays:4,equipment:[],positionOrEvent:"",injuryHistory:"",graduationYear:""});
   const [loading,setLoading] = useState(false);
   const [athleteRow,setAthleteRow] = useState(null); // created athlete (exists before payment)
   const [showConsent,setShowConsent] = useState(false); // T&C + Privacy consent overlay
   const setD = (k,v) => setData(p=>({...p,[k]:v}));
   useEffect(()=>{ track("signup_start","auth"); },[]); // activation-funnel top (pre-login)
 
-  // Total steps shown in the header. Plan selection is the last data step; paid tiers
-  // add a payment step; school athletes skip both plan and payment.
   const isPaidTier = data.tier==="pro"||data.tier==="elite";
-  const TOTAL_STEPS = data.isSchool ? 13 : (isPaidTier ? 15 : 14);
+  // Athlete's competitive level (asked on step 1) drives which questions show:
+  //  - competitive (HS / college / club) → team code (4) + position/event (10)
+  //  - student (HS / college)            → graduation year (12)
+  //  - "just training for myself"        → skips all three
+  const competitive = ["highschool","college","club"].includes(data.level);
+  const student = ["highschool","college"].includes(data.level);
+  // The ordered list of step numbers actually shown, given the level + tier. Drives
+  // the "STEP X OF Y" header and the back/next navigation (so skipped steps stay
+  // hidden and the count stays contiguous). Step 13 (recruiting) was removed.
+  const visibleSteps = [1,2,3, ...(competitive?[4]:[]), 5,6,7,8,9, ...(competitive?[10]:[]), 11, ...(student?[12]:[]),
+    ...(data.isSchool ? [] : [14, ...(isPaidTier?[15]:[])])];
+  const lastDataStep = student ? 12 : 11;   // final profile question before consent
+  const prevStep = () => { const i=visibleSteps.indexOf(step); return i>0 ? visibleSteps[i-1] : null; };
 
   // Insert the athlete once all profile data is collected (step 13). The row must
   // exist before we create a Stripe subscription. Returns the row, or null on error.
@@ -1807,7 +1817,6 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
           training_days_per_week:+data.trainingDays, equipment:data.equipment,
           position_or_event:data.positionOrEvent.trim()||null,
           injury_history:data.injuryHistory.trim()||null,
-          recruiting_intent:data.recruitingIntent,
           graduation_year:data.graduationYear?parseInt(data.graduationYear):null,
           first_chat_complete:false,
         }
@@ -1867,6 +1876,25 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
   // "Decline & Go Back" on any consent step — no athlete row was created.
   const declineConsent = () => { setShowConsent(false); setView("home"); };
 
+  // Advance off the final profile question: capture consent (T&C + Privacy, +
+  // parental for 13–17) and create the account. If the athlete already consented +
+  // was created on a previous pass (navigated back then forward), don't re-show it —
+  // school finishes onboarding; everyone else continues to plan selection.
+  const proceedToConsent = async () => {
+    setErr("");
+    if(athleteRow){
+      if(data.isSchool){
+        setLoading(true);
+        try { await finishOnboarding("school", athleteRow); }
+        catch(e){ setErr("Connection error."); setLoading(false); }
+        return;
+      }
+      setStep(14);
+      return;
+    }
+    setShowConsent(true); // ConsentFlow → completeSignup() handles creation
+  };
+
   // Finalize onboarding: send coach notifications (now that the tier is final) and
   // drop the athlete into the app. Called for school, free, and post-payment paths.
   const finishOnboarding = async (finalTier, row) => {
@@ -1905,7 +1933,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
       if(!data.email.trim()||!data.email.includes("@")){setErr("Enter a valid email address.");return;}
       setStep(3);
     } else if(step===3){
-      setStep(4);
+      setStep(competitive?4:5); // non-competitive athletes skip the team code
     } else if(step===4){
       // Resolve school membership now so school athletes skip plan + payment.
       setLoading(true);
@@ -1939,31 +1967,15 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
       setStep(9);
     } else if(step===9){
       if(data.equipment.length===0){setErr("Select at least one equipment option.");return;}
-      setStep(10);
+      setStep(competitive?10:11); // non-competitive athletes skip position/event
     } else if(step===10){
       setStep(11);
     } else if(step===11){
-      setStep(12);
+      // Injury is the last data step for non-students; students still have grad year.
+      if(student) setStep(12); else await proceedToConsent();
     } else if(step===12){
-      // graduation_year — optional, always advance
-      setStep(13);
-    } else if(step===13){
-      // College recruiting — final data step. Before creating the athlete row,
-      // capture T&C + Privacy (+ parental, for 13–17) consent.
-      if(!data.recruitingIntent){setErr("Select an option.");return;}
-      if(athleteRow){
-        // Already consented + created on a previous pass (user navigated back then
-        // forward) — don't re-show consent or re-create the row, just continue.
-        if(data.isSchool){
-          setLoading(true);
-          try { await finishOnboarding("school", athleteRow); }
-          catch(e){ setErr("Connection error."); setLoading(false); }
-          return;
-        }
-        setStep(14);
-        return;
-      }
-      setShowConsent(true); // ConsentFlow → completeSignup() handles creation
+      // graduation_year — optional; final data step for students → consent.
+      await proceedToConsent();
     } else if(step===14){
       // Plan selection
       if(data.tier==="free"){
@@ -2029,19 +2041,39 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
     )}
     <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24}}>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
-        <button onClick={()=>step>1?setStep(step-1):setView("home")} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:18}}>←</button>
-        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>NEW ATHLETE — STEP {step} OF {TOTAL_STEPS}</div>
+        <button onClick={()=>{const p=prevStep(); p?setStep(p):setView("home");}} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:18}}>←</button>
+        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>NEW ATHLETE — STEP {Math.max(1,visibleSteps.indexOf(step)+1)} OF {visibleSteps.length}</div>
       </div>
       {step===1&&<>
         <div style={{marginBottom:16}}>
           <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>FULL NAME</label>
           <input value={data.name} onChange={e=>setD("name",e.target.value)} placeholder="Your name" style={inp()}/>
         </div>
-        <div style={{marginBottom:20}}>
+        <div style={{marginBottom:16}}>
           <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>PRIMARY SPORT</label>
           <select value={data.sport} onChange={e=>setD("sport",e.target.value)} style={inp()}>
             {SPORTS.map(s=><option key={s}>{s}</option>)}
           </select>
+        </div>
+        <div style={{marginBottom:20}}>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:8}}>HOW DO YOU TRAIN?</label>
+          {[
+            {k:"self",l:"Just training for myself"},
+            {k:"club",l:"Competitive / club",s:"Adult, rec, or club athlete"},
+            {k:"highschool",l:"High school athlete"},
+            {k:"college",l:"College athlete"},
+          ].map(o=>(
+            <div key={o.k} onClick={()=>setD("level",o.k)}
+              style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",marginBottom:8,padding:"12px 14px",background:data.level===o.k?`${C.gold}18`:C.navy3,borderRadius:10,border:`2px solid ${data.level===o.k?C.gold:C.border}`,transition:"all 0.15s"}}>
+              <div style={{width:20,height:20,borderRadius:"50%",border:`2px solid ${data.level===o.k?C.gold:C.muted}`,background:data.level===o.k?C.gold:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                {data.level===o.k&&<span style={{color:"#000",fontSize:10,fontWeight:700}}>✓</span>}
+              </div>
+              <div>
+                <div style={{color:C.text,fontWeight:600,fontSize:14}}>{o.l}</div>
+                {o.s&&<div style={{color:C.muted,fontSize:11,marginTop:2}}>{o.s}</div>}
+              </div>
+            </div>
+          ))}
         </div>
       </>}
       {step===2&&<>
@@ -2246,7 +2278,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
             rows={3}
             style={{...inp(),resize:"none",lineHeight:1.5}}/>
         </div>
-        <button onClick={()=>{setErr("");setStep(12);}}
+        <button onClick={()=>{setErr(""); if(student) setStep(12); else proceedToConsent();}}
           style={{background:"none",border:"none",color:C.muted,fontSize:13,cursor:"pointer",textAlign:"center",width:"100%",marginBottom:12}}>
           Skip →
         </button>
@@ -2261,25 +2293,10 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
             onChange={e=>setD("graduationYear",e.target.value.replace(/\D/g,"").slice(0,4))}
             placeholder="e.g. 2027" style={inp({fontSize:20,letterSpacing:2,textAlign:"center"})}/>
         </div>
-        <button onClick={()=>{setErr("");setStep(13);}}
+        <button onClick={()=>{setErr(""); proceedToConsent();}}
           style={{background:"none",border:"none",color:C.muted,fontSize:13,cursor:"pointer",textAlign:"center",width:"100%",marginBottom:12}}>
           Skip →
         </button>
-      </>}
-
-      {/* ── Step 13: College recruiting (last data step) ── */}
-      {step===13&&<>
-        <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Are you training with college recruiting in mind?</div>
-        {[{key:"yes",label:"Yes — I'm actively pursuing it"},{key:"maybe",label:"Maybe — open to it"},{key:"no",label:"No — training for myself"}].map(opt=>(
-          <div key={opt.key} onClick={()=>setD("recruitingIntent",opt.key)}
-            style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",marginBottom:8,padding:"14px 16px",background:data.recruitingIntent===opt.key?`${C.gold}18`:C.navy3,borderRadius:10,border:`2px solid ${data.recruitingIntent===opt.key?C.gold:C.border}`,transition:"all 0.15s"}}>
-            <div style={{width:20,height:20,borderRadius:"50%",border:`2px solid ${data.recruitingIntent===opt.key?C.gold:C.muted}`,background:data.recruitingIntent===opt.key?C.gold:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
-              {data.recruitingIntent===opt.key&&<span style={{color:"#000",fontSize:10,fontWeight:700}}>✓</span>}
-            </div>
-            <div style={{color:C.text,fontWeight:600,fontSize:14}}>{opt.label}</div>
-          </div>
-        ))}
-        <div style={{marginBottom:12}}/>
       </>}
 
       {/* ── Step 15: Payment (Pro/Elite only) ── */}
@@ -2298,7 +2315,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
         <button onClick={nextStep} disabled={loading} style={btn(C.gold,"#000",{opacity:loading?0.7:1,cursor:loading?"not-allowed":"pointer"})}>
           {loading ? "Please wait..."
             : step===14 ? (isPaidTier ? "Continue to Payment →" : "Start with Free →")
-            : step===13 ? (data.isSchool ? "Create Account →" : "Next →")
+            : (step===lastDataStep && data.isSchool) ? "Create Account →"
             : (step===10||step===11) ? "Save & Continue →"
             : "Next →"}
         </button>
@@ -4390,7 +4407,6 @@ function ProfileCompletionModal({athlete, onClose, onSave}) {
     equipment:athlete.equipment||[],
     positionOrEvent:athlete.position_or_event||"",
     injuryHistory:athlete.injury_history||"",
-    recruitingIntent:athlete.recruiting_intent||"",
   });
   const [saving,setSaving] = useState(false);
   const [err,setErr] = useState("");
@@ -4417,7 +4433,6 @@ function ProfileCompletionModal({athlete, onClose, onSave}) {
       if((!athlete.equipment||athlete.equipment.length===0)&&data.equipment.length>0) updates.equipment=data.equipment;
       if(!athlete.position_or_event&&data.positionOrEvent.trim()) updates.position_or_event=data.positionOrEvent.trim();
       if(!athlete.injury_history&&data.injuryHistory.trim()) updates.injury_history=data.injuryHistory.trim();
-      if(!athlete.recruiting_intent&&data.recruitingIntent) updates.recruiting_intent=data.recruitingIntent;
       if(Object.keys(updates).length>0){
         await sbUpdate("athletes",athlete.id,updates);
         onSave(updates);
@@ -4435,7 +4450,6 @@ function ProfileCompletionModal({athlete, onClose, onSave}) {
   const needsEquipment = !athlete.equipment||athlete.equipment.length===0;
   const needsPosition = !athlete.position_or_event;
   const needsInjury = !athlete.injury_history;
-  const needsRecruiting = !athlete.recruiting_intent;
 
   const label = (txt,optional=false) => (
     <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>
@@ -4504,16 +4518,6 @@ function ProfileCompletionModal({athlete, onClose, onSave}) {
           {needsPosition&&<div style={{marginBottom:16}}>{label("POSITION OR EVENT",true)}<input value={data.positionOrEvent} onChange={e=>setD("positionOrEvent",e.target.value)} placeholder="e.g. Linebacker, 100m sprints..." style={inp()}/></div>}
 
           {needsInjury&&<div style={{marginBottom:16}}>{label("INJURIES OR LIMITATIONS",true)}<textarea value={data.injuryHistory} onChange={e=>setD("injuryHistory",e.target.value)} placeholder="e.g. Left knee surgery 2022..." rows={2} style={{...inp(),resize:"none",lineHeight:1.5}}/></div>}
-
-          {needsRecruiting&&<div style={{marginBottom:16}}>{label("COLLEGE RECRUITING?")}
-            {[{key:"yes",label:"Yes"},{key:"maybe",label:"Maybe"},{key:"no",label:"No"}].map(opt=>(
-              <div key={opt.key} onClick={()=>setD("recruitingIntent",opt.key)}
-                style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",marginBottom:6,padding:"10px 12px",background:data.recruitingIntent===opt.key?`${C.gold}18`:C.navy3,borderRadius:8,border:`2px solid ${data.recruitingIntent===opt.key?C.gold:C.border}`,transition:"all 0.15s"}}>
-                <div style={{width:18,height:18,borderRadius:"50%",border:`2px solid ${data.recruitingIntent===opt.key?C.gold:C.muted}`,background:data.recruitingIntent===opt.key?C.gold:"transparent",flexShrink:0}}/>
-                <div style={{color:C.text,fontSize:13,fontWeight:600}}>{opt.label}</div>
-              </div>
-            ))}
-          </div>}
 
           {err&&<div style={{color:C.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
           <button onClick={save} disabled={saving} style={btn(C.gold,"#000",{opacity:saving?0.7:1,cursor:saving?"not-allowed":"pointer",marginBottom:8})}>
