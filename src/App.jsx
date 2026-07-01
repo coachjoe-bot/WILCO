@@ -3167,16 +3167,16 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         {/* Row 1: identity */}
         <div style={{display:"flex",alignItems:"baseline",gap:10,minWidth:0}}>
           <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2,lineHeight:1,flexShrink:0,whiteSpace:"nowrap"}}>COACH JOE-BOT</div>
+          <div style={{display:"flex",alignItems:"baseline",gap:4,flexShrink:0}} title="Workouts logged">
+            <span style={{fontFamily:"'Bebas Neue'",fontSize:18,color:C.gold,lineHeight:1}}>{groupIntoSessions(workoutHistory).length}</span>
+            <span style={{color:C.muted,fontSize:9,letterSpacing:1,fontWeight:600}}>WORKOUTS</span>
+          </div>
           <div style={{flex:1,minWidth:0,color:C.muted,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{athlete.name}</div>
           {(()=>{const t=TIERS[athlete.tier||"free"];return(<span style={{flexShrink:0,background:`${t.color}22`,border:`1px solid ${t.color}`,borderRadius:4,padding:"1px 6px",color:t.color,fontSize:9,fontWeight:700,letterSpacing:1}}>{t.badge}</span>);})()}
           {athlete.certified_badge_earned_at&&(()=>{const cnt=athlete.total_sessions_logged||0;const tier=cnt>=1000?"×4":cnt>=500?"×3":cnt>=250?"×2":"";return<span title="WILCO Certified" style={{flexShrink:0,background:`${C.gold}22`,border:`1px solid ${C.gold}`,borderRadius:4,padding:"1px 6px",color:C.gold,fontSize:9,fontWeight:700,letterSpacing:1}}>✦ CERTIFIED{tier?` ${tier}`:""}</span>;})()}
         </div>
-        {/* Row 2: session count (motivation) + nav */}
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
-          <div style={{display:"flex",alignItems:"baseline",gap:5,flexShrink:0}} title="Total sessions logged">
-            <span style={{fontFamily:"'Bebas Neue'",fontSize:24,color:C.gold,lineHeight:1}}>{athlete.total_sessions_logged||0}</span>
-            <span style={{color:C.muted,fontSize:10,letterSpacing:1,fontWeight:600}}>SESSIONS</span>
-          </div>
+        {/* Row 2: nav (left side intentionally free for a future stat/control) */}
+        <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:8}}>
         <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
           {saved&&<div style={{background:"#0a1e0a",border:`1px solid ${C.green}`,borderRadius:8,padding:"4px 8px",color:C.green,fontSize:11,fontWeight:600,flexShrink:0}}>✓</div>}
           {(athlete.tier||"free")!=="free"&&(
