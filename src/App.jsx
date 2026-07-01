@@ -3141,17 +3141,20 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
     <div style={{height:"100dvh",display:"flex",flexDirection:"column",background:C.navy,maxWidth:600,margin:"0 auto"}}>
       <style>{GS}</style>
       {/* Header */}
-      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,paddingTop:"calc(10px + env(safe-area-inset-top, 0px))",paddingBottom:"10px",paddingLeft:"14px",paddingRight:"14px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0,gap:8}}>
-        <div style={{minWidth:0,flex:1}}>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2,lineHeight:1}}>COACH JOE-BOT</div>
-          <div style={{display:"flex",alignItems:"center",gap:6,marginTop:2,flexWrap:"wrap"}}>
-            <div style={{color:C.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                {athlete.name} · {athlete.sport}
-              </div>
-            {(()=>{const t=TIERS[athlete.tier||"free"];return(<span style={{background:`${t.color}22`,border:`1px solid ${t.color}`,borderRadius:4,padding:"1px 6px",color:t.color,fontSize:9,fontWeight:700,letterSpacing:1,flexShrink:0}}>{t.badge}</span>);})()}
-            {athlete.certified_badge_earned_at&&(()=>{const cnt=athlete.total_sessions_logged||0;const tier=cnt>=1000?"×4":cnt>=500?"×3":cnt>=250?"×2":"";return<span title="WILCO Certified" style={{background:`${C.gold}22`,border:`1px solid ${C.gold}`,borderRadius:4,padding:"1px 6px",color:C.gold,fontSize:9,fontWeight:700,letterSpacing:1,flexShrink:0}}>✦ CERTIFIED{tier?` ${tier}`:""}</span>;})()} 
-          </div>
+      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,paddingTop:"calc(10px + env(safe-area-inset-top, 0px))",paddingBottom:"10px",paddingLeft:"14px",paddingRight:"14px",display:"flex",flexDirection:"column",gap:10,flexShrink:0}}>
+        {/* Row 1: identity */}
+        <div style={{display:"flex",alignItems:"baseline",gap:10,minWidth:0}}>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2,lineHeight:1,flexShrink:0,whiteSpace:"nowrap"}}>COACH JOE-BOT</div>
+          <div style={{flex:1,minWidth:0,color:C.muted,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{athlete.name}</div>
+          {(()=>{const t=TIERS[athlete.tier||"free"];return(<span style={{flexShrink:0,background:`${t.color}22`,border:`1px solid ${t.color}`,borderRadius:4,padding:"1px 6px",color:t.color,fontSize:9,fontWeight:700,letterSpacing:1}}>{t.badge}</span>);})()}
+          {athlete.certified_badge_earned_at&&(()=>{const cnt=athlete.total_sessions_logged||0;const tier=cnt>=1000?"×4":cnt>=500?"×3":cnt>=250?"×2":"";return<span title="WILCO Certified" style={{flexShrink:0,background:`${C.gold}22`,border:`1px solid ${C.gold}`,borderRadius:4,padding:"1px 6px",color:C.gold,fontSize:9,fontWeight:700,letterSpacing:1}}>✦ CERTIFIED{tier?` ${tier}`:""}</span>;})()}
         </div>
+        {/* Row 2: session count (motivation) + nav */}
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+          <div style={{display:"flex",alignItems:"baseline",gap:5,flexShrink:0}} title="Total sessions logged">
+            <span style={{fontFamily:"'Bebas Neue'",fontSize:24,color:C.gold,lineHeight:1}}>{athlete.total_sessions_logged||0}</span>
+            <span style={{color:C.muted,fontSize:10,letterSpacing:1,fontWeight:600}}>SESSIONS</span>
+          </div>
         <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
           {saved&&<div style={{background:"#0a1e0a",border:`1px solid ${C.green}`,borderRadius:8,padding:"4px 8px",color:C.green,fontSize:11,fontWeight:600,flexShrink:0}}>✓</div>}
           {(athlete.tier||"free")!=="free"&&(
@@ -3164,6 +3167,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           {(athlete.tier||"free")!=="free"&&<button onClick={()=>{track("screen_view","nav",{screen:"progress"});setShowProgress(true);}} style={{background:C.navy3,border:`1px solid ${C.blue}`,color:C.blue,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>PROGRESS</button>}
           <button onClick={()=>setShowSettings(true)} title="Settings" style={{background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:14,lineHeight:1}}>⚙</button>
           {!isMobile&&<button onClick={onLogout} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12}}>Log Out</button>}
+        </div>
         </div>
       </div>
 
@@ -3282,10 +3286,10 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
 
       {/* Program View Modal */}
       {showProgram&&(
-        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.8)",display:"flex",alignItems:"flex-end",justifyContent:"center",zIndex:400}}>
+        <div style={{position:"fixed",inset:0,background:C.navy,display:"flex",flexDirection:"column",zIndex:400,maxWidth:600,margin:"0 auto"}}>
           <style>{GS}</style>
-          <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderTopLeftRadius:20,borderTopRightRadius:20,width:"100%",maxWidth:600,maxHeight:"85dvh",display:"flex",flexDirection:"column"}}>
-            <div style={{padding:"16px 20px 12px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+          <div style={{flex:1,minHeight:0,width:"100%",display:"flex",flexDirection:"column"}}>
+            <div style={{paddingTop:"calc(16px + env(safe-area-inset-top, 0px))",paddingBottom:"12px",paddingLeft:"20px",paddingRight:"20px",borderBottom:`1px solid ${C.border}`,background:C.navy2,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
               <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2}}>MY PROGRAM</div>
               <button onClick={()=>setShowProgram(false)} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"4px 12px",cursor:"pointer",fontSize:12}}>✕ Close</button>
             </div>
