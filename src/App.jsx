@@ -6203,19 +6203,33 @@ function CoachDashboard({coach,onLogout}) {
               const [acEmail,setAcEmail] = useState("");
               const [acErr,setAcErr] = useState("");
               const [acOk,setAcOk] = useState("");
+              const [acCode,setAcCode] = useState("");          // freshly-created coach code (for its copy button)
+              const [codeCopied,setCodeCopied] = useState(null); // which code is showing "Copied!"
               const [acSaving,setAcSaving] = useState(false);
+
+              const copyCoachCode = (code) => {
+                if(!code || codeCopied===code) return;
+                try{ navigator.clipboard.writeText(code); }catch(_){}
+                haptic(10);
+                setCodeCopied(code);
+                setTimeout(()=>setCodeCopied(c=>c===code?null:c), 2000);
+              };
+              const codeBtn = (code) => {
+                const done = codeCopied===code;
+                return <button onClick={()=>copyCoachCode(code)} style={{background:done?C.gold:"none",border:`1px solid ${done?C.gold:C.border}`,color:done?"#000":C.muted2,borderRadius:6,padding:"2px 9px",cursor:done?"default":"pointer",fontSize:10,fontWeight:700,marginLeft:8,verticalAlign:"middle"}}>{done?"Copied!":"Copy"}</button>;
+              };
 
               const doAddCoach = async () => {
                 if(!acName.trim()||!acEmail.trim()||!acEmail.includes("@")){setAcErr("Enter a name and valid email.");return;}
                 if(atLimit){setAcErr("Coach limit reached for your plan.");return;}
-                setAcSaving(true);setAcErr("");setAcOk("");
+                setAcSaving(true);setAcErr("");setAcOk("");setAcCode("");
                 try {
                   const nextNum=(schoolCoachesList.reduce((m,c)=>Math.max(m,c.coach_number||0),0))+1;
                   const newCode=(school?.code||"???").toUpperCase()+String(nextNum).padStart(2,"0");
                   const row=await sbInsert("coaches",{name:acName.trim(),email:acEmail.trim().toLowerCase(),school_id:coach.school_id,coach_number:nextNum,access_code:newCode,role:"coach"});
                   if(row?.length){
                     fetch("/api/send-coach-invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({coachName:acName.trim(),coachEmail:acEmail.trim().toLowerCase(),accessCode:newCode,schoolName:school?.name||""})}).catch(()=>{});
-                    setAcOk(`✓ ${acName.trim()} added — invite sent (code: ${newCode})`);
+                    setAcOk(`✓ ${acName.trim()} added — invite sent.`); setAcCode(newCode);
                     setAcName("");setAcEmail("");
                     loadAll();
                   }else{setAcErr("Could not create coach. Try again.");}
@@ -6238,7 +6252,7 @@ function CoachDashboard({coach,onLogout}) {
                     <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:14}}>SCHOOL ACCOUNT</div>
                     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:4}}>
                       <div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>SCHOOL</div><div style={{color:C.text,fontWeight:600,fontSize:14,marginTop:2}}>{school?.name||"—"}</div></div>
-                      <div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>CODE</div><div style={{color:C.gold,fontWeight:700,fontSize:18,fontFamily:"'Bebas Neue'",letterSpacing:2,marginTop:2}}>{school?.code||"—"}</div></div>
+                      <div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>CODE</div><div style={{display:"flex",alignItems:"center",marginTop:2}}><span style={{color:C.gold,fontWeight:700,fontSize:18,fontFamily:"'Bebas Neue'",letterSpacing:2}}>{school?.code||"—"}</span>{school?.code&&codeBtn(school.code)}</div></div>
                       <div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>TIER</div><div style={{color:C.text,fontSize:13,marginTop:2}}>{school?.tier||"—"}</div></div>
                       <div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>COACHES</div><div style={{color:C.text,fontSize:13,marginTop:2}}>{schoolCoachesList.length} / {school?.max_coaches||3}</div></div>
                     </div>
@@ -6271,7 +6285,7 @@ function CoachDashboard({coach,onLogout}) {
                         </div>
                       )}
                       {acErr&&<div style={{color:C.red,fontSize:12,marginTop:8}}>{acErr}</div>}
-                      {acOk&&<div style={{color:C.green,fontSize:12,marginTop:8,fontWeight:600}}>{acOk}</div>}
+                      {acOk&&<div style={{color:C.green,fontSize:12,marginTop:8,fontWeight:600}}>{acOk}{acCode&&<> Code: <span style={{fontFamily:"'Bebas Neue'",letterSpacing:1,color:C.gold,fontSize:14}}>{acCode}</span>{codeBtn(acCode)}</>}</div>}
                     </div>
                   </div>
                 </div>
