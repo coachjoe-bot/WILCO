@@ -3025,7 +3025,6 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       setWorkoutHistory(prev=>[{raw_message:msg,parsed_data:parsedFinal,created_at:new Date().toISOString()},...prev]);
 
       if(newPRs.length>0){
-        haptic([25,40,25]); // celebratory buzz on a new PR
         // 1RM propagation: recalculate program weights for each new PR
         let currentProgramText = updatedAthlete.program_text;
         const propagationLog = [];
@@ -3064,9 +3063,11 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             "You are Coach Joe Thomas. An athlete just hit a new PR. Acknowledge it directly -- short, punchy, in Coach Joe's voice. Atta boy/girl is appropriate here.",
             `Athlete: ${updatedAthlete.name} (${updatedAthlete.sport})\nNew PRs:\n${prCallout}`,150,[],"claude-sonnet-4-6","pr_ack"
           );
+          haptic(60); // one strong buzz, synced to the PR congrats message
           setMessages(prev=>[...prev,{role:"assistant",content:prReply+propagationNote}]);
         } catch(e){
           const propagationNote = propagationLog.length>0 ? `\n\nUpdated your future ${propagationLog.map(l=>l.split(":")[0]).join(", ")} targets based on your new max.` : "";
+          haptic(60); // one strong buzz, synced to the PR congrats message
           setMessages(prev=>[...prev,{role:"assistant",content:newPRs.map(pr=>pr.isActual1RM
             ? `New ACTUAL 1RM -- ${pr.exercise} at ${fmtWeight(pr.weight,pr.unit)}. +${Math.round(pr.diff)}lbs-equiv over previous best. That's what the work is for.`
             : `New PR -- ${pr.exercise} at ${fmtWeight(pr.weight,pr.unit)} x${pr.reps} (est. 1RM: ${Math.round(pr.e1rm)}lbs-equiv). +${Math.round(pr.diff)}lbs-equiv over previous best. That's what the work is for.`
