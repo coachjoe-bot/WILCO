@@ -418,7 +418,7 @@ const epley1RM = (weight, reps) => {
 const getExerciseSets = (ex) => {
   if(!ex) return [];
   if(Array.isArray(ex.set_details) && ex.set_details.length>0){
-    return ex.set_details.map(s=>({weight:s.weight??ex.weight??0, reps:s.reps??ex.reps??1}));
+    return ex.set_details.map(s=>({weight:s.weight??ex.weight??0, reps:s.reps??ex.reps??1, warmup:!!s.warmup}));
   }
   const n = ex.sets||1;
   return Array.from({length:n},()=>({weight:ex.weight??0, reps:ex.reps||1}));
@@ -430,7 +430,10 @@ const getExerciseSets = (ex) => {
 // estimate. Only bumps when effort was actually recorded; otherwise identical to before.
 const bestE1RMForExercise = (ex) => {
   if(!ex || ex.unit==="bodyweight") return 0;
-  const sets = getExerciseSets(ex);
+  const all = getExerciseSets(ex);
+  // Warm-ups never count toward a 1RM estimate (fall back to all sets if somehow
+  // every set was flagged a warm-up).
+  const sets = all.some(s=>!s.warmup) ? all.filter(s=>!s.warmup) : all;
   const bonus = ex.rir!=null ? Math.max(0, ex.rir)
               : ex.rpe!=null ? Math.max(0, 10 - ex.rpe)
               : 0;
@@ -453,7 +456,8 @@ const fmtDuration = (sec) => {
 // Append optional Phase-1 load/intensity descriptors to a formatted set string —
 // only when the athlete actually logged them, so a plain log stays plain and a
 // power-user log gains inline detail ("... +45lbs", "... w/ red band", "... · RPE 8").
-const withSetMods = (ex, base, hasWeight=false) => {
+const TECHNIQUE_LABEL = { drop:"drop set", rest_pause:"rest-pause", cluster:"cluster", myo:"myo-reps", amrap:"AMRAP" };
+const withSetMods = (ex, base, hasWeight=false, warmupCount=0) => {
   let s = base;
   // Added / assisted bodyweight load (weighted pull-ups, assisted dips).
   if(ex.added_weight) s += ` +${ex.added_weight}lbs`;
@@ -462,12 +466,16 @@ const withSetMods = (ex, base, hasWeight=false) => {
   if(ex.resistance) s += ` w/ ${ex.resistance}`;
   // Dumbbell per-hand clarity — only meaningful when a weight is shown.
   if(ex.load_basis==="each" && hasWeight) s += ` (each)`;
-  // Intensity annotations, dot-separated.
+  // Dot-separated annotations, shown only when the athlete logged them.
   const tags = [];
   if(ex.percent_1rm) tags.push(`${ex.percent_1rm}%`);
   if(ex.rpe!=null) tags.push(`RPE ${ex.rpe}`);
   else if(ex.rir!=null) tags.push(`${ex.rir} RIR`);
   if(ex.tempo) tags.push(`tempo ${ex.tempo}`);
+  if(TECHNIQUE_LABEL[ex.technique]) tags.push(TECHNIQUE_LABEL[ex.technique]);
+  if(ex.to_failure) tags.push("to failure");
+  if(ex.superset_group) tags.push(`superset ${ex.superset_group}`);
+  if(warmupCount>0) tags.push(`+${warmupCount} warm-up`);
   if(tags.length) s += ` · ${tags.join(" · ")}`;
   return s;
 };
@@ -482,13 +490,18 @@ const joinWeights = (arr) => arr.every(x=>x===arr[0]) ? String(arr[0]) : arr.joi
 
 const formatSetDetails = (ex) => {
   if(!ex) return "—";
-  const sets = getExerciseSets(ex);
-  const nSets = ex.sets || sets.length || 1;
+  const allSets = getExerciseSets(ex);
+  const nSets = ex.sets || allSets.length || 1;
   // Time-based holds (planks, dead hangs, timed carries): sets × duration, no weight.
   if(ex.time_per_set_seconds){
     return withSetMods(ex, `${nSets}×${fmtDuration(ex.time_per_set_seconds)}`);
   }
-  if(sets.length===0) return "—";
+  if(allSets.length===0) return "—";
+  // Headline shows WORKING sets; warm-ups are summarized as "· +N warm-up" (unless
+  // every set was a warm-up, in which case show them so nothing disappears).
+  const working = allSets.filter(s=>!s.warmup);
+  const sets = working.length ? working : allSets;
+  const warmupCount = allSets.length - sets.length;
   const u = ex.unit==="kg" ? "kg" : ex.unit==="bodyweight" ? "" : "lbs";
   const hasWeight = sets.some(s=>s.weight && s.weight>0);
   let base;
@@ -510,7 +523,7 @@ const formatSetDetails = (ex) => {
       ? groups.map(g=>`${g.weights.length}×${g.reps} @ ${joinWeights(g.weights)}${u}`).join(", ")
       : groups.map(g=>`${g.weights.length}×${g.reps}`).join(", ");
   }
-  return withSetMods(ex, base, hasWeight);
+  return withSetMods(ex, base, hasWeight, warmupCount);
 };
 
 // Format weight with correct unit label. Falls back to "lbs" for legacy data.
@@ -646,7 +659,7 @@ const extractProgramText = async (message) => {
 const parseWorkout = async (message, name, sport) => {
   const sys = `Extract workout data from an athlete message. Return ONLY valid JSON, no markdown.
 {
-  "exercises":[{"name":string,"sets":number|null,"reps":number|null,"rep_scheme":string|null,"time_per_set_seconds":number|null,"weight":number|null,"unit":"lbs"|"kg"|"bodyweight","added_weight":number|null,"assist_weight":number|null,"resistance":string|null,"load_basis":"each"|"total"|null,"rpe":number|null,"rir":number|null,"percent_1rm":number|null,"tempo":string|null,"feel":"easy"|"good"|"hard"|null,"notes":string|null,"set_details":[{"weight":number,"reps":number}]|null}],
+  "exercises":[{"name":string,"sets":number|null,"reps":number|null,"rep_scheme":string|null,"time_per_set_seconds":number|null,"weight":number|null,"unit":"lbs"|"kg"|"bodyweight","added_weight":number|null,"assist_weight":number|null,"resistance":string|null,"load_basis":"each"|"total"|null,"rpe":number|null,"rir":number|null,"percent_1rm":number|null,"tempo":string|null,"technique":"drop"|"rest_pause"|"cluster"|"myo"|"amrap"|null,"to_failure":boolean|null,"superset_group":string|null,"feel":"easy"|"good"|"hard"|null,"notes":string|null,"set_details":[{"weight":number,"reps":number,"warmup":boolean}]|null}],
   "run_data":{"run_type":"easy"|"tempo"|"interval"|"long_run"|"race"|"recovery"|"fartlek"|null,"distance_miles":number|null,"distance_km":number|null,"duration_minutes":number|null,"pace_per_mile":string|null,"pace_per_km":string|null,"heart_rate_avg":number|null,"heart_rate_max":number|null,"intervals":[{"repeat":number|null,"distance":string|null,"time":string|null,"pace":string|null,"rest":string|null}]|null,"notes":string|null}|null,
   "practice_data":{"practice_type":"practice"|"game"|"scrimmage"|"conditioning"|"skill_work"|"film"|"walkthrough"|null,"sport":string|null,"duration_minutes":number|null,"intensity":"light"|"moderate"|"high"|"very_high"|null,"notes":string|null}|null,
   "pain_flags":[{"area":string,"description":string}],
@@ -681,6 +694,11 @@ Rules:
   2. NUMBERS in the REP position around "+" ("225 x 8+3+2", "5x 3+2+2") → a rest-pause / cluster / broken set: set "rep_scheme" to that string ("8+3+2"), "reps" to the FIRST number, and note "rest-pause"/"cluster" in notes if the athlete said so.
   3. "+<number>" right after a BODYWEIGHT movement (pull-up, dip, chin-up, muscle-up) → added_weight (weighted-bodyweight rule).
   4. "+ <band/chain/color>" → resistance (bands rule).
+- WARM-UP SETS: when the athlete separates warm-ups from working sets ("warmed up to 275, then 3x5", "worked up to 315", "warmups: 135/185/225 then 275x3x3", "ramp to 405"), put EACH warm-up set in set_details with "warmup":true and the working sets with warmup omitted. Set "sets"/"reps"/"weight" to the WORKING top set, never a warm-up. If warm-ups vs working are NOT clearly separated, treat every set as a working set (do NOT guess). "worked up to 275 for 3x5" → set_details:[{"weight":135,"reps":5,"warmup":true},{"weight":185,"reps":5,"warmup":true},{"weight":225,"reps":5,"warmup":true},{"weight":275,"reps":5},{"weight":275,"reps":5},{"weight":275,"reps":5}], sets:3, reps:5, weight:275.
+- SET TECHNIQUES (optional) — set "technique" ONLY when the athlete names one: "drop set"/"dropset"→"drop" (weight drops within one set, no rest; put the descending loads in set_details), "rest-pause"/"rest pause"→"rest_pause", "cluster"→"cluster", "myo-reps"/"myoreps"→"myo", "AMRAP"/"as many reps as possible"→"amrap". Rest-pause/cluster/myo ALSO use the "+" rep notation (rep_scheme like "8+3+2") from the PLUS rule. Only ONE technique per exercise (the primary one); leave null if none named.
+- AMRAP SET: "last set AMRAP, got 12", "AMRAP x12" → technique:"amrap" and set "reps" to the reps ACTUALLY achieved (12). Ignore any prescribed target — log what was done.
+- TO FAILURE: "to failure", "till failure", "failed at", "AMRAP" → set "to_failure":true. This can combine with any technique (e.g. a drop set to failure).
+- SUPERSETS / GIANT SETS: when two or more exercises are done back-to-back as a unit — "superset", "SS", "A1/A2", "triset", "giant set", or "X then Y with no rest" — give EVERY exercise in that group the SAME "superset_group" letter ("A" for the first group in the session, "B" for the next, etc.), in the order performed. Each movement is still its OWN exercise entry. "Superset: bench 3x8 185 / bent row 3x8 155" → Bench {..., "superset_group":"A"} and Bent Row {..., "superset_group":"A"}. Leave superset_group null for normal standalone exercises.
 - Exercise "name": use a CANONICAL name = the core lift + equipment + any lift-DEFINING qualifier (front/back, incline/decline/flat, close-/wide-grip, sumo/deficit/romanian, hang/power/full, high-/low-bar). Do NOT put EXECUTION/SETUP descriptors in the name — pause/paused, "from the floor", dead-stop, touch-and-go, slow eccentric, etc. — those belong in "notes" (tempo cadence goes in the "tempo" field, not the name or notes). So "paused back squat" → name:"Back Squat", notes:"paused"; "power snatch from the floor" → name:"Power Snatch". This keeps the same lift from being logged under several names. Use Title Case.
 - If the athlete mentions heart rate, bpm, avg HR, or max HR, populate heart_rate_avg and/or heart_rate_max in run_data.
 - Populate "practice_data" when the message describes a sport practice, game, scrimmage, team conditioning session, skill work, or film/walkthrough. Set practice_type to the best match. Intensity: light=walkthrough/film/skill_work (shooting, ball handling, passing drills — minimal physical exertion), moderate=half-speed/light practice, high=full practice, very_high=game/scrimmage/full-contact. Do NOT populate for gym workouts or standalone runs.
@@ -696,9 +714,14 @@ Rules:
     const text = await askClaude(sys,user,1000,[],model,"workout_parse");
     return JSON.parse(text.replace(/```json|```/g,"").trim());
   };
-  // Mechanical extraction → Haiku (athlete never sees this raw JSON; ~3x cheaper).
+  // Structural / technique-heavy logs (supersets, warm-up separation, drop / rest-pause /
+  // cluster / myo, AMRAP, to-failure) are the hardest to parse and the most error-prone
+  // on Haiku — send those straight to Sonnet. Everything else stays Haiku-first (~3x
+  // cheaper) with the escalate-on-empty net below.
+  const advanced = /superset|super set|drop\s?set|rest[- ]?pause|cluster|myo[- ]?reps?|amrap|to failure|warm[- ]?up|worked up|ramp(?:ed|ing)? up|giant set|triset/i.test(message);
+  const firstModel = advanced ? "claude-sonnet-4-6" : "claude-haiku-4-5";
   let parsed = null;
-  try { parsed = await runParse("claude-haiku-4-5"); }
+  try { parsed = await runParse(firstModel); }
   catch { parsed = null; }
   // Escalate to Sonnet ONLY when Haiku returned nothing structured but the message
   // clearly describes lifting (weights / set×rep patterns). Haiku sometimes drops
@@ -711,7 +734,7 @@ Rules:
     !parsed.run_data && !parsed.practice_data &&
     (!Array.isArray(parsed.pr_attempts) || parsed.pr_attempts.length === 0)
   );
-  if (gotNothing && looksLikeLifting) {
+  if (gotNothing && looksLikeLifting && firstModel !== "claude-sonnet-4-6") {
     try { parsed = await runParse("claude-sonnet-4-6"); }
     catch { /* keep the Haiku result (or null) and fall through to the default */ }
   }
