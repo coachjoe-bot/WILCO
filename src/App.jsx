@@ -570,6 +570,12 @@ const normalizeExName = (name) => {
   // (1c) "Bench" on its own means the bench press — merge it with "Bench Press"
   //      (and "Incline Bench" with "Incline Bench Press", etc.).
   n = n.replace(/\bbench\b(?!\s*press)/g,"bench press");
+  // (1d) A bare, unqualified "squat" (or "barbell squat") means the back squat —
+  //      merge it with "Back Squat". Done BEFORE stripping "pause" below, so an
+  //      ambiguous "pause squat" (could be a pause front/back/overhead) is NOT
+  //      collapsed into back squat — only a truly bare squat is. Qualified squats
+  //      (front/overhead/goblet/split/box/hack/...) keep their qualifier.
+  if(n==="squat"||n==="barbell squat") n="back squat";
   // (2) Strip execution/setup qualifiers.
   n = n
     .replace(/\([^)]*\)/g," ")                                      // any parenthetical, e.g. "(paused)", "(tempo)"
@@ -578,10 +584,6 @@ const normalizeExName = (name) => {
     .replace(/\b(?:paused?|tempo|slow|controlled|eccentric)\b/g," ")      // tempo/pause descriptors
     .replace(/\bw\/?\b/g," ")                                       // dangling "w/" / "w" connector left by the above
     .replace(/\s+/g," ").trim();
-  // (3) A bare "squat" (or "barbell squat") means the back squat — merge it with
-  //     "Back Squat". Qualified variants (front/overhead/goblet/split/box/hack/...)
-  //     keep their qualifier, so genuinely different squats never merge.
-  if(n==="squat"||n==="barbell squat") n="back squat";
   return n;
 };
 
@@ -589,6 +591,12 @@ const normalizeExName = (name) => {
 // canonical display form ("Power Snatch" over "Power Snatch from the Floor",
 // "Back Squat" over "Paused Back Squat"). Used to label grouped exercises.
 const cleanerName = (a,b) => !a ? (b||"") : !b ? a : (b.length<a.length ? b : a);
+
+// Preferred display label for normalized keys where the shortest raw name is a
+// poor label — e.g. the key "back squat" collects raw logs of just "Squat", and
+// "Squat" would otherwise win cleanerName. Force the full, proper lift name.
+const CANON_DISPLAY = { "back squat": "Back Squat" };
+const displayForKey = (key, fallback) => CANON_DISPLAY[key] || fallback;
 
 // Groups workout entries into sessions using time-gap logic.
 // Entries within gapMs of each other (same athlete) = same session.
@@ -3928,8 +3936,8 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
       const e1rm = bestE1RMForExercise(ex);
       if(!e1rm) return;
       const k=normalizeExName(ex.name);
-      if(!byEx[k]) byEx[k]={name:ex.name,e1rm,unit:ex.unit||"lbs"};
-      else { byEx[k].name=cleanerName(byEx[k].name,ex.name); if(e1rm>byEx[k].e1rm) byEx[k].e1rm=e1rm; }
+      if(!byEx[k]) byEx[k]={name:displayForKey(k,ex.name),e1rm,unit:ex.unit||"lbs"};
+      else { byEx[k].name=displayForKey(k,cleanerName(byEx[k].name,ex.name)); if(e1rm>byEx[k].e1rm) byEx[k].e1rm=e1rm; }
     });
   });
 
@@ -6549,8 +6557,8 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
                   if(!e1rm) return;
                   const k = normalizeExName(ex.name);
                   const unit = ex.unit||"lbs";
-                  if(!byEx[k]) byEx[k]={name:ex.name,unit,entries:[]};
-                  else byEx[k].name=cleanerName(byEx[k].name,ex.name);
+                  if(!byEx[k]) byEx[k]={name:displayForKey(k,ex.name),unit,entries:[]};
+                  else byEx[k].name=displayForKey(k,cleanerName(byEx[k].name,ex.name));
                   const topSet = getExerciseSets(ex).reduce((b,s)=>epley1RM(toLbs(s.weight,unit),s.reps)>epley1RM(toLbs(b.weight,unit),b.reps)?s:b, {weight:ex.weight??0, reps:ex.reps||1});
                   byEx[k].entries.push({date:new Date(w.created_at),weight:topSet.weight,unit,reps:topSet.reps||1,e1rm});
                 });
