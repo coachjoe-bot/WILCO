@@ -4030,14 +4030,25 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
     });
   });
 
-  // Benchmark lifts that the athlete has logged
+  // Overlay ACTUAL 1RMs (manual_one_rms — user-set OR system-detected from a reported/
+  // performed true single). An actual PR is the source of truth, so it OVERRIDES the
+  // estimated e1RM here, and seeds a benchmark even for a lift never logged in sets.
+  manualRMs.forEach(m=>{
+    const k=normalizeExName(m.normalized_exercise||m.exercise);
+    const lbs=toLbs(m.weight, m.unit);
+    if(!k || !(lbs>0)) return;
+    if(!byEx[k]) byEx[k]={key:k,name:displayForKey(k,m.exercise||k),e1rm:lbs,unit:"lbs",actual:true};
+    else { byEx[k].e1rm=lbs; byEx[k].actual=true; }
+  });
+
+  // Benchmark lifts the athlete has logged (or has an actual 1RM for)
   const benchmarked = Object.entries(byEx).map(([k,ex])=>{
     const benchKey=getBenchKey(k);
     if(!benchKey) return null;
     const threshRaw=BENCH_THRESHOLDS[genderKey]?.[benchKey];
     if(!threshRaw) return null;
     const thresh = isUnder18 ? threshRaw.map(t=>t*0.85) : threshRaw;
-    return {key:k,name:ex.name,e1rm:ex.e1rm,benchKey,thresh};
+    return {key:k,name:ex.name,e1rm:ex.e1rm,benchKey,thresh,actual:!!ex.actual};
   }).filter(Boolean);
 
   // Dedupe benchmark keys — keep highest e1rm per bench key. `rankedLifts` is the full
@@ -4544,6 +4555,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
   const [actionPin,setActionPin] = useState("");      // PIN confirming money actions
   const [actionBusy,setActionBusy] = useState(false);
   const [actionMsg,setActionMsg] = useState(null);    // {ok,text}
+  const [copiedCode,setCopiedCode] = useState(null);  // gift code just copied → "Copied!" for ~2s
   const [showUpgradePay,setShowUpgradePay] = useState(false);
   const [cancelAtPeriodEnd,setCancelAtPeriodEnd] = useState(!!athlete.cancel_at_period_end);
   const [subStatus,setSubStatus] = useState(athlete.subscription_status||null);
@@ -4904,7 +4916,16 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
         {(currentTier==="pro"||currentTier==="elite")&&(()=>{
           const codes = Array.isArray(athlete.gift_codes)?athlete.gift_codes:[];
           const hasFounder = codes.some(g=>g.unlimited);
-          const copyCode = (code)=>{try{navigator.clipboard.writeText(code);}catch(_){}}
+          const copyCode = (code)=>{
+            if(copiedCode===code) return;              // already showing "Copied!" — ignore until it resets
+            try{ navigator.clipboard.writeText(code); }catch(_){}
+            setCopiedCode(code);
+            setTimeout(()=>setCopiedCode(c=>c===code?null:c), 2000);
+          };
+          const copyBtn = (code)=>{
+            const done = copiedCode===code;
+            return <button onClick={()=>copyCode(code)} style={{background:done?C.gold:"none",border:`1px solid ${done?C.gold:C.border}`,color:done?"#000":C.text,borderRadius:8,padding:"4px 10px",cursor:done?"default":"pointer",fontSize:11,fontWeight:700,transition:"all 0.15s",minWidth:64}}>{done?"Copied!":"Copy"}</button>;
+          };
           return (
           <div style={{marginTop:4,marginBottom:16}}>
             <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>{hasFounder?"YOUR FOUNDER GIFT CODE":"GIFT WILCO TO 4 FRIENDS"}</div>
@@ -4919,11 +4940,11 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
                       {g.unlimited
                         ? <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
                             {g.redeemed_count>0&&<span style={{color:C.muted,fontSize:11}}>{g.redeemed_count} claimed</span>}
-                            <button onClick={()=>copyCode(g.code)} style={{background:"none",border:`1px solid ${C.border}`,color:C.text,borderRadius:8,padding:"4px 10px",cursor:"pointer",fontSize:11,fontWeight:700}}>Copy</button>
+                            {copyBtn(g.code)}
                           </div>
                         : redeemed
                           ? <span style={{color:C.muted,fontSize:11}}>Claimed{g.redeemed_by?` by ${g.redeemed_by}`:""}</span>
-                          : <button onClick={()=>copyCode(g.code)} style={{background:"none",border:`1px solid ${C.border}`,color:C.text,borderRadius:8,padding:"4px 10px",cursor:"pointer",fontSize:11,fontWeight:700}}>Copy</button>}
+                          : copyBtn(g.code)}
                     </div>
                   );
                 })}
