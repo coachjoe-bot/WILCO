@@ -403,6 +403,20 @@ const daysBetween = (date) => {
 
 const fmtDate = (d) => new Date(d).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
 const fmtDateShort = (d) => new Date(d).toLocaleDateString("en-US",{month:"short",day:"numeric"});
+// "Today" / "Yesterday" / "N days ago" for recent entries; falls back to the full date.
+const fmtDateRelative = (d) => {
+  const day = 86400000;
+  const t = new Date(d), n = new Date();
+  const startT = new Date(t.getFullYear(), t.getMonth(), t.getDate()).getTime();
+  const startN = new Date(n.getFullYear(), n.getMonth(), n.getDate()).getTime();
+  const diff = Math.round((startN - startT) / day);
+  if(diff === 0) return "Today";
+  if(diff === 1) return "Yesterday";
+  if(diff > 1 && diff < 7) return `${diff} days ago`;
+  return fmtDate(d);
+};
+// Light haptic tick on supported devices (phones); silent no-op on desktop/unsupported.
+const haptic = (pattern=10) => { try { navigator.vibrate && navigator.vibrate(pattern); } catch(_){} };
 
 // Epley estimated 1-rep max: weight × (1 + reps/30)
 // Lets us compare e.g. 225×5 vs 225×3 — more reps at same weight = more strength.
@@ -996,16 +1010,18 @@ const BENCH_THRESHOLDS = {
 // Current tier index (0=Rookie .. 7=Legendary) for a bodyweight ratio vs a lift's cut-lines.
 const tierForRatio = (ratio, thresh) => { let t=0; for(let i=0;i<thresh.length;i++){ if(ratio>=thresh[i]) t=i+1; } return t; };
 
-// Bodyweight-fair thresholds. Strength scales ~ bodyweight^(2/3), so the ×bodyweight
-// multiple needed to reach a tier scales as (refBW / BW)^(1/3): heavier lifters need a
-// slightly lower multiple, lighter lifters a slightly higher one (so a 250 and a 150 lb
-// lifter are judged fairly). Base multiples are anchored at these reference weights;
-// the factor is clamped so extreme bodyweights stay sane. Under-18 keeps the -15%.
+// Bodyweight-fair thresholds. The ×bodyweight multiple to reach a tier scales as
+// (refBW / BW)^exp: heavier lifters need a slightly lower multiple, lighter a slightly
+// higher one (so a 250 and a 150 lb lifter are judged fairly). We use a GENTLE exponent
+// (0.17, well under the pure 2/3-allometric 1/3) so small lifters aren't over-nerfed —
+// tuned so a 150 lb male hits Elite squat at ~2.1× (vs 2.0× at the 200 lb anchor).
+// Base multiples are anchored at these reference weights; factor clamped for sanity.
 const REF_BW = { male: 200, female: 150 };
+const BW_SCALE_EXP = 0.17;
 const bwTierFactor = (bodyweight, genderKey) => {
   const ref = REF_BW[genderKey] || REF_BW.male;
   if(!bodyweight || bodyweight<=0) return 1;
-  return Math.min(1.25, Math.max(0.8, Math.cbrt(ref / bodyweight)));
+  return Math.min(1.2, Math.max(0.85, Math.pow(ref / bodyweight, BW_SCALE_EXP)));
 };
 const scaledThresholds = (threshRaw, bodyweight, genderKey, isUnder18) => {
   const f = bwTierFactor(bodyweight, genderKey) * (isUnder18 ? 0.85 : 1);
@@ -2920,7 +2936,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         return;
       }
       await sbInsert("workouts",{athlete_id:updatedAthlete.id,raw_message:msg,bot_reply:reply,parsed_data:parsedFinal});
-      setSaved(true); setTimeout(()=>setSaved(false),3000);
+      haptic(15); setSaved(true); setTimeout(()=>setSaved(false),3000);
 
       // ── Session counter + milestone callouts + certified badge ────────────
       try {
@@ -3009,6 +3025,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       setWorkoutHistory(prev=>[{raw_message:msg,parsed_data:parsedFinal,created_at:new Date().toISOString()},...prev]);
 
       if(newPRs.length>0){
+        haptic([25,40,25]); // celebratory buzz on a new PR
         // 1RM propagation: recalculate program weights for each new PR
         let currentProgramText = updatedAthlete.program_text;
         const propagationLog = [];
@@ -3738,7 +3755,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
                           <div style={{width:6,height:6,borderRadius:"50%",background:runDotColor,flexShrink:0}}/>
-                          <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1}}>{isRunSession?"RUN":"WORKOUT"} — {fmtDate(sessionDate)}</div>
+                          <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1}}>{isRunSession?"RUN":"WORKOUT"} — {fmtDateRelative(sessionDate)}</div>
                         </div>
                         <div style={{display:"flex",alignItems:"center",gap:10}}>
                           {!isRunSession&&feelVal&&<div style={{fontSize:11,color:feelVal==="great"||feelVal==="good"?C.green:feelVal==="rough"?C.red:C.gold,fontWeight:600}}>{feelVal}</div>}
@@ -3789,7 +3806,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                     <div key={i} style={{background:C.navy2,border:`1px solid ${C.blue}30`,borderRadius:12,padding:14,marginBottom:10}}>
                       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
                         <div style={{width:6,height:6,borderRadius:"50%",background:C.blue,flexShrink:0}}/>
-                        <div style={{color:C.blue,fontSize:11,fontWeight:700,letterSpacing:1}}>FORM CHECK — {fmtDate(w.created_at)}</div>
+                        <div style={{color:C.blue,fontSize:11,fontWeight:700,letterSpacing:1}}>FORM CHECK — {fmtDateRelative(w.created_at)}</div>
                       </div>
                       <div style={{color:C.muted2,fontSize:12,marginBottom:6}}>{w.raw_message}</div>
                       {w.bot_reply&&<div style={{color:C.text,fontSize:12,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{w.bot_reply}</div>}
@@ -3951,7 +3968,7 @@ function EditWorkoutModal({session, onClose, setWorkoutHistory}) {
         <div style={{padding:"16px 20px 12px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
           <div>
             <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2}}>EDIT WORKOUT</div>
-            <div style={{color:C.muted2,fontSize:12,marginTop:2}}>{fmtDate(session.entries[0].created_at)}</div>
+            <div style={{color:C.muted2,fontSize:12,marginTop:2}}>{fmtDateRelative(session.entries[0].created_at)}</div>
           </div>
           <button onClick={onClose} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"4px 12px",cursor:"pointer",fontSize:12}}>✕</button>
         </div>
@@ -4941,6 +4958,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
           const copyCode = (code)=>{
             if(copiedCode===code) return;              // already showing "Copied!" — ignore until it resets
             try{ navigator.clipboard.writeText(code); }catch(_){}
+            haptic(10);
             setCopiedCode(code);
             setTimeout(()=>setCopiedCode(c=>c===code?null:c), 2000);
           };
@@ -6658,7 +6676,7 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
                           <div style={{width:6,height:6,borderRadius:"50%",background:runDotColor,flexShrink:0}}/>
-                          <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1}}>{isRunSession?"RUN":"WORKOUT"} — {fmtDate(sessionDate)}</div>
+                          <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1}}>{isRunSession?"RUN":"WORKOUT"} — {fmtDateRelative(sessionDate)}</div>
                         </div>
                         {!isRunSession&&feelVal&&<div style={{fontSize:11,color:feelVal==="great"||feelVal==="good"?C.green:feelVal==="rough"?C.red:C.gold,fontWeight:600}}>{feelVal}</div>}
                       </div>
@@ -6696,7 +6714,7 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
                     <div key={i} style={{background:C.navy3,border:`1px solid ${C.blue}30`,borderRadius:12,padding:14,marginBottom:10}}>
                       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
                         <div style={{width:6,height:6,borderRadius:"50%",background:C.blue,flexShrink:0}}/>
-                        <div style={{color:C.blue,fontSize:11,fontWeight:700,letterSpacing:1}}>FORM CHECK — {fmtDate(w.created_at)}</div>
+                        <div style={{color:C.blue,fontSize:11,fontWeight:700,letterSpacing:1}}>FORM CHECK — {fmtDateRelative(w.created_at)}</div>
                       </div>
                       <div style={{color:C.muted2,fontSize:12,marginBottom:6}}>{w.raw_message}</div>
                       {w.bot_reply&&<div style={{color:C.text,fontSize:12,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{w.bot_reply}</div>}
