@@ -437,19 +437,44 @@ const bestE1RMForExercise = (ex) => {
   return best;
 };
 
-// Render set_details (or legacy flat fields) as a human-readable string, grouping
-// consecutive sets that share the same rep count, e.g. "3×5 @ 135/155/175lbs, 1×1 @ 275lbs".
+// Format a duration in seconds as a compact label: 30→"30s", 60→"1 min", 90→"1:30".
+const fmtDuration = (sec) => {
+  if(sec==null || sec<=0) return "";
+  if(sec>=60){ const m=Math.floor(sec/60), s=sec%60; return s ? `${m}:${String(s).padStart(2,"0")}` : `${m} min`; }
+  return `${sec}s`;
+};
+
+// Render set_details (or legacy flat fields) as a human-readable string. Handles
+// weighted sets ("3×5 @ 135/155/175lbs"), Olympic complexes with a rep_scheme
+// ("4×1+1 @ 135/165/185"), time-based holds ("2×1 min"), and bodyweight reps ("2×20").
 const formatSetDetails = (ex) => {
   if(!ex) return "—";
-  const u = ex.unit==="kg" ? "kg" : ex.unit==="bodyweight" ? "" : "lbs";
   const sets = getExerciseSets(ex);
+  const nSets = ex.sets || sets.length || 1;
+  // Time-based holds (planks, dead hangs, timed carries): sets × duration, no weight.
+  if(ex.time_per_set_seconds){
+    return `${nSets}×${fmtDuration(ex.time_per_set_seconds)}`;
+  }
   if(sets.length===0) return "—";
+  const u = ex.unit==="kg" ? "kg" : ex.unit==="bodyweight" ? "" : "lbs";
+  const hasWeight = sets.some(s=>s.weight && s.weight>0);
+  // Olympic complex: one uniform rep scheme (e.g. "1+1") across ramping weights —
+  // show the scheme once rather than grouping by numeric reps.
+  if(ex.rep_scheme){
+    return hasWeight
+      ? `${sets.length}×${ex.rep_scheme} @ ${sets.map(s=>s.weight).join("/")}${u||"lbs"}`
+      : `${sets.length}×${ex.rep_scheme}`;
+  }
   const groups = [];
   sets.forEach(s=>{
     const last = groups[groups.length-1];
     if(last && last.reps===s.reps){ last.weights.push(s.weight); }
     else { groups.push({reps:s.reps, weights:[s.weight]}); }
   });
+  // Bodyweight / unloaded reps (push-ups, Russian twists): show "N×reps", no "@ 0/0".
+  if(!hasWeight){
+    return groups.map(g=>`${g.weights.length}×${g.reps}`).join(", ");
+  }
   return groups.map(g=>`${g.weights.length}×${g.reps} @ ${g.weights.join("/")}${u}`).join(", ");
 };
 
@@ -576,7 +601,7 @@ const extractProgramText = async (message) => {
 const parseWorkout = async (message, name, sport) => {
   const sys = `Extract workout data from an athlete message. Return ONLY valid JSON, no markdown.
 {
-  "exercises":[{"name":string,"sets":number|null,"reps":number|null,"weight":number|null,"unit":"lbs"|"kg"|"bodyweight","feel":"easy"|"good"|"hard"|null,"notes":string|null,"set_details":[{"weight":number,"reps":number}]|null}],
+  "exercises":[{"name":string,"sets":number|null,"reps":number|null,"rep_scheme":string|null,"time_per_set_seconds":number|null,"weight":number|null,"unit":"lbs"|"kg"|"bodyweight","feel":"easy"|"good"|"hard"|null,"notes":string|null,"set_details":[{"weight":number,"reps":number}]|null}],
   "run_data":{"run_type":"easy"|"tempo"|"interval"|"long_run"|"race"|"recovery"|"fartlek"|null,"distance_miles":number|null,"distance_km":number|null,"duration_minutes":number|null,"pace_per_mile":string|null,"pace_per_km":string|null,"heart_rate_avg":number|null,"heart_rate_max":number|null,"intervals":[{"repeat":number|null,"distance":string|null,"time":string|null,"pace":string|null,"rest":string|null}]|null,"notes":string|null}|null,
   "practice_data":{"practice_type":"practice"|"game"|"scrimmage"|"conditioning"|"skill_work"|"film"|"walkthrough"|null,"sport":string|null,"duration_minutes":number|null,"intensity":"light"|"moderate"|"high"|"very_high"|null,"notes":string|null}|null,
   "pain_flags":[{"area":string,"description":string}],
@@ -595,7 +620,9 @@ Rules:
 - Populate "run_data" when the message describes any run, jog, cardio, or running workout. Set run_type to the best match. Calculate pace if distance and time are both given.
 - For interval runs, populate "intervals" array with one entry per repeat type.
 - Populate "exercises" for strength/lifting/conditioning work. Leave empty for pure runs.
-- OLYMPIC WEIGHTLIFTING COMPLEXES: a "complex" is two or more movements done back-to-back within one set, written with "+" (e.g. "muscle snatch+hang snatch", "hang power clean+ hang clean", "clean+jerk", "snatch pull+snatch"). Log EACH movement in the complex as its OWN exercise entry — never skip one. A rep scheme like "4x1+1" means 4 sets, and within each set 1 rep of the first movement + 1 rep of the second (so each movement is sets:4, reps:1). Weights written as "@ 135/165/185/185lbs" are the per-set weights in order — apply the SAME per-set weight ladder to every movement in the complex and populate set_details with one entry per set. Example: "muscle snatch+hang snatch 4x1+1 @ 135/165/185/185lbs" → exercises:[{"name":"Muscle Snatch","sets":4,"reps":1,"weight":185,"unit":"lbs","set_details":[{"weight":135,"reps":1},{"weight":165,"reps":1},{"weight":185,"reps":1},{"weight":185,"reps":1}]},{"name":"Hang Snatch","sets":4,"reps":1,"weight":185,"unit":"lbs","set_details":[{"weight":135,"reps":1},{"weight":165,"reps":1},{"weight":185,"reps":1},{"weight":185,"reps":1}]}]. NEVER return an empty exercises array just because the notation is dense or complex — extract every lift you can identify and put anything you truly can't structure into general_notes as a fallback, not instead of the exercises.
+- OLYMPIC WEIGHTLIFTING COMPLEXES: a "complex" is two or more movements done back-to-back within one set, written with "+" (e.g. "muscle snatch+hang snatch", "hang power clean+ hang clean", "clean+jerk", "snatch pull+snatch"). Log the WHOLE complex as ONE exercise entry — do NOT split it into separate exercises. Set "name" to the movements joined with " + " in Title Case (e.g. "Muscle Snatch + Hang Snatch"). Set "rep_scheme" to the literal per-set scheme string exactly as written ("1+1", "1+1+1", "2+1", etc.) and set "reps" to the number of reps of the FIRST movement per set (for 1RM math). "4x1+1" means sets:4, rep_scheme:"1+1", reps:1. Weights written as "@ 135/165/185/185lbs" are the per-set weights in order → populate set_details with one entry per set ({weight, reps: the first-movement reps}). Example: "muscle snatch+hang snatch 4x1+1 @ 135/165/185/185lbs" → exercises:[{"name":"Muscle Snatch + Hang Snatch","sets":4,"reps":1,"rep_scheme":"1+1","weight":185,"unit":"lbs","set_details":[{"weight":135,"reps":1},{"weight":165,"reps":1},{"weight":185,"reps":1},{"weight":185,"reps":1}]}]. NEVER return an empty exercises array just because the notation is dense — extract every lift you can identify.
+- TIME-BASED / HELD EXERCISES (planks, dead hangs, wall sits, timed carries, isometric holds — anything measured by DURATION, not reps or weight): set "time_per_set_seconds" to the seconds held per set and leave "weight" null, "reps" null, "unit":"bodyweight" (unless external load is stated). Convert units to seconds: "1minute"/"1 min"→60, "30s"/"30 sec"→30, "1:30"→90. Example: "Plank 2x1minute" → {"name":"Plank","sets":2,"time_per_set_seconds":60,"weight":null,"reps":null,"unit":"bodyweight"}. "Dead hang 3x30s" → sets:3, time_per_set_seconds:30. If a movement has BOTH a rep count and a hold, use reps and put the hold in notes.
+- BODYWEIGHT / UNLOADED REP WORK (push-ups, pull-ups, sit-ups, Russian twists, air squats — reps with no external load and no time): set "unit":"bodyweight", "weight":null, and use sets/reps normally. "Russian twists 2x20" → {"name":"Russian Twist","sets":2,"reps":20,"unit":"bodyweight"}. Do NOT set weight to 0.
 - Exercise "name": use a CANONICAL name = the core lift + equipment + any lift-DEFINING qualifier (front/back, incline/decline/flat, close-/wide-grip, sumo/deficit/romanian, hang/power/full, high-/low-bar). Do NOT put EXECUTION/SETUP descriptors in the name — tempo, pause/paused, "from the floor", dead-stop, touch-and-go, slow eccentric, etc. — those belong in "notes". So "paused back squat" → name:"Back Squat", notes:"paused"; "power snatch from the floor" → name:"Power Snatch". This keeps the same lift from being logged under several names. Use Title Case.
 - If the athlete mentions heart rate, bpm, avg HR, or max HR, populate heart_rate_avg and/or heart_rate_max in run_data.
 - Populate "practice_data" when the message describes a sport practice, game, scrimmage, team conditioning session, skill work, or film/walkthrough. Set practice_type to the best match. Intensity: light=walkthrough/film/skill_work (shooting, ball handling, passing drills — minimal physical exertion), moderate=half-speed/light practice, high=full practice, very_high=game/scrimmage/full-contact. Do NOT populate for gym workouts or standalone runs.
@@ -678,7 +705,7 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
         parts.push(`${runD.run_type||"run"}${runD.distance_miles?" "+runD.distance_miles+"mi":runD.distance_km?" "+runD.distance_km+"km":""}${runD.pace_per_mile?" @ "+runD.pace_per_mile+"/mi":runD.pace_per_km?" @ "+runD.pace_per_km+"/km":""}${runD.duration_minutes?" ("+runD.duration_minutes+"min)":""}`);
       }
       if(w.parsed_data?.exercises?.length>0){
-        parts.push(w.parsed_data.exercises.map(e=>`${e.name}${e.weight?" "+fmtWeight(e.weight,e.unit):""}${e.sets&&e.reps?" "+e.sets+"x"+e.reps:""}${e.feel?" ("+e.feel+")":""}`).join(", "));
+        parts.push(w.parsed_data.exercises.map(e=>`${e.name} ${formatSetDetails(e)}${e.feel?" ("+e.feel+")":""}`).join(", "));
       }
       const activityStr = parts.length>0 ? parts.join(" + ") : w.raw_message?.slice(0,120)||"";
       const pain = w.parsed_data?.pain_flags?.map(p=>p.area).join(", ")||"";
@@ -732,6 +759,8 @@ BANNED PHRASES:
 - "Atta boy/girl": BANNED except when athlete explicitly hits a NEW PR.
 - Exclamation points: Maximum ONE per response.
 - "Let's go!" / "Get after it!": BANNED as fillers.
+
+LOGGING IS AUTOMATIC: The app parses and saves every workout the athlete types — the logging happens on its own, and you never need "backend" or "account" access to record anything. NEVER tell the athlete you can't log something, that logging is "handled on the backend," or to contact whoever manages their account. If they say "log this," "make sure to log this," or "record this," they're just sharing the workout — acknowledge it and coach the numbers. Only decline things that are genuinely outside coaching (billing, account changes), never the workout itself.
 
 FOR NORMAL WORKOUT LOGS respond with one of: "Good work." / "Solid session." / "Numbers are moving." / "Nice." -- then one specific observation. That's it.
 
