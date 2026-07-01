@@ -3227,7 +3227,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
       </div>
 
       {/* Input area */}
-      <div style={{padding:"8px 14px",paddingBottom:"max(16px, env(safe-area-inset-bottom))",flexShrink:0,borderTop:`1px solid ${C.border}`,background:C.navy2}}>
+      <div style={{padding:"8px 14px",paddingBottom:"8px",flexShrink:0,borderTop:`1px solid ${C.border}`,background:C.navy2}}>
         <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
           {/* Video upload button */}
           <input ref={videoInputRef} type="file" accept="video/*" style={{display:"none"}} onChange={handleVideoUpload}/>
@@ -3617,7 +3617,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
       </div>
 
       {/* Sticky footer close button — sits above iPhone home bar / gesture area */}
-      <div style={{padding:"10px 16px",paddingBottom:"max(10px, env(safe-area-inset-bottom))",borderTop:`1px solid ${C.border}`,background:C.navy2,flexShrink:0}}>
+      <div style={{padding:"10px 16px",paddingBottom:"10px",borderTop:`1px solid ${C.border}`,background:C.navy2,flexShrink:0}}>
         <button onClick={onClose} style={{width:"100%",background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"12px 14px",cursor:"pointer",fontSize:14,fontWeight:600}}>✕ Close</button>
       </div>
 
@@ -3743,7 +3743,7 @@ function EditWorkoutModal({session, onClose, setWorkoutHistory}) {
           ))}
           {err&&<div style={{color:"#ef4444",fontSize:12,marginBottom:10}}>{err}</div>}
         </div>
-        <div style={{padding:"12px 20px",paddingBottom:"max(12px, env(safe-area-inset-bottom))",borderTop:`1px solid ${C.border}`,display:"flex",gap:10,flexShrink:0}}>
+        <div style={{padding:"12px 20px",paddingBottom:"12px",borderTop:`1px solid ${C.border}`,display:"flex",gap:10,flexShrink:0}}>
           <button onClick={onClose} style={{flex:1,background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"12px 14px",cursor:"pointer",fontSize:14,fontWeight:600}}>Cancel</button>
           <button onClick={save} disabled={saving} style={{flex:1,background:C.gold,border:"none",color:C.navy,borderRadius:8,padding:"12px 14px",cursor:saving?"default":"pointer",fontSize:14,fontWeight:700,opacity:saving?0.6:1}}>{saving?"Saving...":"Save changes"}</button>
         </div>
@@ -4082,7 +4082,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
       </div>
 
       {/* Sticky footer close button — sits above iPhone home bar / gesture area */}
-      <div style={{padding:"10px 16px",paddingBottom:"max(10px, env(safe-area-inset-bottom))",borderTop:`1px solid ${C.border}`,background:C.navy2,flexShrink:0}}>
+      <div style={{padding:"10px 16px",paddingBottom:"10px",borderTop:`1px solid ${C.border}`,background:C.navy2,flexShrink:0}}>
         <button onClick={onClose} style={{width:"100%",background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"12px 14px",cursor:"pointer",fontSize:14,fontWeight:600}}>✕ Close</button>
       </div>
     </div>
