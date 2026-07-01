@@ -49,6 +49,10 @@ const sbGet = async (table,params="") => {
 // nothing breaks before the database is locked down. Once RLS denies anon writes,
 // the fallback simply stops working and only authenticated writes remain.
 let CURRENT_AUTH = null;
+// Accessor so the lazily-loaded coach chunk (src/coach.jsx) can attach the live
+// session to its own fetches (e.g. the now-authenticated send-coach-invite) —
+// CURRENT_AUTH itself is a module-private mutable binding.
+export const getAuth = () => CURRENT_AUTH;
 const dataApi = async (op,table,{data,id,params}={}) => {
   const r = await fetch("/api/data",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth:CURRENT_AUTH,op,table,data,id,params})});
   const t = await r.text(); let d; try{ d = t?JSON.parse(t):null; }catch(_){ d=t; }
@@ -1993,12 +1997,12 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
     }
     if(data.coachEmail.trim()){
       fetch("/api/send-coach-welcome",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({athleteName:data.name.trim(),athleteSport:data.sport,coachName:data.coachName.trim()||null,coachEmail:data.coachEmail.trim().toLowerCase(),tier:finalTier})
+        body:JSON.stringify({auth:CURRENT_AUTH,athleteName:data.name.trim(),athleteSport:data.sport,coachName:data.coachName.trim()||null,coachEmail:data.coachEmail.trim().toLowerCase(),tier:finalTier})
       }).catch(()=>{});
     }
     if(finalTier==="elite"){
       fetch("/api/send-coach-welcome",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({athleteName:data.name.trim(),athleteSport:data.sport,coachName:"WILCO Admin",coachEmail:"coachjoe@trainwilco.com",tier:"elite",isAdminAlert:true})
+        body:JSON.stringify({auth:CURRENT_AUTH,athleteName:data.name.trim(),athleteSport:data.sport,coachName:"WILCO Admin",coachEmail:"coachjoe@trainwilco.com",tier:"elite",isAdminAlert:true})
       }).catch(()=>{});
     }
     setAthlete({...athleteForApp,tier:finalTier,goal:data.goal||"strength"});

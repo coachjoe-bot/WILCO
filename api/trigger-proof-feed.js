@@ -232,9 +232,15 @@ export default async function handler(req, res) {
   if (typeof body === "string") { try { body = JSON.parse(body); } catch { body = {}; } }
   body = body || {};
 
-  // Auth: run-now (authenticated athlete) OR scheduler (cron secret / Vercel cron).
+  // Auth: run-now (authenticated athlete) OR scheduler (cron secret ONLY).
+  // The scheduler path drives the full roster sweep + arbitrary-id fanout (mass AI
+  // spend + mass email), so it must be gated by a real secret. We authenticate it
+  // SOLELY via the Authorization: Bearer <CRON_SECRET> that Vercel injects into cron
+  // invocations when CRON_SECRET is set — NOT the x-vercel-cron header (which an
+  // external caller can forge) and NOT a "secret unset → open" fail-open.
   const cronSecret = process.env.CRON_SECRET;
-  const isCron = !cronSecret || req.headers["authorization"] === `Bearer ${cronSecret}` || req.headers["x-vercel-cron"] === "1";
+  if (!cronSecret) return res.status(500).json({ error: "Missing CRON_SECRET" });
+  const isCron = req.headers["authorization"] === `Bearer ${cronSecret}`;
   let runNowAthleteId = null;
   if (!isCron) {
     try {

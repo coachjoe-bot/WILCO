@@ -5,6 +5,11 @@
 // Always returns a generic success response to prevent account enumeration.
 
 import bcrypt from "bcryptjs";
+import { randomInt } from "node:crypto";
+import { rateLimit, clientIp } from "./_supa.js";
+
+// Escape user-supplied text before interpolating into email HTML.
+const esc = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -25,6 +30,21 @@ export default async function handler(req, res) {
 
   if (!email) return res.status(400).json({ error: "email is required" });
   if (!type)  return res.status(400).json({ error: "type is required (athlete or coach)" });
+
+  // Rate limits: this endpoint RESETS the target's PIN to a new random value on
+  // every successful hit, so without throttling anyone who knows a victim's email
+  // could repeatedly lock them out (and flood their inbox / burn Resend quota).
+  // Two guards, both returning a generic success so account existence never leaks:
+  //   • per-IP  — caps an attacker's overall reset volume
+  //   • per-target (email+type) — protects ONE victim from being ground down even
+  //     across rotating IPs
+  const emailKey = String(email).trim().toLowerCase();
+  try {
+    await rateLimit(`pin-recovery-ip:${clientIp(req)}`, { max: 5, windowMin: 15 });
+    await rateLimit(`pin-recovery-target:${type}:${emailKey}`, { max: 3, windowMin: 60 });
+  } catch {
+    return res.status(200).json({ sent: true }); // throttled — look identical to success
+  }
 
   const sbHeaders = {
     "Content-Type": "application/json",
@@ -62,7 +82,7 @@ export default async function handler(req, res) {
     // Hashed PINs can't be read back — reset to a new random 4-digit PIN and email it.
     let newPin = null;
     if (target) {
-      newPin = String(Math.floor(1000 + Math.random() * 9000));
+      newPin = String(randomInt(1000, 10000)); // CSPRNG 4-digit PIN
       const hash = await bcrypt.hash(newPin, 10);
       await fetch(`${SUPABASE_URL}/rest/v1/${target.table}?id=eq.${target.id}`, {
         method: "PATCH",
@@ -79,8 +99,8 @@ export default async function handler(req, res) {
         ? "Your new WILCO Coach PIN"
         : "Your new WILCO PIN";
 
-      console.log("[pin-recovery] sending to:", email, "| from:", FROM_EMAIL, "| has_resend_key:", !!RESEND_KEY, "| has_supabase:", !!SUPABASE_URL);
-      const resendRes = await fetch("https://api.resend.com/emails", {
+      // No PII in logs: the recipient email + Resend payload used to be logged here.
+      await fetch("https://api.resend.com/emails", {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${RESEND_KEY}`,
@@ -93,8 +113,6 @@ export default async function handler(req, res) {
           html,
         }),
       });
-      const resendData = await resendRes.json();
-      console.log("[pin-recovery] resend response:", JSON.stringify(resendData));
     }
 
     return res.status(200).json({ sent: true });
@@ -107,7 +125,7 @@ export default async function handler(req, res) {
 
 // ── Email builder ──────────────────────────────────────────────────────────────
 function buildPinEmail({ displayName, pin, type }) {
-  const greeting = displayName ? `Hi ${displayName},` : "Hi,";
+  const greeting = displayName ? `Hi ${esc(displayName)},` : "Hi,";
   const roleLabel = type === "coach" ? "coach" : "athlete";
 
   return `<!DOCTYPE html>

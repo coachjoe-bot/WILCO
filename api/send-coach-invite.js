@@ -1,5 +1,16 @@
 // Vercel serverless function — sends a coach their WILCO access code when onboarded by admin.
 // Called from the master dashboard school onboarding form.
+//
+// AUTH: master/admin coaches only. This endpoint renders caller-supplied text into
+// a WILCO-branded email and sends it to a caller-supplied address, so without a
+// gate it was an open relay (arbitrary phishing from our domain + Resend quota
+// burn). Coach creation itself is already master/admin-only via the write gateway;
+// this makes the notify step prove the same before any mail goes out.
+
+import { authCaller, sbSelect, authThrottle, clientIp } from "./_supa.js";
+
+const enc = encodeURIComponent;
+const esc = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -12,7 +23,22 @@ export default async function handler(req, res) {
 
   if (!RESEND_KEY) return res.status(500).json({ error: "Missing RESEND_API_KEY" });
 
-  const { coachName, coachEmail, accessCode, schoolName } = req.body || {};
+  const { auth, coachName, coachEmail, accessCode, schoolName } = req.body || {};
+
+  // Require a master/admin coach session. Brute-force-guard the PIN fallback path.
+  try {
+    const recordAuthFail = await authThrottle(`coach-invite-authfail:${clientIp(req)}`);
+    let caller;
+    try { caller = await authCaller(auth); }
+    catch (e) { if (e.status === 401) await recordAuthFail(); throw e; }
+    if (caller.role !== "coach") return res.status(403).json({ error: "Not authorized" });
+    const me = (await sbSelect("coaches", `?id=eq.${enc(caller.id)}&select=role`))[0];
+    if (!me || (me.role !== "master" && me.role !== "admin")) {
+      return res.status(403).json({ error: "Not authorized" });
+    }
+  } catch (e) {
+    return res.status(e.status || 401).json({ error: e.message || "Unauthorized" });
+  }
 
   if (!coachEmail)  return res.status(400).json({ error: "coachEmail is required" });
   if (!accessCode)  return res.status(400).json({ error: "accessCode is required" });
@@ -62,9 +88,9 @@ function buildInviteEmail({ coachName, accessCode, schoolName, appUrl }) {
     <!-- Body -->
     <div style="background:#fff;padding:32px 28px;border-left:1px solid #e0e0e0;border-right:1px solid #e0e0e0">
 
-      <p style="color:#1a1a2e;font-size:15px;margin:0 0 16px">Hi ${coachName},</p>
+      <p style="color:#1a1a2e;font-size:15px;margin:0 0 16px">Hi ${esc(coachName)},</p>
       <p style="color:#444;font-size:14px;line-height:1.7;margin:0 0 24px">
-        You've been added as a coach for <strong>${schoolName}</strong> on WILCO — an AI-powered strength and conditioning platform for high school athletes.
+        You've been added as a coach for <strong>${esc(schoolName)}</strong> on WILCO — an AI-powered strength and conditioning platform for high school athletes.
       </p>
       <p style="color:#444;font-size:14px;line-height:1.7;margin:0 0 24px">
         Your athletes will use your access code to register and get automatically assigned to your dashboard. Here it is:
@@ -73,7 +99,7 @@ function buildInviteEmail({ coachName, accessCode, schoolName, appUrl }) {
       <!-- Access code card -->
       <div style="background:#060d1e;border-radius:12px;padding:24px;text-align:center;margin-bottom:28px">
         <div style="color:#64748b;font-size:11px;letter-spacing:3px;margin-bottom:10px">YOUR ACCESS CODE</div>
-        <div style="color:#d4a017;font-size:40px;font-weight:900;letter-spacing:12px;font-family:Arial,sans-serif">${accessCode}</div>
+        <div style="color:#d4a017;font-size:40px;font-weight:900;letter-spacing:12px;font-family:Arial,sans-serif">${esc(accessCode)}</div>
         <div style="color:#475569;font-size:12px;margin-top:12px;line-height:1.6">
           Share this code with your athletes — they'll enter it when signing up.<br/>
           <strong style="color:#94a3b8">Keep it safe. Each code is unique to you.</strong>
@@ -99,7 +125,7 @@ function buildInviteEmail({ coachName, accessCode, schoolName, appUrl }) {
           </td>
           <td style="padding:12px 0 0 14px;vertical-align:top">
             <div style="color:#1a1a2e;font-size:13px;font-weight:600;margin-bottom:3px">Share your code with your athletes</div>
-            <div style="color:#888;font-size:12px;line-height:1.5">When they sign up, they enter <strong>${accessCode}</strong> and land directly on your roster.</div>
+            <div style="color:#888;font-size:12px;line-height:1.5">When they sign up, they enter <strong>${esc(accessCode)}</strong> and land directly on your roster.</div>
           </td>
         </tr>
       </table>

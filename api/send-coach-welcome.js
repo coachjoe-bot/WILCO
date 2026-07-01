@@ -1,5 +1,12 @@
 // Vercel serverless function — sends a welcome email to a coach when an athlete signs up.
 // Called from the client-side signup flow immediately after athlete creation.
+//
+// AUTH: authenticated athlete only (the freshly-created account, which has a live
+// session by the time this fires) + per-IP rate limit. Same open-relay reasoning
+// as send-coach-invite: caller controls both the recipient and body text, so an
+// unauthenticated version could send WILCO-branded mail to anyone.
+
+import { authCaller, authThrottle, rateLimit, clientIp } from "./_supa.js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -12,7 +19,22 @@ export default async function handler(req, res) {
 
   if (!RESEND_KEY) return res.status(500).json({ error: "Missing RESEND_API_KEY" });
 
-  const { athleteName, athleteSport, coachName, coachEmail } = req.body || {};
+  const { auth, athleteName, athleteSport, coachName, coachEmail } = req.body || {};
+
+  // Require a valid athlete session; throttle the PIN-fallback brute-force path.
+  try {
+    const recordAuthFail = await authThrottle(`coach-welcome-authfail:${clientIp(req)}`);
+    let caller;
+    try { caller = await authCaller(auth); }
+    catch (e) { if (e.status === 401) await recordAuthFail(); throw e; }
+    if (caller.role !== "athlete") return res.status(403).json({ error: "Not authorized" });
+  } catch (e) {
+    return res.status(e.status || 401).json({ error: e.message || "Unauthorized" });
+  }
+  // Cap outbound volume per IP regardless of auth (a valid session shouldn't fire
+  // dozens of coach notifications). Silent success so signup UX is never blocked.
+  try { await rateLimit(`coach-welcome:${clientIp(req)}`, { max: 10, windowMin: 60 }); }
+  catch { return res.status(200).json({ sent: false, throttled: true }); }
 
   if (!coachEmail)   return res.status(400).json({ error: "coachEmail is required" });
   if (!athleteName)  return res.status(400).json({ error: "athleteName is required" });
@@ -48,7 +70,11 @@ export default async function handler(req, res) {
 }
 
 // ── Email builder ──────────────────────────────────────────────────────────────
+const esc = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 function buildWelcomeEmail({ athleteName, athleteSport, coachName, initial, joinedDate, signupUrl }) {
+  // Escape user-supplied fields once, up front, so every interpolation below is safe.
+  athleteName = esc(athleteName); athleteSport = esc(athleteSport);
+  coachName = esc(coachName); initial = esc(initial);
   return `<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>

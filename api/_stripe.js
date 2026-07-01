@@ -7,6 +7,7 @@
 // can read/write any athlete from a webhook), all I/O via fetch / the stripe SDK.
 
 import Stripe from "stripe";
+import { randomInt } from "node:crypto";
 import { verifyPin } from "./_supa.js";
 
 // ── Stripe client (lazy singleton) ───────────────────────────────────────────
@@ -67,8 +68,10 @@ export const GIFT_COUPON_ID = process.env.STRIPE_GIFT_COUPON_ID || "WILCO_GIFT_P
 // against Stripe before creating and regenerates on collision.
 const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 export function randomGiftCode() {
+  // CSPRNG (crypto.randomInt) rather than Math.random — gift codes are bearer
+  // credentials for a free month, so they shouldn't be predictable.
   let s = "WILCO-";
-  for (let i = 0; i < 5; i++) s += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
+  for (let i = 0; i < 5; i++) s += CODE_ALPHABET[randomInt(CODE_ALPHABET.length)];
   return s;
 }
 

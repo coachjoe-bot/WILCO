@@ -2,9 +2,11 @@
 // Triggered by Vercel Cron every Monday at 9 AM ET, or manually via GET.
 
 export default async function handler(req, res) {
-  // Simple auth check for manual triggers — skip for cron (Vercel signs cron requests)
+  // Cron-only endpoint. Authenticate SOLELY via the Authorization: Bearer
+  // <CRON_SECRET> that Vercel injects into cron invocations — not the forgeable
+  // x-vercel-cron header, and fail closed (401) if the secret is unset.
   const cronSecret = process.env.CRON_SECRET;
-  if(cronSecret && req.headers["authorization"] !== `Bearer ${cronSecret}` && req.headers["x-vercel-cron"] !== "1") {
+  if(!cronSecret || req.headers["authorization"] !== `Bearer ${cronSecret}`) {
     return res.status(401).json({error:"Unauthorized"});
   }
 

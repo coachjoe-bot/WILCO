@@ -46,9 +46,9 @@ export async function hashPin(plain) {
 // ── Signed session tokens (SCALE-NOTES #1) ───────────────────────────────────
 // Every gateway request used to pay a Supabase lookup + a bcrypt compare
 // (~100-250ms) just to re-prove the same identity. Login now mints an HMAC
-// token (role.id.exp signed with a key derived from the service key — no new
-// env var, and domain-separated so the raw key is never used directly as a MAC
-// key elsewhere). authCaller verifies it with pure CPU: no DB read, no bcrypt.
+// token (role.id.exp signed with a key derived from the service-role key, and
+// domain-separated so the raw key is never used directly as a MAC key elsewhere).
+// authCaller verifies it with pure CPU: no DB read, no bcrypt.
 //
 // The PIN path stays as a full fallback: old clients / expired tokens simply
 // degrade to the exact pre-token behavior, so nothing breaks on deploy.
@@ -58,7 +58,18 @@ export async function hashPin(plain) {
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 const SESSION_TOKEN_DAYS = 7;
-const sessionSecret = () => createHmac("sha256", String(SB_KEY || "")).update("wilco-session-v1").digest();
+// FAIL CLOSED: sign ONLY with a server-secret (the service-role key). The general
+// SB_KEY chain can fall through to the PUBLIC anon key (VITE_SUPABASE_KEY, shipped
+// in the browser bundle); using that to sign would let anyone forge a token for any
+// account. So we derive the signing secret from the service key alone and refuse to
+// sign/verify if it's absent — better a token outage (PIN fallback still works) than
+// a forgeable one. In prod SB_KEY already resolves to this same service key, so the
+// derived secret is byte-identical to before — no live token is invalidated.
+const SB_SIGNING_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const sessionSecret = () => {
+  if (!SB_SIGNING_KEY) throw httpErr(500, "Session signing key unavailable");
+  return createHmac("sha256", SB_SIGNING_KEY).update("wilco-session-v1").digest();
+};
 const signSession = (payload) =>
   createHmac("sha256", sessionSecret()).update(payload).digest("base64url");
 

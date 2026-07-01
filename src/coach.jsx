@@ -5,7 +5,7 @@
 // the dynamic import means the cycle App→coach→App is resolved at load time.
 import { useState, useEffect, useRef } from "react";
 import {
-  C, GS, LineChart, MASTER_CODE, RunCard, SUPABASE_KEY, SUPABASE_URL, askClaude, bestE1RMForExercise, btn, cleanerName, daysBetween, displayForKey, epley1RM, fmtDate, fmtDateRelative, fmtDateShort, fmtWeight, formatSetDetails, getExerciseSets, groupIntoSessions, haptic, idApi, inp, isRealSession, liftTier, normalizeExName, sbDelete, sbInsert, sbRead, sbUpdate, sbUpdateWhere, toLbs, track, useIsMobile
+  C, GS, LineChart, MASTER_CODE, RunCard, SUPABASE_KEY, SUPABASE_URL, askClaude, bestE1RMForExercise, btn, cleanerName, daysBetween, displayForKey, epley1RM, fmtDate, fmtDateRelative, fmtDateShort, fmtWeight, formatSetDetails, getAuth, getExerciseSets, groupIntoSessions, haptic, idApi, inp, isRealSession, liftTier, normalizeExName, sbDelete, sbInsert, sbRead, sbUpdate, sbUpdateWhere, toLbs, track, useIsMobile
 } from "./App.jsx";
 // ─── SCHOOLS LIST (master only) ───────────────────────────────────────────────
 function SchoolsList({schools,coaches,onRefresh}) {
@@ -47,7 +47,7 @@ function SchoolsList({schools,coaches,onRefresh}) {
       if(!coachRow?.length) throw new Error("Failed to create coach.");
       fetch("/api/send-coach-invite",{
         method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({coachName:newCoachName.trim(),coachEmail:newCoachEmail.trim().toLowerCase(),accessCode,schoolName:school.name})
+        body:JSON.stringify({auth:getAuth(),coachName:newCoachName.trim(),coachEmail:newCoachEmail.trim().toLowerCase(),accessCode,schoolName:school.name})
       }).catch(()=>{});
       setAddCoachSuccess(`✓ ${newCoachName.trim()} added as ${accessCode} — invite sent!`);
       setNewCoachName(""); setNewCoachEmail("");
@@ -186,7 +186,7 @@ function CoachesList({coaches,schools,onRefresh}) {
       const school = schoolFor(c.school_id);
       await fetch("/api/send-coach-invite",{
         method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({coachName:c.name,coachEmail:c.email,accessCode:c.access_code,schoolName:school?.name||""})
+        body:JSON.stringify({auth:getAuth(),coachName:c.name,coachEmail:c.email,accessCode:c.access_code,schoolName:school?.name||""})
       });
       setResendStatus(p=>({...p,[c.id]:"sent"}));
       setTimeout(()=>setResendStatus(p=>({...p,[c.id]:null})),3000);
@@ -381,7 +381,7 @@ function SchoolOnboardingForm({onCreated}) {
           fetch("/api/send-coach-invite",{
             method:"POST",
             headers:{"Content-Type":"application/json"},
-            body:JSON.stringify({coachName:c.name.trim(),coachEmail:c.email.trim().toLowerCase(),accessCode,schoolName:schoolName.trim()})
+            body:JSON.stringify({auth:getAuth(),coachName:c.name.trim(),coachEmail:c.email.trim().toLowerCase(),accessCode,schoolName:schoolName.trim()})
           }).catch(()=>{});
         }
       }
@@ -391,7 +391,7 @@ function SchoolOnboardingForm({onCreated}) {
         try {
           const adminRow=await sbInsert("coaches",{name:"Admin",email:contactEmail.trim().toLowerCase(),school_id:school.id,coach_number:0,access_code:adminCode,role:"admin"});
           if(adminRow?.length){
-            fetch("/api/send-coach-invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({coachName:"Admin",coachEmail:contactEmail.trim().toLowerCase(),accessCode:adminCode,schoolName:schoolName.trim(),isAdmin:true})}).catch(()=>{});
+            fetch("/api/send-coach-invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth:getAuth(),coachName:"Admin",coachEmail:contactEmail.trim().toLowerCase(),accessCode:adminCode,schoolName:schoolName.trim(),isAdmin:true})}).catch(()=>{});
           }
         }catch(_){}
       }
@@ -1155,7 +1155,7 @@ function CoachDashboard({coach,onLogout}) {
                   const newCode=(school?.code||"???").toUpperCase()+String(nextNum).padStart(2,"0");
                   const row=await sbInsert("coaches",{name:acName.trim(),email:acEmail.trim().toLowerCase(),school_id:coach.school_id,coach_number:nextNum,access_code:newCode,role:"coach"});
                   if(row?.length){
-                    fetch("/api/send-coach-invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({coachName:acName.trim(),coachEmail:acEmail.trim().toLowerCase(),accessCode:newCode,schoolName:school?.name||""})}).catch(()=>{});
+                    fetch("/api/send-coach-invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth:getAuth(),coachName:acName.trim(),coachEmail:acEmail.trim().toLowerCase(),accessCode:newCode,schoolName:school?.name||""})}).catch(()=>{});
                     setAcOk(`✓ ${acName.trim()} added — invite sent.`); setAcCode(newCode);
                     setAcName("");setAcEmail("");
                     loadAll();
