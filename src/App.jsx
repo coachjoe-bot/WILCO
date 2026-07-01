@@ -425,13 +425,19 @@ const getExerciseSets = (ex) => {
 };
 
 // Best estimated 1RM across all sets in a logged exercise entry (lbs-equivalent).
+// If the athlete logged effort (RIR, or RPE→RIR = 10−RPE), the set implies a higher
+// true 1RM than the raw reps alone — add the reps left "in the tank" to the Epley
+// estimate. Only bumps when effort was actually recorded; otherwise identical to before.
 const bestE1RMForExercise = (ex) => {
   if(!ex || ex.unit==="bodyweight") return 0;
   const sets = getExerciseSets(ex);
+  const bonus = ex.rir!=null ? Math.max(0, ex.rir)
+              : ex.rpe!=null ? Math.max(0, 10 - ex.rpe)
+              : 0;
   let best = 0;
   sets.forEach(s=>{
     const lbs = toLbs(s.weight, ex.unit);
-    const e1rm = epley1RM(lbs, s.reps);
+    const e1rm = epley1RM(lbs, s.reps + bonus);
     if(e1rm>best) best = e1rm;
   });
   return best;
@@ -444,38 +450,67 @@ const fmtDuration = (sec) => {
   return `${sec}s`;
 };
 
+// Append optional Phase-1 load/intensity descriptors to a formatted set string —
+// only when the athlete actually logged them, so a plain log stays plain and a
+// power-user log gains inline detail ("... +45lbs", "... w/ red band", "... · RPE 8").
+const withSetMods = (ex, base, hasWeight=false) => {
+  let s = base;
+  // Added / assisted bodyweight load (weighted pull-ups, assisted dips).
+  if(ex.added_weight) s += ` +${ex.added_weight}lbs`;
+  else if(ex.assist_weight) s += ` −${ex.assist_weight}lbs (assisted)`;
+  // Bands / chains (resistance not on the bar).
+  if(ex.resistance) s += ` w/ ${ex.resistance}`;
+  // Dumbbell per-hand clarity — only meaningful when a weight is shown.
+  if(ex.load_basis==="each" && hasWeight) s += ` (each)`;
+  // Intensity annotations, dot-separated.
+  const tags = [];
+  if(ex.percent_1rm) tags.push(`${ex.percent_1rm}%`);
+  if(ex.rpe!=null) tags.push(`RPE ${ex.rpe}`);
+  else if(ex.rir!=null) tags.push(`${ex.rir} RIR`);
+  if(ex.tempo) tags.push(`tempo ${ex.tempo}`);
+  if(tags.length) s += ` · ${tags.join(" · ")}`;
+  return s;
+};
+
 // Render set_details (or legacy flat fields) as a human-readable string. Handles
 // weighted sets ("3×5 @ 135/155/175lbs"), Olympic complexes with a rep_scheme
-// ("4×1+1 @ 135/165/185"), time-based holds ("2×1 min"), and bodyweight reps ("2×20").
+// ("4×1+1 @ 135/165/185"), time-based holds ("2×1 min"), bodyweight reps ("2×20"),
+// and optional load/intensity descriptors (RPE, %, bands, added/assisted load).
+// Join a list of set weights, collapsing to a single value when they're all equal
+// ("225/225/225" → "225") so uniform sets read cleanly; ramps still show each weight.
+const joinWeights = (arr) => arr.every(x=>x===arr[0]) ? String(arr[0]) : arr.join("/");
+
 const formatSetDetails = (ex) => {
   if(!ex) return "—";
   const sets = getExerciseSets(ex);
   const nSets = ex.sets || sets.length || 1;
   // Time-based holds (planks, dead hangs, timed carries): sets × duration, no weight.
   if(ex.time_per_set_seconds){
-    return `${nSets}×${fmtDuration(ex.time_per_set_seconds)}`;
+    return withSetMods(ex, `${nSets}×${fmtDuration(ex.time_per_set_seconds)}`);
   }
   if(sets.length===0) return "—";
   const u = ex.unit==="kg" ? "kg" : ex.unit==="bodyweight" ? "" : "lbs";
   const hasWeight = sets.some(s=>s.weight && s.weight>0);
-  // Olympic complex: one uniform rep scheme (e.g. "1+1") across ramping weights —
-  // show the scheme once rather than grouping by numeric reps.
+  let base;
+  // Olympic complex / rest-pause: one uniform rep scheme (e.g. "1+1", "8+3+2")
+  // across weights — show the scheme once rather than grouping by numeric reps.
   if(ex.rep_scheme){
-    return hasWeight
-      ? `${sets.length}×${ex.rep_scheme} @ ${sets.map(s=>s.weight).join("/")}${u||"lbs"}`
+    base = hasWeight
+      ? `${sets.length}×${ex.rep_scheme} @ ${joinWeights(sets.map(s=>s.weight))}${u||"lbs"}`
       : `${sets.length}×${ex.rep_scheme}`;
+  } else {
+    const groups = [];
+    sets.forEach(s=>{
+      const last = groups[groups.length-1];
+      if(last && last.reps===s.reps){ last.weights.push(s.weight); }
+      else { groups.push({reps:s.reps, weights:[s.weight]}); }
+    });
+    // Bodyweight / unloaded reps (push-ups, Russian twists): "N×reps", no "@ 0/0".
+    base = hasWeight
+      ? groups.map(g=>`${g.weights.length}×${g.reps} @ ${joinWeights(g.weights)}${u}`).join(", ")
+      : groups.map(g=>`${g.weights.length}×${g.reps}`).join(", ");
   }
-  const groups = [];
-  sets.forEach(s=>{
-    const last = groups[groups.length-1];
-    if(last && last.reps===s.reps){ last.weights.push(s.weight); }
-    else { groups.push({reps:s.reps, weights:[s.weight]}); }
-  });
-  // Bodyweight / unloaded reps (push-ups, Russian twists): show "N×reps", no "@ 0/0".
-  if(!hasWeight){
-    return groups.map(g=>`${g.weights.length}×${g.reps}`).join(", ");
-  }
-  return groups.map(g=>`${g.weights.length}×${g.reps} @ ${g.weights.join("/")}${u}`).join(", ");
+  return withSetMods(ex, base, hasWeight);
 };
 
 // Format weight with correct unit label. Falls back to "lbs" for legacy data.
@@ -601,7 +636,7 @@ const extractProgramText = async (message) => {
 const parseWorkout = async (message, name, sport) => {
   const sys = `Extract workout data from an athlete message. Return ONLY valid JSON, no markdown.
 {
-  "exercises":[{"name":string,"sets":number|null,"reps":number|null,"rep_scheme":string|null,"time_per_set_seconds":number|null,"weight":number|null,"unit":"lbs"|"kg"|"bodyweight","feel":"easy"|"good"|"hard"|null,"notes":string|null,"set_details":[{"weight":number,"reps":number}]|null}],
+  "exercises":[{"name":string,"sets":number|null,"reps":number|null,"rep_scheme":string|null,"time_per_set_seconds":number|null,"weight":number|null,"unit":"lbs"|"kg"|"bodyweight","added_weight":number|null,"assist_weight":number|null,"resistance":string|null,"load_basis":"each"|"total"|null,"rpe":number|null,"rir":number|null,"percent_1rm":number|null,"tempo":string|null,"feel":"easy"|"good"|"hard"|null,"notes":string|null,"set_details":[{"weight":number,"reps":number}]|null}],
   "run_data":{"run_type":"easy"|"tempo"|"interval"|"long_run"|"race"|"recovery"|"fartlek"|null,"distance_miles":number|null,"distance_km":number|null,"duration_minutes":number|null,"pace_per_mile":string|null,"pace_per_km":string|null,"heart_rate_avg":number|null,"heart_rate_max":number|null,"intervals":[{"repeat":number|null,"distance":string|null,"time":string|null,"pace":string|null,"rest":string|null}]|null,"notes":string|null}|null,
   "practice_data":{"practice_type":"practice"|"game"|"scrimmage"|"conditioning"|"skill_work"|"film"|"walkthrough"|null,"sport":string|null,"duration_minutes":number|null,"intensity":"light"|"moderate"|"high"|"very_high"|null,"notes":string|null}|null,
   "pain_flags":[{"area":string,"description":string}],
@@ -623,7 +658,20 @@ Rules:
 - OLYMPIC WEIGHTLIFTING COMPLEXES: a "complex" is two or more movements done back-to-back within one set, written with "+" (e.g. "muscle snatch+hang snatch", "hang power clean+ hang clean", "clean+jerk", "snatch pull+snatch"). Log the WHOLE complex as ONE exercise entry — do NOT split it into separate exercises. Set "name" to the movements joined with " + " in Title Case (e.g. "Muscle Snatch + Hang Snatch"). Set "rep_scheme" to the literal per-set scheme string exactly as written ("1+1", "1+1+1", "2+1", etc.) and set "reps" to the number of reps of the FIRST movement per set (for 1RM math). "4x1+1" means sets:4, rep_scheme:"1+1", reps:1. Weights written as "@ 135/165/185/185lbs" are the per-set weights in order → populate set_details with one entry per set ({weight, reps: the first-movement reps}). Example: "muscle snatch+hang snatch 4x1+1 @ 135/165/185/185lbs" → exercises:[{"name":"Muscle Snatch + Hang Snatch","sets":4,"reps":1,"rep_scheme":"1+1","weight":185,"unit":"lbs","set_details":[{"weight":135,"reps":1},{"weight":165,"reps":1},{"weight":185,"reps":1},{"weight":185,"reps":1}]}]. NEVER return an empty exercises array just because the notation is dense — extract every lift you can identify.
 - TIME-BASED / HELD EXERCISES (planks, dead hangs, wall sits, timed carries, isometric holds — anything measured by DURATION, not reps or weight): set "time_per_set_seconds" to the seconds held per set and leave "weight" null, "reps" null, "unit":"bodyweight" (unless external load is stated). Convert units to seconds: "1minute"/"1 min"→60, "30s"/"30 sec"→30, "1:30"→90. Example: "Plank 2x1minute" → {"name":"Plank","sets":2,"time_per_set_seconds":60,"weight":null,"reps":null,"unit":"bodyweight"}. "Dead hang 3x30s" → sets:3, time_per_set_seconds:30. If a movement has BOTH a rep count and a hold, use reps and put the hold in notes.
 - BODYWEIGHT / UNLOADED REP WORK (push-ups, pull-ups, sit-ups, Russian twists, air squats — reps with no external load and no time): set "unit":"bodyweight", "weight":null, and use sets/reps normally. "Russian twists 2x20" → {"name":"Russian Twist","sets":2,"reps":20,"unit":"bodyweight"}. Do NOT set weight to 0.
-- Exercise "name": use a CANONICAL name = the core lift + equipment + any lift-DEFINING qualifier (front/back, incline/decline/flat, close-/wide-grip, sumo/deficit/romanian, hang/power/full, high-/low-bar). Do NOT put EXECUTION/SETUP descriptors in the name — tempo, pause/paused, "from the floor", dead-stop, touch-and-go, slow eccentric, etc. — those belong in "notes". So "paused back squat" → name:"Back Squat", notes:"paused"; "power snatch from the floor" → name:"Power Snatch". This keeps the same lift from being logged under several names. Use Title Case.
+- The following load/intensity fields are ALL OPTIONAL — most athletes (especially beginners/high-schoolers) won't use them. Leave a field null unless the athlete's own words clearly contain it. Never invent or infer these.
+- RPE / RIR (effort): "RPE 8" or "@8" after a set = Rate of Perceived Exertion (scale 1–10, allow halves like 7.5) → set "rpe". "RIR 2", "2 in the tank", "2 reps in reserve", "left 2" → set "rir". If only one is stated, fill only that one — do NOT convert between them. "squat 5x3 225 RPE 8" → rpe:8.
+- PERCENT OF 1RM: "@ 80%", "80% of max", "at 82%" → set "percent_1rm":80 (number only). This is an intensity, NOT a weight — never put a percent in "weight". If both a percent and an absolute weight are given, record both.
+- TEMPO: a cadence like "tempo 30X1", "3-1-1-0", "3s eccentric", "2 count down" → set "tempo" to that cadence string. Do NOT put tempo in the name or notes.
+- WEIGHTED BODYWEIGHT (added load): a bodyweight movement done with EXTRA weight — "weighted pull-ups +45", "dips +90", "pull-ups w/ 25lb vest", "chin-ups holding a 35". Set "unit":"bodyweight", "weight":null, and "added_weight" to the extra pounds. "weighted pull-ups 3x5 +45" → {"name":"Weighted Pull-Up","sets":3,"reps":5,"unit":"bodyweight","added_weight":45}.
+- ASSISTED BODYWEIGHT (reduced load): band/machine assistance — "assisted pull-ups -40", "assisted dips with 50lb assist", "band-assisted pull-ups". Set "unit":"bodyweight", "weight":null, and "assist_weight" to the assistance pounds. "assisted dips 3x8 -40" → {"name":"Dip","sets":3,"reps":8,"unit":"bodyweight","assist_weight":40}.
+- BANDS / CHAINS (accommodating resistance NOT on the bar): "squat 225 + red band", "bench with chains", "banded deadlift". Keep the bar weight in "weight" and put the description in "resistance" ("red band", "chains", "monster minis"). Do NOT add band/chain tension into the bar weight.
+- DUMBBELL / PER-HAND LOAD: when a dumbbell/kettlebell weight is stated per hand — "DB press 3x10 @ 50s", "50lb dumbbells each hand", "2x24kg" — set "load_basis":"each" and put the per-hand weight in "weight". A single/total load ("goblet squat 1x53") → "load_basis":"total" or null.
+- PLUS-SIGN "+" — decide what it means from context, in THIS priority order:
+  1. MOVEMENT NAMES around "+" ("muscle snatch+hang snatch", "clean+jerk") → Olympic COMPLEX (see complex rule): one entry, rep_scheme on the movements.
+  2. NUMBERS in the REP position around "+" ("225 x 8+3+2", "5x 3+2+2") → a rest-pause / cluster / broken set: set "rep_scheme" to that string ("8+3+2"), "reps" to the FIRST number, and note "rest-pause"/"cluster" in notes if the athlete said so.
+  3. "+<number>" right after a BODYWEIGHT movement (pull-up, dip, chin-up, muscle-up) → added_weight (weighted-bodyweight rule).
+  4. "+ <band/chain/color>" → resistance (bands rule).
+- Exercise "name": use a CANONICAL name = the core lift + equipment + any lift-DEFINING qualifier (front/back, incline/decline/flat, close-/wide-grip, sumo/deficit/romanian, hang/power/full, high-/low-bar). Do NOT put EXECUTION/SETUP descriptors in the name — pause/paused, "from the floor", dead-stop, touch-and-go, slow eccentric, etc. — those belong in "notes" (tempo cadence goes in the "tempo" field, not the name or notes). So "paused back squat" → name:"Back Squat", notes:"paused"; "power snatch from the floor" → name:"Power Snatch". This keeps the same lift from being logged under several names. Use Title Case.
 - If the athlete mentions heart rate, bpm, avg HR, or max HR, populate heart_rate_avg and/or heart_rate_max in run_data.
 - Populate "practice_data" when the message describes a sport practice, game, scrimmage, team conditioning session, skill work, or film/walkthrough. Set practice_type to the best match. Intensity: light=walkthrough/film/skill_work (shooting, ball handling, passing drills — minimal physical exertion), moderate=half-speed/light practice, high=full practice, very_high=game/scrimmage/full-contact. Do NOT populate for gym workouts or standalone runs.
 - A single message may have BOTH practice_data AND exercises (e.g. athlete did practice then hit the weight room). Populate both when applicable.
