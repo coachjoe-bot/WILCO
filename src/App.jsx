@@ -996,6 +996,22 @@ const BENCH_THRESHOLDS = {
 // Current tier index (0=Rookie .. 7=Legendary) for a bodyweight ratio vs a lift's cut-lines.
 const tierForRatio = (ratio, thresh) => { let t=0; for(let i=0;i<thresh.length;i++){ if(ratio>=thresh[i]) t=i+1; } return t; };
 
+// Bodyweight-fair thresholds. Strength scales ~ bodyweight^(2/3), so the ×bodyweight
+// multiple needed to reach a tier scales as (refBW / BW)^(1/3): heavier lifters need a
+// slightly lower multiple, lighter lifters a slightly higher one (so a 250 and a 150 lb
+// lifter are judged fairly). Base multiples are anchored at these reference weights;
+// the factor is clamped so extreme bodyweights stay sane. Under-18 keeps the -15%.
+const REF_BW = { male: 200, female: 150 };
+const bwTierFactor = (bodyweight, genderKey) => {
+  const ref = REF_BW[genderKey] || REF_BW.male;
+  if(!bodyweight || bodyweight<=0) return 1;
+  return Math.min(1.25, Math.max(0.8, Math.cbrt(ref / bodyweight)));
+};
+const scaledThresholds = (threshRaw, bodyweight, genderKey, isUnder18) => {
+  const f = bwTierFactor(bodyweight, genderKey) * (isUnder18 ? 0.85 : 1);
+  return threshRaw.map(t => t * f);
+};
+
 // Map a normalized exercise name to a BENCH_THRESHOLDS key (null if not benchmarked).
 // Order matters: most specific first, and Olympic PULL/DEADLIFT/BALANCE accessory
 // variants (much heavier than the competition lift) and complexes are excluded so
@@ -4049,7 +4065,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
     if(!benchKey) return null;
     const threshRaw=BENCH_THRESHOLDS[genderKey]?.[benchKey];
     if(!threshRaw) return null;
-    const thresh = isUnder18 ? threshRaw.map(t=>t*0.85) : threshRaw;
+    const thresh = scaledThresholds(threshRaw, bodyweight, genderKey, isUnder18);
     return {key:k,name:ex.name,e1rm:ex.e1rm,benchKey,thresh,actual:!!ex.actual};
   }).filter(Boolean);
 
@@ -4356,13 +4372,15 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
 
       {/* Top Rank — what the ranks mean (× bodyweight, squat as the example) */}
       {showRankInfo&&(()=>{
-        const sq = BENCH_THRESHOLDS[genderKey]?.["back squat"] || BENCH_THRESHOLDS.male["back squat"];
-        const rangeFor = (i) => i===0 ? `<${sq[0]}×` : i===TIER_NAMES.length-1 ? `${sq[i-1]}×+` : `${sq[i-1]}×`;
+        const sqBase = BENCH_THRESHOLDS[genderKey]?.["back squat"] || BENCH_THRESHOLDS.male["back squat"];
+        const sq = scaledThresholds(sqBase, bodyweight, genderKey, isUnder18);
+        const fx = (v) => (Math.round(v*100)/100).toString();
+        const rangeFor = (i) => i===0 ? `<${fx(sq[0])}×` : i===TIER_NAMES.length-1 ? `${fx(sq[i-1])}×+` : `${fx(sq[i-1])}×`;
         return (
         <div onClick={()=>setShowRankInfo(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.82)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:600,padding:24}}>
           <div onClick={e=>e.stopPropagation()} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:"20px 22px",maxWidth:360,width:"100%"}}>
             <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:C.gold,letterSpacing:1,marginBottom:4}}>THE RANKS</div>
-            <div style={{color:C.muted2,fontSize:12,lineHeight:1.5,marginBottom:14}}>How strong is the lift, as a multiple of your bodyweight. Numbers shown for the squat — every lift scales to its own standard.</div>
+            <div style={{color:C.muted2,fontSize:12,lineHeight:1.5,marginBottom:14}}>How strong is the lift, as a multiple of your bodyweight — squat shown, tuned to your bodyweight{bodyweight?"":" (add your weight for exact numbers)"}. Every lift scales to its own standard.</div>
             <div style={{display:"flex",flexDirection:"column",gap:7,marginBottom:14}}>
               {TIER_NAMES.map((t,ti)=>ti).reverse().map(ti=>(
                 <div key={ti} style={{display:"flex",alignItems:"baseline",gap:8}}>
