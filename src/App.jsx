@@ -1087,14 +1087,49 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
     setAnswers(newAnswers);
 
     const nextIdx = askedIdx + 1;
-    if(nextIdx < activeQuestions.length){
+    const hasNext = nextIdx < activeQuestions.length;
+    const nextQ = hasNext ? activeQuestions[nextIdx] : null;
+    const willOfferDeeper = !hasNext && !showDeeper && deeperQuestions.length > 0;
+
+    // Make it a conversation, not an interrogation: let Coach Joe DECIDE whether the
+    // answer actually warrants a response. A substantive answer gets a genuine
+    // reaction (woven into the next question when there is one); a thin/low-signal
+    // reply ("idk", "nothing", "fine") gets no forced reaction — he just moves on.
+    // The question bank stays fixed/bounded — we only change how it's delivered.
+    const NONE = "[[NONE]]";
+    const soFar = newAnswers.map(a=>`Q: ${a.q}\nA: ${a.a}`).join("\n");
+    const react = async () => {
+      const base = `You are Coach Joe Thomas running an athlete's ${isMonthly?"monthly":"weekly"} check-in — a real strength coach texting them back. Direct, specific, warm, no fluff, no lists, no emoji spam. The athlete just answered your question. First decide whether their answer actually warrants a genuine response: a real detail, a concern, effort, or something worth reacting to warrants one; a thin/low-effort/empty reply ("idk", "nothing", "fine", "n/a", a shrug) does NOT — don't force it.`;
+      const system = hasNext
+        ? `${base} If it warrants a response: reply in 2-4 sentences that (1) react to what they actually said, referencing a real detail, and (2) then lead into the next thing you want to know: "${nextQ.text}" — keep that question's intent but phrase it as a natural follow-up. If it does NOT warrant a response: reply with ONLY the next question, phrased naturally ("${nextQ.text}"), no forced reaction. Ask only that one question either way. Talk like a text message.`
+        : `${base} This is the last question, so do NOT ask anything new. If it warrants a response: reply in 1-3 sentences reacting to what they said, in your voice, closing the loop. If it does NOT warrant a response: reply with EXACTLY "${NONE}" and nothing else. Talk like a text message.`;
+      try{
+        const r = await askClaude(
+          system,
+          `Digest flags: ${JSON.stringify(c.flags||{})}\n\nCheck-in so far:\n${soFar}\n\nThe question you just asked: "${q.text}"\nTheir answer: "${msg}"`,
+          170,[],"claude-sonnet-4-6","joebot_chat"
+        );
+        return (r&&r.trim())?r.trim():"";
+      }catch(_){ return ""; }
+    };
+
+    setLoading(true);
+    let reaction = await react();
+    setLoading(false);
+    if(reaction===NONE || reaction.includes(NONE)) reaction = "";
+
+    if(hasNext){
       setAskedIdx(nextIdx);
-      setMessages(prev=>[...prev,{role:"assistant",content:activeQuestions[nextIdx].text}]);
-    } else if(!showDeeper && deeperQuestions.length){
-      // Offer go-deeper rather than ending immediately.
+      // The reply is either "reaction + next question" or just the next question;
+      // fall back to the plain scripted question if the call came back empty so the
+      // flow never stalls.
+      setMessages(prev=>[...prev,{role:"assistant",content:reaction||nextQ.text}]);
+    } else if(willOfferDeeper){
+      if(reaction) setMessages(prev=>[...prev,{role:"assistant",content:reaction}]);
       setMessages(prev=>[...prev,{role:"assistant",content:"That's the short version. Want to go deeper, or wrap it here?"}]);
       setPhase("deeper-offer");
     } else {
+      if(reaction) setMessages(prev=>[...prev,{role:"assistant",content:reaction}]);
       await finish(newAnswers);
     }
   };
