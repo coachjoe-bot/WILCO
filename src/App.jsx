@@ -3167,10 +3167,12 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         {/* Row 1: identity */}
         <div style={{display:"flex",alignItems:"baseline",gap:10,minWidth:0}}>
           <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2,lineHeight:1,flexShrink:0,whiteSpace:"nowrap"}}>COACH JOE-BOT</div>
+          {historyLoaded&&(
           <div style={{display:"flex",alignItems:"baseline",gap:4,flexShrink:0}} title="Workouts logged">
-            <span style={{color:C.muted,fontSize:9,letterSpacing:1,fontWeight:600}}>WORKOUT:</span>
+            <span style={{color:C.muted,fontSize:9,letterSpacing:1,fontWeight:600}}>WORKOUTS:</span>
             <span style={{fontFamily:"'Bebas Neue'",fontSize:18,color:C.gold,lineHeight:1}}>{groupIntoSessions(workoutHistory).length}</span>
           </div>
+          )}
           <div style={{flex:1,minWidth:0,color:C.muted,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{athlete.name}</div>
           {(()=>{const t=TIERS[athlete.tier||"free"];return(<span style={{flexShrink:0,background:`${t.color}22`,border:`1px solid ${t.color}`,borderRadius:4,padding:"1px 6px",color:t.color,fontSize:9,fontWeight:700,letterSpacing:1}}>{t.badge}</span>);})()}
           {athlete.certified_badge_earned_at&&(()=>{const cnt=athlete.total_sessions_logged||0;const tier=cnt>=1000?"×4":cnt>=500?"×3":cnt>=250?"×2":"";return<span title="WILCO Certified" style={{flexShrink:0,background:`${C.gold}22`,border:`1px solid ${C.gold}`,borderRadius:4,padding:"1px 6px",color:C.gold,fontSize:9,fontWeight:700,letterSpacing:1}}>✦ CERTIFIED{tier?` ${tier}`:""}</span>;})()}
@@ -3898,7 +3900,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
       <div style={{display:"flex",borderBottom:`1px solid ${C.border}`,flexShrink:0}}>
         {["benchmarks","strength","running","pr"].map(t=>(
           <button key={t} onClick={()=>setTab(t)}
-            style={{padding:"10px 14px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?C.gold:"transparent"}`,color:tab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,transition:"color 0.15s"}}>
+            style={{padding:"10px 16px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?C.gold:"transparent"}`,color:tab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,transition:"color 0.15s"}}>
             {t==="pr"?"PRs":t}
           </button>
         ))}
