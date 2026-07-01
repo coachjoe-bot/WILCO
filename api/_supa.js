@@ -43,6 +43,52 @@ export async function hashPin(plain) {
   return bcrypt.hash(String(plain), 10);
 }
 
+// ── Signed session tokens (SCALE-NOTES #1) ───────────────────────────────────
+// Every gateway request used to pay a Supabase lookup + a bcrypt compare
+// (~100-250ms) just to re-prove the same identity. Login now mints an HMAC
+// token (role.id.exp signed with a key derived from the service key — no new
+// env var, and domain-separated so the raw key is never used directly as a MAC
+// key elsewhere). authCaller verifies it with pure CPU: no DB read, no bcrypt.
+//
+// The PIN path stays as a full fallback: old clients / expired tokens simply
+// degrade to the exact pre-token behavior, so nothing breaks on deploy.
+// Tradeoff accepted: a token stays valid for its lifetime even if the PIN is
+// changed — bounded by the short expiry (tokens are re-minted at every login,
+// and the client never persists a session across page loads).
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+const SESSION_TOKEN_DAYS = 7;
+const sessionSecret = () => createHmac("sha256", String(SB_KEY || "")).update("wilco-session-v1").digest();
+const signSession = (payload) =>
+  createHmac("sha256", sessionSecret()).update(payload).digest("base64url");
+
+export function mintSessionToken(role, id) {
+  const exp = Date.now() + SESSION_TOKEN_DAYS * 24 * 60 * 60 * 1000;
+  const payload = `${role}.${id}.${exp}`;
+  return `v1.${payload}.${signSession(payload)}`;
+}
+
+// Verify auth.token against auth.{role,id}. Returns {role,id} on success, null on
+// ANY mismatch/expiry/malformation — callers fall back to the PIN path, never throw.
+export function tryTokenAuth(auth) {
+  try {
+    if (!auth || typeof auth !== "object" || typeof auth.token !== "string") return null;
+    const parts = auth.token.split(".");
+    if (parts.length !== 5 || parts[0] !== "v1") return null;
+    const [, role, id, expStr, sig] = parts;
+    if (role !== "athlete" && role !== "coach") return null;
+    if (role !== auth.role || String(id) !== String(auth.id)) return null;
+    const exp = Number(expStr);
+    if (!Number.isFinite(exp) || Date.now() > exp) return null;
+    const expected = Buffer.from(signSession(`${role}.${id}.${expStr}`));
+    const given = Buffer.from(String(sig));
+    if (expected.length !== given.length || !timingSafeEqual(expected, given)) return null;
+    return { role, id };
+  } catch {
+    return null;
+  }
+}
+
 // ── Errors ───────────────────────────────────────────────────────────────────
 export function httpErr(status, msg) {
   const e = new Error(msg);
@@ -268,6 +314,10 @@ export async function authThrottle(key, { max = 10, windowMin = 15 } = {}) {
 // Returns { role, id } on success; throws 401 otherwise.
 export async function authCaller(auth) {
   if (!auth || typeof auth !== "object") throw httpErr(401, "Sign in required");
+  // Fast path: a valid signed session token proves identity with zero DB reads
+  // and zero bcrypt. Invalid/expired tokens fall through to the PIN path below.
+  const viaToken = tryTokenAuth(auth);
+  if (viaToken) return viaToken;
   const id = str(auth.id, { max: 64, name: "auth.id" });
   const table = auth.role === "coach" ? "coaches" : auth.role === "athlete" ? "athletes" : null;
   if (!table) throw httpErr(401, "Invalid auth role");

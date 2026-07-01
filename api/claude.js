@@ -14,7 +14,7 @@
 //
 // POST { auth:{role,id,pin}, model?, max_tokens?, system?, messages:[...] }
 
-import { applyCors, httpErr, authCaller, rateLimit, sbSelect, sbInsert, logError, authThrottle, clientIp } from "./_supa.js";
+import { applyCors, httpErr, authCaller, tryTokenAuth, rateLimit, sbSelect, sbInsert, logError, authThrottle, clientIp } from "./_supa.js";
 
 const enc = encodeURIComponent;
 
@@ -129,15 +129,21 @@ export default async function handler(req, res) {
 
   let caller = null;
   try {
-    // 0) Brute-force guard: lock an IP with too many recent failed PIN attempts
-    //    before doing bcrypt work; record only failures so real users aren't throttled.
-    const recordAuthFail = await authThrottle(`claude-authfail:${clientIp(req)}`);
-    // 1) Require a real logged-in athlete/coach (bcrypt PIN verified server-side).
-    try {
-      caller = await authCaller(body.auth);
-    } catch (e) {
-      if (e.status === 401) await recordAuthFail();
-      throw e;
+    // 0) Fast path: a valid signed session token authenticates with zero DB work
+    //    (no throttle lookup, no bcrypt). HMAC tokens aren't brute-forceable, so
+    //    the PIN throttle only matters on the fallback path below.
+    caller = tryTokenAuth(body.auth);
+    if (!caller) {
+      // Brute-force guard: lock an IP with too many recent failed PIN attempts
+      // before doing bcrypt work; record only failures so real users aren't throttled.
+      const recordAuthFail = await authThrottle(`claude-authfail:${clientIp(req)}`);
+      // Require a real logged-in athlete/coach (bcrypt PIN verified server-side).
+      try {
+        caller = await authCaller(body.auth);
+      } catch (e) {
+        if (e.status === 401) await recordAuthFail();
+        throw e;
+      }
     }
 
     // 2) Per-user rate limit — a compromised account can't burn the bill unbounded.
@@ -160,7 +166,19 @@ export default async function handler(req, res) {
     // 4) Forward ONLY the fields we build here — strip anything else the client
     //    sent. Inference params (effort/thinking) are server-chosen per model.
     const payload = { model, max_tokens, messages: body.messages, ...modelParams(model) };
-    if (typeof body.system === "string" && body.system) payload.system = body.system;
+    // Prompt caching: `system_cached` is a STATIC system prefix (identical across
+    // calls — e.g. the workout-parse rulebook) marked ephemeral so Anthropic caches
+    // it (~90% input discount on hits, 5-min TTL); `system` stays the per-call
+    // dynamic tail. Below the per-model minimum cacheable size the marker is a
+    // no-op, never an error. usage_costs already records cache_read/write tokens.
+    const sysBlocks = [];
+    if (typeof body.system_cached === "string" && body.system_cached) {
+      sysBlocks.push({ type: "text", text: body.system_cached, cache_control: { type: "ephemeral" } });
+    }
+    if (typeof body.system === "string" && body.system) {
+      sysBlocks.push({ type: "text", text: body.system });
+    }
+    if (sysBlocks.length) payload.system = sysBlocks;
 
     const startedAt = Date.now();
     const r = await fetch(ANTHROPIC_URL, {

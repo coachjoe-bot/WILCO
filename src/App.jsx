@@ -1,12 +1,15 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, Component, lazy, Suspense } from "react";
+// Coach dashboard lives in its own lazily-loaded chunk (src/coach.jsx) so the
+// athlete-facing bundle — what 95% of users download — stays smaller.
+const CoachDashboard = lazy(()=>import("./coach.jsx"));
 import { loadStripe } from "@stripe/stripe-js";
 import { Elements, PaymentElement, useStripe, useElements } from "@stripe/react-stripe-js";
 import { ConsentFlow, LEGAL_VERSION } from "./legal.jsx";
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
-const SUPABASE_URL  = import.meta.env.VITE_SUPABASE_URL;
-const SUPABASE_KEY  = import.meta.env.VITE_SUPABASE_KEY;
-const MASTER_CODE   = "FORTIS-MASTER"; // keep for backward compat
+export const SUPABASE_URL  = import.meta.env.VITE_SUPABASE_URL;
+export const SUPABASE_KEY  = import.meta.env.VITE_SUPABASE_KEY;
+export const MASTER_CODE   = "FORTIS-MASTER"; // keep for backward compat
 
 // ─── STRIPE ────────────────────────────────────────────────────────────────────
 // Publishable key is safe in the client. loadStripe() is called once at module
@@ -37,7 +40,10 @@ const sbGet = async (table,params="") => {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}${params}`,{headers:{...sbH,"Prefer":"return=representation"}});
   return r.json();
 };
-// CURRENT_AUTH holds the logged-in identity ({role:"athlete"|"coach",id,pin}),
+// CURRENT_AUTH holds the logged-in identity ({role,id,pin,token}). `token` is a
+// signed session credential minted at login — the gateways verify it with pure
+// CPU instead of a per-request DB read + bcrypt compare; `pin` stays as the
+// fallback so an expired token silently degrades to the old (slower) path.
 // set at login/signup. Writes go through the authenticated gateway (api/data.js)
 // when a session exists; otherwise they fall back to the legacy direct path so
 // nothing breaks before the database is locked down. Once RLS denies anon writes,
@@ -49,14 +55,14 @@ const dataApi = async (op,table,{data,id,params}={}) => {
   if(!r.ok) throw new Error((d&&d.error)||`Write failed (${r.status})`);
   return d;
 };
-const sbInsert = async (table,data) => {
+export const sbInsert = async (table,data) => {
   if(!CURRENT_AUTH){
     const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`,{method:"POST",headers:{...sbH,"Prefer":"return=representation"},body:JSON.stringify(data)});
     return r.json();
   }
   return dataApi("insert",table,{data});
 };
-const sbUpdate = async (table,id,data) => {
+export const sbUpdate = async (table,id,data) => {
   if(!CURRENT_AUTH){
     const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`,{method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},body:JSON.stringify(data)});
     const json = await r.json();
@@ -65,7 +71,7 @@ const sbUpdate = async (table,id,data) => {
   }
   return dataApi("update",table,{id,data});
 };
-const sbDelete = async (table,params="") => {
+export const sbDelete = async (table,params="") => {
   if(!CURRENT_AUTH){
     await fetch(`${SUPABASE_URL}/rest/v1/${table}${params}`,{method:"DELETE",headers:sbH});
     return;
@@ -73,7 +79,7 @@ const sbDelete = async (table,params="") => {
   await dataApi("delete",table,{params});
 };
 // Update rows matching an explicit PostgREST filter (e.g. "?coach_id=eq.<id>").
-const sbUpdateWhere = async (table,params,data) => {
+export const sbUpdateWhere = async (table,params,data) => {
   if(!CURRENT_AUTH){
     const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}${params}`,{method:"PATCH",headers:{...sbH,"Prefer":"return=representation"},body:JSON.stringify(data)});
     return r.json();
@@ -84,7 +90,7 @@ const sbUpdateWhere = async (table,params,data) => {
 // scoping (athlete -> own rows; coach -> their athletes; master -> all), so the
 // anon key can be denied SELECT on these PII tables. Falls back to a direct anon
 // read before the database is locked (then the fallback simply stops returning data).
-const sbRead = async (table,params="") => {
+export const sbRead = async (table,params="") => {
   if(!CURRENT_AUTH){
     return sbGet(table,params);
   }
@@ -102,7 +108,7 @@ const sbUpsert = async (table,data,conflict) => {
 // Authenticated identity/login calls go through our server (api/identity.js),
 // which reads athletes/coaches with the service key. The browser can no longer
 // read those tables directly (RLS). Throws a friendly message on rate-limit (429).
-const idApi = async (action,payload={}) => {
+export const idApi = async (action,payload={}) => {
   const r = await fetch("/api/identity",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,...payload})});
   let d={}; try{ d = await r.json(); }catch(_){}
   if(r.status===429) throw new Error(d.error||"Too many attempts. Wait a few minutes and try again.");
@@ -206,13 +212,13 @@ async function biometricLogin(role){
   if(role==="coach"){
     const res = await idApi("coach-login",{ pin: e.pin });
     if(!res.coach){ clearBioEnrollment("coach"); throw new Error("Saved Face ID sign-in is out of date — please log in with your PIN."); }
-    CURRENT_AUTH = { role:"coach", id:res.coach.id, pin:e.pin };
+    CURRENT_AUTH = { role:"coach", id:res.coach.id, pin:e.pin, token:res.token };
     track("login","auth",{ role:"coach", method:"biometric" });
     return { ...res.coach, pin:e.pin };
   }
   const res = await idApi("athlete-login",{ name: e.name, pin: e.pin });
   if(!res.athlete){ clearBioEnrollment("athlete"); throw new Error("Saved Face ID sign-in is out of date — please log in with your PIN."); }
-  CURRENT_AUTH = { role:"athlete", id:res.athlete.id, pin:e.pin };
+  CURRENT_AUTH = { role:"athlete", id:res.athlete.id, pin:e.pin, token:res.token };
   track("login","auth",{ role:"athlete", method:"biometric" });
   return { ...res.athlete, pin:e.pin };
 }
@@ -345,7 +351,7 @@ function _enqueueEvent(event_name, area, meta, session_id){
 // Record one engagement event. event_name must be in the server's allowlist (off-
 // list events are dropped server-side). area uses the error_events vocabulary so
 // the two ledgers can be joined for per-feature error rates.
-function track(event_name, area=null, meta=null){
+export function track(event_name, area=null, meta=null){
   try{
     if(typeof window==="undefined") return;
     if(_evSent >= EV_MAX_PER_LOAD) return;
@@ -392,7 +398,7 @@ function installEngagementTracking(){
 
 // ─── UTILITIES ────────────────────────────────────────────────────────────────
 // Compare dates at midnight local time — fixes the "-1d" timezone bug
-const daysBetween = (date) => {
+export const daysBetween = (date) => {
   if(!date) return null;
   const now = new Date();
   const then = new Date(date);
@@ -401,10 +407,10 @@ const daysBetween = (date) => {
   return Math.round((nowMid - thenMid) / (1000*60*60*24));
 };
 
-const fmtDate = (d) => new Date(d).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
-const fmtDateShort = (d) => new Date(d).toLocaleDateString("en-US",{month:"short",day:"numeric"});
+export const fmtDate = (d) => new Date(d).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
+export const fmtDateShort = (d) => new Date(d).toLocaleDateString("en-US",{month:"short",day:"numeric"});
 // "Today" / "Yesterday" / "N days ago" for recent entries; falls back to the full date.
-const fmtDateRelative = (d) => {
+export const fmtDateRelative = (d) => {
   const day = 86400000;
   const t = new Date(d), n = new Date();
   const startT = new Date(t.getFullYear(), t.getMonth(), t.getDate()).getTime();
@@ -416,11 +422,11 @@ const fmtDateRelative = (d) => {
   return fmtDate(d);
 };
 // Light haptic tick on supported devices (phones); silent no-op on desktop/unsupported.
-const haptic = (pattern=10) => { try { navigator.vibrate && navigator.vibrate(pattern); } catch(_){} };
+export const haptic = (pattern=10) => { try { navigator.vibrate && navigator.vibrate(pattern); } catch(_){} };
 
 // Epley estimated 1-rep max: weight × (1 + reps/30)
 // Lets us compare e.g. 225×5 vs 225×3 — more reps at same weight = more strength.
-const epley1RM = (weight, reps) => {
+export const epley1RM = (weight, reps) => {
   if(!weight||weight<=0) return 0;
   if(!reps||reps<=1) return weight;
   return Math.round(weight * (1 + reps / 30));
@@ -429,7 +435,7 @@ const epley1RM = (weight, reps) => {
 // Expand a logged exercise entry into its individual sets.
 // Handles both the new "set_details" array (variable weight/reps per set) and
 // legacy entries that only have flat sets/reps/weight fields.
-const getExerciseSets = (ex) => {
+export const getExerciseSets = (ex) => {
   if(!ex) return [];
   if(Array.isArray(ex.set_details) && ex.set_details.length>0){
     return ex.set_details.map(s=>({weight:s.weight??ex.weight??0, reps:s.reps??ex.reps??1, warmup:!!s.warmup}));
@@ -451,7 +457,7 @@ const getExerciseSets = (ex) => {
 const LOAD_BEARING_BW = /\b(dips?|pull[ -]?ups?|chin[ -]?ups?|muscle[ -]?ups?)\b/;
 // `bwLbs` (athlete bodyweight) is optional: pass it to score load-bearing bodyweight
 // lifts; omit it and bodyweight lifts return 0, exactly as before.
-const bestE1RMForExercise = (ex, bwLbs=0) => {
+export const bestE1RMForExercise = (ex, bwLbs=0) => {
   if(!ex) return 0;
   const isBW = ex.unit==="bodyweight";
   let bwLoad = 0;
@@ -513,7 +519,7 @@ const withSetMods = (ex, base, hasWeight=false, warmupCount=0) => {
 // ("225/225/225" → "225") so uniform sets read cleanly; ramps still show each weight.
 const joinWeights = (arr) => arr.every(x=>x===arr[0]) ? String(arr[0]) : arr.join("/");
 
-const formatSetDetails = (ex) => {
+export const formatSetDetails = (ex) => {
   if(!ex) return "—";
   const allSets = getExerciseSets(ex);
   const nSets = ex.sets || allSets.length || 1;
@@ -552,17 +558,17 @@ const formatSetDetails = (ex) => {
 };
 
 // Format weight with correct unit label. Falls back to "lbs" for legacy data.
-const fmtWeight = (weight, unit) => {
+export const fmtWeight = (weight, unit) => {
   if(!weight) return "—";
   const u = unit==="kg" ? "kg" : "lbs";
   return `${weight}${u}`;
 };
 
 // Normalize any weight to lbs-equivalent for cross-unit comparison.
-const toLbs = (weight, unit) => (unit==="kg" ? weight*2.205 : weight);
+export const toLbs = (weight, unit) => (unit==="kg" ? weight*2.205 : weight);
 
 // A "real session" has at least one parsed exercise or run_data (filters out pure Q&A messages)
-const isRealSession = (w) => w?.parsed_data?.exercises?.length > 0 || !!w?.parsed_data?.run_data;
+export const isRealSession = (w) => w?.parsed_data?.exercises?.length > 0 || !!w?.parsed_data?.run_data;
 
 // Normalize exercise names so wording variations map to the same key. Two passes:
 //  (1) expand common abbreviations + unify spellings;
@@ -573,7 +579,7 @@ const isRealSession = (w) => w?.parsed_data?.exercises?.length > 0 || !!w?.parse
 // Lift-DEFINING words (front/back, incline/decline/flat, close-/wide-grip, sumo/
 // deficit/romanian, hang/power/full, high-/low-bar) are deliberately PRESERVED so
 // genuinely different lifts never merge.
-const normalizeExName = (name) => {
+export const normalizeExName = (name) => {
   if(!name) return "";
   let n = name.toLowerCase().trim()
     .replace(/\s+/g," ")
@@ -615,13 +621,13 @@ const normalizeExName = (name) => {
 // Among raw names that share a normalized key, the shortest is almost always the
 // canonical display form ("Power Snatch" over "Power Snatch from the Floor",
 // "Back Squat" over "Paused Back Squat"). Used to label grouped exercises.
-const cleanerName = (a,b) => !a ? (b||"") : !b ? a : (b.length<a.length ? b : a);
+export const cleanerName = (a,b) => !a ? (b||"") : !b ? a : (b.length<a.length ? b : a);
 
 // Preferred display label for normalized keys where the shortest raw name is a
 // poor label — e.g. the key "back squat" collects raw logs of just "Squat", and
 // "Squat" would otherwise win cleanerName. Force the full, proper lift name.
 const CANON_DISPLAY = { "back squat": "Back Squat" };
-const displayForKey = (key, fallback) => CANON_DISPLAY[key] || fallback;
+export const displayForKey = (key, fallback) => CANON_DISPLAY[key] || fallback;
 
 // "Big lifts" cluster at the top of the Strength / PRs / Benchmarks lists, ahead of
 // accessories. We match a short list of movement ROOTS against the normalized key
@@ -630,12 +636,12 @@ const displayForKey = (key, fallback) => CANON_DISPLAY[key] || fallback;
 // it never merges lifts. Everything not on the list falls to the accessory tier.
 // Within each tier we sort by weight (heaviest 1RM first).
 const BIG_LIFT_RE = /\b(snatch|clean and jerk|clean|jerk|squat|deadlift|bench press|overhead press|dips?|pull[ -]?ups?|chin[ -]?ups?|rows?)\b/;
-const liftTier = (key) => BIG_LIFT_RE.test(key||"") ? 0 : 1;   // 0 = big lift, 1 = accessory
+export const liftTier = (key) => BIG_LIFT_RE.test(key||"") ? 0 : 1;   // 0 = big lift, 1 = accessory
 
 // Groups workout entries into sessions using time-gap logic.
 // Entries within gapMs of each other (same athlete) = same session.
 // new_session:true in parsed_data forces a split even within the gap window.
-const groupIntoSessions = (workouts, gapMs = 3*60*60*1000) => {
+export const groupIntoSessions = (workouts, gapMs = 3*60*60*1000) => {
   const byAthlete = {};
   workouts.filter(isRealSession).forEach(w => {
     if(!byAthlete[w.athlete_id]) byAthlete[w.athlete_id] = [];
@@ -661,7 +667,12 @@ const groupIntoSessions = (workouts, gapMs = 3*60*60*1000) => {
 // `model` defaults to Sonnet 4.6 (coaching voice / anything athletes read).
 // Pass "claude-haiku-4-5" ONLY for mechanical, never-seen extraction calls
 // (parseWorkout, goal parsing) to cut cost ~3x. The server still allowlists it.
-const askClaude = async (system, user, maxTokens=600, images=[], model="claude-sonnet-4-6", feature="other") => {
+// `system` may be a plain string, or {cached, dynamic}: `cached` is a STATIC
+// prefix (identical every call) the server marks for Anthropic prompt caching —
+// ~90% off input tokens on cache hits; `dynamic` is the per-call tail.
+export const askClaude = async (system, user, maxTokens=600, images=[], model="claude-sonnet-4-6", feature="other") => {
+  const sysCached  = (system && typeof system === "object") ? (system.cached||"")  : "";
+  const sysDynamic = (system && typeof system === "object") ? (system.dynamic||"") : system;
   const content = [];
   for(const img of images){
     content.push({type:"image",source:{type:"base64",media_type:"image/jpeg",data:img}});
@@ -679,7 +690,7 @@ const askClaude = async (system, user, maxTokens=600, images=[], model="claude-s
       headers:{"Content-Type":"application/json"},
       // Model is a hint only — the server (api/claude.js) allowlists it, picks the
       // real model + inference params, and ignores anything unexpected.
-      body:JSON.stringify({auth:CURRENT_AUTH,model,max_tokens:maxTokens,system,messages:[{role:"user",content}],feature})
+      body:JSON.stringify({auth:CURRENT_AUTH,model,max_tokens:maxTokens,system:sysDynamic,...(sysCached?{system_cached:sysCached}:{}),messages:[{role:"user",content}],feature})
     });
   }catch(netErr){
     // The request never reached our server (offline / DNS / dropped). This produces
@@ -757,7 +768,8 @@ Rules:
 - "pr_attempts": include an entry with reps:1 and achieved:true whenever the athlete reports an ACTUAL (not estimated) 1-rep max for a lift — either because they just performed a true 1RM single in this session, OR because they are simply telling you their current actual max for a lift (e.g. "my real squat max is 405", "current bench 1RM is 275", "just hit a 315 deadlift max"). This applies even if no other exercises were logged in the message. If they describe a failed attempt at a 1RM, set achieved:false.`;
   const user = `Athlete: ${name} (${sport})\nMessage: ${message}`;
   const runParse = async (model) => {
-    const text = await askClaude(sys,user,1000,[],model,"workout_parse");
+    // The entire rulebook above is static — cache it (highest-volume call in the app).
+    const text = await askClaude({cached:sys},user,1000,[],model,"workout_parse");
     return JSON.parse(text.replace(/```json|```/g,"").trim());
   };
   // Structural / technique-heavy logs (supersets, warm-up separation, drop / rest-pause /
@@ -812,6 +824,69 @@ const appendAthleteContext = async (athleteId, line, {longTerm=false}={}) => {
   return bounded;
 };
 
+// ── Joe-bot system prompt, split for prompt caching ──────────────────────────
+// The STATIC block (persona + all rules + full goal/sport tables) is byte-identical
+// for every athlete and every message, so the server marks it for Anthropic prompt
+// caching. Everything per-athlete/per-message lives in the dynamic tail built
+// inside getJoeBotReply. Keep anything athlete-specific OUT of this block.
+const JOEBOT_GOALS = {
+  strength:"Maximum strength. Compound lifts, progressive overload, volume. Keep it simple and heavy.",
+  sport:"Sport performance. Build the strength base first, then convert to power and speed. Tie advice to their sport.",
+  speed:"Speed and endurance. Mix strength with conditioning. Running-specific guidance when relevant.",
+  body:"Body composition. Strength training with hypertrophy volume. Track consistency over perfection.",
+  fitness:"General health and fitness. Balanced program — squat, hinge, push, pull, carry. Longevity focus.",
+};
+const JOEBOT_SPORTS = {
+  "Football":"Lower body power (squat/deadlift/hip hinge), upper body strength (bench/row), explosive hip extension.",
+  "Basketball":"Lower body explosiveness, vertical (after strength base), lateral quickness, core stability.",
+  "Volleyball":"Vertical jump (after strength base), shoulder stability, core power, lower body strength.",
+  "Soccer":"Lower body strength and power, single-leg stability, change of direction, aerobic base.",
+  "Baseball":"Rotational power, posterior chain, shoulder health, single-leg strength.",
+  "Archery":"Shoulder stability, posterior chain, core anti-rotation, grip strength.",
+  "Olympic Weightlifting":"Snatch and clean technique, posterior chain, mobility, overhead stability.",
+  "Running":"Single-leg strength, posterior chain, hip stability, calf/ankle strength.",
+  "General Fitness":"Build a balanced foundation -- squat, hinge, push, pull, carry. Health and longevity focus."
+};
+const JOEBOT_STATIC_SYS = `You are Coach Joe Thomas -- high school strength coach, 20+ years military S&C. Direct, real, no fluff.
+
+BANNED PHRASES:
+- "Atta boy/girl": BANNED except when athlete explicitly hits a NEW PR.
+- Exclamation points: Maximum ONE per response.
+- "Let's go!" / "Get after it!": BANNED as fillers.
+
+LOGGING IS AUTOMATIC: The app parses and saves every workout the athlete types — the logging happens on its own, and you never need "backend" or "account" access to record anything. NEVER tell the athlete you can't log something, that logging is "handled on the backend," or to contact whoever manages their account. If they say "log this," "make sure to log this," or "record this," they're just sharing the workout — acknowledge it and coach the numbers. Only decline things that are genuinely outside coaching (billing, account changes), never the workout itself.
+
+FOR NORMAL WORKOUT LOGS respond with one of: "Good work." / "Solid session." / "Numbers are moving." / "Nice." -- then one specific observation. That's it.
+
+RESERVED (only when situation genuinely matches):
+- "Atta boy/girl": New PR only.
+- "If it were easy, everybody would do it.": Athlete struggling mentally only.
+- "It's not about workout 1, it's about workout 100.": Athlete missed sessions only.
+- "You're only in competition with the you of yesterday.": Athlete comparing to others only.
+
+FORMATTING: Use numbered lists for exercises/alternatives/steps. Never paragraph format for exercise lists.
+Keep under 200 words. Use their name once naturally.
+Pain → suggest alternatives. Equipment unavailable → 2-3 specific alternatives.
+Out of scope: "That's one for Coach Joe directly -- email joe.thomas@commandengineering.com."
+
+UNUSUAL TRAINING CONDITIONS (travel, cruise, hotel, beach, limited equipment, injury layoff, etc.):
+- If athlete mentions they'll be away or have limited access but HASN'T described what's available yet: ask 2-3 direct questions — what equipment is on hand, how much space they have, how long the situation lasts. Do not give a program yet.
+- Once conditions ARE described: build a specific day-by-day program for exactly those conditions. Be clear it's temporary.
+- When athlete signals they're back to normal ("I'm back", "home now", "back at the gym"): transition them back to their regular program and reference it.
+
+SPORT PRACTICE + TRAINING LOAD:
+- Sport practices (practice, game, scrimmage, team conditioning) count as real workouts. A 2-hour basketball practice is significant physical stress — treat it as such.
+- When the current message OR recent history shows a practice AND a gym workout on the same day: acknowledge the double load. Ask about how they're feeling, sleep quality, or soreness before piling on more volume advice. Do not just say "Solid session" and move on.
+- When a game or high-intensity scrimmage was logged (today or yesterday) plus a gym session: flag recovery directly. Ask how their legs/body feel, mention sleep and nutrition if relevant, and suggest they keep the gym work moderate unless they feel fresh.
+- Back-to-back high-load days (practice + lift two days in a row): note the cumulative stress and ask if they need a down day or modified session. Injury prevention > training volume.
+- Do not manufacture concern if it's not warranted — film, walkthrough, or skill work (shooting, ball handling, passing drills) before a lift is fine. Use judgment on actual physical load.
+
+GOAL MODES (the athlete's active mode is stated in the session context):
+${Object.entries(JOEBOT_GOALS).map(([k,v])=>`- ${k}: ${v}`).join("\n")}
+
+SPORT PRIORITIES (apply the athlete's sport from the session context):
+${Object.entries(JOEBOT_SPORTS).map(([k,v])=>`- ${k}: ${v}`).join("\n")}`;
+
 const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athleteGoals=[], athleteContext=null) => {
   const hist = history.slice(-6).map(m=>`${m.role==="user"?athlete.name:"Coach Joe"}: ${m.content}`).join("\n");
 
@@ -852,67 +927,15 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
     programContext = `\n\nATHLETE'S CURRENT PROGRAM:\n${athlete.program_text}\nReference this when giving programming feedback.`;
   }
 
-  const goalMap = {
-    strength:"GOAL: Maximum strength. Compound lifts, progressive overload, volume. Keep it simple and heavy.",
-    sport:"GOAL: Sport performance. Build the strength base first, then convert to power and speed. Tie advice to their sport.",
-    speed:"GOAL: Speed and endurance. Mix strength with conditioning. Running-specific guidance when relevant.",
-    body:"GOAL: Body composition. Strength training with hypertrophy volume. Track consistency over perfection.",
-    fitness:"GOAL: General health and fitness. Balanced program — squat, hinge, push, pull, carry. Longevity focus.",
-  };
-  const phaseContext = goalMap[athlete.goal||"strength"] || goalMap.strength;
-
-  const sportPriorities = {
-    "Football":"Lower body power (squat/deadlift/hip hinge), upper body strength (bench/row), explosive hip extension.",
-    "Basketball":"Lower body explosiveness, vertical (after strength base), lateral quickness, core stability.",
-    "Volleyball":"Vertical jump (after strength base), shoulder stability, core power, lower body strength.",
-    "Soccer":"Lower body strength and power, single-leg stability, change of direction, aerobic base.",
-    "Baseball":"Rotational power, posterior chain, shoulder health, single-leg strength.",
-    "Archery":"Shoulder stability, posterior chain, core anti-rotation, grip strength.",
-    "Olympic Weightlifting":"Snatch and clean technique, posterior chain, mobility, overhead stability.",
-    "Running":"Single-leg strength, posterior chain, hip stability, calf/ankle strength.",
-    "General Fitness":"Build a balanced foundation -- squat, hinge, push, pull, carry. Health and longevity focus."
-  };
-
+  // Dynamic tail only — everything static (persona, rules, goal/sport tables)
+  // lives in JOEBOT_STATIC_SYS above so it can be prompt-cached.
   const now = new Date();
   const todayStr = now.toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"});
   const timeStr = now.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit",hour12:true});
-  const sys = `You are Coach Joe Thomas -- high school strength coach, 20+ years military S&C. Direct, real, no fluff.
-TODAY'S DATE: ${todayStr}, ${timeStr}
+  const sys = `TODAY'S DATE: ${todayStr}, ${timeStr}
 Athlete: ${athlete.name}, Sport: ${athlete.sport}${athlete.level?", Level: "+athlete.level:""}
-${phaseContext}
-SPORT: ${sportPriorities[athlete.sport]||"Build a general strength base."}
-
-BANNED PHRASES:
-- "Atta boy/girl": BANNED except when athlete explicitly hits a NEW PR.
-- Exclamation points: Maximum ONE per response.
-- "Let's go!" / "Get after it!": BANNED as fillers.
-
-LOGGING IS AUTOMATIC: The app parses and saves every workout the athlete types — the logging happens on its own, and you never need "backend" or "account" access to record anything. NEVER tell the athlete you can't log something, that logging is "handled on the backend," or to contact whoever manages their account. If they say "log this," "make sure to log this," or "record this," they're just sharing the workout — acknowledge it and coach the numbers. Only decline things that are genuinely outside coaching (billing, account changes), never the workout itself.
-
-FOR NORMAL WORKOUT LOGS respond with one of: "Good work." / "Solid session." / "Numbers are moving." / "Nice." -- then one specific observation. That's it.
-
-RESERVED (only when situation genuinely matches):
-- "Atta boy/girl": New PR only.
-- "If it were easy, everybody would do it.": Athlete struggling mentally only.
-- "It's not about workout 1, it's about workout 100.": Athlete missed sessions only.
-- "You're only in competition with the you of yesterday.": Athlete comparing to others only.
-
-FORMATTING: Use numbered lists for exercises/alternatives/steps. Never paragraph format for exercise lists.
-Keep under 200 words. Use their name once naturally.
-Pain → suggest alternatives. Equipment unavailable → 2-3 specific alternatives.
-Out of scope: "That's one for Coach Joe directly -- email joe.thomas@commandengineering.com."
-
-UNUSUAL TRAINING CONDITIONS (travel, cruise, hotel, beach, limited equipment, injury layoff, etc.):
-- If athlete mentions they'll be away or have limited access but HASN'T described what's available yet: ask 2-3 direct questions — what equipment is on hand, how much space they have, how long the situation lasts. Do not give a program yet.
-- Once conditions ARE described: build a specific day-by-day program for exactly those conditions. Be clear it's temporary.
-- When athlete signals they're back to normal ("I'm back", "home now", "back at the gym"): transition them back to their regular program and reference it.
-
-SPORT PRACTICE + TRAINING LOAD:
-- Sport practices (practice, game, scrimmage, team conditioning) count as real workouts. A 2-hour basketball practice is significant physical stress — treat it as such.
-- When the current message OR recent history shows a practice AND a gym workout on the same day: acknowledge the double load. Ask about how they're feeling, sleep quality, or soreness before piling on more volume advice. Do not just say "Solid session" and move on.
-- When a game or high-intensity scrimmage was logged (today or yesterday) plus a gym session: flag recovery directly. Ask how their legs/body feel, mention sleep and nutrition if relevant, and suggest they keep the gym work moderate unless they feel fresh.
-- Back-to-back high-load days (practice + lift two days in a row): note the cumulative stress and ask if they need a down day or modified session. Injury prevention > training volume.
-- Do not manufacture concern if it's not warranted — film, walkthrough, or skill work (shooting, ball handling, passing drills) before a lift is fine. Use judgment on actual physical load.${pastContext}${programContext}`;
+GOAL: ${JOEBOT_GOALS[athlete.goal||"strength"] || JOEBOT_GOALS.strength}
+SPORT: ${JOEBOT_SPORTS[athlete.sport]||"Build a general strength base."}${pastContext}${programContext}`;
 
   let goalsContext = "";
   if(athleteGoals?.length>0){
@@ -930,7 +953,7 @@ SPORT PRACTICE + TRAINING LOAD:
     contextMemory = `\n\nATHLETE CONTEXT (from monthly recap history — preferences, injuries, goals stated over time):\n${athleteContext}\nUse this as background — do not repeat it back, just let it inform your responses.`;
   }
 
-  return askClaude(sys+goalsContext+contextMemory,`${hist}\n\n${athlete.name}: ${message}`,450,[],"claude-sonnet-4-6","joebot_chat");
+  return askClaude({cached:JOEBOT_STATIC_SYS, dynamic:sys+goalsContext+contextMemory},`${hist}\n\n${athlete.name}: ${message}`,450,[],"claude-sonnet-4-6","joebot_chat");
 };
 
 // ─── 1RM PROPAGATION ─────────────────────────────────────────────────────────
@@ -1056,9 +1079,10 @@ const getBenchKey = (normalized) => {
 };
 
 // ─── STYLES ──────────────────────────────────────────────────────────────────
-const C = {navy:"#060d1e",navy2:"#0a1228",navy3:"#0d1836",border:"#1e2a4a",gold:"#d4a017",green:"#10b981",red:"#ef4444",text:"#e2e8f0",muted:"#64748b",muted2:"#94a3b8",blue:"#3b82f6"};
-const GS = `
-@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&display=swap');
+export const C = {navy:"#060d1e",navy2:"#0a1228",navy3:"#0d1836",border:"#1e2a4a",gold:"#d4a017",green:"#10b981",red:"#ef4444",text:"#e2e8f0",muted:"#64748b",muted2:"#94a3b8",blue:"#3b82f6"};
+// Fonts (Bebas Neue + DM Sans) load from index.html with preconnect — an @import
+// here would sit unread until the whole JS bundle parses, delaying first text paint.
+export const GS = `
 *{box-sizing:border-box;margin:0;padding:0;}
 html,body{touch-action:manipulation;overscroll-behavior:none;-webkit-text-size-adjust:100%;text-size-adjust:100%;}
 body{background:${C.navy};color:${C.text};font-family:'DM Sans',sans-serif;-webkit-tap-highlight-color:transparent;}
@@ -1068,11 +1092,11 @@ input,textarea,select,button{font-family:'DM Sans',sans-serif;}
 @keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.4;}}
 .fade-up{animation:fadeUp 0.25s ease forwards;}
 `;
-const inp = (extra={}) => ({width:"100%",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",color:C.text,fontSize:15,outline:"none",...extra});
-const btn = (bg,color,extra={}) => ({background:bg,color,border:"none",borderRadius:12,padding:"14px",fontWeight:700,fontSize:16,cursor:"pointer",width:"100%",fontFamily:"'Bebas Neue'",letterSpacing:2,...extra});
+export const inp = (extra={}) => ({width:"100%",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",color:C.text,fontSize:15,outline:"none",...extra});
+export const btn = (bg,color,extra={}) => ({background:bg,color,border:"none",borderRadius:12,padding:"14px",fontWeight:700,fontSize:16,cursor:"pointer",width:"100%",fontFamily:"'Bebas Neue'",letterSpacing:2,...extra});
 
 // ─── RESPONSIVE HOOK ──────────────────────────────────────────────────────────
-function useIsMobile(bp=640) {
+export function useIsMobile(bp=640) {
   const [isMobile,setIsMobile] = useState(typeof window!=="undefined"?window.innerWidth<bp:false);
   useEffect(()=>{
     const handler=()=>setIsMobile(window.innerWidth<bp);
@@ -1083,7 +1107,7 @@ function useIsMobile(bp=640) {
 }
 
 // ─── LINE CHART ───────────────────────────────────────────────────────────────
-function LineChart({data, color=C.gold, unit=""}) {
+export function LineChart({data, color=C.gold, unit=""}) {
   const [selected, setSelected] = useState(null);
   if(!data||data.length<2) return (
     <div style={{color:C.muted,fontSize:12,textAlign:"center",padding:"16px 0"}}>Not enough data yet.</div>
@@ -1136,7 +1160,7 @@ const RUN_TYPE_LABELS = {
   easy:"Easy Run", tempo:"Tempo", interval:"Intervals", long_run:"Long Run",
   race:"Race", recovery:"Recovery", fartlek:"Fartlek", null:"Run"
 };
-function RunCard({runData, feel}) {
+export function RunCard({runData, feel}) {
   if(!runData) return null;
   const typeLabel = RUN_TYPE_LABELS[runData.run_type] || "Run";
   const dist = runData.distance_miles!=null
@@ -1553,7 +1577,40 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
 }
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
+// ─── ERROR BOUNDARY ───────────────────────────────────────────────────────────
+// installErrorReporting captures window errors for the ledger, but a RENDER
+// exception unmounts the whole React tree — in standalone PWA mode that's a
+// permanent white screen with no URL bar to refresh. This catches it, logs a
+// fatal error_event, and gives the athlete a reload button.
+class ErrorBoundary extends Component {
+  constructor(props){ super(props); this.state = { crashed:false }; }
+  static getDerivedStateFromError(){ return { crashed:true }; }
+  componentDidCatch(error, info){
+    reportError("nav", error, {
+      severity: "fatal",
+      error_type: "render_crash",
+      component: info?.componentStack?.split("\n").find(l=>l.trim())?.trim().slice(0,120) || null,
+    });
+  }
+  render(){
+    if(this.state.crashed){
+      return (
+        <div style={{minHeight:"100vh",background:C.navy,color:C.text,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,textAlign:"center",fontFamily:"'DM Sans',sans-serif"}}>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:44,color:C.gold,letterSpacing:5,lineHeight:1}}>WILCO</div>
+          <div style={{marginTop:14,fontSize:15,color:C.muted2}}>Something broke on our end. Your logs are safe.</div>
+          <button onClick={()=>window.location.reload()} style={{marginTop:22,background:C.gold,color:C.navy,border:"none",borderRadius:12,padding:"14px 34px",fontWeight:700,fontSize:16,cursor:"pointer",fontFamily:"'Bebas Neue'",letterSpacing:2}}>RELOAD</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function WilcoApp() {
+  return <ErrorBoundary><WilcoRoot/></ErrorBoundary>;
+}
+
+function WilcoRoot() {
   const [view,setView] = useState("home");
   const [athlete,setAthlete] = useState(null);
   const [coach,setCoach] = useState(null);
@@ -1564,7 +1621,7 @@ export default function WilcoApp() {
   useEffect(()=>{ installErrorReporting(); installEngagementTracking(); },[]);
 
   if(view==="athlete"&&athlete) return <AthleteView athlete={athlete} onLogout={()=>{setAthlete(null);setView("home");}}/>;
-  if(view==="coach"&&coach) return <CoachDashboard coach={coach} onLogout={()=>{setCoach(null);setView("home");}}/>;
+  if(view==="coach"&&coach) return <Suspense fallback={<div style={{minHeight:"100vh",background:C.navy}}/>}><CoachDashboard coach={coach} onLogout={()=>{setCoach(null);setView("home");}}/></Suspense>;
 
   return (
     <div style={{minHeight:"100vh",background:C.navy,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",paddingTop:"calc(24px + env(safe-area-inset-top, 0px))",paddingBottom:24,paddingLeft:24,paddingRight:24}}>
@@ -1837,7 +1894,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
     const heightIn = (+data.heightFt*12)+(+data.heightIn||0);
     const initialTier = data.isSchool ? "school" : "free"; // upgraded later by plan/payment
     // Create the account server-side: PIN is hashed and tier is forced there.
-    let newAthlete;
+    let newAthlete, newToken;
     try {
       const r = await idApi("create-athlete",{
         pin:data.pin, isSchool:data.isSchool, schoolPriceId:SCHOOL_PRICE_ID,
@@ -1853,10 +1910,10 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
           first_chat_complete:false,
         }
       });
-      newAthlete = r.athlete;
+      newAthlete = r.athlete; newToken = r.token;
     } catch(e){ setErr("Error: "+(e.message||"could not create account")); return null; }
     if(!newAthlete){ setErr("Error creating your account. Try again."); return null; }
-    CURRENT_AUTH={role:"athlete",id:newAthlete.id,pin:data.pin}; // authenticate subsequent writes
+    CURRENT_AUTH={role:"athlete",id:newAthlete.id,pin:data.pin,token:newToken}; // authenticate subsequent writes
     track("signup_complete","auth");
     try {
       await sbUpdate("athletes",newAthlete.id,{
@@ -2380,7 +2437,7 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
     try {
       const res = await idApi("athlete-login",{name:name.trim(),pin});
       if(res.athlete){
-        CURRENT_AUTH={role:"athlete",id:res.athlete.id,pin};track("login","auth",{role:"athlete"});
+        CURRENT_AUTH={role:"athlete",id:res.athlete.id,pin,token:res.token};track("login","auth",{role:"athlete"});
         // First successful PIN login on a biometric-capable device with no enrollment yet:
         // offer Face ID before entering. Otherwise go straight in.
         if(!getBioEnrollment("athlete") && !bioOfferSkipped.athlete && await biometricSupported()){
@@ -2549,7 +2606,7 @@ function CoachLoginScreen({setView,setCoach,setErr,err}) {
     try {
       const res = await idApi("coach-login",{pin});
       if(res.coach){
-        CURRENT_AUTH={role:"coach",id:res.coach.id,pin};track("login","auth",{role:"coach"});
+        CURRENT_AUTH={role:"coach",id:res.coach.id,pin,token:res.token};track("login","auth",{role:"coach"});
         // First PIN login on a biometric-capable device with no enrollment yet: offer Face ID.
         if(!getBioEnrollment("coach") && !bioOfferSkipped.coach && await biometricSupported()){
           setEnrollFor({coach:res.coach,pin}); setLoading(false); return;
@@ -2713,8 +2770,8 @@ function CoachSetupScreen({setView,setCoach,setErr,err}) {
     if(pin!==confirmPin){setErr("PINs don't match.");return;}
     setLoading(true); setErr("");
     try {
-      await idApi("set-coach-pin",{coachId:coachRecord.id,accessCode:code.trim().toUpperCase(),pin});
-      CURRENT_AUTH={role:"coach",id:coachRecord.id,pin};track("login","auth",{role:"coach"});setCoach({...coachRecord,pin});setView("coach");
+      const spRes = await idApi("set-coach-pin",{coachId:coachRecord.id,accessCode:code.trim().toUpperCase(),pin});
+      CURRENT_AUTH={role:"coach",id:coachRecord.id,pin,token:spRes.token};track("login","auth",{role:"coach"});setCoach({...coachRecord,pin});setView("coach");
     } catch(e){setErr("Connection error.");}
     setLoading(false);
   };
@@ -2835,6 +2892,16 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   },[messages,historyLoaded]);
 
   useEffect(()=>{
+    // Prune stale per-day chat caches: every day leaves a wilco_chat_<id>_<date>
+    // blob behind forever otherwise. Keep only TODAY's blobs (any athlete — a
+    // shared device shouldn't wipe a sibling's live transcript).
+    try{
+      const todaySuffix = "_"+new Date().toLocaleDateString();
+      for(let i=localStorage.length-1;i>=0;i--){
+        const k = localStorage.key(i);
+        if(k&&k.startsWith("wilco_chat_")&&!k.endsWith(todaySuffix)) localStorage.removeItem(k);
+      }
+    }catch(_){}
     (async()=>{
       const tier = athlete.tier||"free";
       // Restore today's conversation from localStorage if available
@@ -2843,42 +2910,42 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         const storedMsgs = storedChat ? JSON.parse(storedChat) : null;
         if(storedMsgs?.length>0){
           setMessages(storedMsgs);
-          const logs = tier!=="free" ? await sbRead("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=100&select=*`) : [];
+          // Even when we restore today's cached chat, still load the workout history
+          // and latest proof digest (in parallel) so the log + Proof tab aren't empty.
+          const [logs,dr] = await Promise.all([
+            tier!=="free" ? sbRead("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=100&select=*`).catch(()=>[]) : Promise.resolve([]),
+            sbRead("proof_digests",`?athlete_id=eq.${athlete.id}&digest_type=in.(weekly,monthly)&order=generated_at.desc&limit=1`).catch(()=>[]),
+          ]);
           if(logs&&logs.length>0) setWorkoutHistory(logs);
-          // Even when we restore today's cached chat, still load the latest proof
-          // digest so the Proof tab isn't empty (this path used to skip it).
-          try{
-            const dr = await sbRead("proof_digests",`?athlete_id=eq.${athlete.id}&digest_type=in.(weekly,monthly)&order=generated_at.desc&limit=1`);
-            if(Array.isArray(dr)&&dr.length>0) setProofDigest(dr[0]);
-          }catch(_){}
+          if(Array.isArray(dr)&&dr.length>0) setProofDigest(dr[0]);
           setHistoryLoaded(true);
           return;
         }
       } catch(_){}
       try {
-        // Re-fetch athlete from Supabase so JoBot has the latest program_text
-        // even if the coach set it after this athlete logged in
-        const _fa = await idApi("get-athlete",{athleteId:athlete.id,pin:athlete.pin});
-        const freshAthlete = _fa.athlete ? [_fa.athlete] : [];
+        // All five boot loads keyed on athlete.id (get-athlete returns the SAME id,
+        // so nothing here depends on its result) — run them in ONE parallel batch
+        // instead of the old five-step waterfall. Each is individually caught so a
+        // single failed read degrades that feature instead of the whole boot.
+        const [_fa, goals, ctxRows, digestRows, logs] = await Promise.all([
+          // Re-fetch athlete so JoBot has the latest program_text even if the
+          // coach set it after this athlete logged in.
+          idApi("get-athlete",{athleteId:athlete.id,pin:athlete.pin}).catch(()=>null),
+          sbRead("athlete_goals",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=10`).catch(()=>[]),
+          sbRead("athlete_context",`?athlete_id=eq.${athlete.id}&order=updated_at.desc&limit=5`).catch(()=>[]),
+          sbRead("proof_digests",`?athlete_id=eq.${athlete.id}&digest_type=in.(weekly,monthly)&order=generated_at.desc&limit=1`).catch(()=>[]),
+          // Free tier: no session memory — skip loading workout history
+          tier!=="free" ? sbRead("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=100&select=*`).catch(()=>[]) : Promise.resolve([]),
+        ]);
+        const freshAthlete = _fa?.athlete ? [_fa.athlete] : [];
         if(freshAthlete.length>0) setAthlete({...freshAthlete[0],pin:athlete.pin});
-
-        // Load goals for AI context
-        const goals = await sbRead("athlete_goals",`?athlete_id=eq.${freshAthlete?.[0]?.id||athlete.id}&order=created_at.desc&limit=10`);
         if(Array.isArray(goals)&&goals.length>0) setAthleteGoals(goals);
-
-        // Load athlete context (from monthly recaps) for AI prompt injection
-        const ctxRows = await sbRead("athlete_context",`?athlete_id=eq.${freshAthlete?.[0]?.id||athlete.id}&order=updated_at.desc&limit=5`);
         if(Array.isArray(ctxRows)&&ctxRows.length>0) setAthleteContext(ctxRows.map(r=>r.content).join("\n\n"));
-
-        // Load most recent proof digest
-        const digestRows = await sbRead("proof_digests",`?athlete_id=eq.${freshAthlete?.[0]?.id||athlete.id}&digest_type=in.(weekly,monthly)&order=generated_at.desc&limit=1`);
         if(Array.isArray(digestRows)&&digestRows.length>0) setProofDigest(digestRows[0]);
 
         // Register push notification subscription (best-effort)
-        registerPushSubscription(freshAthlete?.[0]?.id||athlete.id);
+        registerPushSubscription(athlete.id);
 
-        // Free tier: no session memory — skip loading workout history
-        const logs = tier!=="free" ? await sbRead("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=100&select=*`) : [];
         if(logs&&logs.length>0) setWorkoutHistory(logs);
 
         const lastLog = logs?.[0];
@@ -3134,9 +3201,11 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       return;
     }
 
-    // Intercept log-view requests — open the log modal instead of calling Claude (Pro/Elite only)
+    // Intercept log-view requests — open the log modal instead of calling Claude (Pro/Elite only).
+    // Only for SHORT messages: substring matching alone hijacked real questions
+    // ("does my history show any knee pain?" should go to the coach, not the modal).
     const logKeywords = ["show me my log","my log","my workout log","show my workouts","view my workouts","workout history","my history","show my history","see my log","all my workouts","see my workouts","show my log"];
-    if(logKeywords.some(kw=>msg.toLowerCase().includes(kw))){
+    if(msg.length<=40 && logKeywords.some(kw=>msg.toLowerCase().includes(kw))){
       setInput("");
       if((athlete.tier||"free")==="free"){
         setMessages(prev=>[...prev,{role:"user",content:msg},{role:"assistant",content:`Your workout log is a Pro feature, ${athlete.name}. Upgrade to Pro to save your history between sessions and view your full log.`}]);
@@ -3155,12 +3224,24 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     try {
       let updatedAthlete = {...athlete};
 
-      const [reply,parsed] = await Promise.all([
-        getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext),
-        parseWorkout(msg,athlete.name,athlete.sport)
-      ]);
+      // Both AI calls fire together, but the coach's reply is shown the MOMENT it
+      // arrives — the parse and all persistence below continue in the background.
+      // The reply used to be held until parse + save finished (several bcrypt-gated
+      // gateway round-trips), which made every message feel slower than the AI was.
+      const parsedP = parseWorkout(msg,athlete.name,athlete.sport);
+      const reply = await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext);
+      setMessages(prev=>[...prev,{role:"assistant",content:reply}]);
+      setLoading(false);
+      const parsed = await parsedP;
 
+      // Notes that used to be appended to the reply text before showing it now post
+      // as their own follow-up bubbles (the reply is already on screen). finalReply
+      // still accumulates them so the persisted bot_reply keeps the full record.
       let finalReply = reply;
+      const followUp = (note)=>{
+        finalReply = finalReply + "\n\n" + note;
+        setMessages(prev=>[...prev,{role:"assistant",content:note}]);
+      };
 
       // Detect and save program updates — any tier, as long as coach hasn't locked it
       if(parsed.is_program_update && !updatedAthlete.program_locked){
@@ -3172,7 +3253,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             await sbUpdate("athletes",athlete.id,{program_text:programText});
             updatedAthlete.program_text = programText;
             setAthlete(updatedAthlete);
-            finalReply = reply + "\n\n📋 Program saved — I'll reference this in every session.";
+            followUp("📋 Program saved — I'll reference this in every session.");
           }
         } catch(e){}
       }
@@ -3193,7 +3274,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           await sbUpdate("athletes",athlete.id,{temp_program_text:null});
           updatedAthlete.temp_program_text = null;
           setAthlete(updatedAthlete);
-          finalReply = reply + "\n\n✅ Temporary program cleared — back to your regular programming.";
+          followUp("✅ Temporary program cleared — back to your regular programming.");
         } catch(e){}
       }
 
@@ -3217,7 +3298,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           const updated = await appendAthleteContext(athlete.id,`${dateTag}: ${cr.note.trim()}`,{longTerm:!!cr.is_injury});
           if(updated!==null){ setAthleteContext(updated); saved.push("note"); }
         }
-        if(saved.length) finalReply = finalReply + "\n\n✓ Got it — I'll remember that.";
+        if(saved.length) followUp("✓ Got it — I'll remember that.");
       }
 
       // Gap check: 1–3 hrs since last real entry → ask same workout or new session
@@ -3226,8 +3307,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         if(lastReal){
           const gapMin = Math.round((Date.now()-new Date(lastReal.created_at))/60000);
           if(gapMin>=60&&gapMin<180){
-            const sessionQ = `\n\nAlso — it's been ${gapMin} minutes since your last log. Same workout still, or is this a new session?`;
-            setMessages(prev=>[...prev,{role:"assistant",content:finalReply+sessionQ}]);
+            const sessionQ = `It's been ${gapMin} minutes since your last log. Same workout still, or is this a new session?`;
+            setMessages(prev=>[...prev,{role:"assistant",content:sessionQ}]);
             setSessionCheckPending({parsed,msg,reply:finalReply,updatedAthlete});
             setLoading(false);
             return;
@@ -3235,7 +3316,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         }
       }
 
-      await finalizeWorkout(parsed,msg,finalReply,updatedAthlete,false,true);
+      // Reply is already on screen (addReply=false) — this just persists + runs PR detection.
+      await finalizeWorkout(parsed,msg,finalReply,updatedAthlete,false,false);
     } catch(e){
       console.error("JoBot error:",e);
       setMessages(prev=>[...prev,{role:"assistant",content:`Hit a snag. Try again. (${e?.message||"unknown error"})`}]);
@@ -5082,1817 +5164,6 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
             </>
           )}
         </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── SCHOOLS LIST (master only) ───────────────────────────────────────────────
-function SchoolsList({schools,coaches,onRefresh}) {
-  const [confirmDelete,setConfirmDelete] = useState(null); // school id pending delete
-  const [deleting,setDeleting] = useState(false);
-  const [addingCoachFor,setAddingCoachFor] = useState(null); // school id showing add-coach form
-  const [newCoachName,setNewCoachName] = useState("");
-  const [newCoachEmail,setNewCoachEmail] = useState("");
-  const [addingCoach,setAddingCoach] = useState(false);
-  const [addCoachErr,setAddCoachErr] = useState("");
-  const [addCoachSuccess,setAddCoachSuccess] = useState("");
-
-  const coachCountFor = (schoolId) => coaches.filter(c=>c.school_id===schoolId).length;
-
-  const openAddCoach = (schoolId) => {
-    setAddingCoachFor(schoolId);
-    setNewCoachName(""); setNewCoachEmail(""); setAddCoachErr(""); setAddCoachSuccess("");
-  };
-  const cancelAddCoach = () => { setAddingCoachFor(null); setAddCoachErr(""); setAddCoachSuccess(""); };
-
-  const handleAddCoach = async (school) => {
-    if(!newCoachName.trim()){setAddCoachErr("Coach name is required.");return;}
-    if(!newCoachEmail.trim()){setAddCoachErr("Coach email is required.");return;}
-    setAddingCoach(true); setAddCoachErr(""); setAddCoachSuccess("");
-    try {
-      // Next coach number = max existing coach_number for this school + 1
-      const schoolCoaches = coaches.filter(c=>c.school_id===school.id);
-      const maxNum = schoolCoaches.reduce((m,c)=>Math.max(m,c.coach_number||0),0);
-      const coachNum = maxNum + 1;
-      const accessCode = school.code.toUpperCase() + String(coachNum).padStart(2,"0");
-      const coachRow = await sbInsert("coaches",{
-        name: newCoachName.trim(),
-        email: newCoachEmail.trim().toLowerCase(),
-        school_id: school.id,
-        coach_number: coachNum,
-        access_code: accessCode,
-        role: "coach"
-      });
-      if(!coachRow?.length) throw new Error("Failed to create coach.");
-      fetch("/api/send-coach-invite",{
-        method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({coachName:newCoachName.trim(),coachEmail:newCoachEmail.trim().toLowerCase(),accessCode,schoolName:school.name})
-      }).catch(()=>{});
-      setAddCoachSuccess(`✓ ${newCoachName.trim()} added as ${accessCode} — invite sent!`);
-      setNewCoachName(""); setNewCoachEmail("");
-      onRefresh();
-      setTimeout(()=>{ setAddingCoachFor(null); setAddCoachSuccess(""); },2500);
-    } catch(e){ setAddCoachErr(e.message||"Something went wrong."); }
-    setAddingCoach(false);
-  };
-
-  const handleDelete = async (school) => {
-    setDeleting(true);
-    try {
-      // Clear school_id + coach_id on athletes belonging to this school's coaches
-      const schoolCoaches = coaches.filter(c=>c.school_id===school.id);
-      for(const c of schoolCoaches){
-        await sbUpdateWhere("athletes",`?coach_id=eq.${c.id}`,{coach_id:null,school_id:null});
-        await sbDelete("coaches",`?id=eq.${c.id}`);
-      }
-      await sbDelete("schools",`?id=eq.${school.id}`);
-      setConfirmDelete(null);
-      onRefresh();
-    } catch(e){console.error(e);}
-    setDeleting(false);
-  };
-
-  if(schools.length===0) return null;
-
-  return (
-    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden",marginBottom:16}}>
-      <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>SCHOOLS / TEAMS</div>
-      {schools.map((s,i)=>{
-        const coachCount = coachCountFor(s.id);
-        const hasOpenSlot = coachCount < (s.max_coaches||3);
-        const isAddingHere = addingCoachFor===s.id;
-        return (
-          <div key={i}>
-            <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:12}}>
-              {s.logo_url
-                ? <img src={s.logo_url} alt={s.name} style={{width:36,height:36,borderRadius:6,objectFit:"contain",background:"#fff",padding:2,flexShrink:0}}/>
-                : <div style={{width:36,height:36,borderRadius:6,background:C.navy3,border:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:16,color:C.gold,flexShrink:0}}>{s.code}</div>
-              }
-              <div style={{flex:1}}>
-                <div style={{color:C.text,fontWeight:600,fontSize:14}}>{s.name}</div>
-                <div style={{color:C.muted,fontSize:11}}>
-                  Code: <span style={{color:C.gold,fontWeight:700}}>{s.code}</span> · {coachCount}/{s.max_coaches||3} coach{coachCount!==1?"es":""} · {s.tier} tier
-                  {hasOpenSlot&&<span style={{color:C.green,marginLeft:6}}>· {(s.max_coaches||3)-coachCount} slot{(s.max_coaches||3)-coachCount!==1?"s":""} open</span>}
-                </div>
-              </div>
-              <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
-                {hasOpenSlot&&!isAddingHere&&confirmDelete!==s.id&&(
-                  <button onClick={()=>openAddCoach(s.id)}
-                    style={{background:"none",border:`1px solid ${C.gold}66`,color:C.gold,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:11}}>
-                    + Add Coach
-                  </button>
-                )}
-                {confirmDelete===s.id ? (
-                  <div style={{display:"flex",alignItems:"center",gap:8}}>
-                    <span style={{color:C.muted,fontSize:11}}>Remove school + coaches?</span>
-                    <button onClick={()=>handleDelete(s)} disabled={deleting}
-                      style={{background:C.red,border:"none",color:"#fff",borderRadius:6,padding:"5px 12px",cursor:"pointer",fontSize:11,fontWeight:700}}>
-                      {deleting?"...":"Yes, delete"}
-                    </button>
-                    <button onClick={()=>setConfirmDelete(null)}
-                      style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:11}}>
-                      Cancel
-                    </button>
-                  </div>
-                ) : (
-                  <button onClick={()=>setConfirmDelete(s.id)}
-                    style={{background:"none",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:11,flexShrink:0}}>
-                    Remove
-                  </button>
-                )}
-              </div>
-            </div>
-            {/* Add Coach inline form */}
-            {isAddingHere&&(
-              <div style={{padding:"14px 16px",background:C.navy3,borderBottom:`1px solid ${C.border}`}}>
-                <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:10}}>
-                  ADD COACH TO {s.name.toUpperCase()} — code will be <span style={{color:C.gold,fontWeight:700}}>{s.code}{String((coaches.filter(c=>c.school_id===s.id).reduce((m,c)=>Math.max(m,c.coach_number||0),0))+1).padStart(2,"0")}</span>
-                </div>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
-                  <input value={newCoachName} onChange={e=>setNewCoachName(e.target.value)} placeholder="Coach name" style={inp()}/>
-                  <input type="email" value={newCoachEmail} onChange={e=>setNewCoachEmail(e.target.value)} placeholder="coach@school.edu" style={inp()}/>
-                </div>
-                {addCoachErr&&<div style={{color:C.red,fontSize:12,marginBottom:8}}>{addCoachErr}</div>}
-                {addCoachSuccess&&<div style={{color:C.green,fontSize:12,marginBottom:8,fontWeight:600}}>{addCoachSuccess}</div>}
-                <div style={{display:"flex",gap:8}}>
-                  <button onClick={()=>handleAddCoach(s)} disabled={addingCoach}
-                    style={{background:C.gold,border:"none",color:"#000",borderRadius:6,padding:"7px 16px",cursor:"pointer",fontSize:12,fontWeight:700}}>
-                    {addingCoach?"Adding...":"Add & Send Invite →"}
-                  </button>
-                  <button onClick={cancelAddCoach}
-                    style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"7px 12px",cursor:"pointer",fontSize:12}}>
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ─── COACHES LIST (master only) ────────────────────────────────────────────────
-function CoachesList({coaches,schools,onRefresh}) {
-  const [editingId,setEditingId] = useState(null);
-  const [editName,setEditName] = useState("");
-  const [editEmail,setEditEmail] = useState("");
-  const [saving,setSaving] = useState(false);
-  const [confirmDelete,setConfirmDelete] = useState(null);
-  const [deleting,setDeleting] = useState(false);
-  const [resendStatus,setResendStatus] = useState({}); // coachId → "sending"|"sent"|"error"
-
-  const schoolFor = (schoolId) => schools.find(s=>s.id===schoolId);
-
-  const startEdit = (c) => { setEditingId(c.id); setEditName(c.name); setEditEmail(c.email||""); };
-  const cancelEdit = () => { setEditingId(null); setEditName(""); setEditEmail(""); };
-
-  const saveEdit = async (c) => {
-    if(!editName.trim()){return;}
-    setSaving(true);
-    try {
-      await sbUpdate("coaches",c.id,{name:editName.trim(),email:editEmail.trim().toLowerCase()||null,pin:null});
-      cancelEdit();
-      onRefresh();
-    } catch(e){console.error(e);}
-    setSaving(false);
-  };
-
-  const resendInvite = async (c) => {
-    setResendStatus(p=>({...p,[c.id]:"sending"}));
-    try {
-      const school = schoolFor(c.school_id);
-      await fetch("/api/send-coach-invite",{
-        method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({coachName:c.name,coachEmail:c.email,accessCode:c.access_code,schoolName:school?.name||""})
-      });
-      setResendStatus(p=>({...p,[c.id]:"sent"}));
-      setTimeout(()=>setResendStatus(p=>({...p,[c.id]:null})),3000);
-    } catch(e){ setResendStatus(p=>({...p,[c.id]:"error"})); }
-  };
-
-  const handleDelete = async (c) => {
-    setDeleting(true);
-    try {
-      // Clear coach_id on their athletes
-      await sbUpdateWhere("athletes",`?coach_id=eq.${c.id}`,{coach_id:null,school_id:null});
-      await sbDelete("coaches",`?id=eq.${c.id}`);
-      setConfirmDelete(null);
-      onRefresh();
-    } catch(e){console.error(e);}
-    setDeleting(false);
-  };
-
-  const nonMasterCoaches = coaches.filter(c=>c.role!=="master");
-  if(nonMasterCoaches.length===0) return null;
-
-  return (
-    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden",marginBottom:16}}>
-      <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>ALL COACHES</div>
-      {nonMasterCoaches.map((c,i)=>{
-        const school = schoolFor(c.school_id);
-        const isEditing = editingId===c.id;
-        const rs = resendStatus[c.id];
-        return (
-          <div key={i} style={{borderBottom:`1px solid ${C.border}`}}>
-            {isEditing ? (
-              <div style={{padding:"12px 16px",background:C.navy3}}>
-                <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>EDIT COACH — <span style={{color:C.gold}}>{c.access_code}</span></div>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
-                  <input value={editName} onChange={e=>setEditName(e.target.value)} placeholder="Coach name" style={inp()}/>
-                  <input type="email" value={editEmail} onChange={e=>setEditEmail(e.target.value)} placeholder="Email" style={inp()}/>
-                </div>
-                <div style={{color:C.muted,fontSize:11,marginBottom:10}}>Saving will reset their PIN so the new coach can register fresh.</div>
-                <div style={{display:"flex",gap:8}}>
-                  <button onClick={()=>saveEdit(c)} disabled={saving} style={{background:C.gold,border:"none",color:"#000",borderRadius:6,padding:"7px 16px",cursor:"pointer",fontSize:12,fontWeight:700}}>
-                    {saving?"Saving...":"Save"}
-                  </button>
-                  <button onClick={cancelEdit} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"7px 12px",cursor:"pointer",fontSize:12}}>Cancel</button>
-                </div>
-              </div>
-            ) : (
-              <div style={{padding:"12px 16px",display:"flex",alignItems:"center",gap:12}}>
-                <div style={{width:36,height:36,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:16,color:"#000",flexShrink:0}}>{c.name?.[0]?.toUpperCase()||"?"}</div>
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{color:C.text,fontWeight:600,fontSize:14}}>{c.name}</div>
-                  <div style={{color:C.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                    <span style={{color:C.gold,fontWeight:700}}>{c.access_code}</span>
-                    {school?` · ${school.name}`:""}
-                    {c.email?` · ${c.email}`:""}
-                  </div>
-                </div>
-                <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
-                  <div style={{color:c.pin?C.green:C.red,fontSize:10,marginRight:4}}>{c.pin?"✓ Active":"Not set up"}</div>
-                  {/* Resend invite */}
-                  {c.email&&c.role!=="master"&&(
-                    <button onClick={()=>resendInvite(c)} disabled={!!rs}
-                      style={{background:"none",border:`1px solid ${C.border}`,color:rs==="sent"?C.green:C.muted2,borderRadius:6,padding:"4px 8px",cursor:rs?"default":"pointer",fontSize:10}}>
-                      {rs==="sending"?"...":rs==="sent"?"✓ Sent":rs==="error"?"Error":"Resend"}
-                    </button>
-                  )}
-                  {/* Edit */}
-                  {confirmDelete!==c.id&&(
-                    <button onClick={()=>startEdit(c)}
-                      style={{background:"none",border:`1px solid ${C.border}`,color:C.muted2,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:10}}>
-                      Replace
-                    </button>
-                  )}
-                  {/* Delete */}
-                  {confirmDelete===c.id ? (
-                    <>
-                      <button onClick={()=>handleDelete(c)} disabled={deleting}
-                        style={{background:C.red,border:"none",color:"#fff",borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:10,fontWeight:700}}>
-                        {deleting?"...":"Confirm"}
-                      </button>
-                      <button onClick={()=>setConfirmDelete(null)}
-                        style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:10}}>
-                        Cancel
-                      </button>
-                    </>
-                  ) : (
-                    <button onClick={()=>setConfirmDelete(c.id)}
-                      style={{background:"none",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:10}}>
-                      Remove
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ─── SCHOOL ONBOARDING FORM (master only) ─────────────────────────────────────
-function SchoolOnboardingForm({onCreated}) {
-  const [schoolName,setSchoolName] = useState("");
-  const [schoolCode,setSchoolCode] = useState("");
-  const [contactEmail,setContactEmail] = useState("");
-  const [tier,setTier] = useState("group");
-  const [maxCoaches,setMaxCoaches] = useState(3);
-  const [maxAthletes,setMaxAthletes] = useState(50);
-  const [coaches,setCoaches] = useState([{name:"",email:""},{name:"",email:""},{name:"",email:""}]);
-  const [logoFile,setLogoFile] = useState(null);
-  const [logoPreview,setLogoPreview] = useState(null);
-  const [saving,setSaving] = useState(false);
-  const [err,setErr] = useState("");
-  const [success,setSuccess] = useState("");
-
-  // Auto-suggest 3-letter code from school name
-  useEffect(()=>{
-    if(!schoolName.trim()) return;
-    const words = schoolName.trim().split(/\s+/);
-    let code = "";
-    if(words.length>=3)      code=(words[0][0]+words[1][0]+words[2][0]).toUpperCase();
-    else if(words.length===2) code=(words[0].slice(0,2)+words[1][0]).toUpperCase();
-    else                      code=schoolName.slice(0,3).toUpperCase();
-    setSchoolCode(code);
-  },[schoolName]);
-
-  const updateCoach = (i,field,val) => setCoaches(prev=>prev.map((c,idx)=>idx===i?{...c,[field]:val}:c));
-
-  const updateMaxCoaches = (n) => {
-    setMaxCoaches(n);
-    setCoaches(prev=>{
-      const arr=[...prev];
-      while(arr.length<n) arr.push({name:"",email:""});
-      return arr.slice(0,n);
-    });
-  };
-
-  const handleLogoChange = (e) => {
-    const file=e.target.files?.[0];
-    if(!file) return;
-    setLogoFile(file);
-    setLogoPreview(URL.createObjectURL(file));
-  };
-
-  const handleSubmit = async () => {
-    if(!schoolName.trim()){setErr("School name is required.");return;}
-    if(!schoolCode.trim()||schoolCode.length!==3){setErr("School code must be exactly 3 letters.");return;}
-    const validCoaches=coaches.slice(0,maxCoaches).filter(c=>c.name.trim()&&c.email.trim());
-    if(validCoaches.length===0){setErr("Add at least one coach with name and email.");return;}
-    setSaving(true); setErr(""); setSuccess("");
-    try {
-      // 1. Upload logo if provided
-      let logoUrl=null;
-      if(logoFile){
-        const ext=logoFile.name.split(".").pop();
-        const fileName=`${schoolCode.toLowerCase()}-${Date.now()}.${ext}`;
-        const uploadRes=await fetch(`${SUPABASE_URL}/storage/v1/object/school-logos/${fileName}`,{
-          method:"POST",
-          headers:{"apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`,"Content-Type":logoFile.type,"x-upsert":"true"},
-          body:logoFile
-        });
-        if(uploadRes.ok) logoUrl=`${SUPABASE_URL}/storage/v1/object/public/school-logos/${fileName}`;
-      }
-      // 2. Create school record
-      const schools=await sbInsert("schools",{
-        name:schoolName.trim(),
-        code:schoolCode.toUpperCase(),
-        logo_url:logoUrl,
-        tier,
-        max_coaches:maxCoaches,
-        max_athletes:maxAthletes,
-        contact_email:contactEmail.trim()||null
-      });
-      if(!schools?.length) throw new Error("Failed to create school — check if that 3-letter code is already taken.");
-      const school=schools[0];
-      // 3. Create coaches + send invites
-      let created=0;
-      for(let i=0;i<validCoaches.length;i++){
-        const c=validCoaches[i];
-        const coachNum=i+1;
-        const accessCode=schoolCode.toUpperCase()+String(coachNum).padStart(2,"0");
-        const coachRow=await sbInsert("coaches",{
-          name:c.name.trim(),
-          email:c.email.trim().toLowerCase(),
-          school_id:school.id,
-          coach_number:coachNum,
-          access_code:accessCode,
-          role:"coach"
-        });
-        if(coachRow?.length){
-          created++;
-          fetch("/api/send-coach-invite",{
-            method:"POST",
-            headers:{"Content-Type":"application/json"},
-            body:JSON.stringify({coachName:c.name.trim(),coachEmail:c.email.trim().toLowerCase(),accessCode,schoolName:schoolName.trim()})
-          }).catch(()=>{});
-        }
-      }
-      // Create admin account for contact email
-      if(contactEmail.trim()){
-        const adminCode=schoolCode.toUpperCase()+"AD";
-        try {
-          const adminRow=await sbInsert("coaches",{name:"Admin",email:contactEmail.trim().toLowerCase(),school_id:school.id,coach_number:0,access_code:adminCode,role:"admin"});
-          if(adminRow?.length){
-            fetch("/api/send-coach-invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({coachName:"Admin",coachEmail:contactEmail.trim().toLowerCase(),accessCode:adminCode,schoolName:schoolName.trim(),isAdmin:true})}).catch(()=>{});
-          }
-        }catch(_){}
-      }
-      setSuccess(`✓ ${schoolName} onboarded! ${created} coach invite${created!==1?"s":""} sent.`);
-      setSchoolName(""); setSchoolCode(""); setContactEmail(""); setLogoFile(null); setLogoPreview(null);
-      setCoaches([{name:"",email:""},{name:"",email:""},{name:"",email:""}]); setMaxCoaches(3);
-      if(onCreated) onCreated();
-    } catch(e){ setErr(e.message||"Something went wrong."); }
-    setSaving(false);
-  };
-
-  return (
-    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:20,marginBottom:16}}>
-      <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:16}}>ONBOARD NEW SCHOOL / TEAM</div>
-
-      {/* Row 1: name + code */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 90px",gap:12,marginBottom:14}}>
-        <div>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>SCHOOL / TEAM NAME</label>
-          <input value={schoolName} onChange={e=>setSchoolName(e.target.value)} placeholder="Lincoln High School" style={inp()}/>
-        </div>
-        <div>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CODE</label>
-          <input value={schoolCode} onChange={e=>setSchoolCode(e.target.value.toUpperCase().replace(/[^A-Z]/g,"").slice(0,3))}
-            placeholder="LHS" style={inp({textAlign:"center",letterSpacing:4,fontWeight:700,textTransform:"uppercase"})}/>
-        </div>
-      </div>
-
-      {/* Row 2: contact email + tier */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
-        <div>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CONTACT EMAIL</label>
-          <input type="email" value={contactEmail} onChange={e=>setContactEmail(e.target.value)} placeholder="ad@school.edu" style={inp()}/>
-        </div>
-        <div>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>TIER</label>
-          <select value={tier} onChange={e=>setTier(e.target.value)} style={{...inp(),cursor:"pointer"}}>
-            <option value="group">Group</option>
-            <option value="school">School</option>
-            <option value="district">District</option>
-          </select>
-        </div>
-      </div>
-
-      {/* Row 3: max coaches + max athletes */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
-        <div>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>MAX COACHES</label>
-          <select value={maxCoaches} onChange={e=>updateMaxCoaches(Number(e.target.value))} style={{...inp(),cursor:"pointer"}}>
-            {[1,2,3,4,5,6,7,8,9,10].map(n=><option key={n} value={n}>{n}</option>)}
-          </select>
-        </div>
-        <div>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>MAX ATHLETES</label>
-          <input type="number" value={maxAthletes} min={1} onChange={e=>setMaxAthletes(Number(e.target.value))} style={inp()}/>
-        </div>
-      </div>
-
-      {/* Logo upload */}
-      <div style={{marginBottom:16}}>
-        <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>SCHOOL LOGO <span style={{color:C.muted,fontWeight:400,letterSpacing:0}}>(optional — PNG, SVG, or JPG)</span></label>
-        <div style={{display:"flex",alignItems:"center",gap:12}}>
-          {logoPreview&&<img src={logoPreview} alt="Preview" style={{width:40,height:40,borderRadius:8,objectFit:"contain",background:"#fff",padding:3}}/>}
-          <label style={{background:C.navy3,border:`1px dashed ${C.border}`,borderRadius:8,padding:"8px 14px",cursor:"pointer",color:C.muted2,fontSize:12,display:"inline-block"}}>
-            {logoFile?logoFile.name:"Upload logo"}
-            <input type="file" accept="image/png,image/svg+xml,image/jpeg" onChange={handleLogoChange} style={{display:"none"}}/>
-          </label>
-        </div>
-      </div>
-
-      {/* Coach slots */}
-      <div style={{marginBottom:16}}>
-        <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:10}}>
-          COACHES — codes: <span style={{color:C.gold,fontWeight:700}}>{schoolCode||"???"}01</span>, <span style={{color:C.gold,fontWeight:700}}>{schoolCode||"???"}02</span>…
-        </div>
-        {coaches.slice(0,maxCoaches).map((c,i)=>(
-          <div key={i} style={{display:"grid",gridTemplateColumns:"56px 1fr 1fr",gap:8,marginBottom:8,alignItems:"center"}}>
-            <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:6,padding:"7px 4px",fontSize:11,fontWeight:700,color:C.gold,letterSpacing:1,fontFamily:"'Bebas Neue'",textAlign:"center"}}>
-              {(schoolCode||"???")+String(i+1).padStart(2,"0")}
-            </div>
-            <input value={c.name} onChange={e=>updateCoach(i,"name",e.target.value)} placeholder={`Coach ${i+1} name`} style={inp()}/>
-            <input type="email" value={c.email} onChange={e=>updateCoach(i,"email",e.target.value)} placeholder="email@school.edu" style={inp()}/>
-          </div>
-        ))}
-      </div>
-
-      {err&&<div style={{color:C.red,fontSize:12,marginBottom:12}}>{err}</div>}
-      {success&&<div style={{color:C.green,fontSize:13,marginBottom:12,fontWeight:600}}>{success}</div>}
-      <button onClick={handleSubmit} disabled={saving} style={btn(C.gold,"#000",{opacity:saving?0.7:1})}>
-        {saving?"Creating school...":"Create School & Send Coach Invites →"}
-      </button>
-    </div>
-  );
-}
-
-// ─── COACH DASHBOARD ──────────────────────────────────────────────────────────
-function CoachDashboard({coach,onLogout}) {
-  const isMaster = coach.role==="master"||coach.access_code===MASTER_CODE;
-  const isAdmin = coach.role==="admin";
-  const [athletes,setAthletes] = useState([]);
-  const [workouts,setWorkouts] = useState([]);
-  const [prs,setPrs] = useState([]);
-  const [allCoaches,setAllCoaches] = useState([]);
-  const [loading,setLoading] = useState(true);
-  const [activeTab,setActiveTab] = useState("athletes");
-  const [selected,setSelected] = useState(null);
-  const [search,setSearch] = useState("");
-  const [filterPain,setFilterPain] = useState(false);
-  const [filterInactive,setFilterInactive] = useState(false);
-  const [sortBy,setSortBy] = useState("lastActive"); // "lastActive" | "name"
-  const [recalcStatus,setRecalcStatus] = useState(null); // null | "running" | "done" | "error" | "X/Y
-  const [allDigests,setAllDigests] = useState([]);
-  const [reportFilter,setReportFilter] = useState("all"); // "all" | "weekly" | "monthly"
-  const [reportSearch,setReportSearch] = useState("");
-  const [reportFlagFilter,setReportFlagFilter] = useState(false);
-  const [selectedDigest,setSelectedDigest] = useState(null);
-  useEffect(()=>{ track("coach_dashboard_view","coach_dashboard"); },[]);
-  const isMobile = useIsMobile();
-  const [selectMode,setSelectMode] = useState(false);
-  const [selectedIds,setSelectedIds] = useState(new Set());
-  const [bulkProgram,setBulkProgram] = useState("");
-  const [showBulkModal,setShowBulkModal] = useState(false);
-  const [bulkSaving,setBulkSaving] = useState(false);
-  const [school,setSchool] = useState(null);
-  const [allSchools,setAllSchools] = useState([]);
-  const [showAssignCoachModal,setShowAssignCoachModal] = useState(false);
-  const [assignCoachId,setAssignCoachId] = useState("");
-  const [assignSaving,setAssignSaving] = useState(false);
-  const [assignError,setAssignError] = useState("");
-
-  useEffect(()=>{loadAll();},[]);
-
-  // Keep selected athlete's program in sync with what Joe-bot may have updated
-  useEffect(()=>{
-    if(!selected) return;
-    const selectedId = selected.id;
-    const poll = setInterval(async ()=>{
-      try {
-        const _r = await idApi("coach-athlete-fields",{coachId:coach.id,pin:coach.pin,athleteId:selectedId});
-        const fresh = _r.fields ? [_r.fields] : [];
-        if(fresh.length>0){
-          const {program_text,program_locked,temp_program_text} = fresh[0];
-          setSelected(prev=>{
-            if(!prev||prev.id!==selectedId) return prev;
-            if(prev.program_text===program_text&&prev.program_locked===program_locked&&prev.temp_program_text===temp_program_text) return prev;
-            return {...prev,program_text,program_locked,temp_program_text};
-          });
-          setAthletes(prev=>prev.map(a=>a.id===selectedId?{...a,program_text,program_locked,temp_program_text}:a));
-        }
-      } catch(e){}
-    },30000);
-    return ()=>clearInterval(poll);
-  },[selected?.id]);
-
-  const loadAll = async () => {
-    setLoading(true);
-    try {
-      // athletes/coaches/schools are RLS-protected — fetch them server-side (role-scoped).
-      // workouts/prs now also go through the gateway, scoped to this coach's athletes
-      // server-side (master -> all). The client-side filter below is kept as a harmless
-      // belt-and-suspenders; the server has already narrowed the result set.
-      const [dash,w,p] = await Promise.all([
-        idApi("coach-dashboard",{coachId:coach.id,pin:coach.pin}),
-        sbRead("workouts","?order=created_at.desc&select=*"),
-        sbRead("prs","?order=created_at.desc&select=*"),
-      ]);
-      const a  = dash.athletes||[];
-      const c  = dash.coaches||[];
-      const s  = dash.school||[];
-      const sc = dash.schoolsAll||[];
-      let filteredAthletes = Array.isArray(a)?a:[];
-      if(!isMaster){
-        filteredAthletes = filteredAthletes.filter(at=>at.coach_id===coach.id);
-      }
-      setAthletes(filteredAthletes);
-      const ids = filteredAthletes.map(at=>at.id);
-      setWorkouts((Array.isArray(w)?w:[]).filter(wk=>ids.includes(wk.athlete_id)));
-      setPrs((Array.isArray(p)?p:[]).filter(pr=>ids.includes(pr.athlete_id)));
-      setAllCoaches(Array.isArray(c)?c:[]);
-      setSchool(Array.isArray(s)&&s.length>0?s[0]:null);
-      setAllSchools(Array.isArray(sc)?sc:[]);
-      // Load proof digests: per-athlete digests for this coach's athletes, plus the
-      // team-aggregate coach reports (athlete_id is null on those, so they're fetched
-      // by digest_type — the gateway scopes both reads to this coach by coach_id).
-      if(ids.length>0){
-        const idList = ids.map(id=>`"${id}"`).join(",");
-        const [perAthlete, teamReports] = await Promise.all([
-          sbRead("proof_digests",`?athlete_id=in.(${idList})&order=generated_at.desc&select=*`),
-          sbRead("proof_digests",`?digest_type=in.(weekly_coach,monthly_coach)&order=generated_at.desc&select=*`),
-        ]);
-        setAllDigests([...(Array.isArray(perAthlete)?perAthlete:[]),...(Array.isArray(teamReports)?teamReports:[])]);
-      }
-    } catch(e){console.error(e);}
-    setLoading(false);
-  };
-
-  const recalcAllPRs = async () => {
-    setRecalcStatus("running");
-    try {
-      // Fetch every workout ever logged (need all history, not just what's loaded)
-      const allWorkouts = await sbRead("workouts","?select=*&order=created_at.asc");
-      if(!Array.isArray(allWorkouts)) throw new Error("Could not load workouts");
-      let done = 0;
-      for(const ath of athletes){
-        const athWorkouts = allWorkouts.filter(w=>w.athlete_id===ath.id);
-        // Find best estimated 1RM per exercise across all sessions
-        const best = {};
-        for(const w of athWorkouts){
-          // parsed_data may come back as a string in some cases — parse it if so
-          const pd = typeof w.parsed_data==="string" ? (() => { try{return JSON.parse(w.parsed_data);}catch{return {};} })() : (w.parsed_data||{});
-          for(const ex of (pd.exercises||[])){
-            if(!ex.name||ex.unit==="bodyweight") continue;
-            const e1rm = bestE1RMForExercise(ex);
-            if(!e1rm) continue;
-            const k = normalizeExName(ex.name);
-            if(!best[k]||e1rm>best[k].e1rm){
-              const topSet = getExerciseSets(ex).reduce((b,s)=>epley1RM(toLbs(s.weight,ex.unit),s.reps)>epley1RM(toLbs(b.weight,ex.unit),b.reps)?s:b, {weight:ex.weight??0, reps:ex.reps||1});
-              best[k] = {exercise:ex.name,weight:topSet.weight,reps:topSet.reps||1,e1rm,unit:ex.unit||"lbs"};
-            }
-          }
-        }
-        // Only wipe and re-insert if we actually found exercises (safety guard)
-        if(Object.keys(best).length>0){
-          await sbDelete("prs",`?athlete_id=eq.${ath.id}`);
-          for(const {exercise,weight,reps,e1rm,unit} of Object.values(best)){
-            await sbInsert("prs",{athlete_id:ath.id,exercise,weight,reps,estimated_1rm:e1rm,unit});
-          }
-        }
-        done++;
-        setRecalcStatus(`${done} / ${athletes.length} athletes done`);
-      }
-      setRecalcStatus("done");
-      await loadAll();
-      setTimeout(()=>setRecalcStatus(null),4000);
-    } catch(e){
-      console.error(e);
-      setRecalcStatus("error");
-      setTimeout(()=>setRecalcStatus(null),4000);
-    }
-  };
-
-  const handleBulkAssign = async () => {
-    if(!bulkProgram.trim()||selectedIds.size===0) return;
-    setBulkSaving(true);
-    try {
-      for(const id of selectedIds){
-        await sbUpdate("athletes",id,{program_text:bulkProgram.trim()});
-      }
-      setAthletes(prev=>prev.map(a=>selectedIds.has(a.id)?{...a,program_text:bulkProgram.trim()}:a));
-      setSelectedIds(new Set());
-      setSelectMode(false);
-      setBulkProgram("");
-      setShowBulkModal(false);
-    } catch(e){console.error(e);}
-    setBulkSaving(false);
-  };
-
-  // Assign (or unassign) selected athletes to a coach/school. assignCoachId==="" means unassign.
-  const handleBulkAssignCoach = async () => {
-    if(selectedIds.size===0) return;
-    setAssignSaving(true);
-    setAssignError("");
-    try {
-      const targetCoach = assignCoachId ? allCoaches.find(c=>c.id===assignCoachId) : null;
-      if(assignCoachId && !targetCoach){ setAssignError("Coach not found — try again."); setAssignSaving(false); return; }
-      const patch = targetCoach ? {coach_id:targetCoach.id, school_id:targetCoach.school_id||null} : {coach_id:null, school_id:null};
-      for(const id of selectedIds){
-        await sbUpdate("athletes",id,patch);
-      }
-      setAthletes(prev=>prev.map(a=>selectedIds.has(a.id)?{...a,...patch}:a));
-      setSelectedIds(new Set());
-      setSelectMode(false);
-      setAssignCoachId("");
-      setShowAssignCoachModal(false);
-    } catch(e){
-      console.error(e);
-      setAssignError("Couldn't save that assignment. Try again.");
-    }
-    setAssignSaving(false);
-  };
-
-  const lastActive = (id) => {
-    const ws = workouts.filter(w=>w.athlete_id===id);
-    return ws.length ? ws[0].created_at : null;
-  };
-
-  const filtered = athletes.filter(a=>{
-    if(search&&!a.name.toLowerCase().includes(search.toLowerCase())&&!a.sport.toLowerCase().includes(search.toLowerCase())) return false;
-    if(filterPain&&!workouts.filter(w=>w.athlete_id===a.id).some(w=>w.parsed_data?.pain_flags?.length>0)) return false;
-    if(filterInactive){
-      const d = daysBetween(lastActive(a.id));
-      if(d!==null&&d<=7) return false;
-    }
-    return true;
-  }).sort((a,b)=>{
-    if(sortBy==="name") return a.name.localeCompare(b.name);
-    // "lastActive": most recent first; athletes who've never logged go to the bottom
-    const la = lastActive(a.id), lb = lastActive(b.id);
-    if(!la&&!lb) return 0;
-    if(!la) return 1;
-    if(!lb) return -1;
-    return new Date(lb) - new Date(la);
-  });
-
-  const tabs = ["athletes","stats","reports",...(isMaster?["coaches"]:[]),...(!isMaster&&isAdmin?["account"]:[])];
-
-  return (
-    <div style={{minHeight:"100dvh",background:C.navy}}>
-      <style>{GS}</style>
-      {/* Header */}
-      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,paddingTop:isMobile?"calc(10px + env(safe-area-inset-top, 0px))":"14px",paddingBottom:isMobile?"10px":"14px",paddingLeft:isMobile?"14px":"20px",paddingRight:isMobile?"14px":"20px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:50,gap:8}}>
-        <div style={{display:"flex",alignItems:"center",gap:10,minWidth:0,flex:1}}>
-          {/* School logo — shown for team coaches who have a logo set */}
-          {!isMaster&&school?.logo_url&&(
-            <img src={school.logo_url} alt={school.name} style={{width:isMobile?32:40,height:isMobile?32:40,borderRadius:8,objectFit:"contain",background:"#fff",padding:3,flexShrink:0}}/>
-          )}
-          <div style={{minWidth:0}}>
-            <div style={{fontFamily:"'Bebas Neue'",fontSize:isMobile?17:22,color:C.gold,letterSpacing:2,lineHeight:1.1,whiteSpace:isMobile?"nowrap":"normal",overflow:"hidden",textOverflow:"ellipsis"}}>
-              {isMaster ? "WILCO MASTER" : (school?.name ? school.name.toUpperCase() : "WILCO COACH")}
-            </div>
-            <div style={{color:C.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-              {coach.name}{!isMaster&&school?" · "+school.name:""}
-            </div>
-          </div>
-        </div>
-        <div style={{display:"flex",gap:6,flexShrink:0}}>
-          <button onClick={loadAll} style={{background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:isMobile?16:12}}>↻</button>
-          <button onClick={onLogout} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12}}>Log Out</button>
-        </div>
-      </div>
-
-      {/* Tabs */}
-      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,display:"flex",padding:"0 20px"}}>
-        {tabs.map(t=>(
-          <button key={t} onClick={()=>{setActiveTab(t);if(t!=="athletes")setSelected(null);}}
-            style={{padding:"12px 18px",background:"none",border:"none",borderBottom:`2px solid ${activeTab===t?C.gold:"transparent"}`,color:activeTab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"color 0.15s"}}>
-            {t==="stats"?"Group Stats":t}
-          </button>
-        ))}
-      </div>
-
-      <div style={{padding:isMobile?12:20,maxWidth:1400,margin:"0 auto"}}>
-        {loading?(
-          <div style={{textAlign:"center",padding:60,color:C.muted}}>Loading...</div>
-        ):(
-          <>
-            {/* ── ATHLETES TAB ── */}
-            {activeTab==="athletes"&&(
-              <div style={{display:"grid",gridTemplateColumns:(!isMobile&&selected)?"300px 1fr":"1fr",gap:20,alignItems:"start"}}>
-                {/* Left: Athlete List — hidden on mobile when detail is open */}
-                {(!isMobile||!selected)&&(
-                <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden",position:isMobile?"static":"sticky",top:90}}>
-                  <div style={{padding:"12px 14px",borderBottom:`1px solid ${C.border}`}}>
-                    <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search athletes..."
-                      style={{width:"100%",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 12px",color:C.text,fontSize:13,outline:"none",marginBottom:8}}/>
-                    <div style={{display:"flex",gap:6}}>
-                      <button onClick={()=>setFilterPain(p=>!p)}
-                        style={{flex:1,background:filterPain?`${C.red}20`:"transparent",border:`1px solid ${filterPain?C.red:C.border}`,color:filterPain?C.red:C.muted,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11,fontFamily:"'DM Sans'"}}>
-                        Pain flags
-                      </button>
-                      <button onClick={()=>setFilterInactive(p=>!p)}
-                        style={{flex:1,background:filterInactive?`${C.gold}20`:"transparent",border:`1px solid ${filterInactive?C.gold:C.border}`,color:filterInactive?C.gold:C.muted,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11,fontFamily:"'DM Sans'"}}>
-                        Inactive 7d+
-                      </button>
-                      <button onClick={()=>setSortBy(s=>s==="lastActive"?"name":"lastActive")}
-                        style={{flex:1,background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11,fontFamily:"'DM Sans'",display:"flex",alignItems:"center",justifyContent:"center",gap:4}}>
-                        <span>{sortBy==="lastActive"?"⏱":"A–Z"}</span>
-                        <span>{sortBy==="lastActive"?"Active":"Name"}</span>
-                      </button>
-                    </div>
-                  </div>
-                  <div style={{padding:"6px 14px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
-                    <button onClick={()=>{setSelectMode(p=>!p);setSelectedIds(new Set());}}
-                      style={{background:selectMode?`${C.gold}20`:"transparent",border:`1px solid ${selectMode?C.gold:C.border}`,color:selectMode?C.gold:C.muted,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:11,fontFamily:"'DM Sans'"}}>
-                      {selectMode?"✕ Cancel":"☑ Bulk Assign"}
-                    </button>
-                    {selectMode&&selectedIds.size>0&&(
-                      <div style={{display:"flex",gap:6}}>
-                        <button onClick={()=>setShowBulkModal(true)}
-                          style={{background:C.gold,border:"none",color:"#000",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,whiteSpace:"nowrap"}}>
-                          Program ({selectedIds.size})
-                        </button>
-                        {isMaster&&(
-                          <button onClick={()=>setShowAssignCoachModal(true)}
-                            style={{background:C.blue,border:"none",color:"#000",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,whiteSpace:"nowrap"}}>
-                            Coach ({selectedIds.size})
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  <div style={{maxHeight:isMobile?"none":"calc(100dvh - 240px)",overflowY:"auto"}}>
-                    {filtered.length===0?(
-                      <div style={{padding:24,textAlign:"center",color:C.muted,fontSize:13}}>No athletes found</div>
-                    ):filtered.map(a=>{
-                      const la = lastActive(a.id);
-                      const d = daysBetween(la);
-                      const aResolvedPain = (a.resolved_pain||[]).map(x=>x.toLowerCase());
-                      const hasPain = workouts.filter(w=>w.athlete_id===a.id).some(w=>w.parsed_data?.pain_flags?.some(p=>!aResolvedPain.includes(p.area.toLowerCase())));
-                      const isSel = selected?.id===a.id;
-                      const dot = d===null?C.muted:d===0?C.green:d<=3?C.green:d<=7?C.gold:C.red;
-                      return (
-                        <div key={a.id}
-                          onClick={()=>selectMode?setSelectedIds(prev=>{const s=new Set(prev);s.has(a.id)?s.delete(a.id):s.add(a.id);return s;}):setSelected(isSel?null:a)}
-                          style={{padding:"11px 14px",borderBottom:`1px solid ${C.border}`,cursor:"pointer",background:selectedIds.has(a.id)?`${C.gold}15`:isSel?C.navy3:"transparent",transition:"background 0.15s",display:"flex",alignItems:"center",gap:10}}>
-                          {selectMode?(
-                            <div style={{width:20,height:20,borderRadius:4,border:`2px solid ${selectedIds.has(a.id)?C.gold:C.muted}`,background:selectedIds.has(a.id)?C.gold:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontSize:11,color:"#000"}}>
-                              {selectedIds.has(a.id)&&"✓"}
-                            </div>
-                          ):(
-                          <div style={{width:34,height:34,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:15,color:"#000",flexShrink:0}}>{a.name[0].toUpperCase()}</div>
-                          )}
-                          <div style={{flex:1,minWidth:0}}>
-                            <div style={{color:C.text,fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:5}}>{a.name}{a.certified_badge_earned_at&&<span title="WILCO Certified" style={{color:C.gold,fontSize:10,flexShrink:0}}>✦</span>}</div>
-                            <div style={{color:C.muted,fontSize:11}}>{a.sport} · {groupIntoSessions(workouts.filter(w=>w.athlete_id===a.id)).length} sessions</div>
-                          </div>
-                          <div style={{textAlign:"right",flexShrink:0}}>
-                            {hasPain&&<div style={{color:C.red,fontSize:9,marginBottom:2}}>⚠ pain</div>}
-                            <div style={{display:"flex",alignItems:"center",gap:4,justifyContent:"flex-end"}}>
-                              <div style={{width:7,height:7,borderRadius:"50%",background:dot}}/>
-                              <div style={{color:C.muted,fontSize:10}}>{d===null?"never":d===0?"today":`${d}d ago`}</div>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-                )}
-
-                {/* Right: Athlete Detail — full-screen on mobile when selected */}
-                {selected&&(
-                  <div>
-                    {isMobile&&(
-                      <button onClick={()=>setSelected(null)}
-                        style={{display:"flex",alignItems:"center",gap:6,background:C.navy2,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13,marginBottom:12,fontFamily:"'DM Sans'"}}>
-                        ← Athletes
-                      </button>
-                    )}
-                    <AthleteDetail
-                      athlete={selected}
-                      workouts={workouts.filter(w=>w.athlete_id===selected.id)}
-                      prs={prs.filter(p=>p.athlete_id===selected.id)}
-                      onProgramSave={async (text)=>{
-                        await sbUpdate("athletes",selected.id,{program_text:text});
-                        setAthletes(prev=>prev.map(a=>a.id===selected.id?{...a,program_text:text}:a));
-                        setSelected(prev=>({...prev,program_text:text}));
-                      }}
-                      onAthleteDelete={(id)=>{
-                        setAthletes(prev=>prev.filter(a=>a.id!==id));
-                        setSelected(null);
-                      }}
-                    />
-                  </div>
-                )}
-                {!selected&&!isMobile&&(
-                  <div style={{display:"flex",alignItems:"center",justifyContent:"center",padding:60,color:C.muted,fontSize:13,border:`1px dashed ${C.border}`,borderRadius:14}}>
-                    Select an athlete to view details
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Bulk Program Modal */}
-            {showBulkModal&&(
-              <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.8)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:500,padding:24}}>
-                <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:500}}>
-                  <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2,marginBottom:4}}>BULK ASSIGN PROGRAM</div>
-                  <div style={{color:C.muted,fontSize:12,marginBottom:14}}>Assigning to {selectedIds.size} athlete{selectedIds.size!==1?"s":""} — overwrites any existing program.</div>
-                  <textarea value={bulkProgram} onChange={e=>setBulkProgram(e.target.value)} placeholder={"Paste the program here...\n\nExample:\nWeek 1:\n  Mon: Squat 3×5, Bench 3×5\n  Wed: Deadlift 1×5, OHP 3×5"} rows={10}
-                    style={{width:"100%",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",color:C.text,fontSize:13,outline:"none",resize:"vertical",lineHeight:1.6,fontFamily:"'DM Sans'",marginBottom:14}}/>
-                  <div style={{display:"flex",gap:8}}>
-                    <button onClick={()=>setShowBulkModal(false)} style={{flex:1,background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14}}>Cancel</button>
-                    <button onClick={handleBulkAssign} disabled={bulkSaving||!bulkProgram.trim()}
-                      style={{flex:2,background:C.gold,border:"none",color:"#000",borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,opacity:bulkSaving||!bulkProgram.trim()?0.6:1}}>
-                      {bulkSaving?"Saving...":"Assign to "+selectedIds.size+" Athletes →"}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Bulk Assign Coach/School Modal (master only) */}
-            {showAssignCoachModal&&(()=>{
-              const schoolsById = Object.fromEntries(allSchools.map(s=>[s.id,s]));
-              const sortedCoaches = [...allCoaches].sort((a,b)=>{
-                const sa = schoolsById[a.school_id]?.name||"";
-                const sb = schoolsById[b.school_id]?.name||"";
-                return sa.localeCompare(sb) || a.name.localeCompare(b.name);
-              });
-              return (
-                <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.8)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:500,padding:24}}
-                  onClick={()=>!assignSaving&&setShowAssignCoachModal(false)}>
-                  <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:460}}
-                    onClick={e=>e.stopPropagation()}>
-                    <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2,marginBottom:4}}>ASSIGN TO COACH</div>
-                    <div style={{color:C.muted,fontSize:12,marginBottom:14}}>
-                      Moving {selectedIds.size} athlete{selectedIds.size!==1?"s":""} to a coach/school. This overwrites their current assignment.
-                    </div>
-                    <select value={assignCoachId} onChange={e=>setAssignCoachId(e.target.value)}
-                      style={{width:"100%",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"11px 12px",color:C.text,fontSize:13,outline:"none",marginBottom:14}}>
-                      <option value="">— Unassigned (remove from any school) —</option>
-                      {sortedCoaches.map(c=>{
-                        const s = schoolsById[c.school_id];
-                        return (
-                          <option key={c.id} value={c.id}>
-                            {(s?.name||"No School")} — {c.name}{c.role==="admin"?" (Admin)":""}{c.access_code?` · ${c.access_code}`:""}
-                          </option>
-                        );
-                      })}
-                    </select>
-                    {assignError&&<div style={{color:C.red,fontSize:12,marginBottom:10}}>{assignError}</div>}
-                    <div style={{display:"flex",gap:8}}>
-                      <button onClick={()=>{setShowAssignCoachModal(false);setAssignCoachId("");setAssignError("");}}
-                        style={{flex:1,background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14}}>Cancel</button>
-                      <button onClick={handleBulkAssignCoach} disabled={assignSaving}
-                        style={{flex:2,background:C.blue,border:"none",color:"#000",borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,opacity:assignSaving?0.6:1}}>
-                        {assignSaving?"Saving...":(assignCoachId?`Assign ${selectedIds.size} Athlete${selectedIds.size!==1?"s":""} →`:`Unassign ${selectedIds.size} Athlete${selectedIds.size!==1?"s":""} →`)}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              );
-            })()}
-
-            {/* ── GROUP STATS TAB ── */}
-            {activeTab==="stats"&&(
-              <GroupStats athletes={athletes} workouts={workouts} prs={prs}/>
-            )}
-
-            {/* ── REPORTS TAB ── */}
-            {activeTab==="reports"&&(()=>{
-              const athleteById = Object.fromEntries(athletes.map(a=>[a.id,a]));
-              // Team-aggregate coach reports vs per-athlete digests.
-              const teamReports = allDigests.filter(d=>d.digest_type==="weekly_coach"||d.digest_type==="monthly_coach");
-              const displayDigests = allDigests.filter(d=>d.digest_type==="weekly"||d.digest_type==="monthly");
-              const latestTeamReport = teamReports[0]||null; // ordered desc by generated_at
-
-              let filtered = displayDigests;
-              if(reportFilter==="weekly") filtered = filtered.filter(d=>d.digest_type==="weekly");
-              if(reportFilter==="monthly") filtered = filtered.filter(d=>d.digest_type==="monthly");
-              if(reportFlagFilter) filtered = filtered.filter(d=>d.has_plateau||d.has_pain||d.has_missed);
-              if(reportSearch) filtered = filtered.filter(d=>{
-                const a = athleteById[d.athlete_id];
-                return a?.name?.toLowerCase().includes(reportSearch.toLowerCase());
-              });
-
-              if(selectedDigest){
-                const c = selectedDigest.content_json||{};
-                const isTeam = selectedDigest.digest_type==="weekly_coach"||selectedDigest.digest_type==="monthly_coach";
-                const a = isTeam ? null : athleteById[selectedDigest.athlete_id];
-                // New shape: sections[]. Legacy fallback: keyed fields.
-                const sections = Array.isArray(c.sections)&&c.sections.length
-                  ? c.sections
-                  : [
-                      ["opening_message","OPENING"],["week_vs_week","THIS WEEK VS LAST"],["month_summary","MONTH SUMMARY"],
-                      ["consistency","CONSISTENCY"],["goal_progress","GOAL PROGRESS"],["month_patterns","PATTERNS"],
-                      ["trend_callouts","TRENDS"],["plateau_flag","PLATEAU FLAG"],["unresolved_plateaus","PLATEAUS"],
-                      ["encouragement","FROM COACH JOE"],["focus_next_week","FOCUS NEXT WEEK"],
-                    ].filter(([k])=>c[k]).map(([k,l])=>({label:l,body:c[k]}));
-                const ol = c.outliers||{};
-                return (
-                  <div style={{maxWidth:700}}>
-                    <button onClick={()=>setSelectedDigest(null)} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:12,marginBottom:14}}>← Back to Reports</button>
-                    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
-                        <div>
-                          <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>{selectedDigest.label}</div>
-                          <div style={{color:C.muted,fontSize:12}}>{isTeam?"Team report":`${a?.name||"Unknown"} · ${a?.sport||""}`}</div>
-                        </div>
-                        <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"flex-end"}}>
-                          {selectedDigest.has_plateau&&<div style={{background:"rgba(239,68,68,0.15)",border:"1px solid rgba(239,68,68,0.4)",borderRadius:4,padding:"2px 7px",color:"#ef4444",fontSize:10,fontWeight:700}}>PLATEAU</div>}
-                          {selectedDigest.has_pain&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:4,padding:"2px 7px",color:"#ef4444",fontSize:10}}>{isTeam?"INJURIES":"PAIN FLAG"}</div>}
-                          {selectedDigest.has_missed&&<div style={{background:"rgba(100,116,139,0.2)",border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 7px",color:C.muted,fontSize:10}}>{isTeam?"AT-RISK":"MISSED SESSIONS"}</div>}
-                        </div>
-                      </div>
-                      {c.intro&&<div style={{color:C.text,fontSize:13,lineHeight:1.65,marginBottom:12,fontStyle:"italic"}}>{c.intro}</div>}
-                      {sections.map((s,i)=>(
-                        <div key={i} style={{background:C.navy3,border:`1px solid ${s.flag==="warn"?"rgba(239,68,68,0.3)":C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
-                          <div style={{color:s.flag==="warn"?"#ef4444":C.muted,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:6}}>{s.label}</div>
-                          <div style={{color:C.text,fontSize:13,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{s.body}</div>
-                        </div>
-                      ))}
-                      {/* Team report: outliers + coach actions */}
-                      {isTeam&&(ol.mostImproved?.length>0||ol.atRisk?.length>0||ol.volumeCratered?.length>0)&&(
-                        <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
-                          <div style={{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:8}}>FLAGGED OUTLIERS</div>
-                          {ol.mostImproved?.length>0&&<div style={{color:C.text,fontSize:13,marginBottom:4}}><span style={{color:C.green}}>↑ Most improved:</span> {ol.mostImproved.map(o=>`${o.name} (+${o.delta})`).join(", ")}</div>}
-                          {ol.atRisk?.length>0&&<div style={{color:C.text,fontSize:13,marginBottom:4}}><span style={{color:"#ef4444"}}>⚠ At risk:</span> {ol.atRisk.join(", ")}</div>}
-                          {ol.volumeCratered?.length>0&&<div style={{color:C.text,fontSize:13}}><span style={{color:C.gold}}>↓ Volume cratered:</span> {ol.volumeCratered.map(o=>`${o.name} (${o.gap}%)`).join(", ")}</div>}
-                        </div>
-                      )}
-                      {isTeam&&Array.isArray(c.actions)&&c.actions.length>0&&(
-                        <div style={{background:"rgba(16,185,129,0.1)",border:"1px solid rgba(16,185,129,0.3)",borderRadius:10,padding:"12px 14px"}}>
-                          <div style={{color:C.green,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:6}}>COACH ACTIONS</div>
-                          <ul style={{margin:0,paddingLeft:16,color:C.text,fontSize:13,lineHeight:1.7}}>{c.actions.map((act,i)=><li key={i}>{act}</li>)}</ul>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              }
-
-              // ── Leaderboard (school accounts only) ───────────────────────────────
-              const leaderboard = school ? (()=>{
-                const now = Date.now();
-                const d30 = 30*24*60*60*1000;
-                const schoolAthletes = athletes.filter(a=>a.school_id===school.id);
-                if(schoolAthletes.length<2) return null;
-                // Most Improved
-                const improved = schoolAthletes.map(a=>{
-                  const aw=workouts.filter(w=>w.athlete_id===a.id);
-                  const rb={};const pb={};
-                  aw.filter(w=>now-new Date(w.created_at)<=d30).forEach(w=>(w.parsed_data?.exercises||[]).forEach(ex=>{if(!ex.name||ex.unit==="bodyweight")return;const k=normalizeExName(ex.name);const e=bestE1RMForExercise(ex);if(e&&(!rb[k]||e>rb[k]))rb[k]=e;}));
-                  aw.filter(w=>{const age=now-new Date(w.created_at);return age>d30&&age<=d30*2;}).forEach(w=>(w.parsed_data?.exercises||[]).forEach(ex=>{if(!ex.name||ex.unit==="bodyweight")return;const k=normalizeExName(ex.name);const e=bestE1RMForExercise(ex);if(e&&(!pb[k]||e>pb[k]))pb[k]=e;}));
-                  let best=0;
-                  Object.keys(rb).forEach(k=>{if(pb[k]&&pb[k]>0){const p=(rb[k]-pb[k])/pb[k]*100;if(p>best)best=p;}});
-                  return best>0?{athlete:a,metric:`+${Math.round(best)}% est. 1RM`}:null;
-                }).filter(Boolean).sort((a,b)=>parseFloat(b.metric)-parseFloat(a.metric)).slice(0,3);
-                // Most Impressive Lift
-                const impressive = schoolAthletes.filter(a=>a.weight_lbs).map(a=>{
-                  let bestRatio=0,bestLift="";
-                  workouts.filter(w=>w.athlete_id===a.id).forEach(w=>(w.parsed_data?.exercises||[]).forEach(ex=>{if(!ex.name||ex.unit==="bodyweight")return;const e=bestE1RMForExercise(ex);if(!e)return;const r=e/a.weight_lbs;if(r>bestRatio){bestRatio=r;bestLift=ex.name;}}));
-                  return bestRatio>0?{athlete:a,metric:`${bestLift} · ${bestRatio.toFixed(2)}×BW`,ratio:bestRatio}:null;
-                }).filter(Boolean).sort((a,b)=>b.ratio-a.ratio).slice(0,3);
-                // Most Consistent (sessions in last 30d)
-                const consistent = schoolAthletes.map(a=>{
-                  const cnt=workouts.filter(w=>w.athlete_id===a.id&&(now-new Date(w.created_at))<=d30).length;
-                  return cnt>0?{athlete:a,metric:`${cnt} sessions`}:null;
-                }).filter(Boolean).sort((a,b)=>parseInt(b.metric)-parseInt(a.metric)).slice(0,3);
-                return {improved,impressive,consistent,asOf:new Date().toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})};
-              })() : null;
-
-              return (
-                <div style={{maxWidth:700}}>
-                  {/* ── Leaderboard Section ── */}
-                  {leaderboard&&(
-                    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16,marginBottom:20}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-                        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>TEAM LEADERBOARD</div>
-                        <div style={{color:C.muted,fontSize:10}}>As of {leaderboard.asOf}</div>
-                      </div>
-                      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
-                        {[{label:"Most Improved",data:leaderboard.improved},{label:"Most Impressive Lift",data:leaderboard.impressive},{label:"Most Consistent",data:leaderboard.consistent}].map(({label,data})=>(
-                          <div key={label}>
-                            <div style={{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,marginBottom:8,textTransform:"uppercase"}}>{label}</div>
-                            {data.length===0?<div style={{color:C.muted,fontSize:11,fontStyle:"italic"}}>Not enough data</div>:data.map((entry,i)=>(
-                              <div key={i} style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
-                                <span style={{color:i===0?C.gold:C.muted,fontSize:i===0?14:11,flexShrink:0}}>{i===0?"🥇":i===1?"2.":"3."}</span>
-                                <div style={{minWidth:0}}>
-                                  <div style={{color:C.text,fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{entry.athlete.name}</div>
-                                  <div style={{color:C.muted,fontSize:10,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{entry.metric}</div>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  {/* Team aggregate report (Coach Joe's read on the whole roster) */}
-                  {latestTeamReport&&(
-                    <button onClick={()=>setSelectedDigest(latestTeamReport)} style={{width:"100%",background:C.navy2,border:`1px solid ${C.gold}40`,borderRadius:14,padding:16,textAlign:"left",cursor:"pointer",display:"block",marginBottom:16}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>TEAM REPORT</div>
-                        <div style={{display:"flex",gap:6}}>
-                          {latestTeamReport.has_pain&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:4,padding:"2px 6px",color:"#ef4444",fontSize:10}}>INJURIES</div>}
-                          {latestTeamReport.has_missed&&<div style={{background:`${C.navy3}`,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 6px",color:C.muted,fontSize:10}}>AT-RISK</div>}
-                        </div>
-                      </div>
-                      {latestTeamReport.content_json?.intro&&<div style={{color:C.text,fontSize:13,lineHeight:1.6,marginBottom:8}}>{latestTeamReport.content_json.intro}</div>}
-                      <div style={{color:C.gold,fontSize:12,fontWeight:700,letterSpacing:1}}>OPEN REPORT →</div>
-                    </button>
-                  )}
-                  {/* Filters */}
-                  <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:14}}>
-                    <input value={reportSearch} onChange={e=>setReportSearch(e.target.value)} placeholder="Search athlete..."
-                      style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"7px 12px",color:C.text,fontSize:13,outline:"none",flex:1,minWidth:120}}/>
-                    {["all","weekly","monthly"].map(f=>(
-                      <button key={f} onClick={()=>setReportFilter(f)}
-                        style={{background:reportFilter===f?`${C.gold}20`:"transparent",border:`1px solid ${reportFilter===f?C.gold:C.border}`,color:reportFilter===f?C.gold:C.muted,borderRadius:6,padding:"6px 12px",cursor:"pointer",fontSize:12,fontFamily:"'DM Sans'",fontWeight:reportFilter===f?700:400}}>
-                        {f.charAt(0).toUpperCase()+f.slice(1)}
-                      </button>
-                    ))}
-                    <button onClick={()=>setReportFlagFilter(p=>!p)}
-                      style={{background:reportFlagFilter?`${C.red}20`:"transparent",border:`1px solid ${reportFlagFilter?"#ef4444":C.border}`,color:reportFlagFilter?"#ef4444":C.muted,borderRadius:6,padding:"6px 12px",cursor:"pointer",fontSize:12}}>
-                      Flags only
-                    </button>
-                  </div>
-
-                  {filtered.length===0?(
-                    <div style={{textAlign:"center",padding:40,color:C.muted,fontSize:13}}>No reports found.</div>
-                  ):(
-                    <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                      {filtered.map((d,i)=>{
-                        const a = athleteById[d.athlete_id];
-                        const isMonthly = d.digest_type==="monthly";
-                        return (
-                          <button key={i} onClick={()=>setSelectedDigest(d)}
-                            style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:"12px 16px",cursor:"pointer",textAlign:"left",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,transition:"border-color 0.15s"}}>
-                            <div style={{minWidth:0}}>
-                              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-                                <div style={{color:isMonthly?C.blue:C.gold,fontSize:10,fontWeight:700,letterSpacing:1.5}}>
-                                  {isMonthly?"MONTHLY":"WEEKLY"}
-                                </div>
-                                <div style={{color:C.text,fontSize:13,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a?.name||"Unknown"}</div>
-                              </div>
-                              <div style={{color:C.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.label}</div>
-                            </div>
-                            <div style={{display:"flex",gap:5,flexShrink:0,alignItems:"center"}}>
-                              {d.has_plateau&&<div style={{background:"rgba(239,68,68,0.15)",border:"1px solid rgba(239,68,68,0.4)",borderRadius:4,padding:"2px 6px",color:"#ef4444",fontSize:9,fontWeight:700}}>PLT</div>}
-                              {d.has_pain&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:4,padding:"2px 6px",color:"#ef4444",fontSize:9}}>PAIN</div>}
-                              {d.has_missed&&<div style={{background:`${C.navy3}`,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 6px",color:C.muted,fontSize:9}}>MISSED</div>}
-                              <div style={{color:C.muted,fontSize:18}}>›</div>
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-
-            {/* ── ACCOUNT TAB (admin only) ── */}
-            {activeTab==="account"&&isAdmin&&!isMaster&&(()=>{
-              const schoolCoachesList = allCoaches.filter(c=>c.school_id===coach.school_id&&c.role!=="admin");
-              const atLimit = schoolCoachesList.length>=(school?.max_coaches||3);
-              const [acName,setAcName] = useState("");
-              const [acEmail,setAcEmail] = useState("");
-              const [acErr,setAcErr] = useState("");
-              const [acOk,setAcOk] = useState("");
-              const [acCode,setAcCode] = useState("");          // freshly-created coach code (for its copy button)
-              const [codeCopied,setCodeCopied] = useState(null); // which code is showing "Copied!"
-              const [acSaving,setAcSaving] = useState(false);
-
-              const copyCoachCode = (code) => {
-                if(!code || codeCopied===code) return;
-                try{ navigator.clipboard.writeText(code); }catch(_){}
-                haptic(10);
-                setCodeCopied(code);
-                setTimeout(()=>setCodeCopied(c=>c===code?null:c), 2000);
-              };
-              const codeBtn = (code) => {
-                const done = codeCopied===code;
-                return <button onClick={()=>copyCoachCode(code)} style={{background:done?C.gold:"none",border:`1px solid ${done?C.gold:C.border}`,color:done?"#000":C.muted2,borderRadius:6,padding:"2px 9px",cursor:done?"default":"pointer",fontSize:10,fontWeight:700,marginLeft:8,verticalAlign:"middle"}}>{done?"Copied!":"Copy"}</button>;
-              };
-
-              const doAddCoach = async () => {
-                if(!acName.trim()||!acEmail.trim()||!acEmail.includes("@")){setAcErr("Enter a name and valid email.");return;}
-                if(atLimit){setAcErr("Coach limit reached for your plan.");return;}
-                setAcSaving(true);setAcErr("");setAcOk("");setAcCode("");
-                try {
-                  const nextNum=(schoolCoachesList.reduce((m,c)=>Math.max(m,c.coach_number||0),0))+1;
-                  const newCode=(school?.code||"???").toUpperCase()+String(nextNum).padStart(2,"0");
-                  const row=await sbInsert("coaches",{name:acName.trim(),email:acEmail.trim().toLowerCase(),school_id:coach.school_id,coach_number:nextNum,access_code:newCode,role:"coach"});
-                  if(row?.length){
-                    fetch("/api/send-coach-invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({coachName:acName.trim(),coachEmail:acEmail.trim().toLowerCase(),accessCode:newCode,schoolName:school?.name||""})}).catch(()=>{});
-                    setAcOk(`✓ ${acName.trim()} added — invite sent.`); setAcCode(newCode);
-                    setAcName("");setAcEmail("");
-                    loadAll();
-                  }else{setAcErr("Could not create coach. Try again.");}
-                }catch(e){setAcErr("Error: "+e.message);}
-                setAcSaving(false);
-              };
-
-              const doRemoveCoach = async (c) => {
-                if(!window.confirm(`Remove ${c.name}? Their athletes will remain unassigned.`)) return;
-                try {
-                  await sbUpdate("coaches",c.id,{pin:null,access_code:`REMOVED_${c.access_code}`});
-                  await sbUpdateWhere("athletes",`?coach_id=eq.${c.id}`,{coach_id:null});
-                  loadAll();
-                }catch(e){}
-              };
-
-              return (
-                <div style={{maxWidth:600}}>
-                  <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:20,marginBottom:16}}>
-                    <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:14}}>SCHOOL ACCOUNT</div>
-                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:4}}>
-                      <div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>SCHOOL</div><div style={{color:C.text,fontWeight:600,fontSize:14,marginTop:2}}>{school?.name||"—"}</div></div>
-                      <div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>CODE</div><div style={{display:"flex",alignItems:"center",marginTop:2}}><span style={{color:C.gold,fontWeight:700,fontSize:18,fontFamily:"'Bebas Neue'",letterSpacing:2}}>{school?.code||"—"}</span>{school?.code&&codeBtn(school.code)}</div></div>
-                      <div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>TIER</div><div style={{color:C.text,fontSize:13,marginTop:2}}>{school?.tier||"—"}</div></div>
-                      <div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>COACHES</div><div style={{color:C.text,fontSize:13,marginTop:2}}>{schoolCoachesList.length} / {school?.max_coaches||3}</div></div>
-                    </div>
-                  </div>
-
-                  <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:20,marginBottom:16}}>
-                    <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:14}}>COACHES</div>
-                    {schoolCoachesList.length===0?<div style={{color:C.muted,fontSize:13,marginBottom:12}}>No coaches added yet.</div>:schoolCoachesList.map(c=>{
-                      const athCount=athletes.filter(a=>a.coach_id===c.id).length;
-                      return(
-                        <div key={c.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:`1px solid ${C.border}`}}>
-                          <div>
-                            <div style={{color:C.text,fontWeight:600,fontSize:13}}>{c.name}</div>
-                            <div style={{color:C.muted,fontSize:11}}>{c.email} · Code: {c.access_code} · {athCount} athlete{athCount!==1?"s":""}</div>
-                          </div>
-                          <button onClick={()=>doRemoveCoach(c)} style={{background:"none",border:`1px solid ${C.border}`,color:C.red,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:11}}>Remove</button>
-                        </div>
-                      );
-                    })}
-
-                    <div style={{marginTop:16}}>
-                      <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:10}}>ADD COACH</div>
-                      {atLimit?<div style={{color:C.muted,fontSize:12,fontStyle:"italic"}}>Coach limit reached for your plan ({school?.max_coaches||3} max).</div>:(
-                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:8,alignItems:"center"}}>
-                          <input value={acName} onChange={e=>setAcName(e.target.value)} placeholder="Coach name" style={inp({padding:"9px 12px",fontSize:13})}/>
-                          <input type="email" value={acEmail} onChange={e=>setAcEmail(e.target.value)} placeholder="email@school.edu" style={inp({padding:"9px 12px",fontSize:13})}/>
-                          <button onClick={doAddCoach} disabled={acSaving} style={{background:C.gold,border:"none",color:"#000",borderRadius:8,padding:"9px 14px",cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"'Bebas Neue'",letterSpacing:1,whiteSpace:"nowrap",opacity:acSaving?0.7:1}}>
-                            {acSaving?"Adding...":"Add Coach →"}
-                          </button>
-                        </div>
-                      )}
-                      {acErr&&<div style={{color:C.red,fontSize:12,marginTop:8}}>{acErr}</div>}
-                      {acOk&&<div style={{color:C.green,fontSize:12,marginTop:8,fontWeight:600}}>{acOk}{acCode&&<> Code: <span style={{fontFamily:"'Bebas Neue'",letterSpacing:1,color:C.gold,fontSize:14}}>{acCode}</span>{codeBtn(acCode)}</>}</div>}
-                    </div>
-                  </div>
-                </div>
-              );
-            })()}
-
-            {/* ── COACHES TAB (master only) ── */}
-            {activeTab==="coaches"&&isMaster&&(
-              <div style={{maxWidth:800}}>
-                {/* School onboarding form */}
-                <SchoolOnboardingForm onCreated={loadAll}/>
-
-
-                {/* ── PR Recalculation ── */}
-                <div style={{marginBottom:16,background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16}}>
-                  <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:6}}>DATA MAINTENANCE</div>
-                  <div style={{color:C.muted2,fontSize:13,lineHeight:1.6,marginBottom:14}}>
-                    Recalculates every athlete's PRs from their full workout history using the Epley estimated 1RM formula.
-                    Run this once to correct records that were saved before the 1RM update. Takes a few seconds per athlete.
-                  </div>
-                  <div style={{display:"flex",alignItems:"center",gap:14}}>
-                    <button
-                      onClick={recalcAllPRs}
-                      disabled={!!recalcStatus}
-                      style={{background:recalcStatus?C.navy3:C.gold,color:recalcStatus?C.muted:"#000",border:`1px solid ${recalcStatus?C.border:C.gold}`,borderRadius:10,padding:"10px 22px",cursor:recalcStatus?"not-allowed":"pointer",fontSize:13,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,transition:"all 0.2s"}}>
-                      {recalcStatus&&recalcStatus!=="done"&&recalcStatus!=="error"?"Recalculating...":"Recalculate All PRs"}
-                    </button>
-                    {recalcStatus&&(
-                      <div style={{fontSize:13,color:recalcStatus==="done"?C.green:recalcStatus==="error"?C.red:C.muted2,fontWeight:recalcStatus==="done"||recalcStatus==="error"?600:400}}>
-                        {recalcStatus==="done"?"✓ Done — all PRs updated"
-                          :recalcStatus==="error"?"✗ Something went wrong — check console"
-                          :recalcStatus}
-                      </div>
-                    )}
-                  </div>
-                </div>
-                {/* ── SCHOOLS LIST ── */}
-                <SchoolsList schools={allSchools} coaches={allCoaches} onRefresh={loadAll}/>
-
-                {/* ── COACHES LIST ── */}
-                <CoachesList coaches={allCoaches} schools={allSchools} onRefresh={loadAll}/>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ─── GROUP STATS ──────────────────────────────────────────────────────────────
-function GroupStats({athletes,workouts,prs}) {
-  const now = new Date();
-  const weekAgo = new Date(now-7*24*60*60*1000);
-
-  const weekWorkouts = workouts.filter(w=>new Date(w.created_at)>=weekAgo&&isRealSession(w));
-  const weekPRs = prs.filter(p=>new Date(p.created_at||0)>=weekAgo);
-  const weekPain = weekWorkouts.filter(w=>w.parsed_data?.pain_flags?.length>0); // weekWorkouts already filtered to real sessions
-
-  const activeIds = new Set(weekWorkouts.map(w=>w.athlete_id));
-  const inactiveAthletes = athletes.filter(a=>!activeIds.has(a.id));
-  const activeAthletes = athletes.filter(a=>activeIds.has(a.id));
-
-  // Sessions per day this week for sparkline
-  const dayLabels = [];
-  const dayCounts = [];
-  for(let i=6;i>=0;i--){
-    const d = new Date(now);
-    d.setDate(d.getDate()-i);
-    d.setHours(0,0,0,0);
-    const next = new Date(d); next.setDate(next.getDate()+1);
-    dayLabels.push(d.toLocaleDateString("en-US",{weekday:"short"}));
-    dayCounts.push(groupIntoSessions(workouts.filter(w=>{const wd=new Date(w.created_at);return wd>=d&&wd<next;})).length);
-  }
-
-  // Sport breakdown
-  const bySport = {};
-  activeAthletes.forEach(a=>{bySport[a.sport]=(bySport[a.sport]||0)+1;});
-
-  return (
-    <div style={{maxWidth:900}}>
-      {/* Stat cards */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:12,marginBottom:24}}>
-        {[
-          {label:"Total Athletes",val:athletes.length,color:C.gold},
-          {label:"Active This Week",val:activeAthletes.length,color:C.green},
-          {label:"Sessions This Week",val:groupIntoSessions(weekWorkouts).length,color:C.green},
-          {label:"Pain Flags This Week",val:weekPain.length,color:C.red},
-          {label:"New PRs This Week",val:weekPRs.length,color:C.blue},
-        ].map(s=>(
-          <div key={s.label} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16}}>
-            <div style={{fontFamily:"'Bebas Neue'",fontSize:34,color:s.color}}>{s.val}</div>
-            <div style={{color:C.muted,fontSize:10,letterSpacing:1}}>{s.label}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Sessions this week sparkline */}
-      <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16,marginBottom:16}}>
-        <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>SESSIONS PER DAY — LAST 7 DAYS</div>
-        <LineChart data={dayLabels.map((l,i)=>({label:l,y:dayCounts[i]}))} color={C.green} unit=""/>
-      </div>
-
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginBottom:16}}>
-        {/* Pain flags */}
-        {weekPain.length>0&&(
-          <div style={{background:C.navy2,border:`1px solid ${C.red}40`,borderRadius:14,padding:16}}>
-            <div style={{color:C.red,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>PAIN FLAGS THIS WEEK</div>
-            {weekPain.slice(0,8).map((w,i)=>{
-              const a = athletes.find(at=>at.id===w.athlete_id);
-              return (
-                <div key={i} style={{padding:"5px 0",borderBottom:`1px solid ${C.border}20`,fontSize:12}}>
-                  <span style={{color:C.text,fontWeight:600}}>{a?.name||"Unknown"}</span>
-                  <span style={{color:C.muted}}> — {w.parsed_data.pain_flags.map(p=>p.area).join(", ")}</span>
-                  <span style={{color:C.muted,fontSize:10,marginLeft:6}}>{fmtDateShort(w.created_at)}</span>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* New PRs */}
-        {weekPRs.length>0&&(
-          <div style={{background:C.navy2,border:`1px solid ${C.blue}40`,borderRadius:14,padding:16}}>
-            <div style={{color:C.blue,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>NEW PRs THIS WEEK</div>
-            {weekPRs.slice(0,8).map((p,i)=>{
-              const a = athletes.find(at=>at.id===p.athlete_id);
-              return (
-                <div key={i} style={{padding:"5px 0",borderBottom:`1px solid ${C.border}20`,fontSize:12}}>
-                  <span style={{color:C.text,fontWeight:600}}>{a?.name||"Unknown"}</span>
-                  <span style={{color:C.muted}}> — {p.exercise} {fmtWeight(p.weight,p.unit)}</span>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* Inactive athletes */}
-      {inactiveAthletes.length>0&&(
-        <div style={{background:C.navy2,border:`1px solid ${C.gold}40`,borderRadius:14,padding:16,marginBottom:16}}>
-          <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>NO SESSIONS THIS WEEK ({inactiveAthletes.length})</div>
-          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-            {inactiveAthletes.map((a,i)=>{
-              const la = workouts.filter(w=>w.athlete_id===a.id)[0];
-              const d = la ? daysBetween(la.created_at) : null;
-              return (
-                <div key={i} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 12px"}}>
-                  <div style={{color:C.text,fontSize:12,fontWeight:600}}>{a.name}</div>
-                  <div style={{color:C.muted,fontSize:10}}>{d===null?"never logged":`Last: ${d}d ago`}</div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-
-      {/* Sport breakdown */}
-      {Object.keys(bySport).length>0&&(
-        <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
-          <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>ACTIVE ATHLETES BY SPORT</div>
-          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-            {Object.entries(bySport).map(([sport,count])=>(
-              <div key={sport} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 14px"}}>
-                <div style={{color:C.text,fontWeight:600,fontSize:13}}>{sport}</div>
-                <div style={{color:C.muted,fontSize:11}}>{count} active this week</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── ATHLETE DETAIL (Coach Dashboard) ────────────────────────────────────────
-function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
-  const [tab,setTab] = useState("overview");
-  const [programText,setProgramText] = useState(athlete.program_text||"");
-  const [programLocked,setProgramLocked] = useState(!!athlete.program_locked);
-  const [programSaving,setProgramSaving] = useState(false);
-  const [programSaved,setProgramSaved] = useState(false);
-  const [programError,setProgramError] = useState("");
-  const [photoProcessing,setPhotoProcessing] = useState(false);
-  const [confirmDelete,setConfirmDelete] = useState(false);
-  const programPhotoRef = useRef(null);
-
-  const handleDelete = async () => {
-    try {
-      await sbDelete("workouts",`?athlete_id=eq.${athlete.id}`);
-      await sbDelete("prs",`?athlete_id=eq.${athlete.id}`);
-      await sbDelete("athletes",`?id=eq.${athlete.id}`);
-      onAthleteDelete(athlete.id);
-    } catch(e){ console.error(e); }
-  };
-
-  useEffect(()=>{ setProgramText(athlete.program_text||""); },[athlete.id,athlete.program_text]);
-
-  const handleProgramSave = async () => {
-    setProgramSaving(true);
-    setProgramError("");
-    try {
-      await onProgramSave(programText);
-      setProgramSaved(true);
-      setTimeout(()=>setProgramSaved(false),3000);
-    } catch(e){
-      setProgramError("Save failed — " + (e?.message||"check your connection and try again."));
-    }
-    setProgramSaving(false);
-  };
-
-  const handlePhotoProgram = async (e) => {
-    const file = e.target.files?.[0];
-    if(!file) return;
-    e.target.value="";
-    setPhotoProcessing(true);
-    setProgramError("");
-    try {
-      const reader = new FileReader();
-      const b64 = await new Promise((res,rej)=>{reader.onload=()=>res(reader.result.split(",")[1]);reader.onerror=rej;reader.readAsDataURL(file);});
-      const extracted = await askClaude(
-        "You are reading a photo of an athlete's training program. Extract the full program text exactly as written. Preserve all structure — exercises, sets, reps, weights, days, weeks. Output plain text only, no commentary.",
-        "Extract the training program from this image.",600,[b64],"claude-sonnet-4-6","program_extract"
-      );
-      if(extracted) setProgramText(prev=>prev?prev+"\n\n"+extracted:extracted);
-    } catch(err){ setProgramError("Couldn't read that image. Try a clearer photo."); }
-    setPhotoProcessing(false);
-  };
-
-  const toggleLock = async () => {
-    const newLocked = !programLocked;
-    try {
-      await sbUpdate("athletes",athlete.id,{program_locked:newLocked});
-      setProgramLocked(newLocked);
-    } catch(err){ setProgramError("Couldn't update lock. Try again."); }
-  };
-
-  const lastWorkout = workouts[0];
-  const resolvedPainAreas = (athlete.resolved_pain||[]).map(a=>a.toLowerCase());
-  const hasPain = workouts.some(w=>w.parsed_data?.pain_flags?.some(p=>!resolvedPainAreas.includes(p.area.toLowerCase())));
-  const tabs = ["overview","workouts","progress","program"];
-
-  return (
-    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden"}}>
-      {/* Athlete header */}
-      <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,background:C.navy3,display:"flex",alignItems:"center",gap:14}}>
-        <div style={{width:48,height:48,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:22,color:"#000",flexShrink:0}}>
-          {athlete.name[0].toUpperCase()}
-        </div>
-        <div style={{flex:1,minWidth:0}}>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.text,letterSpacing:1}}>{athlete.name}</div>
-          <div style={{color:C.muted,fontSize:12}}>{athlete.sport} · {groupIntoSessions(workouts).length} sessions</div>
-          {athlete.season_date&&<div style={{color:C.gold,fontSize:11}}>Season: {fmtDate(athlete.season_date)}</div>}
-        </div>
-        <div style={{display:"flex",gap:8,flexShrink:0,alignItems:"center"}}>
-          {hasPain&&<div style={{background:`${C.red}20`,border:`1px solid ${C.red}`,borderRadius:8,padding:"4px 10px",color:C.red,fontSize:11}}>⚠ Pain</div>}
-          {athlete.temp_program_text&&<div style={{background:`${C.gold}15`,border:`1px solid ${C.gold}`,borderRadius:8,padding:"4px 10px",color:C.gold,fontSize:11}}>✈️ Temp program</div>}
-          {!athlete.temp_program_text&&athlete.program_text&&<div style={{background:"#0a0e1e",border:`1px solid ${C.blue}`,borderRadius:8,padding:"4px 10px",color:C.blue,fontSize:11}}>Program set</div>}
-          {confirmDelete?(
-            <div style={{display:"flex",gap:6,alignItems:"center",background:`${C.red}15`,border:`1px solid ${C.red}40`,borderRadius:10,padding:"4px 10px"}}>
-              <span style={{color:C.muted2,fontSize:11}}>Delete athlete?</span>
-              <button onClick={handleDelete} style={{background:C.red,border:"none",color:"#fff",borderRadius:6,padding:"3px 10px",cursor:"pointer",fontSize:11,fontWeight:700}}>Delete</button>
-              <button onClick={()=>setConfirmDelete(false)} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"3px 8px",cursor:"pointer",fontSize:11}}>Cancel</button>
-            </div>
-          ):(
-            <button onClick={()=>setConfirmDelete(true)} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"4px 10px",cursor:"pointer",fontSize:11}}>Delete</button>
-          )}
-        </div>
-      </div>
-
-      {/* Tabs */}
-      <div style={{display:"flex",borderBottom:`1px solid ${C.border}`}}>
-        {tabs.map(t=>(
-          <button key={t} onClick={()=>setTab(t)}
-            style={{padding:"10px 16px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?C.gold:"transparent"}`,color:tab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"color 0.15s"}}>
-            {t==="progress"?"Progress":t}
-          </button>
-        ))}
-      </div>
-
-      <div style={{padding:20,maxHeight:"calc(100vh - 320px)",overflowY:"auto"}}>
-
-        {/* ── OVERVIEW TAB ── */}
-        {tab==="overview"&&(
-          <div>
-            {lastWorkout?(
-              <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:16}}>
-                <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:8}}>LAST SESSION — {fmtDateShort(lastWorkout.created_at)}</div>
-                {lastWorkout.parsed_data?.run_data?(
-                  <RunCard runData={lastWorkout.parsed_data.run_data} feel={lastWorkout.parsed_data.session_feel}/>
-                ):lastWorkout.parsed_data?.exercises?.length>0?(
-                  <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                    {lastWorkout.parsed_data.exercises.map((e,i)=>(
-                      <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 10px"}}>
-                        <div style={{color:C.text,fontSize:12,fontWeight:600}}>{e.name}</div>
-                        <div style={{color:C.muted,fontSize:11}}>
-                          {formatSetDetails(e)}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ):(
-                  <div style={{color:C.muted2,fontSize:13}}>{lastWorkout.raw_message?.slice(0,200)}</div>
-                )}
-                {lastWorkout.parsed_data?.session_feel&&(
-                  <div style={{marginTop:8,color:C.muted,fontSize:11}}>
-                    Feel: <span style={{color:lastWorkout.parsed_data.session_feel==="great"||lastWorkout.parsed_data.session_feel==="good"?C.green:lastWorkout.parsed_data.session_feel==="rough"?C.red:C.gold}}>
-                      {lastWorkout.parsed_data.session_feel}
-                    </span>
-                  </div>
-                )}
-              </div>
-            ):(
-              <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:16,color:C.muted,fontSize:13}}>No sessions logged yet.</div>
-            )}
-
-            {(()=>{
-              const painLogs = workouts.filter(w=>w.parsed_data?.pain_flags?.some(p=>!resolvedPainAreas.includes(p.area.toLowerCase())));
-              if(!painLogs.length) return null;
-              const areaCounts = {};
-              painLogs.flatMap(w=>w.parsed_data.pain_flags.filter(p=>!resolvedPainAreas.includes(p.area.toLowerCase())).map(p=>p.area)).forEach(a=>areaCounts[a]=(areaCounts[a]||0)+1);
-              return (
-                <div style={{background:`${C.red}10`,border:`1px solid ${C.red}40`,borderRadius:12,padding:16,marginBottom:16}}>
-                  <div style={{color:C.red,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:8}}>ACTIVE PAIN FLAGS ({painLogs.length} sessions flagged)</div>
-                  <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                    {Object.entries(areaCounts).map(([area,count])=>(
-                      <div key={area} style={{background:`${C.red}20`,border:`1px solid ${C.red}40`,borderRadius:8,padding:"4px 10px",fontSize:12,color:C.red}}>
-                        {area} ×{count}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              );
-            })()}
-
-            {prs.length>0&&(
-              <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:16}}>
-                <div style={{color:C.blue,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>TOP PRs</div>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-                  {[...prs].sort((a,b)=>liftTier(normalizeExName(a.exercise))-liftTier(normalizeExName(b.exercise)) || (b.estimated_1rm||b.weight||0)-(a.estimated_1rm||a.weight||0)).slice(0,6).map((p,i)=>(
-                    <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 12px"}}>
-                      <div style={{color:C.text,fontSize:12,fontWeight:600}}>{p.exercise}</div>
-                      <div style={{color:C.blue,fontSize:13,fontWeight:700}}>{fmtWeight(p.weight,p.unit)}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ── WORKOUTS TAB ── */}
-        {tab==="workouts"&&(()=>{
-          // Group entries into sessions (entries within 3hrs = same session) — mirrors athlete-facing log view
-          const sessions = groupIntoSessions(workouts)
-            .sort((a,b)=>new Date(b.entries[0].created_at)-new Date(a.entries[0].created_at));
-          const formChecks = workouts.filter(w=>w.raw_message?.startsWith("[Form review:"));
-          const qaEntries = workouts.filter(w=>!isRealSession(w)&&!w.raw_message?.startsWith("[Form review:"));
-
-          const timeline = [
-            ...sessions.map(s=>({type:"session",data:s,date:new Date(s.entries[s.entries.length-1].created_at)})),
-            ...formChecks.map(w=>({type:"formcheck",data:w,date:new Date(w.created_at)})),
-            ...qaEntries.map(w=>({type:"qa",data:w,date:new Date(w.created_at)})),
-          ].sort((a,b)=>b.date-a.date);
-
-          if(timeline.length===0) return (
-            <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No activity logged yet.</div>
-          );
-
-          return (
-            <div>
-              {timeline.slice(0,60).map((item,i)=>{
-                // ── Workout / run session (merged across entries within the 3hr window) ──
-                if(item.type==="session"){
-                  const session = item.data;
-                  const allExercises = session.entries.flatMap(e=>{
-                    const pd = typeof e.parsed_data==="string"?(()=>{try{return JSON.parse(e.parsed_data);}catch{return {};}})():(e.parsed_data||{});
-                    return pd.exercises||[];
-                  });
-                  const allPainFlags = session.entries.flatMap(e=>{
-                    const pd = typeof e.parsed_data==="string"?(()=>{try{return JSON.parse(e.parsed_data);}catch{return {};}})():(e.parsed_data||{});
-                    return pd.pain_flags||[];
-                  });
-                  const sessionFeel = session.entries.slice().reverse().find(e=>{
-                    const pd = typeof e.parsed_data==="string"?(()=>{try{return JSON.parse(e.parsed_data);}catch{return {};}})():(e.parsed_data||{});
-                    return pd.session_feel;
-                  });
-                  const feelVal = sessionFeel?(typeof sessionFeel.parsed_data==="string"?JSON.parse(sessionFeel.parsed_data):sessionFeel.parsed_data)?.session_feel:null;
-                  const lastReply = [...session.entries].reverse().find(e=>e.bot_reply)?.bot_reply;
-                  const sessionDate = session.entries[0].created_at;
-
-                  const allRunData = session.entries.map(e=>{
-                    const pd = typeof e.parsed_data==="string"?(()=>{try{return JSON.parse(e.parsed_data);}catch{return {};}})():(e.parsed_data||{});
-                    return pd.run_data;
-                  }).filter(Boolean);
-                  const isRunSession = allRunData.length>0 && allExercises.length===0;
-                  const runDotColor = isRunSession ? C.blue : C.green;
-
-                  return (
-                    <div key={i} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:14,marginBottom:10}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                        <div style={{display:"flex",alignItems:"center",gap:8}}>
-                          <div style={{width:6,height:6,borderRadius:"50%",background:runDotColor,flexShrink:0}}/>
-                          <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1}}>{isRunSession?"RUN":"WORKOUT"} — {fmtDateRelative(sessionDate)}</div>
-                        </div>
-                        {!isRunSession&&feelVal&&<div style={{fontSize:11,color:feelVal==="great"||feelVal==="good"?C.green:feelVal==="rough"?C.red:C.gold,fontWeight:600}}>{feelVal}</div>}
-                      </div>
-                      {isRunSession?(
-                        <RunCard runData={allRunData[0]} feel={feelVal}/>
-                      ):(
-                        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,marginBottom:allPainFlags.length>0?8:0}}>
-                          <thead>
-                            <tr>
-                              {["Exercise","Sets","Feel"].map(h=>(
-                                <th key={h} style={{color:C.muted,fontWeight:600,fontSize:10,letterSpacing:1,textAlign:"left",paddingBottom:4,borderBottom:`1px solid ${C.border}`}}>{h}</th>
-                              ))}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {allExercises.map((e,j)=>(
-                              <tr key={j}>
-                                <td style={{color:C.text,fontWeight:600,padding:"5px 8px 5px 0",verticalAlign:"top"}}>{e.name}</td>
-                                <td style={{color:C.muted2,padding:"5px 8px 5px 0",verticalAlign:"top"}}>{formatSetDetails(e)}</td>
-                                <td style={{color:e.feel==="easy"?C.blue:e.feel==="hard"?C.red:C.muted,padding:"5px 0",verticalAlign:"top"}}>{e.feel||"—"}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      )}
-                      {allPainFlags.length>0&&<div style={{color:C.red,fontSize:11,marginTop:4}}>⚠ {allPainFlags.map(p=>p.area).join(", ")}</div>}
-                      {lastReply&&<div style={{marginTop:8,borderTop:`1px solid ${C.border}`,paddingTop:8,color:C.muted2,fontSize:12,fontStyle:"italic"}}>Coach Joe: "{lastReply.slice(0,200)}{lastReply.length>200?"...":""}"</div>}
-                    </div>
-                  );
-                }
-                // ── Form check ──
-                if(item.type==="formcheck"){
-                  const w = item.data;
-                  return (
-                    <div key={i} style={{background:C.navy3,border:`1px solid ${C.blue}30`,borderRadius:12,padding:14,marginBottom:10}}>
-                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
-                        <div style={{width:6,height:6,borderRadius:"50%",background:C.blue,flexShrink:0}}/>
-                        <div style={{color:C.blue,fontSize:11,fontWeight:700,letterSpacing:1}}>FORM CHECK — {fmtDateRelative(w.created_at)}</div>
-                      </div>
-                      <div style={{color:C.muted2,fontSize:12,marginBottom:6}}>{w.raw_message}</div>
-                      {w.bot_reply&&<div style={{color:C.text,fontSize:12,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{w.bot_reply}</div>}
-                    </div>
-                  );
-                }
-                // ── Q&A / Chat ──
-                const w = item.data;
-                return (
-                  <div key={i} style={{marginBottom:10}}>
-                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-                      <div style={{width:6,height:6,borderRadius:"50%",background:C.muted,flexShrink:0}}/>
-                      <div style={{color:C.muted,fontSize:10,letterSpacing:1}}>Q&A — {fmtDate(w.created_at)}</div>
-                    </div>
-                    <div style={{display:"flex",justifyContent:"flex-end",marginBottom:4}}>
-                      <div style={{background:C.gold,color:"#000",borderRadius:"14px 14px 4px 14px",padding:"8px 12px",fontSize:12,maxWidth:"85%"}}>{w.raw_message}</div>
-                    </div>
-                    {w.bot_reply&&(
-                      <div style={{display:"flex",gap:6,alignItems:"flex-start"}}>
-                        <div style={{width:22,height:22,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#000",flexShrink:0,marginTop:2}}>J</div>
-                        <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:"14px 14px 14px 4px",padding:"8px 12px",fontSize:12,color:C.text,maxWidth:"85%",lineHeight:1.5}}>{w.bot_reply}</div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          );
-        })()}
-
-        {/* ── PROGRESS TAB ── */}
-        {tab==="progress"&&(
-          <div>
-            {(()=>{
-              // Build per-exercise progression from full workout history
-              const bodyweight = athlete.weight_lbs;
-              const byEx = {};
-              workouts.forEach(w=>{
-                const pd = typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return {};}})():(w.parsed_data||{});
-                (pd.exercises||[]).forEach(ex=>{
-                  if(!ex.name) return;
-                  // Pass bodyweight so load-bearing bodyweight lifts (dips, pull-ups) score.
-                  const e1rm = bestE1RMForExercise(ex, bodyweight);
-                  if(!e1rm) return;
-                  const k = normalizeExName(ex.name);
-                  const isBW = ex.unit==="bodyweight";
-                  const unit = isBW ? "lbs" : (ex.unit||"lbs");
-                  if(!byEx[k]) byEx[k]={key:k,name:displayForKey(k,ex.name),unit,entries:[]};
-                  else byEx[k].name=displayForKey(k,cleanerName(byEx[k].name,ex.name));
-                  let topSet;
-                  if(isBW){
-                    // Effective load = bodyweight (+added/−assist); best set = most reps.
-                    const bwLoad = (bodyweight||0)+(ex.added_weight||0)-(ex.assist_weight||0);
-                    const sets = getExerciseSets(ex);
-                    const working = sets.some(s=>!s.warmup) ? sets.filter(s=>!s.warmup) : sets;
-                    const reps = working.reduce((m,s)=>Math.max(m,s.reps||0),0) || (ex.reps||1);
-                    topSet = {weight:bwLoad, reps};
-                  } else {
-                    topSet = getExerciseSets(ex).reduce((b,s)=>epley1RM(toLbs(s.weight,unit),s.reps)>epley1RM(toLbs(b.weight,unit),b.reps)?s:b, {weight:ex.weight??0, reps:ex.reps||1});
-                  }
-                  byEx[k].entries.push({date:new Date(w.created_at),weight:topSet.weight,unit,reps:topSet.reps||1,e1rm});
-                });
-              });
-              const exercises = Object.values(byEx)
-                .map(ex=>{
-                  const sorted=[...ex.entries].sort((a,b)=>a.date-b.date);
-                  const best=Math.max(...sorted.map(e=>e.e1rm));
-                  const bestEntry=sorted.reduce((a,b)=>b.e1rm>a.e1rm?b:a);
-                  return {...ex,entries:sorted,best,bestEntry};
-                })
-                .sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.best-a.best);
-
-              if(exercises.length===0) return (
-                <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No weighted exercises logged yet.</div>
-              );
-
-              return exercises.map((ex,i)=>(
-                <div key={i} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}>
-                  {/* Header row */}
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
-                    <div>
-                      <div style={{color:C.text,fontWeight:700,fontSize:14}}>{ex.name}</div>
-                      <div style={{color:C.muted,fontSize:11,marginTop:2}}>{ex.entries.length} logged set{ex.entries.length!==1?"s":""}</div>
-                    </div>
-                    <div style={{textAlign:"right"}}>
-                      <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>LIFETIME BEST EST. 1RM</div>
-                      <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>
-                        {ex.best}<span style={{fontSize:13,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>{ex.unit==="kg"?"kg":"lbs"}</span>
-                      </div>
-                      <div style={{color:C.muted,fontSize:10,marginTop:2}}>{fmtWeight(ex.bestEntry.weight,ex.unit)} × {ex.bestEntry.reps} rep{ex.bestEntry.reps!==1?"s":""}</div>
-                    </div>
-                  </div>
-                  {/* Chart or single-entry note */}
-                  {ex.entries.length>=2?(
-                    <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={C.gold} unit={ex.unit==="kg"?"kg":"lbs"}/>
-                  ):(
-                    <div style={{background:C.navy2,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.muted2}}>
-                      Logged once — log again to see a trend line.
-                    </div>
-                  )}
-                </div>
-              ));
-            })()}
-          </div>
-        )}
-
-        {/* ── PROGRAM TAB ── */}
-        {tab==="program"&&(
-          <div>
-            {/* Temp program banner */}
-            {athlete.temp_program_text&&(
-              <div style={{background:`${C.gold}12`,border:`1px solid ${C.gold}50`,borderRadius:12,padding:14,marginBottom:16}}>
-                <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:6}}>✈️ TEMPORARY PROGRAM ACTIVE</div>
-                <div style={{color:C.muted2,fontSize:12,lineHeight:1.6,marginBottom:10,whiteSpace:"pre-wrap"}}>{athlete.temp_program_text}</div>
-                <div style={{color:C.muted,fontSize:11}}>Joe-bot is using this instead of the regular program. It will revert automatically when {athlete.name} tells Joe-bot they're back to normal.</div>
-              </div>
-            )}
-
-            <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:14,marginBottom:16,color:C.muted2,fontSize:13,lineHeight:1.65}}>
-              {athlete.temp_program_text
-                ? <><span style={{color:C.muted,fontWeight:600}}>Regular program (on hold).</span> Joe-bot is currently using the temporary program above. This will resume when the athlete returns to normal training.</>
-                : athlete.program_text
-                  ? <><span style={{color:C.blue,fontWeight:600}}>Program active.</span> This was set via the Joe-bot conversation or submitted by a coach. Joe-bot references it whenever making recommendations or logging workouts. You can edit or replace it below.</>
-                  : <>No program set yet. You can paste or write a program here and Joe-bot will reference it going forward. Alternatively, the athlete can describe their program to Joe-bot ("my program is...") and it will be saved automatically.</>
-              }
-            </div>
-
-            {athlete.program_text&&(
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14,flexWrap:"wrap"}}>
-                <div style={{width:8,height:8,borderRadius:"50%",background:athlete.temp_program_text?C.muted:C.blue,flexShrink:0}}/>
-                <div style={{color:athlete.temp_program_text?C.muted:C.blue,fontSize:12}}>{athlete.temp_program_text?"On hold — resumes when temporary program clears":"Joe-bot references this in every conversation with "+athlete.name}</div>
-                {!athlete.program_locked&&!athlete.temp_program_text&&<div style={{background:`${C.blue}15`,border:`1px solid ${C.blue}30`,borderRadius:6,padding:"2px 8px",color:C.blue,fontSize:11}}>🔄 Live — updates when {athlete.name} describes their program to Joe-bot</div>}
-              </div>
-            )}
-
-            <textarea
-              value={programText}
-              onChange={e=>setProgramText(e.target.value)}
-              placeholder={"Paste or write the athlete's training program here...\n\nExamples:\n  Week 1: Squat 3×5, Bench 3×5, Deadlift 1×5\n  Week 2: Squat 3×5 +5lbs, Bench 3×5 +5lbs\n\nOr paste a full multi-week periodization plan — Joe-bot will read the whole thing."}
-              rows={14}
-              style={{width:"100%",background:C.navy3,border:`1px solid ${programText!==(athlete.program_text||"")?C.gold:C.border}`,borderRadius:12,padding:"12px 14px",color:C.text,fontSize:13,outline:"none",resize:"vertical",lineHeight:1.6,fontFamily:"'DM Sans'",transition:"border-color 0.15s"}}
-            />
-
-            <input ref={programPhotoRef} type="file" accept="image/*" style={{display:"none"}} onChange={handlePhotoProgram}/>
-            <div style={{display:"flex",gap:8,marginTop:12,alignItems:"center",flexWrap:"wrap"}}>
-              <button onClick={handleProgramSave} disabled={programSaving||programText===(athlete.program_text||"")}
-                style={{background:programSaving||programText===(athlete.program_text||"")?C.navy3:C.gold,color:programSaving||programText===(athlete.program_text||"")?C.muted:"#000",border:`1px solid ${programSaving||programText===(athlete.program_text||"")?C.border:C.gold}`,borderRadius:10,padding:"10px 20px",cursor:programSaving||programText===(athlete.program_text||"")?"not-allowed":"pointer",fontSize:13,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>
-                {programSaving?"Saving...":"Save Program"}
-              </button>
-              <button onClick={()=>programPhotoRef.current?.click()} disabled={photoProcessing}
-                style={{background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:10,padding:"10px 14px",cursor:"pointer",fontSize:13,display:"flex",alignItems:"center",gap:6,opacity:photoProcessing?0.6:1}}>
-                {photoProcessing?"Reading photo...":"📷 Photo upload"}
-              </button>
-              <button onClick={toggleLock}
-                style={{background:programLocked?`${C.gold}20`:"transparent",border:`1px solid ${programLocked?C.gold:C.border}`,color:programLocked?C.gold:C.muted,borderRadius:10,padding:"10px 14px",cursor:"pointer",fontSize:13}}>
-                {programLocked?"🔒 Program locked":"🔓 Unlocked"}
-              </button>
-              {programSaved&&<div style={{color:C.green,fontSize:13,fontWeight:600}}>✓ Saved</div>}
-              {!programSaved&&programText!==(athlete.program_text||"")&&!programSaving&&!programError&&<div style={{color:C.muted,fontSize:12}}>Unsaved changes</div>}
-              {programError&&<div style={{color:C.red,fontSize:12,fontWeight:600}}>⚠ {programError}</div>}
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );

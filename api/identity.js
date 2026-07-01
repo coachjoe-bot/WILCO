@@ -15,7 +15,7 @@
 import {
   applyCors, httpErr, str, pin4, clientIp, stripPin,
   sbSelect, sbWrite, rateLimit, rateLimitReset, verifyPin, hashPin,
-  authCaller, logError, logEvents,
+  authCaller, mintSessionToken, logError, logEvents,
 } from "./_supa.js";
 
 const enc = encodeURIComponent;
@@ -73,7 +73,8 @@ async function athleteLogin(req, res, body) {
   for (const a of byName) {
     if (await verifyPin(pin, a.pin)) {
       await rateLimitReset(key);
-      return res.status(200).json({ athlete: stripPin(a) }); // never send the hash to the browser
+      // token: signed session credential so subsequent gateway calls skip bcrypt.
+      return res.status(200).json({ athlete: stripPin(a), token: mintSessionToken("athlete", a.id) }); // never send the hash to the browser
     }
   }
   return res.status(200).json({ athlete: null, reason: byName.length ? "wrong_pin" : "not_found" });
@@ -87,7 +88,9 @@ async function coachLogin(req, res, body) {
   // Hashed PINs can't be queried — pull coaches that have a PIN set and compare.
   const coaches = await sbSelect("coaches", `?pin=not.is.null&select=*`);
   for (const c of coaches) {
-    if (await verifyPin(pin, c.pin)) return res.status(200).json({ coach: stripPin(c) });
+    if (await verifyPin(pin, c.pin)) {
+      return res.status(200).json({ coach: stripPin(c), token: mintSessionToken("coach", c.id) });
+    }
   }
   return res.status(200).json({ coach: null });
 }
@@ -120,7 +123,9 @@ async function getAthlete(req, res, body) {
   const pin = pin4(body.pin);
   const found = await sbSelect("athletes", `?id=eq.${enc(id)}&select=*`);
   const a = found[0];
-  if (a && (await verifyPin(pin, a.pin))) return res.status(200).json({ athlete: stripPin(a) });
+  if (a && (await verifyPin(pin, a.pin))) {
+    return res.status(200).json({ athlete: stripPin(a), token: mintSessionToken("athlete", a.id) });
+  }
   return res.status(200).json({ athlete: null });
 }
 
@@ -183,7 +188,10 @@ async function createAthleteAction(req, res, body) {
 
   const created = await sbWrite({ method: "POST", table: "athletes", body: row });
   const athlete = Array.isArray(created) ? created[0] : created;
-  return res.status(200).json({ athlete: athlete ? stripPin(athlete) : null });
+  return res.status(200).json({
+    athlete: athlete ? stripPin(athlete) : null,
+    token: athlete ? mintSessionToken("athlete", athlete.id) : null,
+  });
 }
 
 // ── set-coach-pin (first-time coach setup: prove access code, set hashed PIN) ─
@@ -198,7 +206,9 @@ async function setCoachPinAction(req, res, body) {
   if (!c) throw httpErr(401, "Invalid coach or access code");
   if (c.pin) throw httpErr(409, "This account already has a PIN set");
   await sbWrite({ method: "PATCH", table: "coaches", query: `?id=eq.${enc(coachId)}`, body: { pin: await hashPin(pin) }, prefer: "return=minimal" });
-  return res.status(200).json({ ok: true });
+  // Proving the access code + setting the PIN IS an authentication event — mint a
+  // session token so this first coach session skips per-request bcrypt too.
+  return res.status(200).json({ ok: true, token: mintSessionToken("coach", coachId) });
 }
 
 // ── log-error (Phase 1.5 reliability ingestion) ──────────────────────────────

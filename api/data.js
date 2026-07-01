@@ -20,7 +20,7 @@
 //       master → all; admin → their school; regular coach → their own roster only.
 //       schools are master-only, and coaches-table writes are admin-only (own school).
 
-import { applyCors, httpErr, str, sbWrite, sbSelect, authCaller, logError, authThrottle, clientIp } from "./_supa.js";
+import { applyCors, httpErr, str, sbWrite, sbSelect, authCaller, tryTokenAuth, logError, authThrottle, clientIp } from "./_supa.js";
 
 const enc = encodeURIComponent;
 
@@ -105,15 +105,21 @@ export default async function handler(req, res) {
 
   let caller = null;
   try {
-    // Brute-force guard: refuse once an IP has too many recent failed PIN attempts,
-    // and record THIS attempt only if it fails (legit callers send the right PIN and
-    // are never throttled). Must run before authCaller so a locked IP skips bcrypt.
-    const recordAuthFail = await authThrottle(`data-authfail:${clientIp(req)}`);
-    try {
-      caller = await authCaller(body.auth);
-    } catch (e) {
-      if (e.status === 401) await recordAuthFail();
-      throw e;
+    // Fast path: a valid signed session token authenticates with zero DB work —
+    // no throttle lookup, no bcrypt. Tokens aren't brute-forceable (HMAC over a
+    // 256-bit key, vs a 4-digit PIN space), so the throttle isn't needed here.
+    caller = tryTokenAuth(body.auth);
+    if (!caller) {
+      // Brute-force guard: refuse once an IP has too many recent failed PIN attempts,
+      // and record THIS attempt only if it fails (legit callers send the right PIN and
+      // are never throttled). Must run before authCaller so a locked IP skips bcrypt.
+      const recordAuthFail = await authThrottle(`data-authfail:${clientIp(req)}`);
+      try {
+        caller = await authCaller(body.auth);
+      } catch (e) {
+        if (e.status === 401) await recordAuthFail();
+        throw e;
+      }
     }
 
     // ── Phase 1b(b): scoped READ ─────────────────────────────────────────────
