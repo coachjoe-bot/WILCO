@@ -430,13 +430,27 @@ const getExerciseSets = (ex) => {
 // tags but never silently inflate the 1RM: a PR must be a genuinely heavier performance,
 // not just a set logged with effort. Warm-ups are excluded (fall back to all sets if
 // somehow every set was flagged a warm-up).
-const bestE1RMForExercise = (ex) => {
-  if(!ex || ex.unit==="bodyweight") return 0;
+// Load-bearing bodyweight movements — dips, pull-ups, chin-ups, muscle-ups — where
+// the athlete's own bodyweight IS the resistance. Given their bodyweight we can
+// estimate a 1RM (plus any added weight, minus any assistance). Other bodyweight
+// work (push-ups, planks, air squats) has no meaningful 1RM.
+const LOAD_BEARING_BW = /\b(dips?|pull[ -]?ups?|chin[ -]?ups?|muscle[ -]?ups?)\b/;
+// `bwLbs` (athlete bodyweight) is optional: pass it to score load-bearing bodyweight
+// lifts; omit it and bodyweight lifts return 0, exactly as before.
+const bestE1RMForExercise = (ex, bwLbs=0) => {
+  if(!ex) return 0;
+  const isBW = ex.unit==="bodyweight";
+  let bwLoad = 0;
+  if(isBW){
+    if(!bwLbs || !LOAD_BEARING_BW.test((ex.name||"").toLowerCase())) return 0;
+    bwLoad = bwLbs + (ex.added_weight||0) - (ex.assist_weight||0);
+    if(bwLoad<=0) return 0;
+  }
   const all = getExerciseSets(ex);
   const sets = all.some(s=>!s.warmup) ? all.filter(s=>!s.warmup) : all;
   let best = 0;
   sets.forEach(s=>{
-    const lbs = toLbs(s.weight, ex.unit);
+    const lbs = isBW ? bwLoad : toLbs(s.weight, ex.unit);
     const e1rm = epley1RM(lbs, s.reps);
     if(e1rm>best) best = e1rm;
   });
@@ -594,6 +608,15 @@ const cleanerName = (a,b) => !a ? (b||"") : !b ? a : (b.length<a.length ? b : a)
 // "Squat" would otherwise win cleanerName. Force the full, proper lift name.
 const CANON_DISPLAY = { "back squat": "Back Squat" };
 const displayForKey = (key, fallback) => CANON_DISPLAY[key] || fallback;
+
+// "Big lifts" cluster at the top of the Strength / PRs / Benchmarks lists, ahead of
+// accessories. We match a short list of movement ROOTS against the normalized key
+// (whole-word), so one root covers all its variants — "squat" catches back/front/
+// overhead squat — WITHOUT enumerating every exercise. This only sets sort priority;
+// it never merges lifts. Everything not on the list falls to the accessory tier.
+// Within each tier we sort by weight (heaviest 1RM first).
+const BIG_LIFT_RE = /\b(snatch|clean and jerk|clean|jerk|squat|deadlift|bench press|overhead press|dips?|pull[ -]?ups?|chin[ -]?ups?|rows?)\b/;
+const liftTier = (key) => BIG_LIFT_RE.test(key||"") ? 0 : 1;   // 0 = big lift, 1 = accessory
 
 // Groups workout entries into sessions using time-gap logic.
 // Entries within gapMs of each other (same athlete) = same session.
@@ -3929,11 +3952,15 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   workoutHistory.forEach(w=>{
     const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
     (pd.exercises||[]).forEach(ex=>{
-      if(!ex.name||ex.unit==="bodyweight") return;
-      const e1rm = bestE1RMForExercise(ex);
+      if(!ex.name) return;
+      // Pass bodyweight (athlete.weight_lbs) so load-bearing bodyweight lifts (dips,
+      // pull-ups) score a 1RM; every other bodyweight movement returns 0 and drops out.
+      const e1rm = bestE1RMForExercise(ex, bodyweight);
       if(!e1rm) return;
       const k=normalizeExName(ex.name);
-      if(!byEx[k]) byEx[k]={name:displayForKey(k,ex.name),e1rm,unit:ex.unit||"lbs"};
+      // A bodyweight lift's e1rm is already a lbs-equivalent, so label it "lbs".
+      const unit = ex.unit==="bodyweight" ? "lbs" : (ex.unit||"lbs");
+      if(!byEx[k]) byEx[k]={key:k,name:displayForKey(k,ex.name),e1rm,unit};
       else { byEx[k].name=displayForKey(k,cleanerName(byEx[k].name,ex.name)); if(e1rm>byEx[k].e1rm) byEx[k].e1rm=e1rm; }
     });
   });
@@ -3945,24 +3972,26 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
     const threshRaw=BENCH_THRESHOLDS[genderKey]?.[benchKey];
     if(!threshRaw) return null;
     const thresh = isUnder18 ? threshRaw.map(t=>t*0.85) : threshRaw;
-    return {name:ex.name,e1rm:ex.e1rm,benchKey,thresh};
+    return {key:k,name:ex.name,e1rm:ex.e1rm,benchKey,thresh};
   }).filter(Boolean);
 
-  // Dedupe benchmark keys — keep highest e1rm per bench key
+  // Dedupe benchmark keys — keep highest e1rm per bench key — then order big lifts
+  // first, heaviest 1RM first within each tier.
   const seen={};
   const dedupedBench = benchmarked.filter(b=>{
     if(seen[b.benchKey]&&seen[b.benchKey]>=b.e1rm) return false;
     seen[b.benchKey]=b.e1rm; return true;
-  }).filter(b=>matchesSearch(b.name));
+  }).filter(b=>matchesSearch(b.name))
+    .sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.e1rm-a.e1rm);
 
   // Strength/running progress for other tabs
   const exercises = Object.values(byEx).map(ex=>{
     const entries = workoutHistory.flatMap(w=>{
       const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
-      return (pd.exercises||[]).filter(e=>normalizeExName(e.name)===normalizeExName(ex.name)&&e.unit!=="bodyweight").map(e=>({date:new Date(w.created_at),e1rm:bestE1RMForExercise(e)})).filter(e=>e.e1rm>0);
+      return (pd.exercises||[]).filter(e=>normalizeExName(e.name)===normalizeExName(ex.name)).map(e=>({date:new Date(w.created_at),e1rm:bestE1RMForExercise(e, bodyweight)})).filter(e=>e.e1rm>0);
     }).sort((a,b)=>a.date-b.date);
     return {...ex,entries};
-  }).sort((a,b)=>b.e1rm-a.e1rm).filter(ex=>matchesSearch(ex.name));
+  }).sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.e1rm-a.e1rm).filter(ex=>matchesSearch(ex.name));
 
   // PR tab — manual (actual) 1RM takes precedence over the estimated 1RM above
   const prMap = {};
@@ -3976,7 +4005,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   });
   const prList = Object.values(prMap)
     .map(row=>({...row,active: row.manual ? toLbs(row.manual.weight,row.manual.unit) : row.estimated}))
-    .sort((a,b)=>b.active-a.active)
+    .sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.active-a.active)
     .filter(row=>matchesSearch(row.name));
 
   const saveManual = async (row) => {
