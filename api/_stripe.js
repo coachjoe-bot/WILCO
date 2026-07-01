@@ -172,7 +172,14 @@ export async function resolvePromotionCode(stripe, code) {
   const promo = list.data[0];
   if (!promo) return { valid: false, error: "That gift code isn't valid." };
   if (!promo.active) return { valid: false, error: "That gift code is no longer active." };
-  if (promo.coupon?.id !== GIFT_COUPON_ID) return { valid: false, error: "That isn't a WILCO gift code." };
+  // The coupon id can surface as promo.coupon.id (legacy API shape) or nested under
+  // promo.promotion.coupon (newer shape, e.g. founder codes minted via the newer API).
+  // Accept either so a code links correctly regardless of how it was created.
+  const couponId =
+    promo.coupon?.id ||
+    (typeof promo.promotion?.coupon === "string" ? promo.promotion.coupon : promo.promotion?.coupon?.id) ||
+    null;
+  if (couponId !== GIFT_COUPON_ID) return { valid: false, error: "That isn't a WILCO gift code." };
   if (promo.max_redemptions != null && promo.times_redeemed >= promo.max_redemptions)
     return { valid: false, error: "That gift code has already been used." };
   return { valid: true, promotionCodeId: promo.id, promo };
