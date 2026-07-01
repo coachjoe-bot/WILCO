@@ -6436,7 +6436,7 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
               <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:16}}>
                 <div style={{color:C.blue,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>TOP PRs</div>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-                  {prs.slice(0,6).map((p,i)=>(
+                  {[...prs].sort((a,b)=>liftTier(normalizeExName(a.exercise))-liftTier(normalizeExName(b.exercise)) || (b.estimated_1rm||b.weight||0)-(a.estimated_1rm||a.weight||0)).slice(0,6).map((p,i)=>(
                     <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 12px"}}>
                       <div style={{color:C.text,fontSize:12,fontWeight:600}}>{p.exercise}</div>
                       <div style={{color:C.blue,fontSize:13,fontWeight:700}}>{fmtWeight(p.weight,p.unit)}</div>
@@ -6574,18 +6574,31 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
           <div>
             {(()=>{
               // Build per-exercise progression from full workout history
+              const bodyweight = athlete.weight_lbs;
               const byEx = {};
               workouts.forEach(w=>{
                 const pd = typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return {};}})():(w.parsed_data||{});
                 (pd.exercises||[]).forEach(ex=>{
-                  if(!ex.name||ex.unit==="bodyweight") return;
-                  const e1rm = bestE1RMForExercise(ex);
+                  if(!ex.name) return;
+                  // Pass bodyweight so load-bearing bodyweight lifts (dips, pull-ups) score.
+                  const e1rm = bestE1RMForExercise(ex, bodyweight);
                   if(!e1rm) return;
                   const k = normalizeExName(ex.name);
-                  const unit = ex.unit||"lbs";
-                  if(!byEx[k]) byEx[k]={name:displayForKey(k,ex.name),unit,entries:[]};
+                  const isBW = ex.unit==="bodyweight";
+                  const unit = isBW ? "lbs" : (ex.unit||"lbs");
+                  if(!byEx[k]) byEx[k]={key:k,name:displayForKey(k,ex.name),unit,entries:[]};
                   else byEx[k].name=displayForKey(k,cleanerName(byEx[k].name,ex.name));
-                  const topSet = getExerciseSets(ex).reduce((b,s)=>epley1RM(toLbs(s.weight,unit),s.reps)>epley1RM(toLbs(b.weight,unit),b.reps)?s:b, {weight:ex.weight??0, reps:ex.reps||1});
+                  let topSet;
+                  if(isBW){
+                    // Effective load = bodyweight (+added/−assist); best set = most reps.
+                    const bwLoad = (bodyweight||0)+(ex.added_weight||0)-(ex.assist_weight||0);
+                    const sets = getExerciseSets(ex);
+                    const working = sets.some(s=>!s.warmup) ? sets.filter(s=>!s.warmup) : sets;
+                    const reps = working.reduce((m,s)=>Math.max(m,s.reps||0),0) || (ex.reps||1);
+                    topSet = {weight:bwLoad, reps};
+                  } else {
+                    topSet = getExerciseSets(ex).reduce((b,s)=>epley1RM(toLbs(s.weight,unit),s.reps)>epley1RM(toLbs(b.weight,unit),b.reps)?s:b, {weight:ex.weight??0, reps:ex.reps||1});
+                  }
                   byEx[k].entries.push({date:new Date(w.created_at),weight:topSet.weight,unit,reps:topSet.reps||1,e1rm});
                 });
               });
@@ -6596,7 +6609,7 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
                   const bestEntry=sorted.reduce((a,b)=>b.e1rm>a.e1rm?b:a);
                   return {...ex,entries:sorted,best,bestEntry};
                 })
-                .sort((a,b)=>b.best-a.best);
+                .sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.best-a.best);
 
               if(exercises.length===0) return (
                 <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No weighted exercises logged yet.</div>
