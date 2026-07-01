@@ -818,7 +818,8 @@ const C = {navy:"#060d1e",navy2:"#0a1228",navy3:"#0d1836",border:"#1e2a4a",gold:
 const GS = `
 @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&display=swap');
 *{box-sizing:border-box;margin:0;padding:0;}
-body{background:${C.navy};color:${C.text};font-family:'DM Sans',sans-serif;}
+html,body{touch-action:manipulation;overscroll-behavior:none;-webkit-text-size-adjust:100%;text-size-adjust:100%;}
+body{background:${C.navy};color:${C.text};font-family:'DM Sans',sans-serif;-webkit-tap-highlight-color:transparent;}
 input,textarea,select,button{font-family:'DM Sans',sans-serif;}
 ::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-track{background:${C.navy2};}::-webkit-scrollbar-thumb{background:${C.border};border-radius:2px;}
 @keyframes fadeUp{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
@@ -1262,11 +1263,10 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
 
       {phase==="dialogue"&&!programPending&&(
         <div style={{padding:"12px 16px",borderTop:`1px solid ${C.border}`,background:C.navy2,flexShrink:0,display:"flex",gap:8}}>
-          <input
+          <textarea
             value={input} onChange={e=>setInput(e.target.value)}
-            onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage();}}}
-            placeholder="Type your answer..."
-            style={{flex:1,background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",color:C.text,fontSize:15,outline:"none"}}
+            placeholder="Type your answer..." rows={2}
+            style={{flex:1,background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",color:C.text,fontSize:15,outline:"none",resize:"none",lineHeight:1.5}}
           />
           <button onClick={sendMessage} disabled={loading||!input.trim()} style={{background:input.trim()&&!loading?C.gold:C.navy3,color:input.trim()&&!loading?"#000":C.muted,border:"none",borderRadius:10,padding:"10px 16px",cursor:input.trim()&&!loading?"pointer":"not-allowed",fontWeight:700,fontSize:18,transition:"background 0.15s"}}>→</button>
         </div>
@@ -3231,7 +3231,6 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             </div>
           )}
           <textarea value={input} onChange={e=>setInput(e.target.value)}
-            onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey&&!sessionCheckPending){e.preventDefault();send();}}}
             placeholder={sessionCheckPending?"Tap Same workout or New session above...":`Tell Coach Joe about your workout, ${athlete.name}...`} rows={2}
             disabled={!!sessionCheckPending}
             style={{flex:1,background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:"10px 14px",color:C.text,fontSize:14,outline:"none",resize:"none",lineHeight:1.5,opacity:sessionCheckPending?0.4:1}}/>
