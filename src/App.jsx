@@ -4031,14 +4031,16 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   });
 
   // Overlay ACTUAL 1RMs (manual_one_rms — user-set OR system-detected from a reported/
-  // performed true single). An actual PR is the source of truth, so it OVERRIDES the
-  // estimated e1RM here, and seeds a benchmark even for a lift never logged in sets.
+  // performed true single). Show the HIGHER of the estimate and the actual 1RM: someone
+  // who rarely tests a true single still deserves their best number, and a fresh actual
+  // PR beats a stale estimate. Seeds a benchmark even for a lift never logged in sets.
+  // The `actual` flag (and PR badge) is set only when the actual is the number shown.
   manualRMs.forEach(m=>{
     const k=normalizeExName(m.normalized_exercise||m.exercise);
     const lbs=toLbs(m.weight, m.unit);
     if(!k || !(lbs>0)) return;
     if(!byEx[k]) byEx[k]={key:k,name:displayForKey(k,m.exercise||k),e1rm:lbs,unit:"lbs",actual:true};
-    else { byEx[k].e1rm=lbs; byEx[k].actual=true; }
+    else if(lbs>=byEx[k].e1rm){ byEx[k].e1rm=lbs; byEx[k].actual=true; }
   });
 
   // Benchmark lifts the athlete has logged (or has an actual 1RM for)
@@ -4051,14 +4053,14 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
     return {key:k,name:ex.name,e1rm:ex.e1rm,benchKey,thresh,actual:!!ex.actual};
   }).filter(Boolean);
 
-  // Exactly ONE entry per bench key: prefer an actual 1RM, then the heaviest value.
-  // Order-independent — an earlier low entry can no longer leave a duplicate behind
-  // (which caused two Pull-Up cards). `rankedLifts` drives the counter; `dedupedBench`
-  // adds the search filter and orders big lifts first, heaviest first within a tier.
+  // Exactly ONE entry per bench key: keep the highest number; on a tie prefer the actual
+  // 1RM (so the PR badge shows). Order-independent — an earlier low entry can no longer
+  // leave a duplicate behind (which caused two Pull-Up cards). `rankedLifts` drives the
+  // counter; `dedupedBench` adds the search filter and orders big lifts first.
   const bestByKey={};
   benchmarked.forEach(b=>{
     const cur=bestByKey[b.benchKey];
-    if(!cur || (b.actual&&!cur.actual) || (b.actual===cur.actual && b.e1rm>cur.e1rm)) bestByKey[b.benchKey]=b;
+    if(!cur || b.e1rm>cur.e1rm || (b.e1rm===cur.e1rm && b.actual&&!cur.actual)) bestByKey[b.benchKey]=b;
   });
   const rankedLifts = Object.values(bestByKey);
   const dedupedBench = rankedLifts.filter(b=>matchesSearch(b.name))
