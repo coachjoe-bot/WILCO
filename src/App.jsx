@@ -943,37 +943,78 @@ const propagate1RM = (programText, exerciseName, old1RM, new1RM) => {
   return {text:updated.join("\n"),changed};
 };
 
-// ─── BENCHMARK THRESHOLDS (bodyweight multiples) ─────────────────────────────
-// [solid_min, strong_min, elite_min] — below solid_min = Developing
+// ─── BENCHMARK TIERS ("Grit" ladder) ─────────────────────────────────────────
+// 8 tiers, ranking the LIFT not the lifter. Below the first cut-line = Rookie.
+const TIER_NAMES  = ["ROOKIE","GRITTY","SHARP","STRONG","ELITE","DOMINANT","UNTOUCHABLE","LEGENDARY"];
+const TIER_COLORS = ["#64748b","#3b82f6","#22d3ee","#10b981","#d4a017","#f97316","#ef4444","#a855f7"];
+// Strength Score points per tier — each level worth more than the last.
+const TIER_POINTS = [10, 25, 50, 100, 175, 275, 400, 600];
+
+// Per-lift bodyweight-multiple cut-lines to REACH each tier 1..7 (Rookie = below [0]).
+// [Gritty, Sharp, Strong, Elite, Dominant, Untouchable, Legendary]. Anchored to
+// published standards (Strength Level) for the lower rungs and competition/record
+// ratios up top; first-draft values, tunable. Weighted pull-up/dip ratios are
+// (bodyweight + added load) / bodyweight, so 1.0 = a clean bodyweight rep.
 const BENCH_THRESHOLDS = {
   male: {
-    "squat":          [1.0,  1.5,  2.0 ],
-    "deadlift":       [1.25, 1.75, 2.25],
-    "bench press":    [0.75, 1.25, 1.75],
-    "overhead press": [0.5,  0.75, 1.0 ],
-    "power clean":    [0.75, 1.1,  1.4 ],
+    "back squat":     [0.75, 1.25, 1.5,  2.0,  2.5,  2.75, 3.0 ],
+    "front squat":    [0.6,  1.0,  1.25, 1.75, 2.25, 2.5,  2.75],
+    "deadlift":       [1.0,  1.5,  1.75, 2.25, 2.75, 3.0,  3.25],
+    "bench press":    [0.5,  0.75, 1.25, 1.5,  2.0,  2.25, 2.5 ],
+    "overhead press": [0.4,  0.55, 0.75, 1.0,  1.25, 1.4,  1.55],
+    "barbell row":    [0.5,  0.75, 1.0,  1.25, 1.5,  1.75, 2.0 ],
+    "weighted pull-up":[1.0, 1.15, 1.3,  1.5,  1.75, 2.0,  2.25],
+    "weighted dip":   [1.0,  1.2,  1.4,  1.65, 1.9,  2.15, 2.4 ],
+    "snatch":         [0.5,  0.75, 1.0,  1.25, 1.5,  1.65, 1.75],
+    "clean and jerk": [0.5,  0.75, 1.25, 1.5,  1.75, 1.9,  2.1 ],
+    "clean":          [0.55, 0.8,  1.3,  1.55, 1.8,  1.95, 2.15],
+    "jerk":           [0.55, 0.8,  1.3,  1.6,  1.85, 2.0,  2.2 ],
+    "power clean":    [0.5,  0.75, 1.1,  1.35, 1.6,  1.75, 1.9 ],
   },
   female: {
-    "squat":          [0.7,  1.0,  1.4 ],
-    "deadlift":       [0.9,  1.25, 1.6 ],
-    "bench press":    [0.5,  0.85, 1.2 ],
-    "overhead press": [0.35, 0.55, 0.75],
-    "power clean":    [0.55, 0.8,  1.0 ],
+    "back squat":     [0.6,  0.9,  1.1,  1.4,  1.75, 1.95, 2.2 ],
+    "front squat":    [0.45, 0.7,  0.9,  1.2,  1.5,  1.7,  1.9 ],
+    "deadlift":       [0.75, 1.1,  1.35, 1.6,  2.0,  2.2,  2.4 ],
+    "bench press":    [0.3,  0.5,  0.75, 1.0,  1.3,  1.45, 1.6 ],
+    "overhead press": [0.28, 0.4,  0.55, 0.7,  0.9,  1.0,  1.1 ],
+    "barbell row":    [0.35, 0.55, 0.7,  0.9,  1.1,  1.3,  1.5 ],
+    "weighted pull-up":[1.0, 1.1,  1.2,  1.35, 1.5,  1.65, 1.8 ],
+    "weighted dip":   [1.0,  1.1,  1.25, 1.4,  1.6,  1.8,  2.0 ],
+    "snatch":         [0.35, 0.5,  0.65, 0.85, 1.05, 1.15, 1.25],
+    "clean and jerk": [0.4,  0.55, 0.85, 1.05, 1.25, 1.35, 1.5 ],
+    "clean":          [0.42, 0.6,  0.9,  1.1,  1.3,  1.4,  1.55],
+    "jerk":           [0.42, 0.6,  0.9,  1.12, 1.32, 1.45, 1.6 ],
+    "power clean":    [0.38, 0.55, 0.8,  1.0,  1.2,  1.3,  1.45],
   }
 };
-const TIER_NAMES = ["DEVELOPING","SOLID","STRONG","ELITE"];
-const TIER_COLORS = ["#4b5563","#3b82f6","#10b981","#d4a017"];
 
-// Map a normalized exercise name to a BENCH_THRESHOLDS key (null if not benchmarked)
+// Current tier index (0=Rookie .. 7=Legendary) for a bodyweight ratio vs a lift's cut-lines.
+const tierForRatio = (ratio, thresh) => { let t=0; for(let i=0;i<thresh.length;i++){ if(ratio>=thresh[i]) t=i+1; } return t; };
+
+// Map a normalized exercise name to a BENCH_THRESHOLDS key (null if not benchmarked).
+// Order matters: most specific first, and Olympic PULL/DEADLIFT/BALANCE accessory
+// variants (much heavier than the competition lift) and complexes are excluded so
+// they never inflate a rank.
 const getBenchKey = (normalized) => {
   if(!normalized) return null;
   const n = normalized.toLowerCase();
-  if(n.includes("front squat")) return null; // distinct lift, no threshold
-  if(n.includes("squat")) return "squat";
+  if(n.includes("+")) return null;                                   // complexes aren't a single max
+  if(/(snatch|clean).*(pull|deadlift|balance|shrug|high\s*pull)/.test(n) ||
+     /(pull|deadlift|balance|shrug|high\s*pull).*(snatch|clean)/.test(n)) return null;
+  if(n.includes("overhead squat")) return null;
+  if(n.includes("clean and jerk")||n.includes("clean & jerk")) return "clean and jerk";
+  if(n.includes("power clean")) return "power clean";
+  if(n.includes("snatch")) return "snatch";                          // incl. power/hang/muscle snatch
+  if(n.includes("jerk")) return "jerk";                              // split/push jerk (standalone)
+  if(n.includes("clean")) return "clean";                            // clean, hang clean
+  if(n.includes("front squat")) return "front squat";
+  if(n.includes("squat")) return "back squat";
   if(n.includes("deadlift")) return "deadlift";
   if(n.includes("bench press")||n==="bench"||n.includes("barbell bench")) return "bench press";
-  if(n.includes("overhead press")||n.includes("ohp")||n==="press"||n.includes("military press")) return "overhead press";
-  if(n.includes("power clean")||n.includes("hang clean")||n.includes("hang power clean")) return "power clean";
+  if(n.includes("overhead press")||n.includes("ohp")||n==="press"||n.includes("military press")||n.includes("strict press")) return "overhead press";
+  if(/\b(pull[ -]?up|chin[ -]?up)\b/.test(n)) return "weighted pull-up";
+  if(/\bdips?\b/.test(n)) return "weighted dip";
+  if(n.includes("barbell row")||n.includes("bent over row")||n.includes("bent-over row")||n.includes("pendlay")) return "barbell row";
   return null;
 };
 
@@ -3929,6 +3970,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   const [manualRMs,setManualRMs] = useState([]);
   const [editingKey,setEditingKey] = useState(null);
   const [editVal,setEditVal] = useState("");
+  const [showScoreInfo,setShowScoreInfo] = useState(false);
 
   useEffect(()=>{
     sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`).then(rows=>{
@@ -3975,14 +4017,39 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
     return {key:k,name:ex.name,e1rm:ex.e1rm,benchKey,thresh};
   }).filter(Boolean);
 
-  // Dedupe benchmark keys — keep highest e1rm per bench key — then order big lifts
-  // first, heaviest 1RM first within each tier.
+  // Dedupe benchmark keys — keep highest e1rm per bench key. `rankedLifts` is the full
+  // set (drives the counter); `dedupedBench` additionally applies the search filter and
+  // orders big lifts first, heaviest 1RM first within each tier (drives the list).
   const seen={};
-  const dedupedBench = benchmarked.filter(b=>{
+  const rankedLifts = benchmarked.filter(b=>{
     if(seen[b.benchKey]&&seen[b.benchKey]>=b.e1rm) return false;
     seen[b.benchKey]=b.e1rm; return true;
-  }).filter(b=>matchesSearch(b.name))
+  });
+  const dedupedBench = rankedLifts.filter(b=>matchesSearch(b.name))
     .sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.e1rm-a.e1rm);
+
+  // ── Benchmark counter stats (top of the Benchmarks tab) ──
+  // Tier per lift needs bodyweight (ratio). Strength Score = sum of tier points across
+  // ranked lifts; Top Rank = the single highest tier reached on any lift.
+  const tierIdxOf = (b) => (bodyweight ? tierForRatio(b.e1rm/bodyweight, b.thresh) : 0);
+  const strengthScore = bodyweight ? rankedLifts.reduce((s,b)=>s+TIER_POINTS[tierIdxOf(b)],0) : 0;
+  const topTierIdx = (bodyweight && rankedLifts.length) ? Math.max(...rankedLifts.map(tierIdxOf)) : -1;
+  // PRs Hit — lifetime count of new-best moments across every lift (first best counts).
+  const prsHit = (()=>{
+    const best={}; let count=0;
+    [...workoutHistory].sort((a,b)=>new Date(a.created_at)-new Date(b.created_at)).forEach(w=>{
+      const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
+      (pd.exercises||[]).forEach(ex=>{
+        if(!ex.name) return;
+        const e=bestE1RMForExercise(ex, bodyweight);
+        if(!e) return;
+        const k=normalizeExName(ex.name);
+        if(!(k in best)){ best[k]=e; count++; }
+        else if(e>best[k]+0.5){ best[k]=e; count++; }
+      });
+    });
+    return count;
+  })();
 
   // Strength/running progress for other tabs
   const exercises = Object.values(byEx).map(ex=>{
@@ -4061,31 +4128,26 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
         {/* ── BENCHMARKS TAB ── */}
         {tab==="benchmarks"&&(
           <div>
-            {/* ── Workouts Logged Card ── */}
-            {(()=>{
-              const now=Date.now();
-              const wk=workoutHistory.filter(w=>(now-new Date(w.created_at))<=7*24*60*60*1000).length;
-              const mo=workoutHistory.filter(w=>(now-new Date(w.created_at))<=30*24*60*60*1000).length;
-              const life=athlete.total_sessions_logged||workoutHistory.length;
-              return(
-                <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:16,display:"flex",justifyContent:"space-around",textAlign:"center"}}>
-                  <div>
-                    <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>{wk}</div>
-                    <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:2}}>THIS WEEK</div>
-                  </div>
-                  <div style={{width:1,background:C.border}}/>
-                  <div>
-                    <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>{mo}</div>
-                    <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:2}}>THIS MONTH</div>
-                  </div>
-                  <div style={{width:1,background:C.border}}/>
-                  <div>
-                    <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>{life}</div>
-                    <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:2}}>LIFETIME</div>
-                  </div>
+            {/* ── Rank Counter: PRs Hit · Top Rank · Strength Score ── */}
+            <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:16,display:"flex",justifyContent:"space-around",textAlign:"center",alignItems:"center"}}>
+              <div style={{flex:1}}>
+                <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>{prsHit}</div>
+                <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:2}}>PRs HIT</div>
+              </div>
+              <div style={{width:1,alignSelf:"stretch",background:C.border}}/>
+              <div style={{flex:1}}>
+                <div style={{fontFamily:"'Bebas Neue'",fontSize:topTierIdx>=0?22:26,color:topTierIdx>=0?TIER_COLORS[topTierIdx]:C.muted,lineHeight:1,marginTop:topTierIdx>=0?5:0,letterSpacing:0.5}}>{topTierIdx>=0?TIER_NAMES[topTierIdx]:"—"}</div>
+                <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:5}}>TOP RANK</div>
+              </div>
+              <div style={{width:1,alignSelf:"stretch",background:C.border}}/>
+              <div style={{flex:1}}>
+                <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>{strengthScore.toLocaleString()}</div>
+                <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:2,display:"flex",alignItems:"center",justifyContent:"center",gap:4}}>
+                  STRENGTH SCORE
+                  <span onClick={()=>setShowScoreInfo(true)} title="How is this calculated?" style={{cursor:"pointer",border:`1px solid ${C.border}`,borderRadius:"50%",width:14,height:14,display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:9,color:C.muted2,lineHeight:1}}>i</span>
                 </div>
-              );
-            })()}
+              </div>
+            </div>
 
             <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>STRENGTH BENCHMARKS</div>
 
@@ -4107,56 +4169,45 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
 
             {bodyweight&&dedupedBench.length<3&&(
               <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:16,color:C.muted2,fontSize:12,lineHeight:1.6}}>
-                Log more sessions to unlock your full benchmark profile. Benchmarks track: Squat, Deadlift, Bench Press, Overhead Press, Power Clean.
+                Log more lifts to fill out your benchmark profile. Ranked lifts: Back &amp; Front Squat, Deadlift, Bench, Overhead Press, Barbell Row, Weighted Pull-up &amp; Dip, Snatch, Clean &amp; Jerk, Clean, Jerk, Power Clean.
               </div>
             )}
 
             {bodyweight&&dedupedBench.map((b,i)=>{
               const ratio = b.e1rm / bodyweight;
-              const [t1,t2,t3] = b.thresh;
-              let tierIdx = 0;
-              if(ratio>=t3) tierIdx=3;
-              else if(ratio>=t2) tierIdx=2;
-              else if(ratio>=t1) tierIdx=1;
-              // Position marker: map ratio to 0-100% across the full range [0, t3*1.3]
-              const maxRatio = t3*1.3;
+              const tierIdx = tierForRatio(ratio, b.thresh);   // 0=Rookie .. 7=Legendary
+              // Bar spans 0 → a bit past the Legendary cut-line; 8 colored segments.
+              const maxRatio = b.thresh[b.thresh.length-1]*1.12;
               const markerPct = Math.min(Math.max(ratio/maxRatio*100,1),99);
-              // Tier segment widths (roughly equal)
-              const segments = [t1/maxRatio*100,(t2-t1)/maxRatio*100,(t3-t2)/maxRatio*100,(maxRatio-t3)/maxRatio*100];
-              const segColors = ["#374151","#1e3a5f","#065f46","#78460f"];
+              const bounds = [0, ...b.thresh, maxRatio];       // 9 bounds → 8 segments
+              const isTop = tierIdx>=TIER_NAMES.length-1;
+              const toNext = isTop ? 0 : Math.max(0, Math.round(b.thresh[tierIdx]*bodyweight - b.e1rm));
               return (
                 <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:12}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
                     <div>
                       <div style={{color:C.text,fontWeight:700,fontSize:14}}>{b.name}</div>
-                      <div style={{color:TIER_COLORS[tierIdx],fontSize:12,fontWeight:600,marginTop:2}}>{TIER_NAMES[tierIdx]} for your stats</div>
+                      <div style={{color:TIER_COLORS[tierIdx],fontSize:13,fontWeight:700,marginTop:2,letterSpacing:0.5}}>{TIER_NAMES[tierIdx]}</div>
                     </div>
                     <div style={{textAlign:"right"}}>
                       <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:TIER_COLORS[tierIdx],lineHeight:1}}>{Math.round(b.e1rm)}<span style={{fontSize:11,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span></div>
-                      <div style={{color:C.muted,fontSize:10}}>{(ratio).toFixed(2)}× bodyweight</div>
+                      <div style={{color:C.muted,fontSize:10}}>{ratio.toFixed(2)}× bodyweight</div>
                     </div>
                   </div>
-                  {/* Tier labels */}
-                  <div style={{display:"flex",marginBottom:4}}>
-                    {TIER_NAMES.map((t,ti)=>(
-                      <div key={t} style={{flex:1,textAlign:"center",color:tierIdx===ti?TIER_COLORS[ti]:C.muted,fontSize:9,fontWeight:700,letterSpacing:0.5,textTransform:"uppercase"}}>{t}</div>
-                    ))}
+                  {/* 8-segment tier bar */}
+                  <div style={{position:"relative",height:14,borderRadius:7,overflow:"visible",display:"flex"}}>
+                    {bounds.slice(1).map((hi,si)=>{
+                      const w=(hi-bounds[si])/maxRatio*100;
+                      return <div key={si} style={{width:`${w}%`,height:"100%",background:TIER_COLORS[si],opacity:si===tierIdx?1:0.45,
+                        borderRadius:si===0?"7px 0 0 7px":si===7?"0 7px 7px 0":"0",borderRight:si<7?"1px solid rgba(6,13,30,0.6)":""}}/>;
+                    })}
+                    <div style={{position:"absolute",top:-3,left:`${markerPct}%`,transform:"translateX(-50%)",width:5,height:20,background:"#fff",borderRadius:3,boxShadow:"0 0 6px rgba(255,255,255,0.7)"}}/>
                   </div>
-                  {/* Bar */}
-                  <div style={{position:"relative",height:16,borderRadius:8,overflow:"visible",display:"flex"}}>
-                    {segments.map((w,si)=>(
-                      <div key={si} style={{width:`${w}%`,height:"100%",background:segColors[si],
-                        borderRadius:si===0?"8px 0 0 8px":si===3?"0 8px 8px 0":"0",
-                        borderRight:si<3?"1px solid rgba(255,255,255,0.1)":""}}/>
-                    ))}
-                    {/* Gold marker */}
-                    <div style={{position:"absolute",top:-3,left:`${markerPct}%`,transform:"translateX(-50%)",width:6,height:22,background:C.gold,borderRadius:3,boxShadow:`0 0 6px ${C.gold}`}}/>
-                  </div>
-                  {/* Threshold labels */}
-                  <div style={{display:"flex",justifyContent:"space-between",marginTop:4,paddingLeft:"0%",paddingRight:"0%"}}>
-                    <div style={{color:C.muted,fontSize:9}}>{(t1*bodyweight).toFixed(0)}</div>
-                    <div style={{color:C.muted,fontSize:9}}>{(t2*bodyweight).toFixed(0)}</div>
-                    <div style={{color:C.muted,fontSize:9}}>{(t3*bodyweight).toFixed(0)}</div>
+                  {/* Next-tier target */}
+                  <div style={{marginTop:9,textAlign:"center",fontSize:11}}>
+                    {isTop
+                      ? <span style={{color:TIER_COLORS[tierIdx],fontWeight:700,letterSpacing:0.5}}>TOP RANK REACHED 🏆</span>
+                      : <span style={{color:C.muted}}>{toNext} lbs to <span style={{color:TIER_COLORS[tierIdx+1],fontWeight:700,letterSpacing:0.5}}>{TIER_NAMES[tierIdx+1]}</span></span>}
                   </div>
                 </div>
               );
@@ -4258,6 +4309,27 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
           </div>
         )}
       </div>
+
+      {/* Strength Score — how it's calculated */}
+      {showScoreInfo&&(
+        <div onClick={()=>setShowScoreInfo(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.82)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:600,padding:24}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:"20px 22px",maxWidth:340,width:"100%"}}>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:C.gold,letterSpacing:1,marginBottom:8}}>STRENGTH SCORE</div>
+            <div style={{color:C.muted2,fontSize:13,lineHeight:1.6,marginBottom:14}}>
+              Every lift you've ranked earns points for the level it's reached — and each level is worth more than the last. Rank up any lift, or add a new one, and your score climbs.
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:16}}>
+              {TIER_NAMES.map((t,ti)=>(
+                <div key={t} style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{color:TIER_COLORS[ti],fontSize:12,fontWeight:700,letterSpacing:1}}>{t}</span>
+                  <span style={{color:C.text,fontSize:12}}>{TIER_POINTS[ti]} pts</span>
+                </div>
+              ))}
+            </div>
+            <button onClick={()=>setShowScoreInfo(false)} style={{width:"100%",background:C.gold,border:"none",color:"#000",borderRadius:10,padding:"11px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14,cursor:"pointer"}}>Got it</button>
+          </div>
+        </div>
+      )}
 
       {/* Sticky footer close button — sits above iPhone home bar / gesture area */}
       <div style={{padding:"10px 16px",paddingBottom:"10px",borderTop:`1px solid ${C.border}`,background:C.navy2,flexShrink:0}}>
