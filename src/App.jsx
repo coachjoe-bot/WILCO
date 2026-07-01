@@ -4051,14 +4051,16 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
     return {key:k,name:ex.name,e1rm:ex.e1rm,benchKey,thresh,actual:!!ex.actual};
   }).filter(Boolean);
 
-  // Dedupe benchmark keys — keep highest e1rm per bench key. `rankedLifts` is the full
-  // set (drives the counter); `dedupedBench` additionally applies the search filter and
-  // orders big lifts first, heaviest 1RM first within each tier (drives the list).
-  const seen={};
-  const rankedLifts = benchmarked.filter(b=>{
-    if(seen[b.benchKey]&&seen[b.benchKey]>=b.e1rm) return false;
-    seen[b.benchKey]=b.e1rm; return true;
+  // Exactly ONE entry per bench key: prefer an actual 1RM, then the heaviest value.
+  // Order-independent — an earlier low entry can no longer leave a duplicate behind
+  // (which caused two Pull-Up cards). `rankedLifts` drives the counter; `dedupedBench`
+  // adds the search filter and orders big lifts first, heaviest first within a tier.
+  const bestByKey={};
+  benchmarked.forEach(b=>{
+    const cur=bestByKey[b.benchKey];
+    if(!cur || (b.actual&&!cur.actual) || (b.actual===cur.actual && b.e1rm>cur.e1rm)) bestByKey[b.benchKey]=b;
   });
+  const rankedLifts = Object.values(bestByKey);
   const dedupedBench = rankedLifts.filter(b=>matchesSearch(b.name))
     .sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.e1rm-a.e1rm);
 
@@ -4226,7 +4228,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                 <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:12}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
                     <div>
-                      <div style={{color:C.text,fontWeight:700,fontSize:14}}>{dispName}</div>
+                      <div style={{color:C.text,fontWeight:700,fontSize:14,display:"flex",alignItems:"center",gap:6}}>{dispName}{b.actual&&<span title="Using your actual 1RM" style={{background:`${C.gold}22`,border:`1px solid ${C.gold}`,color:C.gold,borderRadius:4,padding:"0 5px",fontSize:9,fontWeight:700,letterSpacing:1}}>PR</span>}</div>
                       <div style={{color:TIER_COLORS[tierIdx],fontSize:13,fontWeight:700,marginTop:2,letterSpacing:0.5}}>{TIER_NAMES[tierIdx]}</div>
                     </div>
                     <div style={{textAlign:"right"}}>
