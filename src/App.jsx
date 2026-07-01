@@ -949,6 +949,11 @@ const TIER_NAMES  = ["ROOKIE","GRITTY","SHARP","STRONG","ELITE","DOMINANT","UNTO
 const TIER_COLORS = ["#64748b","#3b82f6","#22d3ee","#10b981","#d4a017","#f97316","#ef4444","#a855f7"];
 // Strength Score points per tier — each level worth more than the last.
 const TIER_POINTS = [10, 25, 50, 100, 175, 275, 400, 600];
+// Flavor line per tier (shown in the Top Rank classification popover).
+const TIER_DESC = ["just off the ground","on the come-up","lookin' sharp","just plain solid","top of the gym","a cut above","national-class","truly incredible"];
+// Load-bearing bodyweight lifts show a cleaner name + a "bodyweight + added" readout.
+const BENCH_DISPLAY = { "weighted pull-up": "Pull-Ups", "weighted dip": "Dips" };
+const BENCH_IS_BW = { "weighted pull-up": true, "weighted dip": true };
 
 // Per-lift bodyweight-multiple cut-lines to REACH each tier 1..7 (Rookie = below [0]).
 // [Gritty, Sharp, Strong, Elite, Dominant, Untouchable, Legendary]. Anchored to
@@ -3971,6 +3976,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   const [editingKey,setEditingKey] = useState(null);
   const [editVal,setEditVal] = useState("");
   const [showScoreInfo,setShowScoreInfo] = useState(false);
+  const [showRankInfo,setShowRankInfo] = useState(false);
 
   useEffect(()=>{
     sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`).then(rows=>{
@@ -4137,7 +4143,10 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
               <div style={{width:1,alignSelf:"stretch",background:C.border}}/>
               <div style={{flex:1}}>
                 <div style={{fontFamily:"'Bebas Neue'",fontSize:topTierIdx>=0?22:26,color:topTierIdx>=0?TIER_COLORS[topTierIdx]:C.muted,lineHeight:1,marginTop:topTierIdx>=0?5:0,letterSpacing:0.5}}>{topTierIdx>=0?TIER_NAMES[topTierIdx]:"—"}</div>
-                <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:5}}>TOP RANK</div>
+                <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:5,display:"flex",alignItems:"center",justifyContent:"center",gap:4}}>
+                  TOP RANK
+                  <span onClick={()=>setShowRankInfo(true)} title="What do the ranks mean?" style={{cursor:"pointer",border:`1px solid ${C.border}`,borderRadius:"50%",width:14,height:14,display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:9,color:C.muted2,lineHeight:1}}>i</span>
+                </div>
               </div>
               <div style={{width:1,alignSelf:"stretch",background:C.border}}/>
               <div style={{flex:1}}>
@@ -4182,16 +4191,19 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
               const bounds = [0, ...b.thresh, maxRatio];       // 9 bounds → 8 segments
               const isTop = tierIdx>=TIER_NAMES.length-1;
               const toNext = isTop ? 0 : Math.max(0, Math.round(b.thresh[tierIdx]*bodyweight - b.e1rm));
+              const dispName = BENCH_DISPLAY[b.benchKey] || b.name;
+              const isBW = BENCH_IS_BW[b.benchKey];               // pull-ups / dips → show bodyweight + added
+              const added = Math.round(b.e1rm - bodyweight);
               return (
                 <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:12}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
                     <div>
-                      <div style={{color:C.text,fontWeight:700,fontSize:14}}>{b.name}</div>
+                      <div style={{color:C.text,fontWeight:700,fontSize:14}}>{dispName}</div>
                       <div style={{color:TIER_COLORS[tierIdx],fontSize:13,fontWeight:700,marginTop:2,letterSpacing:0.5}}>{TIER_NAMES[tierIdx]}</div>
                     </div>
                     <div style={{textAlign:"right"}}>
                       <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:TIER_COLORS[tierIdx],lineHeight:1}}>{Math.round(b.e1rm)}<span style={{fontSize:11,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span></div>
-                      <div style={{color:C.muted,fontSize:10}}>{ratio.toFixed(2)}× bodyweight</div>
+                      <div style={{color:C.muted,fontSize:10}}>{isBW ? (added>0 ? `${Math.round(bodyweight)} + ${added} lbs` : `${Math.round(bodyweight)} lbs bodyweight`) : `${ratio.toFixed(2)}× bodyweight`}</div>
                     </div>
                   </div>
                   {/* 8-segment tier bar */}
@@ -4206,7 +4218,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                   {/* Next-tier target */}
                   <div style={{marginTop:9,textAlign:"center",fontSize:11}}>
                     {isTop
-                      ? <span style={{color:TIER_COLORS[tierIdx],fontWeight:700,letterSpacing:0.5}}>TOP RANK REACHED 🏆</span>
+                      ? <span style={{color:TIER_COLORS[tierIdx],fontWeight:700,letterSpacing:0.5}}>TRULY INCREDIBLE 🏆</span>
                       : <span style={{color:C.muted}}>{toNext} lbs to <span style={{color:TIER_COLORS[tierIdx+1],fontWeight:700,letterSpacing:0.5}}>{TIER_NAMES[tierIdx+1]}</span></span>}
                   </div>
                 </div>
@@ -4309,6 +4321,33 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
           </div>
         )}
       </div>
+
+      {/* Top Rank — what the ranks mean (× bodyweight, squat as the example) */}
+      {showRankInfo&&(()=>{
+        const sq = BENCH_THRESHOLDS[genderKey]?.["back squat"] || BENCH_THRESHOLDS.male["back squat"];
+        const rangeFor = (i) => i===0 ? `<${sq[0]}×` : i===TIER_NAMES.length-1 ? `${sq[i-1]}×+` : `${sq[i-1]}×`;
+        return (
+        <div onClick={()=>setShowRankInfo(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.82)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:600,padding:24}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:"20px 22px",maxWidth:360,width:"100%"}}>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:C.gold,letterSpacing:1,marginBottom:4}}>THE RANKS</div>
+            <div style={{color:C.muted2,fontSize:12,lineHeight:1.5,marginBottom:14}}>How strong is the lift, as a multiple of your bodyweight. Numbers shown for the squat — every lift scales to its own standard.</div>
+            <div style={{display:"flex",flexDirection:"column",gap:7,marginBottom:14}}>
+              {TIER_NAMES.map((t,ti)=>ti).reverse().map(ti=>(
+                <div key={ti} style={{display:"flex",alignItems:"baseline",gap:8}}>
+                  <span style={{color:TIER_COLORS[ti],fontSize:12,fontWeight:700,letterSpacing:1,width:104,flexShrink:0}}>{TIER_NAMES[ti]}</span>
+                  <span style={{color:TIER_COLORS[ti],fontSize:12,width:52,flexShrink:0}}>{rangeFor(ti)}</span>
+                  <span style={{color:C.muted2,fontSize:12,lineHeight:1.4}}>{TIER_DESC[ti]}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{background:`${C.gold}12`,border:`1px solid ${C.gold}40`,borderRadius:10,padding:"9px 12px",color:C.muted2,fontSize:11.5,lineHeight:1.5,marginBottom:14}}>
+              Hit <span style={{color:"#a855f7",fontWeight:700}}>LEGENDARY</span>? Reach out to <a href="mailto:support@trainwilco.com" style={{color:C.gold}}>support@trainwilco.com</a> to get your lift featured.
+            </div>
+            <button onClick={()=>setShowRankInfo(false)} style={{width:"100%",background:C.gold,border:"none",color:"#000",borderRadius:10,padding:"11px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14,cursor:"pointer"}}>Got it</button>
+          </div>
+        </div>
+        );
+      })()}
 
       {/* Strength Score — how it's calculated */}
       {showScoreInfo&&(
