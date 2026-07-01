@@ -180,7 +180,15 @@ function buildEmail(coach, workouts, prs, weekLabel, signupUrl) {
         // Strength session
         content = exercises.filter(e => e.name).map(e => {
           let s = `<span style="color:#1a1a2e;font-weight:600">${e.name}</span>`;
-          if(e.sets && e.reps) s += ` <span style="color:#555">${e.sets}×${e.reps}</span>`;
+          if(e.time_per_set_seconds) {
+            const sec = e.time_per_set_seconds;
+            const dur = sec >= 60 ? (sec % 60 ? `${Math.floor(sec/60)}:${String(sec%60).padStart(2,"0")}` : `${Math.floor(sec/60)} min`) : `${sec}s`;
+            s += ` <span style="color:#555">${e.sets||1}×${dur}</span>`;
+          } else if(e.rep_scheme && e.sets) {
+            s += ` <span style="color:#555">${e.sets}×${e.rep_scheme}</span>`;   // complexes / rest-pause
+          } else if(e.sets && e.reps) {
+            s += ` <span style="color:#555">${e.sets}×${e.reps}</span>`;
+          }
           if(e.weight) {
             const u = e.unit === "kg" ? "kg" : "lbs";
             s += ` <span style="color:#555">@ ${e.weight}${u}</span>`;

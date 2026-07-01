@@ -52,7 +52,21 @@ export const epley1RM = (weight, reps) => {
 
 const toLbs = (w, unit) => (unit === "kg" ? w * 2.205 : w);
 
+// Working sets of a logged exercise: prefer set_details (excluding warm-ups), else the
+// flat sets/reps/weight. Mirrors the client so the digest, plateau flags, volume, and
+// the Progress screen all agree — and so warm-ups never inflate e1RM or working volume.
+const workingSets = (ex) => {
+  if (Array.isArray(ex.set_details) && ex.set_details.length) {
+    const w = ex.set_details.filter((s) => !s.warmup);
+    const use = w.length ? w : ex.set_details;
+    return use.map((s) => ({ weight: s.weight ?? ex.weight ?? 0, reps: s.reps ?? ex.reps ?? 1 }));
+  }
+  const n = ex.sets || 1;
+  return Array.from({ length: n }, () => ({ weight: ex.weight ?? 0, reps: ex.reps || 1 }));
+};
+
 // ── per-lift est-1RM history across a set of sessions ─────────────────────────
+// e1RM is plain Epley over working sets (matches the client) — RPE/RIR never bump it.
 export const buildLiftHistory = (sessions) => {
   const byLift = {};
   for (const group of sessions) {
@@ -60,11 +74,15 @@ export const buildLiftHistory = (sessions) => {
     const exercises = group.flatMap((e) => getPD(e).exercises || []);
     for (const ex of exercises) {
       if (!ex.name || !ex.weight || ex.unit === "bodyweight") continue;
-      const w = toLbs(ex.weight, ex.unit);
-      const e1rm = epley1RM(w, ex.reps || 1);
+      const sets = workingSets(ex);
+      let e1rm = 0, top = { weight: ex.weight, reps: ex.reps || 1 };
+      for (const s of sets) {
+        const e = epley1RM(toLbs(s.weight, ex.unit), s.reps);
+        if (e > e1rm) { e1rm = e; top = s; }
+      }
       const k = ex.name.toLowerCase().trim();
       if (!byLift[k]) byLift[k] = [];
-      byLift[k].push({ date, e1rm, weight: ex.weight, reps: ex.reps || 1, sets: ex.sets || 1 });
+      byLift[k].push({ date, e1rm, weight: top.weight, reps: top.reps || 1, sets: sets.length });
     }
   }
   return byLift;

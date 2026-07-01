@@ -424,23 +424,20 @@ const getExerciseSets = (ex) => {
   return Array.from({length:n},()=>({weight:ex.weight??0, reps:ex.reps||1}));
 };
 
-// Best estimated 1RM across all sets in a logged exercise entry (lbs-equivalent).
-// If the athlete logged effort (RIR, or RPE→RIR = 10−RPE), the set implies a higher
-// true 1RM than the raw reps alone — add the reps left "in the tank" to the Epley
-// estimate. Only bumps when effort was actually recorded; otherwise identical to before.
+// Best estimated 1RM across the WORKING sets of a logged exercise (lbs-equivalent).
+// e1RM is plain Epley — one definition used everywhere (Progress, PRs, and the server
+// Proof Feed) so the numbers always agree. RPE/RIR are captured and shown as context
+// tags but never silently inflate the 1RM: a PR must be a genuinely heavier performance,
+// not just a set logged with effort. Warm-ups are excluded (fall back to all sets if
+// somehow every set was flagged a warm-up).
 const bestE1RMForExercise = (ex) => {
   if(!ex || ex.unit==="bodyweight") return 0;
   const all = getExerciseSets(ex);
-  // Warm-ups never count toward a 1RM estimate (fall back to all sets if somehow
-  // every set was flagged a warm-up).
   const sets = all.some(s=>!s.warmup) ? all.filter(s=>!s.warmup) : all;
-  const bonus = ex.rir!=null ? Math.max(0, ex.rir)
-              : ex.rpe!=null ? Math.max(0, 10 - ex.rpe)
-              : 0;
   let best = 0;
   sets.forEach(s=>{
     const lbs = toLbs(s.weight, ex.unit);
-    const e1rm = epley1RM(lbs, s.reps + bonus);
+    const e1rm = epley1RM(lbs, s.reps);
     if(e1rm>best) best = e1rm;
   });
   return best;
