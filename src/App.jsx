@@ -578,6 +578,10 @@ const normalizeExName = (name) => {
     .replace(/\b(?:paused?|tempo|slow|controlled|eccentric)\b/g," ")      // tempo/pause descriptors
     .replace(/\bw\/?\b/g," ")                                       // dangling "w/" / "w" connector left by the above
     .replace(/\s+/g," ").trim();
+  // (3) A bare "squat" (or "barbell squat") means the back squat — merge it with
+  //     "Back Squat". Qualified variants (front/overhead/goblet/split/box/hack/...)
+  //     keep their qualifier, so genuinely different squats never merge.
+  if(n==="squat"||n==="barbell squat") n="back squat";
   return n;
 };
 
