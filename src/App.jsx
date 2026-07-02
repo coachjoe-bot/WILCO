@@ -3118,6 +3118,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [showSettings,setShowSettings] = useState(false);
   const [showProgram,setShowProgram] = useState(false);
   const [showProgress,setShowProgress] = useState(false);
+  const [showQuickLog,setShowQuickLog] = useState(false);
   const [showProfileCompletion,setShowProfileCompletion] = useState(false);
   const [profileBannerDismissed,setProfileBannerDismissed] = useState(()=>{
     try{return!!localStorage.getItem(`wilco_profile_banner_${initialAthlete.id}`);}catch{return false;}
@@ -3455,8 +3456,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     setLoading(false);
   };
 
-  const send = async () => {
-    const msg = input.trim();
+  // `overrideText` lets Quick Log submit a prepared message directly — the click
+  // handler passes an event object (not a string), which safely falls back to `input`.
+  const send = async (overrideText) => {
+    const msg = (typeof overrideText==="string" ? overrideText : input).trim();
     if(!msg||loading||videoLoading||!historyLoaded) return;
     track("chat_message_sent","ai");
 
@@ -3798,8 +3801,15 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           {(()=>{const t=TIERS[athlete.tier||"free"];return(<span style={{flexShrink:0,background:`${t.color}22`,border:`1px solid ${t.color}`,borderRadius:4,padding:"1px 6px",color:t.color,fontSize:9,fontWeight:700,letterSpacing:1}}>{t.badge}</span>);})()}
           {athlete.certified_badge_earned_at&&(()=>{const cnt=athlete.total_sessions_logged||0;const tier=cnt>=1000?"×4":cnt>=500?"×3":cnt>=250?"×2":"";return<span title="WILCO Certified" style={{flexShrink:0,background:`${C.gold}22`,border:`1px solid ${C.gold}`,borderRadius:4,padding:"1px 6px",color:C.gold,fontSize:9,fontWeight:700,letterSpacing:1}}>✦ CERTIFIED{tier?` ${tier}`:""}</span>;})()}
         </div>
-        {/* Row 2: nav (left side intentionally free for a future stat/control) */}
+        {/* Row 2: nav — Quick Log owns the left slot; marginRight:auto keeps the
+            right-side group pinned right even when Quick Log is hidden (free tier). */}
         <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:8}}>
+        {(athlete.tier||"free")!=="free"&&(
+          <button onClick={()=>{track("screen_view","nav",{screen:"quick_log"});setShowQuickLog(true);}} title="Prefill today's workout log"
+            style={{marginRight:"auto",background:C.gold,border:`1px solid ${C.gold}`,color:"#000",borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1,flexShrink:0,display:"flex",alignItems:"center",gap:4}}>
+            ⚡ QUICK LOG
+          </button>
+        )}
         <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
           {saved&&<div style={{background:"#0a1e0a",border:`1px solid ${C.green}`,borderRadius:8,padding:"4px 8px",color:C.green,fontSize:11,fontWeight:600,flexShrink:0}}>✓</div>}
           {(athlete.tier||"free")!=="free"&&(
@@ -3994,6 +4004,23 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         </div>
       )}
 
+      {/* Quick Log Sheet */}
+      {showQuickLog&&(
+        <QuickLogSheet
+          athlete={athlete}
+          workoutHistory={workoutHistory}
+          onClose={()=>setShowQuickLog(false)}
+          onAddProgram={()=>{setShowQuickLog(false);setShowProgram(true);}}
+          onSend={(text)=>{
+            setShowQuickLog(false);
+            // If a send is already in flight, park the draft in the input box
+            // instead of silently dropping it (send() early-returns while busy).
+            if(loading||videoLoading||!historyLoaded) setInput(text);
+            else send(text);
+          }}
+        />
+      )}
+
       {/* Settings Modal */}
       {showSettings&&(
         <SettingsModal
@@ -4047,6 +4074,208 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
 }
 
 // ─── MY LOG MODAL ─────────────────────────────────────────────────────────────
+// ─── QUICK LOG ───────────────────────────────────────────────────────────────
+// Prefills today's workout log from the athlete's program + history so they can
+// review/edit/send instead of typing it out. The draft is ONLY a message — it goes
+// through the normal send() → parseWorkout pipeline, so a bad draft can never
+// corrupt data; the athlete edits it (directly, or via the "tell Joe" bar) first.
+
+// Compact context bundle for the draft/edit prompts. The 1RM math is done HERE in
+// code (client-side) — the model fills in numbers we hand it; it never does the
+// Epley arithmetic itself.
+const buildQuickLogContext = (athlete, workoutHistory, manualRMs) => {
+  const program = athlete.temp_program_text || athlete.program_text || "";
+  const bodyweight = athlete.weight_lbs;
+  // Last 8 sessions, newest first, one compact block each.
+  const sessions = groupIntoSessions(workoutHistory)
+    .map(s=>({entries:s.entries, t:new Date(s.entries[s.entries.length-1].created_at)}))
+    .sort((a,b)=>b.t-a.t).slice(0,8);
+  const sessionLines = sessions.map(s=>{
+    const day = s.t.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"});
+    const lines = [];
+    s.entries.forEach(w=>{
+      (w.parsed_data?.exercises||[]).forEach(ex=>{ if(ex.name) lines.push(`${ex.name} ${formatSetDetails(ex)}`); });
+      if(w.parsed_data?.run_data) lines.push("(run logged)");
+      if(w.parsed_data?.practice_data) lines.push("(practice logged)");
+    });
+    return `${day}:\n${lines.join("\n")||"(no exercise detail)"}`;
+  }).join("\n\n");
+  // 1RM cheat sheet: best history e1RM per exercise, overlaid with actual 1RMs
+  // (manual_one_rms) — higher number wins, same rule as the Progress modal.
+  const byEx = {};
+  workoutHistory.forEach(w=>{ (w.parsed_data?.exercises||[]).forEach(ex=>{
+    if(!ex.name) return;
+    const e1 = bestE1RMForExercise(ex, bodyweight);
+    if(!e1) return;
+    const k = normalizeExName(ex.name);
+    if(!byEx[k]) byEx[k]={name:displayForKey(k,ex.name), e1rm:e1};
+    else { byEx[k].name=displayForKey(k,cleanerName(byEx[k].name,ex.name)); if(e1>byEx[k].e1rm) byEx[k].e1rm=e1; }
+  });});
+  (manualRMs||[]).forEach(m=>{
+    const k = normalizeExName(m.normalized_exercise||m.exercise);
+    const lbs = toLbs(m.weight, m.unit);
+    if(!byEx[k]||lbs>byEx[k].e1rm) byEx[k]={name:m.exercise, e1rm:lbs, actual:true};
+  });
+  const rmLines = Object.values(byEx).sort((a,b)=>b.e1rm-a.e1rm).slice(0,15)
+    .map(r=>`${r.name}: ${Math.round(r.e1rm)} lbs${r.actual?" (actual 1RM)":" (est.)"}`).join("\n");
+  return { program, sessionLines, rmLines };
+};
+
+const QL_DRAFT_SYS = `You prefill workout logs for an athlete in a fitness app. Write the exact log message the athlete would type into chat AFTER finishing today's session, based on their training program, recent logged sessions, and known 1RMs.
+
+Rules:
+- FIRST LINE: the program day label (e.g. "Day 3 – Pull" or "Upper B"). Infer which day is NEXT from what they logged most recently and today's date. If the program has no day labels, use a short session name.
+- Then a blank line, then ONE line per exercise: "Name SETSxREPS @ WEIGHT" (e.g. "Back Squat 5x3 @ 225"). Weighted bodyweight: "Weighted Pull-ups 3x8 +25". Plain bodyweight: "Push-ups 3x20". Timed holds: "Plank 3x60s".
+- Weight priority: (1) an explicit weight written in the program for that exercise; (2) a program percentage x the athlete's 1RM from the cheat sheet, rounded to the nearest 5 lbs; (3) what they lifted last time on that exercise; (4) if nothing is known, write the exercise with sets/reps and no weight.
+- Include ONLY exercises programmed for the inferred day. Never invent exercises.
+- If the program says today is a rest day and no training day is clearly next, output exactly: REST_DAY
+- Output ONLY the log text. No commentary, no markdown, no explanation.`;
+
+const QL_EDIT_SYS = `You revise a prefilled workout-log draft per an athlete's instruction. You get their program, recent sessions, 1RMs, the CURRENT draft, and the instruction.
+
+Rules:
+- Apply the instruction; keep everything else in the draft unchanged.
+- If the instruction names a different program day ("I did day 2"), rebuild the whole draft for that day using the program and the same weight rules (program weight, else % x 1RM rounded to 5 lbs, else last time).
+- If the draft is empty and the instruction describes what they did, write the draft from it.
+- Same format: first line = day label, blank line, one exercise per line ("Name SETSxREPS @ WEIGHT").
+- If the instruction is NOT about editing this draft (a coaching question, chit-chat), return the current draft EXACTLY unchanged.
+- Output ONLY the log text. No commentary, no markdown.`;
+
+function QuickLogSheet({athlete, workoutHistory, onClose, onAddProgram, onSend}) {
+  const hasProgram = !!(athlete.temp_program_text||athlete.program_text);
+  const [draft,setDraft] = useState("");
+  const [phase,setPhase] = useState(hasProgram?"loading":"noprogram"); // loading|ready|rest|error|noprogram
+  const [instruction,setInstruction] = useState("");
+  const [editBusy,setEditBusy] = useState(false);
+  const [editErr,setEditErr] = useState("");
+  const [undoStack,setUndoStack] = useState([]);
+  const ctxRef = useRef(null);
+
+  const todayStr = () => new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"});
+  const ctxBlock = (ctx) => `PROGRAM:\n${ctx.program||"(none)"}\n\nRECENT SESSIONS (newest first):\n${ctx.sessionLines||"(none logged yet)"}\n\n1RM CHEAT SHEET:\n${ctx.rmLines||"(none known)"}`;
+
+  const generate = async () => {
+    setPhase("loading");
+    try{
+      let manualRMs = [];
+      try{ manualRMs = await sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`)||[]; }catch(_){}
+      const ctx = buildQuickLogContext(athlete, workoutHistory, manualRMs);
+      ctxRef.current = ctx;
+      const text = await askClaude(QL_DRAFT_SYS, `Today is ${todayStr()}.\n\n${ctxBlock(ctx)}`, 500, [], "claude-sonnet-5", "quick_log_draft");
+      const t = (text||"").trim();
+      if(!t || t==="REST_DAY"){ setDraft(""); setPhase("rest"); }
+      else { setDraft(t); setPhase("ready"); }
+    }catch(e){ setPhase("error"); }
+  };
+  useEffect(()=>{ if(hasProgram) generate(); },[]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const applyInstruction = async () => {
+    const ins = instruction.trim();
+    if(!ins||editBusy) return;
+    setEditBusy(true); setEditErr("");
+    try{
+      const ctx = ctxRef.current || buildQuickLogContext(athlete, workoutHistory, []);
+      const revised = await askClaude(QL_EDIT_SYS,
+        `Today is ${todayStr()}.\n\n${ctxBlock(ctx)}\n\nCURRENT DRAFT:\n${draft.trim()||"(empty)"}\n\nATHLETE'S INSTRUCTION:\n${ins}`,
+        500, [], "claude-sonnet-5", "quick_log_edit");
+      const t = (revised||"").trim();
+      if(t && t!==draft.trim()){
+        setUndoStack(prev=>[...prev,draft]);
+        setDraft(t);
+        setPhase("ready");
+      }
+      setInstruction("");
+    }catch(e){ setEditErr("Couldn't apply that — try again."); }
+    setEditBusy(false);
+  };
+
+  const undo = () => {
+    setUndoStack(prev=>{
+      if(!prev.length) return prev;
+      setDraft(prev[prev.length-1]);
+      return prev.slice(0,-1);
+    });
+  };
+
+  const dayLabel = (draft.split("\n")[0]||"").trim();
+  const canSend = phase==="ready" && !!draft.trim() && !editBusy;
+
+  return (
+    <div style={{position:"fixed",inset:0,background:C.navy,display:"flex",flexDirection:"column",zIndex:400,maxWidth:600,margin:"0 auto"}}>
+      <style>{GS}</style>
+      <div style={{paddingTop:"calc(16px + env(safe-area-inset-top, 0px))",paddingBottom:"12px",paddingLeft:"20px",paddingRight:"20px",borderBottom:`1px solid ${C.border}`,background:C.navy2,display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
+        <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2,flexShrink:0}}>⚡ QUICK LOG</div>
+        {phase==="ready"&&dayLabel&&dayLabel.length<=36&&(
+          <div style={{background:`${C.blue}22`,border:`1px solid ${C.blue}`,borderRadius:4,padding:"2px 8px",color:C.blue,fontSize:10,fontWeight:700,letterSpacing:1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{dayLabel.toUpperCase()}</div>
+        )}
+        <div style={{flex:1}}/>
+        <button onClick={onClose} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"4px 12px",cursor:"pointer",fontSize:12,flexShrink:0}}>✕ Close</button>
+      </div>
+
+      {phase==="noprogram"?(
+        <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"0 32px",gap:14,textAlign:"center"}}>
+          <div style={{fontSize:32}}>📋</div>
+          <div style={{color:C.text,fontSize:15,lineHeight:1.6}}>Quick Log preps today's workout from your program — but I don't have a program on file for you yet.</div>
+          <div style={{color:C.muted,fontSize:13,lineHeight:1.6}}>Add it once and every log after that is one tap.</div>
+          <button onClick={onAddProgram} style={{background:C.gold,color:"#000",border:"none",borderRadius:10,padding:"12px 28px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:15,cursor:"pointer"}}>Add My Program →</button>
+        </div>
+      ):phase==="loading"?(
+        <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14}}>
+          <div style={{display:"flex",gap:6}}>
+            {[0,1,2].map(i=><div key={i} style={{width:8,height:8,borderRadius:"50%",background:C.gold,animation:`pulse 1.2s ease ${i*0.2}s infinite`}}/>)}
+          </div>
+          <div style={{color:C.muted,fontSize:13}}>Building today's log from your program…</div>
+        </div>
+      ):phase==="error"?(
+        <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"0 32px",gap:14,textAlign:"center"}}>
+          <div style={{color:C.text,fontSize:14,lineHeight:1.6}}>Couldn't build the draft. Might be a connection hiccup.</div>
+          <button onClick={generate} style={{background:C.navy3,border:`1px solid ${C.gold}`,color:C.gold,borderRadius:10,padding:"10px 24px",cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>Try Again</button>
+        </div>
+      ):(
+        <div style={{flex:1,minHeight:0,display:"flex",flexDirection:"column",padding:"14px 16px",gap:10}}>
+          {phase==="rest"&&(
+            <div style={{background:`${C.blue}12`,border:`1px solid ${C.blue}50`,borderRadius:10,padding:"10px 14px",color:C.muted2,fontSize:12,lineHeight:1.6}}>
+              Your program says today's a rest day, so there's nothing to prep. Trained anyway? Tell Joe below — "I did day 2", "did some arms and cardio" — and I'll draft it.
+            </div>
+          )}
+          <textarea
+            value={draft}
+            onChange={e=>setDraft(e.target.value)}
+            placeholder={phase==="rest"?"Your draft will appear here…":""}
+            style={{flex:1,minHeight:160,background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:"12px 14px",color:C.text,fontSize:14,outline:"none",resize:"none",lineHeight:1.8,fontFamily:"'DM Sans'"}}
+          />
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <div style={{color:C.muted,fontSize:11}}>Tap the draft to edit directly, or tell Joe below.</div>
+            <div style={{flex:1}}/>
+            {undoStack.length>0&&(
+              <button onClick={undo} style={{background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:8,padding:"4px 10px",cursor:"pointer",fontSize:11}}>↩ Undo</button>
+            )}
+          </div>
+          {editErr&&<div style={{color:C.red,fontSize:12}}>{editErr}</div>}
+          <div style={{display:"flex",gap:8}}>
+            <input
+              value={instruction}
+              onChange={e=>setInstruction(e.target.value)}
+              onKeyDown={e=>{ if(e.key==="Enter"){ e.preventDefault(); applyInstruction(); } }}
+              placeholder={`Tell Joe what to change — "I did day 2", "all bench at 185"`}
+              disabled={editBusy}
+              style={{flex:1,background:C.navy,border:`1px solid ${C.blue}`,borderRadius:10,padding:"11px 13px",color:C.text,fontSize:13,outline:"none"}}
+            />
+            <button onClick={applyInstruction} disabled={editBusy||!instruction.trim()}
+              style={{background:C.navy3,border:`1px solid ${C.blue}`,color:editBusy?C.muted:C.blue,borderRadius:10,padding:"0 16px",cursor:editBusy?"wait":"pointer",fontSize:13,fontWeight:700}}>
+              {editBusy?"…":"Apply"}
+            </button>
+          </div>
+          <button onClick={()=>onSend(draft.trim())} disabled={!canSend}
+            style={{background:canSend?C.gold:C.navy3,color:canSend?"#000":C.muted,border:`1px solid ${canSend?C.gold:C.border}`,borderRadius:12,padding:"14px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:16,cursor:canSend?"pointer":"not-allowed",marginBottom:"env(safe-area-inset-bottom, 0px)"}}>
+            SEND TO CHAT →
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead, onOpenProofChat, setWorkoutHistory}) {
   const [tab,setTab] = useState("workouts");
   const [editSession,setEditSession] = useState(null);

@@ -80,6 +80,9 @@ const FEATURES = new Set([
   // proof_answer_extract runs from the CLIENT (guided-chat answer parsing) through
   // this proxy, so it MUST be allowlisted here or it would fall back to "other".
   "proof_weekly", "proof_monthly", "proof_coach", "program_parse", "proof_answer_extract",
+  // Quick Log: draft = prefill today's log from program+history; edit = revise the
+  // draft per an athlete instruction ("I did day 2", "all bench at 185").
+  "quick_log_draft", "quick_log_edit",
 ]);
 
 // Snapshot the segmentation fields AT CALL TIME so cost stays correctly attributed
