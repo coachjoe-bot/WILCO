@@ -19,6 +19,7 @@
   "devDependencies": {
     "@playwright/test": "^1.61.1",
     "@vitejs/plugin-react": "^4.2.0",
+    "qrcode": "^1.5.4",
     "vite": "^5.0.0"
   }
 }

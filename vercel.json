@@ -2,6 +2,9 @@
   "buildCommand": "npm ci && node_modules/.bin/vite build",
   "outputDirectory": "dist",
   "framework": "vite",
+  "rewrites": [
+    { "source": "/crunch/:location", "destination": "/index.html" }
+  ],
   "headers": [
     {
       "source": "/(.*)",

@@ -57,6 +57,63 @@ const TIERS = {
   elite: { label:"ELITE", color:"#3b82f6", price:"$99.99/mo",   priceNote:"or $1,000/yr · Cancel anytime",    badge:"ELITE" },
 };
 
+// ─── EVENT LANDING PAGES (in-person tabling) ─────────────────────────────────
+// Config-driven: one entry per location; the QR code at the table points at
+// `path` permanently. `active:false` keeps the page dormant (visitors are sent
+// to the normal home screen), so QR codes can be printed early and leaked links
+// do nothing. The 30-day trial itself is granted server-side ONLY while the
+// matching entry in api/_stripe.js EVENT_SOURCES is enabled — this client flag
+// just shows/hides the page.
+//
+// EVENT DAY: flip `active` to true here (and `enabled` in api/_stripe.js), deploy.
+const EVENTS = {
+  "crunch-aloma": {
+    active: false, // ← EVENT-DAY SWITCH (client)
+    path: "/crunch/aloma",
+    gym: "CRUNCH FITNESS · WINTER PARK",
+    headline: "Your first month of WILCO Pro is on us.",
+    sub: "Full AI strength coaching, workout tracking, PRs, and weekly progress reports. 30 days free. Cancel anytime before the trial ends and you pay nothing.",
+    tier: "pro", billing: "monthly", trialDays: 30,
+  },
+};
+// Match the current URL to an event config (trailing slashes ignored).
+const eventFromPath = (pathname) => {
+  const clean = String(pathname||"").replace(/\/+$/,"") || "/";
+  const hit = Object.entries(EVENTS).find(([,e]) => e.path === clean);
+  return hit ? { source: hit[0], ...hit[1] } : null;
+};
+
+// ─── ADD TO HOME SCREEN (PWA install) ────────────────────────────────────────
+// Chrome/Android fires `beforeinstallprompt` early — capture it at module scope
+// (before React mounts) so a later single tap can trigger the native install.
+// iOS has no programmatic install; we show Share → Add to Home Screen steps.
+let deferredInstallPrompt = null;
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); deferredInstallPrompt = e; });
+  window.addEventListener("appinstalled", () => { deferredInstallPrompt = null; });
+}
+const isStandalone = () => {
+  try { return window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true; }
+  catch { return false; }
+};
+const isIOS = () => {
+  const ua = navigator.userAgent || "";
+  return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+};
+// Real Safari on iOS — NOT Chrome/Firefox/Edge on iOS and NOT an in-app webview
+// (Instagram/TikTok/etc.), where "Add to Home Screen" isn't available, so we'd
+// be showing instructions the user can't follow.
+const isIOSSafari = () => {
+  const ua = navigator.userAgent || "";
+  return isIOS() && /Safari\//.test(ua) && !/CriOS|FxiOS|EdgiOS|OPiOS|GSA|Instagram|FBAN|FBAV|Snapchat|musical_ly|BytedanceWebview/i.test(ua);
+};
+const INSTALL_DISMISS_KEY = "wilco_install_dismissed";
+const installDismissed = () => { try { return !!localStorage.getItem(INSTALL_DISMISS_KEY); } catch { return false; } };
+const rememberInstallDismissed = () => { try { localStorage.setItem(INSTALL_DISMISS_KEY, "1"); } catch {} };
+// Set when signup completes so AthleteView can auto-show the install prompt
+// exactly once, on that first post-signup screen only (never on normal loads).
+let JUST_SIGNED_UP = false;
+
 // ─── SUPABASE ────────────────────────────────────────────────────────────────
 const sbH = {"Content-Type":"application/json","apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`};
 const sbGet = async (table,params="") => {
@@ -1638,7 +1695,13 @@ export default function WilcoApp() {
 }
 
 function WilcoRoot() {
-  const [view,setView] = useState("home");
+  // Event landing pages (/crunch/aloma etc.): resolved ONCE from the boot URL.
+  // Active event → dedicated landing view; inactive/unknown → normal home screen
+  // (the URL is cleaned up so a reload doesn't resurface a dormant page).
+  const [eventCtx] = useState(()=>{
+    try { return eventFromPath(window.location.pathname); } catch { return null; }
+  });
+  const [view,setView] = useState(eventCtx?.active ? "event" : "home");
   const [athlete,setAthlete] = useState(null);
   const [coach,setCoach] = useState(null);
   const [err,setErr] = useState("");
@@ -1646,6 +1709,11 @@ function WilcoRoot() {
   // Install global error reporting once, on mount (before any early return so the
   // hook order stays stable). Captures uncaught errors + unhandled rejections.
   useEffect(()=>{ installErrorReporting(); installEngagementTracking(); },[]);
+  useEffect(()=>{
+    if(!eventCtx) return;
+    if(eventCtx.active) track("event_landing_view","billing",{source:eventCtx.source});
+    else { try { window.history.replaceState({}, "", "/"); } catch {} }
+  },[]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if(view==="athlete"&&athlete) return <AthleteView athlete={athlete} onLogout={()=>{setAthlete(null);setView("home");}}/>;
   if(view==="coach"&&coach) return <Suspense fallback={<div style={{minHeight:"100vh",background:C.navy}}/>}><CoachDashboard coach={coach} onLogout={()=>{setCoach(null);setView("home");}}/></Suspense>;
@@ -1659,7 +1727,9 @@ function WilcoRoot() {
           <div style={{color:C.muted,fontSize:12,letterSpacing:4,marginTop:4}}>COACH JOE-BOT</div>
         </div>
         {view==="home"      && <HomeScreen setView={setView} setAthlete={setAthlete} setCoach={setCoach}/>}
+        {view==="event"     && <EventLanding event={eventCtx} onStart={()=>{ try { window.history.replaceState({}, "", "/"); } catch {} setView("eventSignup"); }} onLogin={()=>{ try { window.history.replaceState({}, "", "/"); } catch {} setView("login"); }}/>}
         {view==="signup"    && <SignupScreen setView={setView} setAthlete={setAthlete} setErr={setErr} err={err}/>}
+        {view==="eventSignup" && <SignupScreen setView={setView} setAthlete={setAthlete} setErr={setErr} err={err} eventCtx={eventCtx}/>}
         {view==="login"     && <LoginScreen setView={setView} setAthlete={setAthlete} setErr={setErr} err={err}/>}
         {view==="coachLogin"&& <CoachLoginScreen setView={setView} setCoach={setCoach} setErr={setErr} err={err}/>}
         {view==="coachSetup"&& <CoachSetupScreen setView={setView} setCoach={setCoach} setErr={setErr} err={err}/>}
@@ -1706,12 +1776,108 @@ function HomeScreen({setView,setAthlete,setCoach}) {
   );
 }
 
+// ─── EVENT LANDING PAGE ───────────────────────────────────────────────────────
+// One job: the offer + one button into the event signup flow (tier/billing/trial
+// come from the EVENTS config; the visitor never types a code). Renders inside
+// WilcoRoot's branded shell, so the WILCO wordmark is already above this.
+function EventLanding({event, onStart, onLogin}) {
+  if(!event) return null;
+  return (
+    <div className="fade-up" style={{display:"flex",flexDirection:"column",gap:14}}>
+      <div style={{textAlign:"center",color:C.blue,fontSize:11,letterSpacing:3,fontFamily:"'Bebas Neue'"}}>{event.gym}</div>
+      <div style={{textAlign:"center",fontFamily:"'Bebas Neue'",fontSize:34,lineHeight:1.1,color:C.text,letterSpacing:1}}>{event.headline}</div>
+      <div style={{background:`${C.gold}15`,border:`1px solid ${C.gold}55`,borderRadius:12,padding:"14px 16px",textAlign:"center"}}>
+        <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:C.gold,letterSpacing:2}}>{event.trialDays} DAYS FREE</div>
+        <div style={{color:C.muted2,fontSize:12,marginTop:4}}>then {PRICE_LABEL[event.tier]?.[event.billing]||""} for WILCO {event.tier.toUpperCase()}. Cancel anytime.</div>
+      </div>
+      <div style={{color:C.muted2,fontSize:13,lineHeight:1.6,textAlign:"center"}}>{event.sub}</div>
+      <button onClick={onStart} style={btn(C.gold,"#000",{fontSize:16})}>Start My Free Month</button>
+      <div style={{color:C.muted,fontSize:11,textAlign:"center",lineHeight:1.6}}>
+        No charge today. Your card is only billed if you keep WILCO after the {event.trialDays}-day trial.
+      </div>
+      <button onClick={onLogin} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>Already have an account? Log in</button>
+    </div>
+  );
+}
+
+// ─── ADD TO HOME SCREEN PROMPT ────────────────────────────────────────────────
+// Shown automatically exactly once, right after signup completes (JUST_SIGNED_UP),
+// and afterwards only via Settings → "Install the app". Never shown when already
+// installed (standalone) — callers check that plus the persisted dismissal.
+// Android/Chrome: one tap fires the captured beforeinstallprompt. iOS Safari:
+// programmatic install doesn't exist, so we show the 3-step Share instructions.
+function InstallPrompt({manual, onClose}) {
+  const [installing,setInstalling] = useState(false);
+  const canNativeInstall = !!deferredInstallPrompt;
+  const showIOSSteps = !canNativeInstall && isIOSSafari();
+
+  const nativeInstall = async () => {
+    if(!deferredInstallPrompt||installing) return;
+    setInstalling(true);
+    try {
+      deferredInstallPrompt.prompt();
+      const choice = await deferredInstallPrompt.userChoice;
+      deferredInstallPrompt = null; // one-shot: Chrome invalidates it after prompt()
+      if(choice?.outcome==="accepted"){ onClose(); return; }
+    } catch(_){}
+    setInstalling(false);
+  };
+
+  const Step = ({n,children}) => (
+    <div style={{display:"flex",alignItems:"center",gap:12,background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px"}}>
+      <div style={{minWidth:26,height:26,borderRadius:"50%",background:`${C.gold}22`,border:`1px solid ${C.gold}66`,color:C.gold,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,fontWeight:700}}>{n}</div>
+      <div style={{color:C.text,fontSize:13,lineHeight:1.5}}>{children}</div>
+    </div>
+  );
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(3,8,20,0.88)",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:20}} onClick={onClose}>
+      <div className="fade-up" onClick={e=>e.stopPropagation()}
+        style={{width:"100%",maxWidth:380,background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:22}}>
+        <div style={{textAlign:"center",marginBottom:14}}>
+          <img src="/icon-192.png" alt="" width={56} height={56} style={{borderRadius:14,marginBottom:10}}/>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:24,color:C.gold,letterSpacing:2}}>PUT WILCO ON YOUR HOME SCREEN</div>
+          <div style={{color:C.muted2,fontSize:13,lineHeight:1.6,marginTop:6}}>
+            WILCO isn't in the App Store. Install it from here and it opens full screen like a normal app, right next to the rest of your apps.
+          </div>
+        </div>
+
+        {canNativeInstall && (
+          <button onClick={nativeInstall} disabled={installing} style={btn(C.gold,"#000",{opacity:installing?0.7:1})}>
+            {installing?"Installing...":"Add to Home Screen"}
+          </button>
+        )}
+
+        {showIOSSteps && (
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            <Step n={1}>Tap the <b style={{color:C.gold}}>Share</b> button <span style={{color:C.gold}}>(the square with the arrow, bottom of Safari)</span></Step>
+            <Step n={2}>Scroll down and tap <b style={{color:C.gold}}>Add to Home Screen</b></Step>
+            <Step n={3}>Tap <b style={{color:C.gold}}>Add</b> in the top corner</Step>
+          </div>
+        )}
+
+        {!canNativeInstall && !showIOSSteps && (
+          <div style={{color:C.muted2,fontSize:13,lineHeight:1.6,textAlign:"center",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px"}}>
+            {isIOS()
+              ? <>Open <b style={{color:C.gold}}>app.trainwilco.com</b> in <b style={{color:C.gold}}>Safari</b> to install. In-app browsers can't add to your home screen.</>
+              : <>Open <b style={{color:C.gold}}>app.trainwilco.com</b> on your phone to install it there.</>}
+          </div>
+        )}
+
+        <button onClick={onClose} style={{width:"100%",background:"none",border:"none",color:C.muted,fontSize:13,cursor:"pointer",marginTop:14}}>
+          {manual?"Close":"Maybe later"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── STRIPE PAYMENT ─────────────────────────────────────────────────────────
 // Required pre-purchase disclosures (T&C compliance + Stripe). Rendered ABOVE the
 // confirm button. Branches on the standard 7-day-trial path vs the gift-code path.
-function PaymentDisclosures({tier, billing, giftApplied}) {
+function PaymentDisclosures({tier, billing, giftApplied, trialDays=7}) {
   const priceLabel = PRICE_LABEL[tier]?.[billing] || "";
-  const trialChargeDate = fmtDate(Date.now() + 7*24*60*60*1000);
+  const trialChargeDate = fmtDate(Date.now() + trialDays*24*60*60*1000);
   const giftMonthlyChargeDate = (()=>{ const d=new Date(); d.setMonth(d.getMonth()+1); return fmtDate(d); })();
   const giftAnnualRenewDate  = (()=>{ const d=new Date(); d.setFullYear(d.getFullYear()+1); return fmtDate(d); })();
   const renewWord = billing==="annual" ? "year" : "month";
@@ -1723,7 +1889,7 @@ function PaymentDisclosures({tier, billing, giftApplied}) {
       </div>
       {!giftApplied ? (
         <div style={{color:C.muted2,fontSize:12,lineHeight:1.6}}>
-          Your 7-day free trial starts today. You will be charged <b style={{color:C.text}}>{priceLabel}</b> on <b style={{color:C.text}}>{trialChargeDate}</b> unless you cancel before then.
+          Your {trialDays}-day free trial starts today. You will be charged <b style={{color:C.text}}>{priceLabel}</b> on <b style={{color:C.text}}>{trialChargeDate}</b> unless you cancel before then.
         </div>
       ) : (
         <div style={{color:C.muted2,fontSize:12,lineHeight:1.6}}>
@@ -1781,7 +1947,7 @@ function PayForm({confirmMode, payLabel, onSuccess}) {
 
 // Payment step: creates the subscription server-side (to get a client secret), shows
 // disclosures + an optional gift-code field, then mounts Stripe Elements.
-function PaymentStep({athleteId, pin, tier, billing, onSuccess}) {
+function PaymentStep({athleteId, pin, tier, billing, eventCtx, onSuccess}) {
   const [clientSecret,setClientSecret] = useState(null);
   const [confirmMode,setConfirmMode] = useState("setup");
   const [initializing,setInitializing] = useState(true);
@@ -1798,6 +1964,10 @@ function PaymentStep({athleteId, pin, tier, billing, onSuccess}) {
   const [giftChecking,setGiftChecking] = useState(false);
 
   const isPro = tier==="pro";
+  // Event signups get the event's longer trial; the server re-derives this from
+  // its own config, so the value here is display-only. Gift codes don't combine
+  // with event offers, so the gift field is hidden on the event path.
+  const trialDays = eventCtx?.trialDays || 7;
 
   // Create (or recreate, when the gift changes) the subscription to get a secret.
   useEffect(()=>{
@@ -1807,7 +1977,7 @@ function PaymentStep({athleteId, pin, tier, billing, onSuccess}) {
       try {
         const r = await fetch("/api/create-subscription",{
           method:"POST",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({athleteId,pin,tier,billing,giftCode:appliedGift||undefined})
+          body:JSON.stringify({athleteId,pin,tier,billing,giftCode:appliedGift||undefined,eventSource:eventCtx?.source||undefined})
         });
         const j = await r.json();
         if(cancelled) return;
@@ -1856,7 +2026,7 @@ function PaymentStep({athleteId, pin, tier, billing, onSuccess}) {
 
   const payLabel = appliedGift
     ? (billing==="annual" ? "Pay $135.01 →" : "Start First Month Free →")
-    : "Start 7-Day Free Trial →";
+    : `Start ${trialDays}-Day Free Trial →`;
 
   return (
     <div className="fade-up">
@@ -1864,10 +2034,10 @@ function PaymentStep({athleteId, pin, tier, billing, onSuccess}) {
         {appliedGift ? "Confirm your payment details to activate Pro." : "Add a card to start your free trial. You won't be charged until it ends — cancel anytime."}
       </div>
 
-      <PaymentDisclosures tier={tier} billing={billing} giftApplied={!!appliedGift}/>
+      <PaymentDisclosures tier={tier} billing={billing} giftApplied={!!appliedGift} trialDays={trialDays}/>
 
-      {/* Gift code — Pro only */}
-      {isPro && (
+      {/* Gift code — Pro only, never on the event path (offers don't stack) */}
+      {isPro && !eventCtx && (
         <div style={{marginBottom:14}}>
           {!appliedGift ? (
             <>
@@ -1920,9 +2090,13 @@ function PaymentStep({athleteId, pin, tier, billing, onSuccess}) {
 }
 
 // ─── ATHLETE SIGNUP ───────────────────────────────────────────────────────────
-function SignupScreen({setView,setAthlete,setErr,err}) {
+// eventCtx (optional): the athlete arrived via an event landing page (QR at a gym
+// table). Locks the plan to the event's tier/billing, skips plan selection, and
+// sends the source through to create-athlete + create-subscription so the server
+// can attribute the signup and grant the event trial.
+function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
   const [step,setStep] = useState(1);
-  const [data,setData] = useState({name:"",sport:SPORTS[0],level:"self",pin:"",confirmPin:"",email:"",goal:"strength",coachCode:"",coachName:"",coachEmail:"",tier:"free",billing:"monthly",birthday:"",heightFt:"",heightIn:"0",weight:"",gender:"",trainingDays:4,equipment:[],positionOrEvent:"",injuryHistory:"",graduationYear:""});
+  const [data,setData] = useState({name:"",sport:SPORTS[0],level:"self",pin:"",confirmPin:"",email:"",goal:"strength",coachCode:"",coachName:"",coachEmail:"",tier:eventCtx?eventCtx.tier:"free",billing:eventCtx?eventCtx.billing:"monthly",birthday:"",heightFt:"",heightIn:"0",weight:"",gender:"",trainingDays:4,equipment:[],positionOrEvent:"",injuryHistory:"",graduationYear:""});
   const [loading,setLoading] = useState(false);
   const [athleteRow,setAthleteRow] = useState(null); // created athlete (exists before payment)
   const [showConsent,setShowConsent] = useState(false); // T&C + Privacy consent overlay
@@ -1940,7 +2114,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
   // the "STEP X OF Y" header and the back/next navigation (so skipped steps stay
   // hidden and the count stays contiguous). Step 13 (recruiting) was removed.
   const visibleSteps = [1,2,3, ...(competitive?[4]:[]), 5,6,7,8,9, ...(competitive?[10]:[]), 11, ...(student?[12]:[]),
-    ...(data.isSchool ? [] : [14, ...(isPaidTier?[15]:[])])];
+    ...(data.isSchool ? [] : eventCtx ? [15] : [14, ...(isPaidTier?[15]:[])])]; // event flow: plan is fixed, skip selection
   const lastDataStep = student ? 12 : 11;   // final profile question before consent
   const prevStep = () => { const i=visibleSteps.indexOf(step); return i>0 ? visibleSteps[i-1] : null; };
 
@@ -1956,6 +2130,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
     try {
       const r = await idApi("create-athlete",{
         pin:data.pin, isSchool:data.isSchool, schoolPriceId:SCHOOL_PRICE_ID,
+        signupSource:eventCtx?.source,
         athlete:{
           name:data.name.trim(), sport:data.sport, billing:data.billing,
           email:data.email.trim().toLowerCase(),
@@ -2016,7 +2191,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
         return;
       }
       setLoading(false);
-      setStep(14); // plan selection
+      setStep(eventCtx?15:14); // event flow: plan is fixed → straight to payment
     } catch(e){ setShowConsent(false); setErr("Connection error."); setLoading(false); }
   };
 
@@ -2036,7 +2211,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
         catch(e){ setErr("Connection error."); setLoading(false); }
         return;
       }
-      setStep(14);
+      setStep(eventCtx?15:14);
       return;
     }
     setShowConsent(true); // ConsentFlow → completeSignup() handles creation
@@ -2060,6 +2235,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
       }).catch(()=>{});
     }
     setAthlete({...athleteForApp,tier:finalTier,goal:data.goal||"strength"});
+    JUST_SIGNED_UP = true; // AthleteView auto-shows the install prompt once, on this entry only
     setView("athlete");
   };
 
@@ -2453,6 +2629,7 @@ function SignupScreen({setView,setAthlete,setErr,err}) {
           pin={data.pin}
           tier={data.tier}
           billing={data.billing}
+          eventCtx={eventCtx}
           onSuccess={()=>finishOnboarding(data.tier, athleteRow)}
         />
       )}
@@ -2911,6 +3088,22 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const isMobile = useIsMobile();
   const chatStorageKey = `wilco_chat_${athlete.id}_${new Date().toLocaleDateString()}`;
   useEffect(()=>{ track("chat_opened","ai"); },[]); // athlete's main surface is the chat
+
+  // Add-to-Home-Screen: auto-show ONCE on the post-signup entry (never on normal
+  // loads), and only if not already installed, not previously dismissed, and this
+  // platform actually has an install path. "manual" comes from Settings and
+  // ignores the dismissal (that's the point of the persistent entry).
+  const [showInstall,setShowInstall] = useState(null); // null | "auto" | "manual"
+  useEffect(()=>{
+    if(!JUST_SIGNED_UP) return;
+    JUST_SIGNED_UP = false;
+    if(isStandalone()||installDismissed()) return;
+    if(deferredInstallPrompt||isIOSSafari()) setShowInstall("auto");
+  },[]);
+  const closeInstall = () => {
+    if(showInstall==="auto") rememberInstallDismissed();
+    setShowInstall(null);
+  };
 
   const saveAthleteProgram = async () => {
     if(athleteProgramSaving) return;
@@ -3760,8 +3953,12 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           onCoachUpdate={(updates)=>setAthlete(prev=>({...prev,...updates}))}
           onProofRefresh={(d)=>setProofDigest(d)}
           onLogout={onLogout}
+          onInstallApp={()=>{setShowSettings(false);setShowInstall("manual");}}
         />
       )}
+
+      {/* Add-to-Home-Screen prompt (post-signup auto, or manual from Settings) */}
+      {showInstall&&<InstallPrompt manual={showInstall==="manual"} onClose={closeInstall}/>}
 
       {/* Progress Modal */}
       {showProgress&&(
@@ -4722,7 +4919,7 @@ function ProfileCompletionModal({athlete, onClose, onSave}) {
 }
 
 // ─── SETTINGS MODAL ───────────────────────────────────────────────────────────
-function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogout}) {
+function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogout, onInstallApp}) {
   const [coachName,setCoachName] = useState(athlete.coach_name||"");
   const [coachEmail,setCoachEmail] = useState(athlete.coach_email||"");
   const [weightUnit,setWeightUnit] = useState(athlete.weight_unit||"lbs");
@@ -5168,6 +5365,14 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
                 : "Cancel anytime. You keep access until the end of your billing period; no further charges."}
             </div>
           </div>
+        )}
+
+        {/* Install app — the persistent entry point for users who dismissed the
+            post-signup prompt. Hidden once the app is already on the home screen. */}
+        {onInstallApp&&!isStandalone()&&(
+          <button onClick={onInstallApp} style={btn("transparent",C.gold,{border:`1px solid ${C.gold}55`,fontSize:13,padding:"10px",letterSpacing:1,marginBottom:10})}>
+            Install the App on Your Phone
+          </button>
         )}
 
         {onLogout&&(

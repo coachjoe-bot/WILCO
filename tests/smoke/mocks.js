@@ -162,6 +162,15 @@ export async function mockApi(page, options = {}) {
         return route.fulfill(json({ athlete, token: "smoketest-session-token" }));
       case "check-athlete-name":
         return route.fulfill(json({ exists: false }));
+      case "create-athlete": {
+        // Real endpoint: hashes the PIN server-side and forces tier; returns the
+        // created row (merged over the caller's profile fields) + a session token.
+        const created = makeAthlete({
+          ...body.athlete,
+          tier: body.isSchool ? "school" : "free",
+        });
+        return route.fulfill(json({ athlete: created, token: "smoketest-session-token" }));
+      }
       case "log-error":
       case "log-events": // fire-and-forget ingestion always answers 200 { ok:true }
         return route.fulfill(json({ ok: true }));

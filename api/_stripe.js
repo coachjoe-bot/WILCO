@@ -63,6 +63,26 @@ export function tierForPrice(priceId) {
 // Gift coupon — same ID in live and test (we set the id explicitly when mirroring).
 export const GIFT_COUPON_ID = process.env.STRIPE_GIFT_COUPON_ID || "WILCO_GIFT_PRO_MONTH";
 
+// ── In-person event signups (tabling at gyms) ────────────────────────────────
+// Server-side source of truth for event offers. A signup that arrives with a
+// valid, ENABLED eventSource gets that event's longer trial instead of the
+// standard 7 days; the source is stamped on the Stripe subscription metadata and
+// the athlete row for per-location attribution. The client mirrors this config
+// for the landing pages (src/App.jsx EVENTS) but can never grant itself the
+// longer trial — only this map decides.
+//
+// EVENT DAY: flip `enabled` to true here (and `active` in src/App.jsx EVENTS),
+// then deploy. Disabled events reject checkout outright so a leaked/early-scanned
+// QR link can't redeem the offer before the event.
+export const EVENT_SOURCES = {
+  "crunch-aloma": {
+    enabled: false, // ← EVENT-DAY SWITCH (server)
+    label: "Crunch Fitness — Winter Park (Aloma)",
+    trialDays: 30,
+    tier: "pro", // the only tier this offer sells
+  },
+};
+
 // ── Gift code generation ─────────────────────────────────────────────────────
 // Branded, human-readable, unambiguous (no 0/O/1/I/L). Caller checks uniqueness
 // against Stripe before creating and regenerates on collision.

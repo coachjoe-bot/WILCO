@@ -17,6 +17,7 @@ import {
   sbSelect, sbWrite, rateLimit, rateLimitReset, verifyPin, hashPin,
   authCaller, mintSessionToken, logError, logEvents,
 } from "./_supa.js";
+import { EVENT_SOURCES } from "./_stripe.js";
 
 const enc = encodeURIComponent;
 
@@ -185,6 +186,13 @@ async function createAthleteAction(req, res, body) {
   for (const k of ATHLETE_FIELDS) if (a[k] !== undefined) row[k] = a[k];
   row.tier = body.isSchool ? "school" : "free"; // never set from the client's tier
   if (body.isSchool && body.schoolPriceId) row.stripe_price_id = str(body.schoolPriceId, { max: 120, name: "price" });
+  // Event attribution (QR → landing → signup). Validated against the server-side
+  // event config, never stored free-form. Recorded even while the event is still
+  // disabled (attribution shouldn't be losable); the longer trial itself is gated
+  // separately in create-subscription.
+  if (body.signupSource && Object.prototype.hasOwnProperty.call(EVENT_SOURCES, String(body.signupSource))) {
+    row.signup_source = String(body.signupSource);
+  }
 
   const created = await sbWrite({ method: "POST", table: "athletes", body: row });
   const athlete = Array.isArray(created) ? created[0] : created;

@@ -16,6 +16,7 @@ import {
   epochToISO,
   subPeriodEnd,
   STRIPE_MODE,
+  EVENT_SOURCES,
 } from "./_stripe.js";
 import { logError } from "./_supa.js";
 
@@ -23,7 +24,7 @@ export default async function handler(req, res) {
   if (applyCors(req, res)) return;
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { athleteId, pin, tier, billing, giftCode } = req.body || {};
+  const { athleteId, pin, tier, billing, giftCode, eventSource } = req.body || {};
   let athlete = null; // hoisted so the catch can attribute (only if verified)
 
   try {
@@ -31,6 +32,29 @@ export default async function handler(req, res) {
 
     if (tier !== "pro" && tier !== "elite") {
       return res.status(400).json({ error: "Choose a Pro or Elite plan to continue." });
+    }
+
+    // Event signups (QR → landing page): the server decides the trial length from
+    // EVENT_SOURCES — the client only names the source. Unknown sources are a hard
+    // error; a known-but-disabled one means someone reached checkout before the
+    // event went live, so refuse rather than silently downgrading their offer.
+    let event = null;
+    if (eventSource !== undefined && eventSource !== null && eventSource !== "") {
+      // hasOwnProperty guard: a crafted source like "__proto__" must not walk the
+      // prototype chain into a truthy non-config object.
+      event = Object.prototype.hasOwnProperty.call(EVENT_SOURCES, String(eventSource))
+        ? EVENT_SOURCES[String(eventSource)]
+        : null;
+      if (!event) return res.status(400).json({ error: "Unknown signup source." });
+      if (!event.enabled) {
+        return res.status(403).json({ error: "This offer isn't live yet. Come see us at the event!" });
+      }
+      if (tier !== event.tier) {
+        return res.status(400).json({ error: "This offer is for the Pro plan." });
+      }
+      if (giftCode && giftCode.trim()) {
+        return res.status(400).json({ error: "Gift codes can't be combined with this offer." });
+      }
     }
     const interval = billing === "annual" ? "annual" : "monthly";
     const priceId = priceFor(tier, interval);
@@ -69,7 +93,10 @@ export default async function handler(req, res) {
       const customer = await stripe.customers.create({
         email: athlete.email || undefined,
         name: athlete.name || undefined,
-        metadata: { athlete_id: String(athlete.id) },
+        metadata: {
+          athlete_id: String(athlete.id),
+          ...(event ? { signup_source: String(eventSource) } : {}),
+        },
       });
       customerId = customer.id;
       await sbAthletePatch(athlete.id, { stripe_customer_id: customerId });
@@ -102,12 +129,20 @@ export default async function handler(req, res) {
       payment_behavior: "default_incomplete",
       payment_settings: { save_default_payment_method: "on_subscription" },
       expand: ["latest_invoice.payment_intent", "pending_setup_intent"],
-      metadata: { athlete_id: String(athlete.id), tier, billing: interval },
+      metadata: {
+        athlete_id: String(athlete.id),
+        tier,
+        billing: interval,
+        ...(event ? { signup_source: String(eventSource) } : {}),
+      },
     };
     if (giftApplied) {
       params.discounts = [{ promotion_code: promotionCodeId }]; // free month replaces the trial
     } else {
-      params.trial_period_days = 7;
+      // Event signups get the event's longer trial (e.g. 30 days at a gym table);
+      // everyone else keeps the standard 7. Card is saved either way and auto-charges
+      // at trial end; no card by then → the subscription cancels itself.
+      params.trial_period_days = event ? event.trialDays : 7;
       params.trial_settings = { end_behavior: { missing_payment_method: "cancel" } };
     }
 
