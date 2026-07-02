@@ -1155,8 +1155,32 @@ const bwTierFactor = (bodyweight, genderKey) => {
   if(!bodyweight || bodyweight<=0) return 1;
   return Math.min(1.2, Math.max(0.85, Math.pow(ref / bodyweight, BW_SCALE_EXP)));
 };
-const scaledThresholds = (threshRaw, bodyweight, genderKey, isUnder18) => {
-  const f = bwTierFactor(bodyweight, genderKey) * (isUnder18 ? 0.85 : 1);
+
+// Age-fair thresholds. Continuous multiplier on the cut-lines, anchored to the
+// inverse of the coefficients sanctioned meets score with (Foster for juniors
+// under 23, McCulloch for masters 40+): prime = 23–40 at 1.0, teens ramp up to
+// it, masters ease down from it. Piecewise-linear between anchors, clamped at
+// the ends; unknown age ranks as prime.
+const AGE_TIER_ANCHORS = [
+  [13,0.78],[14,0.81],[16,0.88],[18,0.94],[20,0.97],[23,1.0],
+  [40,1.0],[45,0.96],[50,0.92],[55,0.86],[60,0.79],[65,0.74],
+  [70,0.68],[75,0.62],[80,0.56],[85,0.51],[90,0.46],
+];
+const ageTierFactor = (age) => {
+  if(age==null || !(age>0)) return 1;
+  const a = AGE_TIER_ANCHORS;
+  if(age<=a[0][0]) return a[0][1];
+  if(age>=a[a.length-1][0]) return a[a.length-1][1];
+  for(let i=1;i<a.length;i++){
+    if(age<=a[i][0]){
+      const [x0,y0]=a[i-1], [x1,y1]=a[i];
+      return y0 + (y1-y0)*(age-x0)/(x1-x0);
+    }
+  }
+  return 1;
+};
+const scaledThresholds = (threshRaw, bodyweight, genderKey, age) => {
+  const f = bwTierFactor(bodyweight, genderKey) * ageTierFactor(age);
   return threshRaw.map(t => t * f);
 };
 
@@ -4405,7 +4429,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   const age = athlete.birthday
     ? Math.floor((Date.now()-new Date(athlete.birthday))/(365.25*24*60*60*1000))
     : (athlete.age||null);
-  const isUnder18 = age!==null && age<18;
+  const ageFactor = ageTierFactor(age);
 
   // Build best estimated 1RM per exercise from workout history (uses every logged set,
   // including variable weight/rep sets captured via set_details)
@@ -4445,7 +4469,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
     if(!benchKey) return null;
     const threshRaw=BENCH_THRESHOLDS[genderKey]?.[benchKey];
     if(!threshRaw) return null;
-    const thresh = scaledThresholds(threshRaw, bodyweight, genderKey, isUnder18);
+    const thresh = scaledThresholds(threshRaw, bodyweight, genderKey, age);
     return {key:k,name:ex.name,e1rm:ex.e1rm,benchKey,thresh,actual:!!ex.actual};
   }).filter(Boolean);
 
@@ -4598,9 +4622,14 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
               </div>
             )}
 
-            {isUnder18&&(
+            {ageFactor!==1&&(
               <div style={{background:`${C.blue}12`,border:`1px solid ${C.blue}30`,borderRadius:8,padding:"8px 12px",marginBottom:12,color:C.muted2,fontSize:11,lineHeight:1.5}}>
-                Age-adjusted thresholds applied (−15% for under-18).
+                Age-adjusted standards applied (−{Math.round((1-ageFactor)*100)}% for age {age}).
+              </div>
+            )}
+            {age===null&&bodyweight&&(
+              <div style={{background:`${C.blue}12`,border:`1px solid ${C.blue}30`,borderRadius:8,padding:"8px 12px",marginBottom:12,color:C.muted2,fontSize:11,lineHeight:1.5}}>
+                Add your birthday in Settings for age-adjusted ranks.
               </div>
             )}
 
@@ -4753,14 +4782,14 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
       {/* Top Rank — what the ranks mean (× bodyweight, squat as the example) */}
       {showRankInfo&&(()=>{
         const sqBase = BENCH_THRESHOLDS[genderKey]?.["back squat"] || BENCH_THRESHOLDS.male["back squat"];
-        const sq = scaledThresholds(sqBase, bodyweight, genderKey, isUnder18);
+        const sq = scaledThresholds(sqBase, bodyweight, genderKey, age);
         const fx = (v) => (Math.round(v*100)/100).toString();
         const rangeFor = (i) => i===0 ? `<${fx(sq[0])}×` : i===TIER_NAMES.length-1 ? `${fx(sq[i-1])}×+` : `${fx(sq[i-1])}×`;
         return (
         <div onClick={()=>setShowRankInfo(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.82)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:600,padding:24}}>
           <div onClick={e=>e.stopPropagation()} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:"20px 22px",maxWidth:360,width:"100%"}}>
             <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:C.gold,letterSpacing:1,marginBottom:4}}>THE RANKS</div>
-            <div style={{color:C.muted2,fontSize:12,lineHeight:1.5,marginBottom:14}}>How strong is the lift, as a multiple of your bodyweight — squat shown, tuned to your bodyweight{bodyweight?"":" (add your weight for exact numbers)"}. Every lift scales to its own standard.</div>
+            <div style={{color:C.muted2,fontSize:12,lineHeight:1.5,marginBottom:14}}>How strong is the lift, as a multiple of your bodyweight — squat shown, tuned to your bodyweight and age{bodyweight?"":" (add your weight for exact numbers)"}. Every lift scales to its own standard.</div>
             <div style={{display:"flex",flexDirection:"column",gap:7,marginBottom:14}}>
               {TIER_NAMES.map((t,ti)=>ti).reverse().map(ti=>(
                 <div key={ti} style={{display:"flex",alignItems:"baseline",gap:8}}>
