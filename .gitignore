@@ -6,3 +6,7 @@
 node_modules
 *.bak
 dist
+
+# Playwright
+test-results
+playwright-report

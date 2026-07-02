@@ -1,0 +1,55 @@
+# Smoke tests (pre-deploy gate)
+
+A Playwright suite that answers one question before you push: **does the app boot and do the core flows still work?** Run it before every deploy.
+
+## Run it
+
+```bash
+npm run test:smoke
+```
+
+That's it. Playwright starts its own `vite dev` on port **5175** (dedicated — never collides with the 5174 preview server), runs chromium headless, and shuts down. First-time setup on a new machine: `npm install && npx playwright install chromium`.
+
+Useful variants:
+
+```bash
+npx playwright test --headed          # watch it run
+npx playwright test tests/smoke/checkout.spec.js   # one spec
+npx playwright show-trace test-results/**/trace.zip # debug a failure
+```
+
+## What's covered
+
+| Spec | Asserts |
+|---|---|
+| `boot.spec.js` | App boots to the home/login screen, zero console errors |
+| `login.spec.js` | Athlete login lands on the Coach Joe-Bot chat; wrong PIN shows the error |
+| `log-workout.spec.js` | Typing a workout sentence gets a coach reply, the ✓ saved badge, and a real `workouts` insert through the data gateway |
+| `chat.spec.js` | A chat question round-trips through the Claude proxy and renders the reply |
+| `checkout.spec.js` | Settings → PRO → Subscribe reaches the payment step's loading state; with `js.stripe.com` blocked (ad-blocker simulation) the visible failure message + working Retry button appear, and the `StripeLoadCheckoutBlocked` error is reported (the b3901c9 fix) |
+
+## IMPORTANT: everything is mocked
+
+Under `vite dev` the `/api/*` Vercel functions **do not exist**, so the suite intercepts them with route fixtures in `tests/smoke/mocks.js` that mimic the real response shapes (`/api/identity` login/session-token payloads, `/api/data` gateway ops, `/api/claude` Anthropic message shape, `/api/create-subscription` clientSecret). These tests verify the **client**: boot, auth plumbing, chat/log UI, checkout surface. They do NOT verify the serverless functions, Supabase RLS, or real Stripe checkout — true e2e against prod checkout is out of scope. A green run means "the frontend isn't broken," not "the backend works."
+
+If you change an API response shape in `api/*.js`, update the matching mock in `tests/smoke/mocks.js` or the suite will keep testing yesterday's contract.
+
+## Adding a spec
+
+1. Create `tests/smoke/<name>.spec.js`.
+2. Start with the shared fixtures:
+
+```js
+import { test, expect } from "@playwright/test";
+import { mockApi, makeAthlete, loginAsAthlete } from "./mocks.js";
+
+test("my new flow", async ({ page }) => {
+  const athlete = makeAthlete({ tier: "free" });        // override any field
+  const { calls } = await mockApi(page, { athlete });   // calls = every /api/* request body
+  await loginAsAthlete(page, athlete);
+  // drive the UI with role/text/placeholder selectors — App.jsx has no test ids
+});
+```
+
+3. Prefer role/text selectors (`getByRole`, `getByText`, `getByPlaceholder`) — do not add test ids to App.jsx for a smoke test.
+4. Keep it deterministic: no real network, no sleeps, assert on visible UI or on `calls`. The gate runs with 0 retries on purpose — a flaky spec is a broken spec.
