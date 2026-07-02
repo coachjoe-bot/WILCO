@@ -157,7 +157,7 @@ function buildPinEmail({ displayName, pin, type }) {
         Keep this somewhere safe. If you didn't request this reset, contact us right away — your PIN was just changed.
       </p>
       <p style="color:#888;font-size:13px;line-height:1.6;margin:0">
-        Questions? Email us at <a href="mailto:joe.thomas@commandengineering.com" style="color:#d4a017">joe.thomas@commandengineering.com</a>.
+        Questions? Email us at <a href="mailto:support@trainwilco.com" style="color:#d4a017">support@trainwilco.com</a>.
       </p>
     </div>
 

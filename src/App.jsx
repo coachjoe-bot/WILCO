@@ -976,7 +976,7 @@ RESERVED (only when situation genuinely matches):
 FORMATTING: Use numbered lists for exercises/alternatives/steps. Never paragraph format for exercise lists.
 Keep under 200 words. Use their name once naturally.
 Pain → suggest alternatives. Equipment unavailable → 2-3 specific alternatives.
-Out of scope: "That's one for Coach Joe directly -- email joe.thomas@commandengineering.com."
+Out of scope: "That's one for Coach Joe directly -- email support@trainwilco.com."
 
 UNUSUAL TRAINING CONDITIONS (travel, cruise, hotel, beach, limited equipment, injury layoff, etc.):
 - If athlete mentions they'll be away or have limited access but HASN'T described what's available yet: ask 2-3 direct questions — what equipment is on hand, how much space they have, how long the situation lasts. Do not give a program yet.
@@ -5286,7 +5286,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
           )}
           {currentTier==="elite"&&!planChanged&&(
             <div style={{marginTop:8,color:C.muted2,fontSize:11,lineHeight:1.5,textAlign:"center"}}>
-              A WILCO Certified Coach will be in touch within 24 hrs. Email joe.thomas@commandengineering.com with any questions.
+              A WILCO Certified Coach will be in touch within 24 hrs. Email support@trainwilco.com with any questions.
             </div>
           )}
           </>
