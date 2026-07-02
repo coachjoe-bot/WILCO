@@ -4176,8 +4176,8 @@ const QL_EDIT_SYS = `You revise a prefilled workout-log draft per an athlete's i
 
 Rules:
 - Apply the instruction; keep everything else in the draft unchanged.
-- Return ONLY the revised log (day label + exercises). NEVER include the worksheet notes or any "===" separator in your output.
-- If the instruction names a different program day ("I did day 2"), rebuild the whole draft for that day using the program and the same weight rules (program weight, else % x 1RM rounded to 5 lbs, else last time, else a "___" fill-in blank — never a guessed number).
+- If the instruction names a DIFFERENT program day ("I did day 2"), rebuild BOTH sections for that day and output them in the draft format: the worksheet (day pick + per-exercise sourcing), then a line containing only "===", then the log — same weight rules (program weight, else % x 1RM rounded to 5 lbs, else last time, else a "___" fill-in blank — never a guessed number). This is the ONLY case where you output a worksheet.
+- For every other instruction (weight tweaks, sets/reps changes, adding or removing exercises), output ONLY the revised log — no worksheet, no "===".
 - If the draft is empty and the instruction describes what they did, write the draft from it.
 - Same format: first line = day label, blank line, one exercise per line ("Name SETSxREPS @ WEIGHT").
 - If the instruction is NOT about editing this draft (a coaching question, chit-chat), return the current draft EXACTLY unchanged.
@@ -4186,7 +4186,8 @@ Rules:
 function QuickLogSheet({athlete, workoutHistory, onClose, onAddProgram, onSend}) {
   const hasProgram = !!(athlete.temp_program_text||athlete.program_text);
   const [draft,setDraft] = useState("");
-  const [notes,setNotes] = useState(""); // Joe's worksheet — read-only reference, never sent, never AI-edited
+  const [notes,setNotes] = useState(""); // Joe's worksheet — read-only reference, never sent; AI-rebuilt ONLY on a day change
+  const [showEditHelp,setShowEditHelp] = useState(false);
   const [phase,setPhase] = useState(hasProgram?"loading":"noprogram"); // loading|ready|rest|error|noprogram
   const [instruction,setInstruction] = useState("");
   const [editBusy,setEditBusy] = useState(false);
@@ -4226,15 +4227,18 @@ function QuickLogSheet({athlete, workoutHistory, onClose, onAddProgram, onSend})
     try{
       const ctx = ctxRef.current || buildQuickLogContext(athlete, workoutHistory, []);
       const revised = await askClaude(QL_EDIT_SYS,
-        `Today is ${todayStr()}.\n\n${ctxBlock(ctx)}\n\nJOE'S WORKSHEET (reference only — do NOT include in output):\n${notes||"(none)"}\n\nCURRENT DRAFT:\n${draft.trim()||"(empty)"}\n\nATHLETE'S INSTRUCTION:\n${ins}`,
-        500, [], "claude-sonnet-5", "quick_log_edit");
+        `Today is ${todayStr()}.\n\n${ctxBlock(ctx)}\n\nCURRENT WORKSHEET:\n${notes||"(none)"}\n\nCURRENT DRAFT:\n${draft.trim()||"(empty)"}\n\nATHLETE'S INSTRUCTION:\n${ins}`,
+        800, [], "claude-sonnet-5", "quick_log_edit");
       let t = (revised||"").trim();
-      // Belt-and-braces: if the model returned a worksheet anyway, keep only the log.
+      // A two-section reply means the day changed and the worksheet was rebuilt
+      // to match; a plain reply is a log-only tweak (worksheet stays put).
+      let newNotes = null;
       const rparts = t.split(/\n\s*={3,}\s*\n/);
-      if(rparts.length>=2) t = rparts[rparts.length-1].trim();
-      if(t && t!==draft.trim()){
-        setUndoStack(prev=>[...prev,draft]);
+      if(rparts.length>=2){ newNotes = rparts[0].trim(); t = rparts.slice(1).join("\n").trim(); }
+      if(t && (t!==draft.trim() || (newNotes!==null && newNotes!==notes))){
+        setUndoStack(prev=>[...prev,{draft,notes}]);
         setDraft(t);
+        if(newNotes!==null) setNotes(newNotes);
         setPhase("ready");
       }
       setInstruction("");
@@ -4245,7 +4249,9 @@ function QuickLogSheet({athlete, workoutHistory, onClose, onAddProgram, onSend})
   const undo = () => {
     setUndoStack(prev=>{
       if(!prev.length) return prev;
-      setDraft(prev[prev.length-1]);
+      const last = prev[prev.length-1];
+      setDraft(last.draft);
+      setNotes(last.notes);
       return prev.slice(0,-1);
     });
   };
@@ -4293,7 +4299,6 @@ function QuickLogSheet({athlete, workoutHistory, onClose, onAddProgram, onSend})
           )}
           {notes&&phase==="ready"&&(
             <div style={{flexShrink:0,maxHeight:"30%",overflowY:"auto",background:C.navy2,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 12px"}}>
-              <div style={{color:C.blue,fontSize:9,fontWeight:700,letterSpacing:1,marginBottom:6}}>HOW JOE BUILT THIS — FOR REFERENCE, NOT SENT WITH YOUR LOG</div>
               <div style={{color:C.muted2,fontSize:12,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{notes}</div>
             </div>
           )}
@@ -4311,18 +4316,32 @@ function QuickLogSheet({athlete, workoutHistory, onClose, onAddProgram, onSend})
             )}
           </div>
           {editErr&&<div style={{color:C.red,fontSize:12}}>{editErr}</div>}
-          <div style={{display:"flex",gap:8,alignItems:"stretch"}}>
-            <textarea
+          {showEditHelp&&(
+            <div style={{background:C.navy2,border:`1px solid ${C.blue}50`,borderRadius:10,padding:"10px 12px",display:"flex",flexDirection:"column",gap:6,flexShrink:0}}>
+              <div style={{color:C.muted,fontSize:11}}>Tell Joe what to change in plain words — tap one to try:</div>
+              {["I did Day 2's workout today","All my bench sets were at 185","Skipped the accessories, added 3 sets of curls"].map(ex=>(
+                <button key={ex} onClick={()=>{setInstruction(ex);setShowEditHelp(false);}}
+                  style={{textAlign:"left",background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:8,padding:"7px 10px",cursor:"pointer",fontSize:12}}>
+                  "{ex}"
+                </button>
+              ))}
+            </div>
+          )}
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <input
               value={instruction}
               onChange={e=>setInstruction(e.target.value)}
-              onKeyDown={e=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); applyInstruction(); } }}
-              placeholder={`Tell Joe what to change — "I did Day 2's workout today", "All my bench sets were at 185"`}
+              onKeyDown={e=>{ if(e.key==="Enter"){ e.preventDefault(); applyInstruction(); } }}
+              placeholder="Tell Joe what to change…"
               disabled={editBusy}
-              rows={3}
-              style={{flex:1,background:C.navy,border:`1px solid ${C.blue}`,borderRadius:10,padding:"11px 13px",color:C.text,fontSize:14,outline:"none",resize:"none",lineHeight:1.5}}
+              style={{flex:1,minWidth:0,background:C.navy,border:`1px solid ${C.blue}`,borderRadius:10,padding:"11px 13px",color:C.text,fontSize:13,outline:"none"}}
             />
+            <button onClick={()=>setShowEditHelp(v=>!v)} title="Examples"
+              style={{background:showEditHelp?`${C.blue}22`:"none",border:`1px solid ${showEditHelp?C.blue:C.border}`,color:showEditHelp?C.blue:C.muted2,borderRadius:"50%",width:32,height:32,flexShrink:0,cursor:"pointer",fontSize:14,display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1}}>
+              ⓘ
+            </button>
             <button onClick={applyInstruction} disabled={editBusy||!instruction.trim()}
-              style={{background:C.navy3,border:`1px solid ${C.blue}`,color:editBusy?C.muted:C.blue,borderRadius:10,padding:"0 16px",cursor:editBusy?"wait":"pointer",fontSize:13,fontWeight:700}}>
+              style={{background:C.navy3,border:`1px solid ${C.blue}`,color:editBusy?C.muted:C.blue,borderRadius:10,padding:"11px 16px",cursor:editBusy?"wait":"pointer",fontSize:13,fontWeight:700,flexShrink:0}}>
               {editBusy?"…":"Apply"}
             </button>
           </div>
