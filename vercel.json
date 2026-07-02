@@ -4,15 +4,15 @@
   "framework": "vite",
   "redirects": [
     {
-      "source": "/:path*",
+      "source": "/(.*)",
       "has": [{ "type": "host", "value": "fortis-ten.vercel.app" }],
-      "destination": "https://app.trainwilco.com/:path*",
+      "destination": "https://app.trainwilco.com/$1",
       "permanent": true
     },
     {
-      "source": "/:path*",
+      "source": "/(.*)",
       "has": [{ "type": "host", "value": "fortis-coachjoe-bots-projects.vercel.app" }],
-      "destination": "https://app.trainwilco.com/:path*",
+      "destination": "https://app.trainwilco.com/$1",
       "permanent": true
     }
   ],
