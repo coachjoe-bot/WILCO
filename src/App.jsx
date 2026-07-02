@@ -4151,21 +4151,32 @@ const buildQuickLogContext = (athlete, workoutHistory, manualRMs) => {
   return { program, sessionLines, rmLines };
 };
 
-const QL_DRAFT_SYS = `You prefill workout logs for an athlete in a fitness app. Write the exact log message the athlete would type into chat AFTER finishing today's session, based on their training program, recent logged sessions, and known 1RMs.
+const QL_DRAFT_SYS = `You prefill workout logs for an athlete in a fitness app. Based on their training program, recent logged sessions, and known 1RMs, produce (1) a compact worksheet showing HOW you built today's log, then (2) the log message itself.
 
-Rules:
-- FIRST LINE: the program day label (e.g. "Day 3 – Pull" or "Upper B"). Infer which day is NEXT from what they logged most recently and today's date. If the program has no day labels, use a short session name.
+Output exactly two sections separated by a line containing only "===" :
+
+SECTION 1 — WORKSHEET (shown to the athlete for reference; never sent to chat):
+- First line: which program day you picked and why, in a few words (e.g. "Block II, Week 1 — Thursday is Push B.").
+- Then ONE compact line per exercise showing your sourcing: percentage math written out ("Bench Press: 275 x 68% = 187, round to 185"), program notes worth seeing (tempo, RPE targets, rest, coach cues written in the program), last-time sourcing ("DB Lateral Raise: no program weight, last time 30 → use 30"), or "no data → blank".
+- Works for every program: if there are no percentages, still show the sourcing (program weight / last time / blank) and any program notes.
+
+===
+
+SECTION 2 — THE LOG (exactly what the athlete would type after the session):
+- FIRST LINE: the program day label (e.g. "Day 5 – Push B" or "Upper B"). Infer which day is NEXT from what they logged most recently and today's date. If the program has no day labels, use a short session name.
 - Then a blank line, then ONE line per exercise: "Name SETSxREPS @ WEIGHT" (e.g. "Back Squat 5x3 @ 225"). Weighted bodyweight: "Weighted Pull-ups 3x8 +25". Plain bodyweight: "Push-ups 3x20". Timed holds: "Plank 3x60s".
 - Weight priority — the PROGRAM always outranks history: (1) an explicit weight written in the program for that exercise; (2) a program percentage x the athlete's 1RM from the cheat sheet, rounded to the nearest 5 lbs. Only when the program gives NEITHER a weight NOR a percentage: (3) what they lifted last time on that exercise. Never let a last-time weight override a program prescription, even if last session differed.
 - If none of those three give you a number, write the weight as a fill-in blank: "Weighted Dips 3x8 @ ___" (or "+___" for added-load bodyweight work). NEVER guess a weight — a visible blank beats a made-up number.
 - Include ONLY exercises programmed for the inferred day. Never invent exercises.
-- If the program says today is a rest day and no training day is clearly next, output exactly: REST_DAY
-- Output ONLY the log text. No commentary, no markdown, no explanation.`;
 
-const QL_EDIT_SYS = `You revise a prefilled workout-log draft per an athlete's instruction. You get their program, recent sessions, 1RMs, the CURRENT draft, and the instruction.
+If the program says today is a rest day and no training day is clearly next, output exactly REST_DAY (no sections, no separator).
+No markdown, no commentary outside the two sections.`;
+
+const QL_EDIT_SYS = `You revise a prefilled workout-log draft per an athlete's instruction. You get their program, recent sessions, 1RMs, Joe's worksheet notes (reference only), the CURRENT draft, and the instruction.
 
 Rules:
 - Apply the instruction; keep everything else in the draft unchanged.
+- Return ONLY the revised log (day label + exercises). NEVER include the worksheet notes or any "===" separator in your output.
 - If the instruction names a different program day ("I did day 2"), rebuild the whole draft for that day using the program and the same weight rules (program weight, else % x 1RM rounded to 5 lbs, else last time, else a "___" fill-in blank — never a guessed number).
 - If the draft is empty and the instruction describes what they did, write the draft from it.
 - Same format: first line = day label, blank line, one exercise per line ("Name SETSxREPS @ WEIGHT").
@@ -4175,6 +4186,7 @@ Rules:
 function QuickLogSheet({athlete, workoutHistory, onClose, onAddProgram, onSend}) {
   const hasProgram = !!(athlete.temp_program_text||athlete.program_text);
   const [draft,setDraft] = useState("");
+  const [notes,setNotes] = useState(""); // Joe's worksheet — read-only reference, never sent, never AI-edited
   const [phase,setPhase] = useState(hasProgram?"loading":"noprogram"); // loading|ready|rest|error|noprogram
   const [instruction,setInstruction] = useState("");
   const [editBusy,setEditBusy] = useState(false);
@@ -4192,10 +4204,17 @@ function QuickLogSheet({athlete, workoutHistory, onClose, onAddProgram, onSend})
       try{ manualRMs = await sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`)||[]; }catch(_){}
       const ctx = buildQuickLogContext(athlete, workoutHistory, manualRMs);
       ctxRef.current = ctx;
-      const text = await askClaude(QL_DRAFT_SYS, `Today is ${todayStr()}.\n\n${ctxBlock(ctx)}`, 500, [], "claude-sonnet-5", "quick_log_draft");
+      const text = await askClaude(QL_DRAFT_SYS, `Today is ${todayStr()}.\n\n${ctxBlock(ctx)}`, 800, [], "claude-sonnet-5", "quick_log_draft");
       const t = (text||"").trim();
-      if(!t || t==="REST_DAY"){ setDraft(""); setPhase("rest"); }
-      else { setDraft(t); setPhase("ready"); }
+      if(!t || t==="REST_DAY"){ setNotes(""); setDraft(""); setPhase("rest"); }
+      else {
+        // Split worksheet from log on the "===" separator line. If the model
+        // skipped the worksheet, treat the whole output as the log.
+        const parts = t.split(/\n\s*={3,}\s*\n/);
+        if(parts.length>=2){ setNotes(parts[0].trim()); setDraft(parts.slice(1).join("\n").trim()); }
+        else { setNotes(""); setDraft(t); }
+        setPhase("ready");
+      }
     }catch(e){ setPhase("error"); }
   };
   useEffect(()=>{ if(hasProgram) generate(); },[]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -4207,9 +4226,12 @@ function QuickLogSheet({athlete, workoutHistory, onClose, onAddProgram, onSend})
     try{
       const ctx = ctxRef.current || buildQuickLogContext(athlete, workoutHistory, []);
       const revised = await askClaude(QL_EDIT_SYS,
-        `Today is ${todayStr()}.\n\n${ctxBlock(ctx)}\n\nCURRENT DRAFT:\n${draft.trim()||"(empty)"}\n\nATHLETE'S INSTRUCTION:\n${ins}`,
+        `Today is ${todayStr()}.\n\n${ctxBlock(ctx)}\n\nJOE'S WORKSHEET (reference only — do NOT include in output):\n${notes||"(none)"}\n\nCURRENT DRAFT:\n${draft.trim()||"(empty)"}\n\nATHLETE'S INSTRUCTION:\n${ins}`,
         500, [], "claude-sonnet-5", "quick_log_edit");
-      const t = (revised||"").trim();
+      let t = (revised||"").trim();
+      // Belt-and-braces: if the model returned a worksheet anyway, keep only the log.
+      const rparts = t.split(/\n\s*={3,}\s*\n/);
+      if(rparts.length>=2) t = rparts[rparts.length-1].trim();
       if(t && t!==draft.trim()){
         setUndoStack(prev=>[...prev,draft]);
         setDraft(t);
@@ -4269,6 +4291,12 @@ function QuickLogSheet({athlete, workoutHistory, onClose, onAddProgram, onSend})
               Your program says today's a rest day, so there's nothing to prep. Trained anyway? Tell Joe below — "I did day 2", "did some arms and cardio" — and I'll draft it.
             </div>
           )}
+          {notes&&phase==="ready"&&(
+            <div style={{flexShrink:0,maxHeight:"30%",overflowY:"auto",background:C.navy2,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 12px"}}>
+              <div style={{color:C.blue,fontSize:9,fontWeight:700,letterSpacing:1,marginBottom:6}}>HOW JOE BUILT THIS — FOR REFERENCE, NOT SENT WITH YOUR LOG</div>
+              <div style={{color:C.muted2,fontSize:12,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{notes}</div>
+            </div>
+          )}
           <textarea
             value={draft}
             onChange={e=>setDraft(e.target.value)}
@@ -4288,7 +4316,7 @@ function QuickLogSheet({athlete, workoutHistory, onClose, onAddProgram, onSend})
               value={instruction}
               onChange={e=>setInstruction(e.target.value)}
               onKeyDown={e=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); applyInstruction(); } }}
-              placeholder={`Tell Joe what to change — "I did day 2", "all bench at 185"`}
+              placeholder={`Tell Joe what to change — "I did Day 2's workout today", "All my bench sets were at 185"`}
               disabled={editBusy}
               rows={3}
               style={{flex:1,background:C.navy,border:`1px solid ${C.blue}`,borderRadius:10,padding:"11px 13px",color:C.text,fontSize:14,outline:"none",resize:"none",lineHeight:1.5}}
