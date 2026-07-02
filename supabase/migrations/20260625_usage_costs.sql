@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS ai_pricing (
 -- cache_write is the 5-minute-TTL rate (1.25× input). The app sends no
 -- cache_control today, so cache_* columns read 0 until prompt caching is added.
 INSERT INTO ai_pricing (model, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok) VALUES
+  -- Sonnet 5 intro pricing through 2026-08-31; UPDATE to 3.00/15.00/0.30/3.75 on Sept 1.
+  ('claude-sonnet-5',            2.00, 10.00, 0.20, 2.50),
   ('claude-sonnet-4-6',          3.00, 15.00, 0.30, 3.75),
   ('claude-haiku-4-5',           1.00,  5.00, 0.10, 1.25),
   ('claude-haiku-4-5-20251001',  1.00,  5.00, 0.10, 1.25),

@@ -1436,7 +1436,7 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
       const b64 = await new Promise((res,rej)=>{reader.onload=()=>res(reader.result.split(",")[1]);reader.onerror=rej;reader.readAsDataURL(file);});
       const extracted = await askClaude(
         "You are reading a photo of an athlete's training program. Extract the full program text exactly as written. Preserve all structure — exercises, sets, reps, weights, days, weeks. Output plain text only, no commentary.",
-        "Extract the training program from this image.",600,[b64],"claude-sonnet-4-6","program_extract"
+        "Extract the training program from this image.",600,[b64],"claude-sonnet-5","program_extract"
       );
       if(extracted) setProgramText(prev=>prev?prev+"\n\n"+extracted:extracted);
     } catch(err){ setProgramError("Couldn't read that image. Try a clearer photo."); }

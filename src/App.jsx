@@ -779,7 +779,7 @@ export const groupIntoSessions = (workouts, gapMs = 3*60*60*1000) => {
 // `system` may be a plain string, or {cached, dynamic}: `cached` is a STATIC
 // prefix (identical every call) the server marks for Anthropic prompt caching —
 // ~90% off input tokens on cache hits; `dynamic` is the per-call tail.
-export const askClaude = async (system, user, maxTokens=600, images=[], model="claude-sonnet-4-6", feature="other") => {
+export const askClaude = async (system, user, maxTokens=600, images=[], model="claude-sonnet-5", feature="other") => {
   const sysCached  = (system && typeof system === "object") ? (system.cached||"")  : "";
   const sysDynamic = (system && typeof system === "object") ? (system.dynamic||"") : system;
   const content = [];
@@ -817,7 +817,7 @@ export const askClaude = async (system, user, maxTokens=600, images=[], model="c
 const extractProgramText = async (message) => {
   const text = await askClaude(
     "Extract the training program from this athlete message. Return only the program content — days, exercises, sets, reps, weights. Clean formatting. No intro, no commentary, no explanation.",
-    message, 800, [], "claude-sonnet-4-6", "program_extract"
+    message, 800, [], "claude-sonnet-5", "program_extract"
   );
   return text?.trim() || message;
 };
@@ -886,7 +886,7 @@ Rules:
   // on Haiku — send those straight to Sonnet. Everything else stays Haiku-first (~3x
   // cheaper) with the escalate-on-empty net below.
   const advanced = /superset|super set|drop\s?set|rest[- ]?pause|cluster|myo[- ]?reps?|amrap|to failure|warm[- ]?up|worked up|ramp(?:ed|ing)? up|giant set|triset/i.test(message);
-  const firstModel = advanced ? "claude-sonnet-4-6" : "claude-haiku-4-5";
+  const firstModel = advanced ? "claude-sonnet-5" : "claude-haiku-4-5";
   let parsed = null;
   try { parsed = await runParse(firstModel); }
   catch { parsed = null; }
@@ -901,8 +901,8 @@ Rules:
     !parsed.run_data && !parsed.practice_data &&
     (!Array.isArray(parsed.pr_attempts) || parsed.pr_attempts.length === 0)
   );
-  if (gotNothing && looksLikeLifting && firstModel !== "claude-sonnet-4-6") {
-    try { parsed = await runParse("claude-sonnet-4-6"); }
+  if (gotNothing && looksLikeLifting && firstModel !== "claude-sonnet-5") {
+    try { parsed = await runParse("claude-sonnet-5"); }
     catch { /* keep the Haiku result (or null) and fall through to the default */ }
   }
   return parsed || {exercises:[],run_data:null,practice_data:null,pain_flags:[],equipment_issues:[],questions:[],pr_attempts:[],session_feel:null,general_notes:message,is_program_update:false,is_temp_program_update:false,is_program_revert:false};
@@ -1062,7 +1062,7 @@ SPORT: ${JOEBOT_SPORTS[athlete.sport]||"Build a general strength base."}${pastCo
     contextMemory = `\n\nATHLETE CONTEXT (from monthly recap history — preferences, injuries, goals stated over time):\n${athleteContext}\nUse this as background — do not repeat it back, just let it inform your responses.`;
   }
 
-  return askClaude({cached:JOEBOT_STATIC_SYS, dynamic:sys+goalsContext+contextMemory},`${hist}\n\n${athlete.name}: ${message}`,450,[],"claude-sonnet-4-6","joebot_chat");
+  return askClaude({cached:JOEBOT_STATIC_SYS, dynamic:sys+goalsContext+contextMemory},`${hist}\n\n${athlete.name}: ${message}`,450,[],"claude-sonnet-5","joebot_chat");
 };
 
 // ─── 1RM PROPAGATION ─────────────────────────────────────────────────────────
@@ -1470,7 +1470,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
         const reply = await askClaude(
           `You are Coach Joe Thomas — direct, specific, no fluff. The athlete asked a clarifying question during their weekly check-in. Answer it directly and concisely (1-3 sentences) using the digest context below. If they're asking what program change you meant, give the concrete change (sets/%/exercise swap). Do NOT ask a new question. Do NOT restate the whole digest.`,
           `Digest sections:\n${JSON.stringify(c.sections||c)}\n\nThe question I just asked: "${q.text}"\nThe athlete asked back: "${msg}"`,
-          280,[],"claude-sonnet-4-6","joebot_chat"
+          280,[],"claude-sonnet-5","joebot_chat"
         );
         setLoading(false);
         if(reply&&reply.trim()) setMessages(prev=>[...prev,{role:"assistant",content:reply.trim()}]);
@@ -1506,7 +1506,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
         const r = await askClaude(
           system,
           `Digest flags: ${JSON.stringify(c.flags||{})}\n\nCheck-in so far:\n${soFar}\n\nThe question you just asked: "${q.text}"\nTheir answer: "${msg}"`,
-          170,[],"claude-sonnet-4-6","joebot_chat"
+          170,[],"claude-sonnet-5","joebot_chat"
         );
         return (r&&r.trim())?r.trim():"";
       }catch(_){ return ""; }
@@ -1567,7 +1567,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
         const updated = await askClaude(
           `You are Coach Joe Thomas. Apply a small, safe injury-protective adjustment to this athlete's program based on their check-in. Return ONLY the full updated program text — preserve structure/format, change only what's needed. No commentary.`,
           `Current program:\n${athlete.program_text}\n\nCheck-in:\n${qaText}`,
-          1000, [], "claude-sonnet-4-6", "program_generate"
+          1300, [], "claude-sonnet-5", "program_generate"
         );
         if(updated && updated.trim().length>60) setProgramPending({newText:updated.trim()});
       }catch(_){}
@@ -3176,7 +3176,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       const b64 = await new Promise((res,rej)=>{reader.onload=()=>res(reader.result.split(",")[1]);reader.onerror=rej;reader.readAsDataURL(file);});
       const extracted = await askClaude(
         "You are reading a photo of an athlete's training program. Extract the full program text exactly as written. Preserve all structure — exercises, sets, reps, weights, days, weeks. Output plain text only, no commentary.",
-        "Extract the training program from this image.",600,[b64],"claude-sonnet-4-6","program_extract"
+        "Extract the training program from this image.",600,[b64],"claude-sonnet-5","program_extract"
       );
       if(extracted) setAthleteProgramText(prev=>prev?prev+"\n\n"+extracted:extracted);
     } catch(err){ setAthleteProgramMsg("Couldn't read that image. Try a clearer photo."); }
@@ -3428,7 +3428,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           const propagationNote = propagationLog.length>0 ? `\n\nI've updated your future ${propagationLog.map(l=>l.split(":")[0]).join(", ")} targets based on your new max.` : "";
           const prReply = await askClaude(
             "You are Coach Joe Thomas. An athlete just hit a new PR. Acknowledge it directly -- short, punchy, in Coach Joe's voice. Atta boy/girl is appropriate here.",
-            `Athlete: ${updatedAthlete.name} (${updatedAthlete.sport})\nNew PRs:\n${prCallout}`,150,[],"claude-sonnet-4-6","pr_ack"
+            `Athlete: ${updatedAthlete.name} (${updatedAthlete.sport})\nNew PRs:\n${prCallout}`,150,[],"claude-sonnet-5","pr_ack"
           );
           haptic(60); // one strong buzz, synced to the PR congrats message
           setMessages(prev=>[...prev,{role:"assistant",content:prReply+propagationNote}]);
@@ -3763,7 +3763,7 @@ Fix these:
 
 Keep it under 200 words. No fluff. If the frames are unclear, use the clearest one.`;
 
-      const analysis = await askClaude(sys, `Here are ${frames.length} frames from ${athlete.name}'s workout video. Analyze their form.`, 400, frames, "claude-sonnet-4-6", "video_form_review");
+      const analysis = await askClaude(sys, `Here are ${frames.length} frames from ${athlete.name}'s workout video. Analyze their form.`, 400, frames, "claude-sonnet-5", "video_form_review");
 
       updateMsg(analysis);
       await sbInsert("workouts",{

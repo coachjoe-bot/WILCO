@@ -26,17 +26,16 @@ const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY || process.env.ANTHROPIC_API_KEY
 // asks for that isn't here falls back to DEFAULT_MODEL, so a stray/malicious
 // model id can't reach a pricier model — without breaking the app.
 //
-// claude-sonnet-4-5 is kept allowlisted for one release so rollback is a
+// claude-sonnet-4-6 is kept allowlisted for one release so rollback is a
 // one-line DEFAULT_MODEL flip rather than a redeploy of the client too.
-const DEFAULT_MODEL = "claude-sonnet-4-6";
+const DEFAULT_MODEL = "claude-sonnet-5";
 const ALLOWED_MODELS = new Set([
-  "claude-sonnet-4-6",
+  "claude-sonnet-5",
   // Haiku 4.5 is used ONLY for mechanical, never-seen extraction calls
   // (parseWorkout, goal parsing) — ~3x cheaper. modelParams() below gives it
-  // no effort param (effort is invalid on Haiku). Coaching voice stays on 4.6.
+  // no effort param (effort is invalid on Haiku). Coaching voice is Sonnet 5.
   "claude-haiku-4-5",
-  "claude-sonnet-4-5",
-  "claude-sonnet-4-5-20250929",
+  "claude-sonnet-4-6",
 ]);
 
 // Per-model inference params, chosen SERVER-side (the client never picks these).
@@ -48,15 +47,20 @@ const ALLOWED_MODELS = new Set([
 //   Haiku, it must NOT receive `output_config.effort`. Gate on the model id here.
 //   If any feature later needs more reasoning, bump effort to "medium" for that
 //   model — do not remove the gate.
+//   NOTE (Sonnet 5): omitting `thinking` on Sonnet 5 turns adaptive thinking ON
+//   by default — thinking tokens would then eat into max_tokens and could truncate
+//   parse JSON. Keep thinking explicitly disabled on every Sonnet model.
 function modelParams(model) {
-  if (model === "claude-sonnet-4-6") {
+  if (model === "claude-sonnet-5" || model === "claude-sonnet-4-6") {
     return { output_config: { effort: "low" }, thinking: { type: "disabled" } };
   }
   return {};
 }
 
-// The app's largest legitimate call asks for 1000 tokens; cap above that with headroom.
-const MAX_TOKENS_CAP = 1500;
+// The app's largest legitimate call asks for 1300 tokens; cap above that with
+// headroom. (Sonnet 5's tokenizer yields ~30% more tokens for the same text than
+// 4.6, so the old 1500 cap is too tight for the biggest calls.)
+const MAX_TOKENS_CAP = 2000;
 // Per-user ceiling: far above any human's real usage, low enough to bound a stolen
 // session's spend. Every call (success or not) counts — each one costs money.
 const RATE = { max: 100, windowMin: 15 };

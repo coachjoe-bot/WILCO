@@ -211,22 +211,24 @@ export async function askClaudeServer({
   system,
   user,
   maxTokens = 1200,
-  model = "claude-sonnet-4-6",
+  model = "claude-sonnet-5",
   feature = "other",
   attribution = {},
 }) {
   const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY || process.env.ANTHROPIC_API_KEY;
 
   // Inference params chosen per model, matching api/claude.js modelParams():
-  // Sonnet 4.6 pins effort low + thinking off (cheap/fast, no quality loss for our
-  // calls). effort is INVALID on Haiku 4.5 — it must receive neither field.
+  // Sonnet pins effort low + thinking off (cheap/fast, no quality loss for our
+  // calls). On Sonnet 5, omitting `thinking` turns adaptive thinking ON by
+  // default, so the explicit disable is load-bearing there, not just a cost
+  // tweak. effort is INVALID on Haiku 4.5 — it must receive neither field.
   const payload = {
     model,
     max_tokens: maxTokens,
     system,
     messages: [{ role: "user", content: user }],
   };
-  if (model === "claude-sonnet-4-6") {
+  if (model === "claude-sonnet-5" || model === "claude-sonnet-4-6") {
     payload.output_config = { effort: "low" };
     payload.thinking = { type: "disabled" };
   }
