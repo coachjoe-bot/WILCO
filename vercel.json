@@ -2,6 +2,20 @@
   "buildCommand": "npm ci && node_modules/.bin/vite build",
   "outputDirectory": "dist",
   "framework": "vite",
+  "redirects": [
+    {
+      "source": "/:path*",
+      "has": [{ "type": "host", "value": "fortis-ten.vercel.app" }],
+      "destination": "https://app.trainwilco.com/:path*",
+      "permanent": true
+    },
+    {
+      "source": "/:path*",
+      "has": [{ "type": "host", "value": "fortis-coachjoe-bots-projects.vercel.app" }],
+      "destination": "https://app.trainwilco.com/:path*",
+      "permanent": true
+    }
+  ],
   "rewrites": [
     { "source": "/crunch/:location", "destination": "/index.html" }
   ],

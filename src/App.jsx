@@ -241,6 +241,23 @@ const getBioEnrollment = (role) => { try{ return JSON.parse(localStorage.getItem
 const setBioEnrollment = (role,e) => { try{ localStorage.setItem(bioKey(role), JSON.stringify(e)); }catch{} };
 const clearBioEnrollment = (role) => { try{ localStorage.removeItem(bioKey(role)); }catch{} };
 
+// Consecutive assertion failures per role. A WebAuthn NotAllowedError is BOTH
+// "user cancelled" and "no matching credential exists" (the spec hides which, on
+// purpose) — so we tolerate one failure as an accidental cancel, but on the second
+// in a row we assume the saved passkey is broken (deleted from the password
+// manager, enrolled on an old domain, moved devices) and clear the enrollment.
+// The next PIN login then re-offers a fresh Face ID setup instead of dead-ending
+// the user on the same broken prompt forever.
+const bioFailKey = (role) => "wilco_biometric_fail_" + role;
+const noteBioFailure = (role) => {
+  try{
+    const n = (+(localStorage.getItem(bioFailKey(role))||0)) + 1;
+    if(n >= 2){ clearBioEnrollment(role); localStorage.removeItem(bioFailKey(role)); }
+    else localStorage.setItem(bioFailKey(role), String(n));
+  }catch{}
+};
+const clearBioFailures = (role) => { try{ localStorage.removeItem(bioFailKey(role)); }catch{} };
+
 // Register a platform credential and remember this user's login on this device.
 // Throws if the user cancels or the platform refuses (caller surfaces a message).
 // `name` is the athlete's login name; coaches sign in with PIN only so it's omitted.
@@ -265,6 +282,7 @@ async function biometricEnroll({role, userId, name, pin}){
   let transports = ["internal"];
   try{ const t = cred.response?.getTransports?.(); if(Array.isArray(t) && t.length) transports = t; }catch{}
   setBioEnrollment(role, { credentialId: b64u.enc(cred.rawId), role, userId, name: name||null, pin, transports, enabledAt: Date.now() });
+  clearBioFailures(role); // fresh credential — old failure streak is irrelevant
   return true;
 }
 
@@ -276,15 +294,22 @@ async function biometricAssert(role){
   // this hint iOS Safari can't tell the passkey is local and falls back to the hybrid
   // "scan QR / use a security key" flow instead of showing Face ID / Touch ID.
   const transports = (Array.isArray(e.transports) && e.transports.length) ? e.transports : ["internal"];
-  const assertion = await navigator.credentials.get({
-    publicKey: {
-      challenge: randBytes(32),
-      allowCredentials: [{ id: b64u.dec(e.credentialId), type:"public-key", transports }],
-      userVerification: "required",
-      timeout: 60000,
-    },
-  });
-  if(!assertion) throw new Error("Face ID was cancelled.");
+  let assertion;
+  try {
+    assertion = await navigator.credentials.get({
+      publicKey: {
+        challenge: randBytes(32),
+        allowCredentials: [{ id: b64u.dec(e.credentialId), type:"public-key", transports }],
+        userVerification: "required",
+        timeout: 60000,
+      },
+    });
+  } catch(err) {
+    noteBioFailure(role); // second consecutive failure wipes the broken enrollment
+    throw err;
+  }
+  if(!assertion){ noteBioFailure(role); throw new Error("Face ID was cancelled."); }
+  clearBioFailures(role);
   return e;
 }
 
