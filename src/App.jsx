@@ -1121,6 +1121,14 @@ const BENCH_THRESHOLDS = {
     "clean":          [0.55, 0.8,  1.3,  1.55, 1.8,  1.95, 2.15],
     "jerk":           [0.55, 0.8,  1.3,  1.6,  1.85, 2.0,  2.2 ],
     "power clean":    [0.5,  0.75, 1.1,  1.35, 1.6,  1.75, 1.9 ],
+    "incline bench press":     [0.45, 0.65, 1.05, 1.3,  1.7,  1.9,  2.15],
+    "trap bar deadlift":       [1.05, 1.55, 1.85, 2.35, 2.85, 3.1,  3.4 ],
+    "romanian deadlift":       [0.85, 1.25, 1.5,  1.9,  2.35, 2.55, 2.75],
+    "hip thrust":              [0.9,  1.4,  1.8,  2.5,  3.1,  3.4,  3.75],
+    "push press":              [0.5,  0.7,  0.95, 1.25, 1.55, 1.75, 1.95],
+    "dumbbell bench press":    [0.25, 0.4,  0.55, 0.75, 0.95, 1.05, 1.15],
+    "dumbbell shoulder press": [0.15, 0.25, 0.35, 0.5,  0.65, 0.72, 0.8 ],
+    "barbell curl":            [0.2,  0.3,  0.45, 0.55, 0.7,  0.78, 0.85],
   },
   female: {
     "back squat":     [0.6,  0.9,  1.1,  1.4,  1.75, 1.95, 2.2 ],
@@ -1136,6 +1144,14 @@ const BENCH_THRESHOLDS = {
     "clean":          [0.42, 0.6,  0.9,  1.1,  1.3,  1.4,  1.55],
     "jerk":           [0.42, 0.6,  0.9,  1.12, 1.32, 1.45, 1.6 ],
     "power clean":    [0.38, 0.55, 0.8,  1.0,  1.2,  1.3,  1.45],
+    "incline bench press":     [0.25, 0.45, 0.65, 0.85, 1.1,  1.25, 1.4 ],
+    "trap bar deadlift":       [0.8,  1.15, 1.4,  1.7,  2.1,  2.3,  2.5 ],
+    "romanian deadlift":       [0.65, 0.95, 1.15, 1.35, 1.7,  1.85, 2.05],
+    "hip thrust":              [0.8,  1.2,  1.6,  2.2,  2.75, 3.0,  3.3 ],
+    "push press":              [0.35, 0.5,  0.7,  0.9,  1.15, 1.25, 1.4 ],
+    "dumbbell bench press":    [0.12, 0.2,  0.32, 0.45, 0.6,  0.67, 0.75],
+    "dumbbell shoulder press": [0.08, 0.15, 0.22, 0.3,  0.42, 0.47, 0.52],
+    "barbell curl":            [0.1,  0.18, 0.28, 0.35, 0.45, 0.5,  0.55],
   }
 };
 
@@ -1195,16 +1211,30 @@ const getBenchKey = (normalized) => {
   if(/(snatch|clean).*(pull|deadlift|balance|shrug|high\s*pull)/.test(n) ||
      /(pull|deadlift|balance|shrug|high\s*pull).*(snatch|clean)/.test(n)) return null;
   if(n.includes("overhead squat")) return null;
+  // Per-leg/light variants (no honest barbell standard) and heavy partials that
+  // dwarf the parent lift (shrugs, carries) are tracked, never ranked.
+  if(/(split squat|bulgarian|goblet|pistol|hack squat|sissy|single[ -]?leg)/.test(n)) return null;
+  if(/(shrug|carry|farmer|march|\bwalk)/.test(n)) return null;
   if(n.includes("clean and jerk")||n.includes("clean & jerk")) return "clean and jerk";
   if(n.includes("power clean")) return "power clean";
   if(n.includes("snatch")) return "snatch";                          // incl. power/hang/muscle snatch
+  if(n.includes("push press")) return "push press";
   if(n.includes("jerk")) return "jerk";                              // split/push jerk (standalone)
   if(n.includes("clean")) return "clean";                            // clean, hang clean
   if(n.includes("front squat")) return "front squat";
   if(n.includes("squat")) return "back squat";
+  if(/(romanian|\brdl\b|stiff[ -]?leg)/.test(n)) return "romanian deadlift";
+  if(/(trap|hex)[ -]?bar/.test(n)) return "trap bar deadlift";
   if(n.includes("deadlift")) return "deadlift";
+  if(n.includes("hip thrust")) return "hip thrust";
+  // Dumbbell presses rank per-dumbbell against their own standards, never the barbell's.
+  if(/\b(dumbbell|db)\b/.test(n) && /(press|bench)/.test(n))
+    return /(bench|floor|incline|chest)/.test(n) ? "dumbbell bench press" : "dumbbell shoulder press";
+  if(n.includes("arnold press")) return "dumbbell shoulder press";
+  if(n.includes("incline bench")||n.includes("incline press")) return "incline bench press";
   if(n.includes("bench press")||n==="bench"||n.includes("barbell bench")) return "bench press";
   if(n.includes("overhead press")||n.includes("ohp")||n==="press"||n.includes("military press")||n.includes("strict press")) return "overhead press";
+  if(/(barbell|\bbb\b|ez[ -]?bar)[ -]?curl/.test(n)) return "barbell curl";
   if(/\b(pull[ -]?up|chin[ -]?up)\b/.test(n)) return "weighted pull-up";
   if(/\bdips?\b/.test(n)) return "weighted dip";
   if(n.includes("barbell row")||n.includes("bent over row")||n.includes("bent-over row")||n.includes("pendlay")) return "barbell row";
@@ -4868,7 +4898,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
 
             {bodyweight&&dedupedBench.length<3&&(
               <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:16,color:C.muted2,fontSize:12,lineHeight:1.6}}>
-                Log more lifts to fill out your benchmark profile. Ranked lifts: Back &amp; Front Squat, Deadlift, Bench, Overhead Press, Barbell Row, Weighted Pull-up &amp; Dip, Snatch, Clean &amp; Jerk, Clean, Jerk, Power Clean.
+                Log more lifts to fill out your benchmark profile. Ranked lifts: Back &amp; Front Squat, Deadlift, Trap Bar Deadlift, RDL, Bench, Incline Bench, Dumbbell Bench &amp; Shoulder Press, Overhead Press, Push Press, Barbell Row, Barbell Curl, Hip Thrust, Weighted Pull-up &amp; Dip, Snatch, Clean &amp; Jerk, Clean, Jerk, Power Clean.
               </div>
             )}
 
