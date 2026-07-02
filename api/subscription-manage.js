@@ -12,15 +12,17 @@ import {
   epochToISO,
   subPeriodEnd,
 } from "./_stripe.js";
+import { logError } from "./_supa.js";
 
 export default async function handler(req, res) {
   if (applyCors(req, res)) return;
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const { athleteId, pin, action, tier, billing } = req.body || {};
+  let athlete = null; // hoisted so the catch can attribute (only if verified)
 
   try {
-    const athlete = await verifyAthlete({ athleteId, pin });
+    athlete = await verifyAthlete({ athleteId, pin });
     if (!athlete.stripe_subscription_id) {
       return res.status(400).json({ error: "No active subscription." });
     }
@@ -78,6 +80,18 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Unknown action." });
   } catch (e) {
     console.error("[subscription-manage] error:", e.message);
+    const status = e.status || e.statusCode || 500;
+    // Same convention as api/create-subscription.js: ledger Stripe API errors
+    // (e.type) + 5xx into error_events; routine 4xx (bad PIN etc.) stay out.
+    if (status >= 500 || e.type) {
+      await logError({
+        source: "server", severity: "error", area: "billing", route: "api/subscription-manage",
+        error_type: e.type || `http_${status}`, message: e.message, status_code: status,
+        role: athlete ? "athlete" : null, actor_id: athlete?.id ?? null,
+        athlete_id: athlete?.id ?? null,
+        meta: { action: action ?? null, tier: tier ?? null, billing: billing ?? null },
+      });
+    }
     return res.status(e.status || 500).json({ error: e.message });
   }
 }

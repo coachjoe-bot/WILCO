@@ -2,7 +2,9 @@ import { useState, useEffect, useRef, Component, lazy, Suspense } from "react";
 // Coach dashboard lives in its own lazily-loaded chunk (src/coach.jsx) so the
 // athlete-facing bundle — what 95% of users download — stays smaller.
 const CoachDashboard = lazy(()=>import("./coach.jsx"));
-import { loadStripe } from "@stripe/stripe-js";
+// The /pure entry does NOT inject the Stripe script at import time — loading only
+// happens when checkout actually calls loadStripe (see getStripeJs below).
+import { loadStripe } from "@stripe/stripe-js/pure";
 import { Elements, PaymentElement, useStripe, useElements } from "@stripe/react-stripe-js";
 import { ConsentFlow, LEGAL_VERSION } from "./legal.jsx";
 
@@ -12,10 +14,31 @@ export const SUPABASE_KEY  = import.meta.env.VITE_SUPABASE_KEY;
 export const MASTER_CODE   = "FORTIS-MASTER"; // keep for backward compat
 
 // ─── STRIPE ────────────────────────────────────────────────────────────────────
-// Publishable key is safe in the client. loadStripe() is called once at module
-// scope (never per-render). Null-guarded so the app still boots if the key is unset.
+// Publishable key is safe in the client. Stripe.js is loaded LAZILY at checkout
+// time (never at boot — the eager module-scope load was erroring ~7x/week when ad
+// blockers or flaky networks killed the script on pages that never reached
+// checkout). Up to 3 attempts with backoff; loadStripe clears its own cache on
+// failure, so each attempt genuinely re-injects the script. A total failure also
+// clears OUR cache so a user-tapped Retry starts clean. Null-guarded so the app
+// still boots if the key is unset.
 const STRIPE_PK = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY;
-const stripePromise = STRIPE_PK ? loadStripe(STRIPE_PK) : null;
+let _stripeJsPromise = null;
+const getStripeJs = () => {
+  if(!STRIPE_PK) return null;
+  if(!_stripeJsPromise){
+    _stripeJsPromise = (async()=>{
+      let lastErr = null;
+      for(let attempt=0; attempt<3; attempt++){
+        if(attempt>0) await new Promise(r=>setTimeout(r, 800*attempt));
+        try { return await loadStripe(STRIPE_PK); }
+        catch(e){ lastErr = e; }
+      }
+      _stripeJsPromise = null; // let the next call (Retry button) start fresh
+      throw lastErr || new Error("Failed to load Stripe.js");
+    })();
+  }
+  return _stripeJsPromise;
+};
 const TERMS_URL   = "https://trainwilco.com/terms";
 const PRIVACY_URL = "https://trainwilco.com/privacy";
 const SCHOOL_PRICE_ID = "price_1TbNnkRlrDCVlwEBUiO5txAx"; // School plan — billed via invoice, no in-app charge
@@ -1764,6 +1787,10 @@ function PaymentStep({athleteId, pin, tier, billing, onSuccess}) {
   const [initializing,setInitializing] = useState(true);
   const [initError,setInitError] = useState("");
   const [retryKey,setRetryKey] = useState(0);
+  // Stripe.js itself (loaded lazily, in parallel with the subscription create)
+  const [stripeObj,setStripeObj] = useState(null);
+  const [stripeFailed,setStripeFailed] = useState(false);
+  const [stripeRetryKey,setStripeRetryKey] = useState(0);
   // Gift code
   const [giftInput,setGiftInput] = useState("");
   const [appliedGift,setAppliedGift] = useState("");
@@ -1790,6 +1817,24 @@ function PaymentStep({athleteId, pin, tier, billing, onSuccess}) {
     })();
     return ()=>{ cancelled=true; };
   },[appliedGift,tier,billing,athleteId,pin,retryKey]);
+
+  // Load Stripe.js (3 attempts with backoff inside getStripeJs). A total failure
+  // shows a visible retry state below — never a silent dead form — and logs a
+  // checkout-blocked error DISTINCT from background load noise (area "billing" +
+  // its own error_type) so the ledger can tell "ad blocker at checkout" apart.
+  useEffect(()=>{
+    let cancelled = false;
+    setStripeFailed(false);
+    const p = getStripeJs();
+    if(!p) return; // no publishable key — the config message below covers it
+    p.then(s=>{ if(!cancelled) setStripeObj(s); })
+     .catch(e=>{
+       if(cancelled) return;
+       setStripeFailed(true);
+       reportError("billing", e, { error_type:"StripeLoadCheckoutBlocked", component:"PaymentStep" });
+     });
+    return ()=>{ cancelled=true; };
+  },[stripeRetryKey]);
 
   const applyGift = async () => {
     const code = giftInput.trim().toUpperCase();
@@ -1853,12 +1898,21 @@ function PaymentStep({athleteId, pin, tier, billing, onSuccess}) {
           <button onClick={()=>setRetryKey(k=>k+1)} style={btn(C.gold,"#000")}>Try Again</button>
         </div>
       )}
-      {clientSecret && stripePromise && (
-        <Elements stripe={stripePromise} options={{clientSecret, appearance:{theme:"night", variables:{colorPrimary:C.gold, colorBackground:C.navy3, colorText:C.text, borderRadius:"10px"}}}}>
+      {clientSecret && stripeObj && (
+        <Elements stripe={stripeObj} options={{clientSecret, appearance:{theme:"night", variables:{colorPrimary:C.gold, colorBackground:C.navy3, colorText:C.text, borderRadius:"10px"}}}}>
           <PayForm confirmMode={confirmMode} payLabel={payLabel} onSuccess={onSuccess}/>
         </Elements>
       )}
-      {clientSecret && !stripePromise && (
+      {clientSecret && STRIPE_PK && !stripeObj && !stripeFailed && (
+        <div style={{color:C.muted,fontSize:13,textAlign:"center",padding:"20px 0"}}>Loading secure checkout…</div>
+      )}
+      {clientSecret && stripeFailed && (
+        <div style={{textAlign:"center",padding:"12px 0"}}>
+          <div style={{color:C.red,fontSize:13,marginBottom:10,lineHeight:1.5}}>Payment couldn't load. An ad blocker may be blocking Stripe. Turn it off for this site, then tap retry.</div>
+          <button onClick={()=>setStripeRetryKey(k=>k+1)} style={btn(C.gold,"#000")}>Retry</button>
+        </div>
+      )}
+      {clientSecret && !STRIPE_PK && (
         <div style={{color:C.red,fontSize:12,textAlign:"center"}}>Payments are not configured (missing publishable key).</div>
       )}
     </div>

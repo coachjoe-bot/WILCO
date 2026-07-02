@@ -17,15 +17,17 @@ import {
   subPeriodEnd,
   STRIPE_MODE,
 } from "./_stripe.js";
+import { logError } from "./_supa.js";
 
 export default async function handler(req, res) {
   if (applyCors(req, res)) return;
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const { athleteId, pin, tier, billing, giftCode } = req.body || {};
+  let athlete = null; // hoisted so the catch can attribute (only if verified)
 
   try {
-    const athlete = await verifyAthlete({ athleteId, pin });
+    athlete = await verifyAthlete({ athleteId, pin });
 
     if (tier !== "pro" && tier !== "elite") {
       return res.status(400).json({ error: "Choose a Pro or Elite plan to continue." });
@@ -158,6 +160,20 @@ export default async function handler(req, res) {
     });
   } catch (e) {
     console.error("[create-subscription] error:", e.message);
+    const status = e.status || e.statusCode || 500;
+    // Ledger the real failures (any Stripe API error — they carry e.type — plus
+    // 5xx like a Supabase patch dying) so checkout breakage shows in error_events,
+    // not just function logs. Routine 4xx (bad PIN, own gift code) stay out,
+    // matching api/data.js. Attribution only from the already-verified athlete.
+    if (status >= 500 || e.type) {
+      await logError({
+        source: "server", severity: "error", area: "billing", route: "api/create-subscription",
+        error_type: e.type || `http_${status}`, message: e.message, status_code: status,
+        role: athlete ? "athlete" : null, actor_id: athlete?.id ?? null,
+        athlete_id: athlete?.id ?? null,
+        meta: { tier: tier ?? null, billing: billing ?? null },
+      });
+    }
     return res.status(e.status || 500).json({ error: e.message || "Subscription failed" });
   }
 }
