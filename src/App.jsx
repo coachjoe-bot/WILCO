@@ -3806,7 +3806,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:8}}>
         {(athlete.tier||"free")!=="free"&&(
           <button onClick={()=>{track("screen_view","nav",{screen:"quick_log"});setShowQuickLog(true);}} title="Prefill today's workout log"
-            style={{marginRight:"auto",background:C.gold,border:`1px solid ${C.gold}`,color:"#000",borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1,flexShrink:0,display:"flex",alignItems:"center",gap:4}}>
+            style={{flex:1,minWidth:0,marginRight:"auto",background:C.gold,border:`1px solid ${C.gold}`,color:"#000",borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1,display:"flex",alignItems:"center",justifyContent:"center",gap:4,whiteSpace:"nowrap"}}>
             ⚡ QUICK LOG
           </button>
         )}
@@ -4126,7 +4126,8 @@ const QL_DRAFT_SYS = `You prefill workout logs for an athlete in a fitness app. 
 Rules:
 - FIRST LINE: the program day label (e.g. "Day 3 – Pull" or "Upper B"). Infer which day is NEXT from what they logged most recently and today's date. If the program has no day labels, use a short session name.
 - Then a blank line, then ONE line per exercise: "Name SETSxREPS @ WEIGHT" (e.g. "Back Squat 5x3 @ 225"). Weighted bodyweight: "Weighted Pull-ups 3x8 +25". Plain bodyweight: "Push-ups 3x20". Timed holds: "Plank 3x60s".
-- Weight priority: (1) an explicit weight written in the program for that exercise; (2) a program percentage x the athlete's 1RM from the cheat sheet, rounded to the nearest 5 lbs; (3) what they lifted last time on that exercise; (4) if nothing is known, write the exercise with sets/reps and no weight.
+- Weight priority — the PROGRAM always outranks history: (1) an explicit weight written in the program for that exercise; (2) a program percentage x the athlete's 1RM from the cheat sheet, rounded to the nearest 5 lbs. Only when the program gives NEITHER a weight NOR a percentage: (3) what they lifted last time on that exercise. Never let a last-time weight override a program prescription, even if last session differed.
+- If none of those three give you a number, write the weight as a fill-in blank: "Weighted Dips 3x8 @ ___" (or "+___" for added-load bodyweight work). NEVER guess a weight — a visible blank beats a made-up number.
 - Include ONLY exercises programmed for the inferred day. Never invent exercises.
 - If the program says today is a rest day and no training day is clearly next, output exactly: REST_DAY
 - Output ONLY the log text. No commentary, no markdown, no explanation.`;
@@ -4135,7 +4136,7 @@ const QL_EDIT_SYS = `You revise a prefilled workout-log draft per an athlete's i
 
 Rules:
 - Apply the instruction; keep everything else in the draft unchanged.
-- If the instruction names a different program day ("I did day 2"), rebuild the whole draft for that day using the program and the same weight rules (program weight, else % x 1RM rounded to 5 lbs, else last time).
+- If the instruction names a different program day ("I did day 2"), rebuild the whole draft for that day using the program and the same weight rules (program weight, else % x 1RM rounded to 5 lbs, else last time, else a "___" fill-in blank — never a guessed number).
 - If the draft is empty and the instruction describes what they did, write the draft from it.
 - Same format: first line = day label, blank line, one exercise per line ("Name SETSxREPS @ WEIGHT").
 - If the instruction is NOT about editing this draft (a coaching question, chit-chat), return the current draft EXACTLY unchanged.
@@ -4252,22 +4253,25 @@ function QuickLogSheet({athlete, workoutHistory, onClose, onAddProgram, onSend})
             )}
           </div>
           {editErr&&<div style={{color:C.red,fontSize:12}}>{editErr}</div>}
-          <div style={{display:"flex",gap:8}}>
-            <input
+          <div style={{display:"flex",gap:8,alignItems:"stretch"}}>
+            <textarea
               value={instruction}
               onChange={e=>setInstruction(e.target.value)}
-              onKeyDown={e=>{ if(e.key==="Enter"){ e.preventDefault(); applyInstruction(); } }}
+              onKeyDown={e=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); applyInstruction(); } }}
               placeholder={`Tell Joe what to change — "I did day 2", "all bench at 185"`}
               disabled={editBusy}
-              style={{flex:1,background:C.navy,border:`1px solid ${C.blue}`,borderRadius:10,padding:"11px 13px",color:C.text,fontSize:13,outline:"none"}}
+              rows={3}
+              style={{flex:1,background:C.navy,border:`1px solid ${C.blue}`,borderRadius:10,padding:"11px 13px",color:C.text,fontSize:14,outline:"none",resize:"none",lineHeight:1.5}}
             />
             <button onClick={applyInstruction} disabled={editBusy||!instruction.trim()}
               style={{background:C.navy3,border:`1px solid ${C.blue}`,color:editBusy?C.muted:C.blue,borderRadius:10,padding:"0 16px",cursor:editBusy?"wait":"pointer",fontSize:13,fontWeight:700}}>
               {editBusy?"…":"Apply"}
             </button>
           </div>
-          <button onClick={()=>onSend(draft.trim())} disabled={!canSend}
-            style={{background:canSend?C.gold:C.navy3,color:canSend?"#000":C.muted,border:`1px solid ${canSend?C.gold:C.border}`,borderRadius:12,padding:"14px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:16,cursor:canSend?"pointer":"not-allowed",marginBottom:"env(safe-area-inset-bottom, 0px)"}}>
+          {/* No safe-area bottom margin — reclaimed app-wide on purpose (47941e6);
+              re-adding it here renders as a dead navy band under this button. */}
+          <button onClick={()=>onSend(draft.replace(/\s*[@+]\s*_{2,}/g,"").trim())} disabled={!canSend}
+            style={{background:canSend?C.gold:C.navy3,color:canSend?"#000":C.muted,border:`1px solid ${canSend?C.gold:C.border}`,borderRadius:12,padding:"14px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:16,cursor:canSend?"pointer":"not-allowed"}}>
             SEND TO CHAT →
           </button>
         </div>
