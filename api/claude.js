@@ -196,6 +196,78 @@ export default async function handler(req, res) {
     }
     if (sysBlocks.length) payload.system = sysBlocks;
 
+    // ── Streaming path (opt-in via body.stream) ──────────────────────────────
+    // Used only by the conversational chat so replies render token-by-token. All
+    // the guards above (token auth, rate limit, model/token clamp, feature label)
+    // are shared. We relay Anthropic's text deltas to the client as SSE, then
+    // reconstruct `usage` from the stream events and log to usage_costs with the
+    // SAME logUsage() as the JSON path — cost tracking does NOT regress.
+    if (body.stream === true) {
+      const startedAt = Date.now();
+      const upstream = await fetch(ANTHROPIC_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": ANTHROPIC_KEY,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({ ...payload, stream: true }),
+      });
+      // Upstream failed before any streaming — behave exactly like the JSON path:
+      // record the error in usage_costs and return a JSON error (headers not sent yet).
+      if (!upstream.ok || !upstream.body) {
+        const errData = await upstream.json().catch(() => ({}));
+        try { await logUsage({ caller, feature, model, data: errData, latency_ms: Date.now() - startedAt, status: `error_${upstream.status}`, snapP }); } catch {}
+        return res.status(upstream.status).json(errData);
+      }
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no", // ask proxies not to buffer, so deltas flush live
+      });
+      const usage = { input_tokens: null, output_tokens: null, cache_read_input_tokens: null, cache_creation_input_tokens: null };
+      let resolvedModel = model, aborted = false;
+      req.on("close", () => { aborted = true; });
+      const reader = upstream.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let i;
+          while ((i = buf.indexOf("\n\n")) !== -1) {
+            const frame = buf.slice(0, i); buf = buf.slice(i + 2);
+            const dl = frame.split("\n").find((l) => l.startsWith("data:"));
+            if (!dl) continue;
+            const raw = dl.slice(5).trim();
+            if (!raw || raw === "[DONE]") continue;
+            let ev; try { ev = JSON.parse(raw); } catch { continue; }
+            if (ev.type === "message_start" && ev.message) {
+              resolvedModel = ev.message.model || resolvedModel;
+              const mu = ev.message.usage || {};
+              usage.input_tokens = mu.input_tokens ?? usage.input_tokens;
+              usage.cache_read_input_tokens = mu.cache_read_input_tokens ?? usage.cache_read_input_tokens;
+              usage.cache_creation_input_tokens = mu.cache_creation_input_tokens ?? usage.cache_creation_input_tokens;
+            } else if (ev.type === "content_block_delta" && ev.delta?.type === "text_delta") {
+              res.write(`data: ${JSON.stringify({ text: ev.delta.text || "" })}\n\n`);
+            } else if (ev.type === "message_delta" && ev.usage) {
+              usage.output_tokens = ev.usage.output_tokens ?? usage.output_tokens;
+            }
+          }
+          if (aborted) { try { await reader.cancel(); } catch {} break; }
+        }
+      } catch {
+        try { res.write(`event: error\ndata: ${JSON.stringify({ error: "stream_interrupted" })}\n\n`); } catch {}
+      }
+      try { res.write(`event: done\ndata: ${JSON.stringify({ done: true })}\n\n`); } catch {}
+      try { res.end(); } catch {}
+      try { await logUsage({ caller, feature, model: resolvedModel, data: { model: resolvedModel, usage }, latency_ms: Date.now() - startedAt, status: aborted ? "aborted" : "ok", snapP }); } catch {}
+      return;
+    }
+
     const startedAt = Date.now();
     const r = await fetch(ANTHROPIC_URL, {
       method: "POST",

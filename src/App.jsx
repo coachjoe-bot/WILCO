@@ -919,6 +919,43 @@ export const askClaude = async (system, user, maxTokens=600, images=[], model="c
   return d.content?.[0]?.text||"";
 };
 
+// Streaming variant of askClaude for the conversational chat: same server proxy
+// (api/claude.js with stream:true), but relays Anthropic's text deltas as SSE so the
+// reply renders token-by-token. Calls onDelta(chunk) as text arrives and RESOLVES to
+// the full text. THROWS on any failure so the caller can fall back to non-streaming
+// askClaude — a broken stream must never leave a blank reply. Text-only (no images).
+export const askClaudeStream = async (system, user, {maxTokens=600, model="claude-sonnet-5", feature="other", onDelta}={}) => {
+  const sysCached  = (system && typeof system === "object") ? (system.cached||"")  : "";
+  const sysDynamic = (system && typeof system === "object") ? (system.dynamic||"") : system;
+  const r = await fetch("/api/claude",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({auth:CURRENT_AUTH,model,max_tokens:maxTokens,stream:true,system:sysDynamic,...(sysCached?{system_cached:sysCached}:{}),messages:[{role:"user",content:[{type:"text",text:user}]}],feature})
+  });
+  if(!r.ok || !r.body) throw new Error(`stream failed (${r.status})`);
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buf="", full="";
+  for(;;){
+    const {done,value} = await reader.read();
+    if(done) break;
+    buf += decoder.decode(value,{stream:true});
+    let i;
+    while((i=buf.indexOf("\n\n"))!==-1){
+      const frame=buf.slice(0,i); buf=buf.slice(i+2);
+      const lines=frame.split("\n");
+      const evLine=lines.find(l=>l.startsWith("event:"));
+      const dataLine=lines.find(l=>l.startsWith("data:"));
+      if(!dataLine) continue;
+      if(evLine && evLine.includes("error")) throw new Error("stream_interrupted");
+      let obj; try{ obj=JSON.parse(dataLine.slice(5).trim()); }catch{ continue; }
+      if(obj && typeof obj.text==="string" && obj.text){ full+=obj.text; if(onDelta) onDelta(obj.text); }
+    }
+  }
+  if(!full.trim()) throw new Error("empty stream");
+  return full;
+};
+
 const extractProgramText = async (message) => {
   const text = await askClaude(
     "Extract the training program from this athlete message. Return only the program content — days, exercises, sets, reps, weights. Clean formatting. No intro, no commentary, no explanation.",
@@ -1101,7 +1138,7 @@ ${Object.entries(JOEBOT_GOALS).map(([k,v])=>`- ${k}: ${v}`).join("\n")}
 SPORT PRIORITIES (apply the athlete's sport from the session context):
 ${Object.entries(JOEBOT_SPORTS).map(([k,v])=>`- ${k}: ${v}`).join("\n")}`;
 
-const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athleteGoals=[], athleteContext=null) => {
+const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athleteGoals=[], athleteContext=null, onDelta=null) => {
   const hist = history.slice(-6).map(m=>`${m.role==="user"?athlete.name:"Coach Joe"}: ${m.content}`).join("\n");
 
   // Improved history context with explicit dates so bot can answer "what did I do Monday" etc.
@@ -1167,7 +1204,11 @@ SPORT: ${JOEBOT_SPORTS[athlete.sport]||"Build a general strength base."}${pastCo
     contextMemory = `\n\nATHLETE CONTEXT (from monthly recap history — preferences, injuries, goals stated over time):\n${athleteContext}\nUse this as background — do not repeat it back, just let it inform your responses.`;
   }
 
-  return askClaude({cached:JOEBOT_STATIC_SYS, dynamic:sys+goalsContext+contextMemory},`${hist}\n\n${athlete.name}: ${message}`,450,[],"claude-sonnet-5","joebot_chat");
+  const sysObj = {cached:JOEBOT_STATIC_SYS, dynamic:sys+goalsContext+contextMemory};
+  const userMsg = `${hist}\n\n${athlete.name}: ${message}`;
+  // Stream when the caller wants live rendering; otherwise the classic one-shot call.
+  if(onDelta) return askClaudeStream(sysObj, userMsg, {maxTokens:450, model:"claude-sonnet-5", feature:"joebot_chat", onDelta});
+  return askClaude(sysObj, userMsg, 450, [], "claude-sonnet-5", "joebot_chat");
 };
 
 // ─── 1RM PROPAGATION ─────────────────────────────────────────────────────────
@@ -3681,8 +3722,28 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // The reply used to be held until parse + save finished (several bcrypt-gated
       // gateway round-trips), which made every message feel slower than the AI was.
       const parsedP = parseWorkout(msg,athlete.name,athlete.sport);
-      const reply = await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext);
-      setMessages(prev=>[...prev,{role:"assistant",content:reply}]);
+      // Stream the coaching reply into a live-updating bubble: append an empty
+      // assistant message and grow it as deltas arrive. On ANY stream failure (or an
+      // empty stream), fall back to the one-shot call and replace the placeholder —
+      // a broken stream must never leave a blank reply.
+      setMessages(prev=>[...prev,{role:"assistant",content:""}]);
+      let firstDelta = true;
+      const applyDelta = (chunk)=>{
+        if(firstDelta){ firstDelta = false; setLoading(false); } // hide the typing dot once text starts
+        setMessages(prev=>{
+          const u=[...prev]; const last=u[u.length-1];
+          if(last && last.role==="assistant") u[u.length-1]={role:"assistant",content:(last.content||"")+chunk};
+          return u;
+        });
+      };
+      let reply="";
+      try {
+        reply = await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext,applyDelta);
+      } catch(_streamErr){ /* fall through to the one-shot call below */ }
+      if(!reply || !reply.trim()){
+        reply = await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext);
+        setMessages(prev=>{ const u=[...prev]; const last=u[u.length-1]; if(last && last.role==="assistant") u[u.length-1]={role:"assistant",content:reply}; return u; });
+      }
       setLoading(false);
       const parsed = await parsedP;
 
