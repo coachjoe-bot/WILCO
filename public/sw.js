@@ -84,16 +84,23 @@ self.addEventListener("fetch", e => {
 });
 
 // ─── PUSH NOTIFICATIONS ───────────────────────────────────────────────────────
+// tag is PAYLOAD-DRIVEN (notification policy v2): with four distinct push types
+// (feed-live, 14/30-day inactivity, coach programming-update, test) now live, a
+// single hardcoded tag would let one type's notification silently replace another
+// still sitting in the tray (same tag = same OS notification slot). The server
+// sends `data.tag` per type (api/_push.js's pushPayload sets a sensible default
+// when a caller omits it); "wilco-proof-feed" stays as the fallback ONLY for
+// payloads sent before this change (old queued pushes, if any).
 self.addEventListener("push", e => {
-  let data = { title: "WILCO", body: "Your Proof Feed is ready.", url: "/" };
+  let data = { title: "WILCO", body: "Your Proof Feed is ready.", url: "/", tag: "wilco-proof-feed" };
   if (e.data) {
     try { data = { ...data, ...JSON.parse(e.data.text()) }; } catch (_) {}
   }
   const options = {
     body: data.body,
-    icon: "/icon-192.png",
-    badge: "/icon-192.png",
-    tag: "wilco-proof-feed",
+    icon: data.icon || "/icon-192.png",
+    badge: data.badge || "/icon-192.png",
+    tag: data.tag || "wilco-proof-feed",
     renotify: true,
     data: { url: data.url || "/" },
     actions: [{ action: "open", title: "View Now" }],

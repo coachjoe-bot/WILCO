@@ -1,4 +1,4 @@
-// ─── WEB PUSH ENDPOINT (v1) ───────────────────────────────────────────────────
+// ─── WEB PUSH ENDPOINT (v2 — notification policy v2) ──────────────────────────
 // One route for everything push: the client enables/disables notifications and
 // fires a test through POST actions (athlete-authenticated, same token/PIN
 // pattern as api/data.js), and the daily inactivity-nudge cron hits GET with the
@@ -8,124 +8,137 @@
 // POST { auth, action:"subscribe", subscription }           -> { ok }          (upsert by endpoint, bound to caller)
 // POST { auth, action:"unsubscribe", endpoint }             -> { ok }          (deletes caller's own row only)
 // POST { auth, action:"test" }                              -> { sent, pruned }(immediate test push to caller's devices)
-// GET  Authorization: Bearer <CRON_SECRET>                  -> { checked, nudged, pruned }
+// GET  Authorization: Bearer <CRON_SECRET>                  -> { checked, nudged14, nudged30, pruned }
 //
-// The nudge run finds athletes who have push enabled, haven't logged a workout
-// in >3 days, and haven't been nudged in >3 days, and sends each ONE short
-// Coach Joe message. Dead subscriptions (push service says 404/410) are pruned
-// wherever a send fails, so the table self-cleans as devices churn.
+// NOTIFICATION POLICY v2 (Will, 2026-07-04): WILCO sends exactly FOUR kinds of
+// push, ever, without Will's explicit sign-off — feed-live (api/trigger-proof-feed.js),
+// inactivity (this file), coach programming-update (api/notify-program-changes.js),
+// and this file's user-initiated "test." Nothing else.
+//
+// INACTIVITY POLICY (replaces the old repeating 3-day nudge): exactly TWO touches
+// per quiet streak — one at 14 days since the athlete's last logged workout, one
+// at 30 days — then silence until they log again, which resets the streak and
+// re-arms both touches. Tracked in athlete_nudge_state (one row per athlete,
+// NOT per device): stage_14_sent_at / stage_30_sent_at record whether each touch
+// has already fired for the CURRENT streak, and last_workout_at is the streak
+// anchor. A per-athlete table (rather than overloading push_subscriptions,
+// which is per-DEVICE) is what makes "have we sent the 14-day touch for THIS
+// streak" unambiguous across an athlete's multiple devices — see the migration's
+// header for the fuller rationale.
 //
 // Env: VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT, CRON_SECRET,
 //      SUPABASE_URL + SUPABASE_SERVICE_KEY (via ./_supa.js).
 
-import webpush from "web-push";
 import {
   applyCors, httpErr, str, sbSelect, sbWrite, sbDelete,
   authCaller, tryTokenAuth, authThrottle, clientIp, logError,
 } from "./_supa.js";
+import { ensureVapid, vapidPublicKey, sendTo, sendToAthlete, pushPayload } from "./_push.js";
 
 const enc = encodeURIComponent;
 
-const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "";
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "";
-const VAPID_SUBJECT = process.env.VAPID_SUBJECT || "mailto:coachwill@trainwilco.com";
+// Streak thresholds (days since last logged workout).
+const STAGE_14_DAYS = 14;
+const STAGE_30_DAYS = 30;
+const daysAgo = (n) => new Date(Date.now() - n * 864e5).toISOString();
 
-let vapidReady = false;
-function ensureVapid() {
-  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) throw httpErr(500, "Push not configured");
-  if (!vapidReady) {
-    webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
-    vapidReady = true;
-  }
-}
-
-// How long an athlete (and a nudge cooldown) can sit quiet before Joe pings.
-const STALE_DAYS = 3;
-const staleCutoff = () => new Date(Date.now() - STALE_DAYS * 864e5).toISOString();
-
-// Coach Joe inactivity nudges — short, human, one per run, rotated at random.
-const NUDGE_VARIANTS = [
-  "Been a few days. What are we training today?",
-  "Haven't seen a log from you in a bit. Let's get one in today.",
-  "Your last session is getting old. Time to stack another one.",
-  "Consistency wins. Get a session in and log it for me today.",
+// Coach Joe inactivity nudges — simple encouragement, no guilt-tripping, rotated
+// at random. Two distinct banks (14-day touch is a lighter check-in; 30-day is a
+// last honest nudge before we go quiet) so the two touches don't feel identical.
+const NUDGE_14_VARIANTS = [
+  "Haven't seen a log from you in a couple weeks. No pressure, just checking in — let's get back to it.",
+  "It's been 14 days since your last session. Whenever you're ready, I'm here.",
+  "Two weeks since we've trained together. Let's get one in today.",
+];
+const NUDGE_30_VARIANTS = [
+  "It's been a month since your last log. Whenever life settles, come back — I'll pick up right where we left off.",
+  "30 days quiet. No judgment — just know the door's open whenever you want back in.",
+  "It's been a while. If you're ready to start again, I'm ready to coach.",
 ];
 
-// Send one push to one subscription row. Returns "sent", "pruned", or "failed".
-// 404/410 from the push service mean the subscription is dead — delete the row.
-// Any other failure is logged and swallowed so one bad device can't break a batch.
-async function sendTo(sub, payload) {
-  try {
-    await webpush.sendNotification(
-      { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
-      JSON.stringify(payload)
-    );
-    return "sent";
-  } catch (e) {
-    const code = e && e.statusCode;
-    if (code === 404 || code === 410) {
-      try { await sbDelete("push_subscriptions", `?id=eq.${enc(sub.id)}`); } catch { /* prune is best-effort */ }
-      return "pruned";
-    }
-    console.error(`[push] send failed (${code || "network"}) for sub ${sub.id}:`, e?.message);
-    return "failed";
-  }
-}
-
 // ── Daily nudge run (GET, cron-only) ──────────────────────────────────────────
+// Runs once/day. For each athlete with push subscriptions: find their most recent
+// workout, and if none in 14/30 days AND the matching stage hasn't already fired
+// for this streak, send it and stamp the stage. A workout since the last stage
+// stamp resets last_workout_at (via upsert below) which naturally re-arms both
+// stages for the NEXT streak — no separate "reset" branch needed, since the
+// 14/30-day check is always relative to the CURRENT last_workout_at.
 async function runNudges(res) {
   ensureVapid();
   const subs = await sbSelect("push_subscriptions", "?select=*");
-  if (subs.length === 0) return res.status(200).json({ checked: 0, nudged: 0, pruned: 0 });
+  if (subs.length === 0) return res.status(200).json({ checked: 0, nudged14: 0, nudged30: 0, pruned: 0 });
 
-  // Group subscriptions per athlete; an athlete gets ONE nudge across devices.
   const byAthlete = {};
   for (const s of subs) (byAthlete[s.athlete_id] = byAthlete[s.athlete_id] || []).push(s);
   const athleteIds = Object.keys(byAthlete);
   const idList = athleteIds.map((id) => `"${id}"`).join(",");
 
-  // Anyone with a workout in the last STALE_DAYS is active — skip them. Athletes
-  // with NO workouts ever count as stale too (they clearly need the nudge), but
-  // a brand-new subscription gets a grace period so nobody is pinged the same
-  // week they turned notifications on without ever going quiet.
-  const cutoff = staleCutoff();
-  const recent = await sbSelect(
+  // Most recent workout per athlete (single query, then reduced client-side —
+  // PostgREST has no native "latest per group," and this table is small enough).
+  const recentWorkouts = await sbSelect(
     "workouts",
-    `?athlete_id=in.(${idList})&created_at=gte.${enc(cutoff)}&select=athlete_id`
+    `?athlete_id=in.(${idList})&select=athlete_id,created_at&order=created_at.desc`
   );
-  const active = new Set(recent.map((w) => w.athlete_id));
-
-  let nudged = 0;
-  let pruned = 0;
-  for (const [athleteId, rows] of Object.entries(byAthlete)) {
-    if (active.has(athleteId)) continue;
-    // Cooldown: skip if ANY of their rows was nudged within the window.
-    if (rows.some((r) => r.last_nudged_at && r.last_nudged_at >= cutoff)) continue;
-    // Grace period: newest subscription must itself be older than the window.
-    if (rows.every((r) => r.created_at && r.created_at >= cutoff)) continue;
-
-    const body = NUDGE_VARIANTS[Math.floor(Math.random() * NUDGE_VARIANTS.length)];
-    const payload = { title: "Coach Joe", body, url: "/" };
-    let sentAny = false;
-    for (const sub of rows) {
-      const outcome = await sendTo(sub, payload);
-      if (outcome === "sent") sentAny = true;
-      if (outcome === "pruned") pruned++;
-    }
-    if (sentAny) nudged++;
-    // Stamp the cooldown even if every device failed — retrying a broken endpoint
-    // nightly just burns the run; the rows self-heal (prune) or the athlete re-enables.
-    try {
-      await sbWrite({
-        method: "PATCH", table: "push_subscriptions",
-        query: `?athlete_id=eq.${enc(athleteId)}`,
-        body: { last_nudged_at: new Date().toISOString() },
-        prefer: "return=minimal",
-      });
-    } catch { /* cooldown stamp is best-effort */ }
+  const lastWorkoutAt = {};
+  for (const w of recentWorkouts) {
+    if (!lastWorkoutAt[w.athlete_id]) lastWorkoutAt[w.athlete_id] = w.created_at; // first hit per id = latest (query is DESC)
   }
 
-  return res.status(200).json({ checked: athleteIds.length, nudged, pruned });
+  const stateRows = await sbSelect("athlete_nudge_state", `?athlete_id=in.(${idList})&select=*`);
+  const stateByAthlete = Object.fromEntries(stateRows.map((r) => [r.athlete_id, r]));
+
+  const cutoff14 = daysAgo(STAGE_14_DAYS);
+  const cutoff30 = daysAgo(STAGE_30_DAYS);
+
+  let nudged14 = 0, nudged30 = 0, pruned = 0;
+  for (const [athleteId, rows] of Object.entries(byAthlete)) {
+    const lastWorkout = lastWorkoutAt[athleteId] || null; // null = never logged a workout at all
+    const state = stateByAthlete[athleteId] || null;
+
+    // If the athlete's last workout is NEWER than what we have stamped as the
+    // streak anchor (or we've never stamped one), the streak is fresh/reset —
+    // clear any stage stamps so both touches are re-armed for THIS streak.
+    const priorAnchor = state?.last_workout_at || null;
+    const streakReset = lastWorkout && (!priorAnchor || new Date(lastWorkout) > new Date(priorAnchor));
+
+    let stage14Sent = streakReset ? null : (state?.stage_14_sent_at || null);
+    let stage30Sent = streakReset ? null : (state?.stage_30_sent_at || null);
+
+    const isStale14 = !lastWorkout || lastWorkout <= cutoff14;
+    const isStale30 = !lastWorkout || lastWorkout <= cutoff30;
+
+    let stageToSend = null; // "14" | "30" | null
+    if (isStale30 && !stage30Sent) stageToSend = "30";
+    else if (isStale14 && !stage14Sent) stageToSend = "14";
+
+    let patch = null;
+    if (streakReset) patch = { athlete_id: athleteId, last_workout_at: lastWorkout, stage_14_sent_at: null, stage_30_sent_at: null };
+
+    if (stageToSend) {
+      const variants = stageToSend === "30" ? NUDGE_30_VARIANTS : NUDGE_14_VARIANTS;
+      const body = variants[Math.floor(Math.random() * variants.length)];
+      const payload = pushPayload({ title: "Coach Joe", body, url: "/", type: stageToSend === "30" ? "nudge30" : "nudge14" });
+      const { pruned: p } = await sendToAthlete(rows, payload);
+      pruned += p;
+      // Stamp the stage even if every device failed — retrying a broken endpoint
+      // tomorrow just burns the run; the rows self-heal (prune) or the athlete
+      // re-subscribes, and this is a once-per-streak touch, not a repeating nudge.
+      if (stageToSend === "30") { nudged30++; stage30Sent = new Date().toISOString(); }
+      else { nudged14++; stage14Sent = new Date().toISOString(); }
+      patch = { athlete_id: athleteId, last_workout_at: lastWorkout, stage_14_sent_at: stage14Sent, stage_30_sent_at: stage30Sent };
+    }
+
+    if (patch) {
+      try {
+        await sbWrite({
+          method: "POST", table: "athlete_nudge_state", query: "?on_conflict=athlete_id",
+          body: patch, prefer: "resolution=merge-duplicates,return=minimal",
+        });
+      } catch { /* state stamp is best-effort — worst case we re-evaluate next run */ }
+    }
+  }
+
+  return res.status(200).json({ checked: athleteIds.length, nudged14, nudged30, pruned });
 }
 
 // Vercel Pro: cap this function's execution time. 60s gives the nudge run room
@@ -165,8 +178,9 @@ export default async function handler(req, res) {
 
   // Public: the VAPID public key is by definition public — no auth needed.
   if (body.action === "vapid-public-key") {
-    if (!VAPID_PUBLIC_KEY) return res.status(500).json({ error: "Push not configured" });
-    return res.status(200).json({ publicKey: VAPID_PUBLIC_KEY });
+    const key = vapidPublicKey();
+    if (!key) return res.status(500).json({ error: "Push not configured" });
+    return res.status(200).json({ publicKey: key });
   }
 
   let caller = null;
@@ -219,7 +233,7 @@ export default async function handler(req, res) {
       ensureVapid();
       const rows = await sbSelect("push_subscriptions", `?athlete_id=eq.${enc(caller.id)}&select=*`);
       if (rows.length === 0) return res.status(200).json({ sent: 0, pruned: 0 });
-      const payload = { title: "Coach Joe", body: "Notifications are on. I'll keep you posted.", url: "/" };
+      const payload = pushPayload({ title: "Coach Joe", body: "Notifications are on. I'll keep you posted.", url: "/", type: "test" });
       let sent = 0;
       let pruned = 0;
       for (const sub of rows) {

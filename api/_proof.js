@@ -10,6 +10,7 @@
 // per-digest cost flat and bounded as the roster grows.
 
 import crypto from "node:crypto";
+import { epley1RM, computeGritSnapshot, TIER_NAMES } from "./_grit.js";
 
 // ── parsed_data access ────────────────────────────────────────────────────────
 export const getPD = (w) => {
@@ -44,11 +45,11 @@ export const groupIntoSessions = (workouts) => {
   return groups;
 };
 
-export const epley1RM = (weight, reps) => {
-  if (!weight || weight <= 0) return 0;
-  if (!reps || reps <= 1) return weight;
-  return Math.round(weight * (1 + reps / 30));
-};
+// epley1RM now imported from ./_grit.js (re-exports src/grit.js) — was hand-
+// duplicated here before proof-feed-v3; this was the ONE existing drift hazard
+// the shared module was built to close. Re-exported for any other importer that
+// still expects it from this file.
+export { epley1RM };
 
 const toLbs = (w, unit) => (unit === "kg" ? w * 2.205 : w);
 
@@ -142,6 +143,44 @@ export const aggregateInjuries = (sessions, resolved = []) => {
   const active = Object.keys(counts); // anything flagged in the window
   return { active, recurring, counts };
 };
+
+// ── Grit rank movement (v3 enrichment) ────────────────────────────────────────
+// Computes the athlete's CURRENT Grit snapshot (rank/Strength Score/PRs) and diffs
+// it against the snapshot as of the athlete's LAST feed entry, using the SAME
+// computeGritSnapshot the client's Progress screen uses (api/_grit.js re-exports
+// src/grit.js) — stateless: no new table, just recomputed twice off a date filter.
+// `allWorkouts`/`allManualRMs` should be the athlete's FULL history (not just this
+// week) so the "before" snapshot reflects everything known as of that date.
+export function computeRankMovement(allWorkouts, allManualRMs, athlete, previousEntryAt) {
+  const opts = {
+    bodyweightLbs: athlete.weight_lbs || athlete.weight || 0,
+    gender: athlete.gender,
+    age: athlete.age ?? (athlete.birthday ? Math.floor((Date.now() - new Date(athlete.birthday)) / (365.25 * 24 * 3600 * 1000)) : null),
+  };
+  const now = computeGritSnapshot(allWorkouts, allManualRMs, opts);
+  if (!previousEntryAt) {
+    // No prior entry to diff against (first-ever digest) — report the snapshot with
+    // no deltas rather than fabricate a "before" state.
+    return { now, before: null, rankUp: false, strengthScoreDelta: null, newRankedPRs: [] };
+  }
+  const cutoff = new Date(previousEntryAt).getTime();
+  const priorWorkouts = (allWorkouts || []).filter((w) => new Date(w.created_at).getTime() < cutoff);
+  const priorManual = allManualRMs; // manual 1RMs carry no timestamp in this schema; treated as already-known (conservative — never OVER-credits a "new" PR)
+  const before = computeGritSnapshot(priorWorkouts, priorManual, opts);
+
+  const beforeByKey = Object.fromEntries(before.rankedLifts.map((b) => [b.benchKey, b]));
+  const newRankedPRs = now.rankedLifts.filter((b) => {
+    const prior = beforeByKey[b.benchKey];
+    return !prior || b.e1rm > prior.e1rm + 0.5;
+  }).map((b) => ({ name: b.name, benchKey: b.benchKey, e1rm: b.e1rm, tierIdx: b.tierIdx, tierName: TIER_NAMES[b.tierIdx] }));
+
+  return {
+    now, before,
+    rankUp: now.topTierIdx > before.topTierIdx,
+    strengthScoreDelta: now.strengthScore - before.strengthScore,
+    newRankedPRs,
+  };
+}
 
 // ─── PROGRAM PARSE (§6) ───────────────────────────────────────────────────────
 export const hashProgram = (text) =>
@@ -288,9 +327,43 @@ export const buildOneRMs = (prs = [], manual = []) => {
   return map;
 };
 
+// ── total working-set volume for a set of sessions (program-agnostic) ─────────
+// Unlike compareProgramVsActual (which needs a parsed structured program),
+// this is a simple raw-count so EVERY athlete gets a week-over-week volume
+// comparison, program or not: total working sets logged across all lifts.
+export function totalSetVolume(sessions) {
+  let sets = 0;
+  for (const group of sessions) {
+    for (const w of group) {
+      const exercises = getPD(w).exercises || [];
+      for (const ex of exercises) sets += workingSets(ex).length;
+    }
+  }
+  return sets;
+}
+
+// ── pain-flag trend: is it worsening, steady, or clearing vs last window? ─────
+// Compares raw flag COUNTS (not just distinct areas) between this week and last —
+// e.g. the same shoulder flagged 3x this week vs 1x last week reads as worsening.
+export function painTrend(thisWeekSessions, lastWeekSessions, resolved = []) {
+  const thisWk = aggregateInjuries(thisWeekSessions, resolved);
+  const lastWk = aggregateInjuries(lastWeekSessions, resolved);
+  const thisTotal = Object.values(thisWk.counts).reduce((a, b) => a + b, 0);
+  const lastTotal = Object.values(lastWk.counts).reduce((a, b) => a + b, 0);
+  let direction = "steady";
+  if (thisTotal === 0 && lastTotal > 0) direction = "clearing";
+  else if (thisTotal > lastTotal) direction = "worsening";
+  else if (thisTotal < lastTotal && thisTotal > 0) direction = "improving";
+  return { thisWeekFlags: thisTotal, lastWeekFlags: lastTotal, direction, recurring: thisWk.recurring };
+}
+
 // ─── THE BRIEF (§5) ───────────────────────────────────────────────────────────
 // Pure-code summary handed to Sonnet. Compact (a few KB), no raw workout JSON.
-export function buildBrief({ athlete, thisWeekSessions, lastWeekSessions, monthSessions, prs, goals, adherence, injuries, windowType }) {
+// v3 (proof-feed-v3) adds: rank (Grit movement), painTrend (worsening/improving
+// vs last window), and volumeTrend (total working sets this week vs last, program-
+// agnostic — separate from `volume`, which is the structured program-adherence gap
+// and stays null for athletes with no parsed program).
+export function buildBrief({ athlete, thisWeekSessions, lastWeekSessions, monthSessions, prs, goals, adherence, injuries, windowType, rank, painTrendData }) {
   const thisWeekLifts = buildLiftHistory(thisWeekSessions);
   const lastWeekLifts = buildLiftHistory(lastWeekSessions);
 
@@ -316,6 +389,9 @@ export function buildBrief({ athlete, thisWeekSessions, lastWeekSessions, monthS
     goal: g.goal_text, target_metric: g.target_metric, target_value: g.target_value, target_date: g.target_date,
   }));
 
+  const thisWeekVolume = totalSetVolume(thisWeekSessions);
+  const lastWeekVolume = totalSetVolume(lastWeekSessions);
+
   return {
     identity: {
       name: athlete.name,
@@ -330,11 +406,18 @@ export function buildBrief({ athlete, thisWeekSessions, lastWeekSessions, monthS
       thisMonth: monthSessions.length,
       programDaysPerWeek: athlete.training_days_per_week || null,
     },
+    volumeTrend: {
+      thisWeekSets: thisWeekVolume,
+      lastWeekSets: lastWeekVolume,
+      deltaSets: thisWeekVolume - lastWeekVolume,
+    },
     lifts,
     plateaus,
     prs: recentPRs,
     goals: goalLines,
     injuries,
+    painTrend: painTrendData || null,   // null when there's no window to compare (e.g. never logged pain)
+    rank: rank || null,                 // Grit rank movement (null if not computed — e.g. no bodyweight on file)
     volume: adherence,                 // null if no structured program
     onTempProgram: !!athlete.temp_program_text,
   };
@@ -375,8 +458,11 @@ export function buildQuestionBank(brief, athlete, opts = {}) {
     q.push({
       id: "injury_apply", kind: "injury_apply", deeper: false,
       meta: { area: activeInjury, change: injuryChange || null },
+      // Colon form + trailing-period strip so the model-generated `injuryChange`
+      // (often a capitalized "Cap bench…" clause ending in ".") reads clean instead
+      // of "I'd Cap bench… . Apply it" (mid-sentence capital + double period).
       text: injuryChange
-        ? `To protect that ${activeInjury} I'd ${injuryChange}. Apply it next week, keep it as written, or adjust?`
+        ? `To protect that ${activeInjury}: ${injuryChange.replace(/\.\s*$/, "")}. Apply it next week, keep it as written, or adjust?`
         : `I'd protect that ${activeInjury} with a targeted change next week — want the specifics applied, kept as written, or adjusted?`,
     });
   }
@@ -427,22 +513,46 @@ export async function generateWeekly(athlete, brief, deps) {
     ? `VOLUME GAP IS MATERIAL (${v.rolledGapPct}% under prescribed working volume). Lifts: ${v.byLift.filter((l) => l.volumeGapPct >= 15).map((l) => `${l.lift} ${l.actualSets}x${l.actualReps} vs ${l.prescribedSets}x${l.prescribedReps}`).join("; ")}.`
     : v ? `Volume on track (${v.rolledGapPct}% under).` : "No structured program to compare volume against.";
 
+  // v3: program-agnostic week-over-week set volume (every athlete gets this, even
+  // without a parsed program) — separate signal from the program-adherence gap above.
+  const vt = brief.volumeTrend;
+  const volumeTrendNote = vt
+    ? `Raw working sets logged: ${vt.thisWeekSets} this week vs ${vt.lastWeekSets} last week (${vt.deltaSets >= 0 ? "+" : ""}${vt.deltaSets}).`
+    : null;
+
+  // v3: Grit rank movement — new PRs on ranked (benchmarked) lifts, tier-up, and
+  // Strength Score delta since the athlete's last feed entry.
+  const r = brief.rank;
+  const rankNote = r
+    ? (r.before
+        ? `GRIT RANK: current Top Rank ${r.now.topTierName || "Rookie"} (Strength Score ${r.now.strengthScore}), was ${r.before.topTierName || "Rookie"} (${r.before.strengthScore}) as of the last check-in — Strength Score change: ${r.strengthScoreDelta >= 0 ? "+" : ""}${r.strengthScoreDelta}.${r.rankUp ? " TIER-UP this period." : ""}${r.newRankedPRs.length ? ` New bests on ranked lifts: ${r.newRankedPRs.map((p) => `${p.name} ${Math.round(p.e1rm)}lbs (${p.tierName})`).join(", ")}.` : ""}`
+        : `GRIT RANK: current Top Rank ${r.now.topTierName || "Rookie"} (Strength Score ${r.now.strengthScore}). This is their first check-in — no prior snapshot to compare, so don't claim movement.`)
+    : null;
+
+  // v3: pain trend across the window (worsening/improving/clearing/steady), on top
+  // of the raw active-injury list already in brief.injuries.
+  const pt = brief.painTrend;
+  const painTrendNote = pt
+    ? `PAIN TREND: ${pt.direction} (${pt.thisWeekFlags} flags this week vs ${pt.lastWeekFlags} last week).${pt.recurring.length ? ` Recurring: ${pt.recurring.map((x) => `${x.area} (${x.count}x)`).join(", ")}.` : ""}`
+    : null;
+
   const system = `${COACH_VOICE}
 You are writing this week's Proof Feed digest. Return ONLY JSON with these keys (string or null — null when there's nothing real to say):
-{"week_vs_week":..,"volume_headline":..,"program_load":..,"prs_progress":..,"injury_plan":..,"injury_focus":..,"injury_change":..,"goal_progress":..,"focus_next_week":..}
-- week_vs_week: punchy — lifts that moved, est-1RM deltas, block context.
-- volume_headline: ONLY if the volume gap is material — make it the headline, name the set/rep shortfall by lift, allow that it may be intentional auto-regulation but name it. Else null.
+{"week_vs_week":..,"volume_headline":..,"program_load":..,"prs_progress":..,"rank_movement":..,"injury_plan":..,"injury_focus":..,"injury_change":..,"goal_progress":..,"focus_next_week":..}
+- week_vs_week: punchy — lifts that moved, est-1RM deltas, block context. Weave in the raw set-volume trend (VOLUME TREND note in the brief) if it's notable — more or fewer sets logged than last week is real signal even for athletes with no structured program.
+- volume_headline: ONLY if the structured PROGRAM volume gap is material — make it the headline, name the set/rep shortfall by lift, allow that it may be intentional auto-regulation but name it. Else null. (This is different from the raw volume trend above — only fire this for an actual program-adherence gap.)
 - program_load: where loads track vs prescribed %. null if no program.
-- prs_progress: new PRs / block bests. null if none.
-- injury_plan: ONLY if an injury is active — a warning PLUS a concrete example program change (e.g. cap a lift ~80%, swap to a variation, add prehab with real sets). Else null.
+- prs_progress: new PRs / block bests from the athlete's own log (the "prs" list in the brief). null if none.
+- rank_movement: ONLY if the brief's GRIT RANK note describes real movement (a tier-up, a Strength Score change worth naming, or a new best on a ranked/benchmarked lift) — call out the SPECIFIC lift(s) and tier by name (e.g. "Back Squat pushed you into STRONG territory"). If it's their first-ever check-in (no prior snapshot), you may state their current rank once but never claim "movement." If nothing changed, null.
+- injury_plan: ONLY if an injury is active — a warning PLUS a concrete example program change (e.g. cap a lift ~80%, swap to a variation, add prehab with real sets). Use the PAIN TREND note (worsening/improving/clearing) to calibrate urgency — worsening or recurring flags deserve a firmer plan than a single one-off mention. Else null.
 - injury_focus: if an injury is active, the SINGLE body area you are addressing (e.g. "left pec", "right knee"). MUST be the same area injury_plan and focus_next_week talk about — pick one and stay consistent across all three. Else null.
 - injury_change: if an injury is active, the SPECIFIC change you'd make, concrete enough to apply verbatim — name exercises, sets/reps, and %s (e.g. "cap pressing at 80% 1RM, swap flat bench for floor press 4x6, add band pull-aparts 3x20"). No vague "a small tweak". Else null.
 - goal_progress: vs stated goals. null if none.
-- focus_next_week: one specific directive (consistent with injury_focus if an injury is active).`;
+- focus_next_week: REQUIRED, never null. End the whole digest on exactly ONE concrete, specific directive for next week — a lift + a number (weight, sets/reps, or %), or a session-count target if that's the real gap. Never a vague "keep it up." Consistent with injury_focus if an injury is active.`;
 
-  const user = `BRIEF (JSON):\n${JSON.stringify({ ...brief, volume: v ? { ...v, note: volNote } : null }, null, 1)}`;
+  const user = `BRIEF (JSON):\n${JSON.stringify({ ...brief, volume: v ? { ...v, note: volNote } : null, volumeTrend: vt ? { ...vt, note: volumeTrendNote } : null, rank: r ? { ...r, note: rankNote } : null, painTrend: pt ? { ...pt, note: painTrendNote } : null }, null, 1)}`;
 
-  const raw = await deps.askClaudeServer({ system, user, maxTokens: 1300, feature: "proof_weekly", attribution: deps.attribution });
+  const raw = await deps.askClaudeServer({ system, user, maxTokens: 1400, feature: "proof_weekly", attribution: deps.attribution });
   const obj = parseJsonLoose(raw) || {};
 
   const sections = sectionsFrom(obj, [
@@ -450,6 +560,7 @@ You are writing this week's Proof Feed digest. Return ONLY JSON with these keys 
     { key: "volume_headline", label: "VOLUME", flag: "warn" },
     { key: "program_load", label: "PROGRAM VS ACTUAL (LOAD)" },
     { key: "prs_progress", label: "PRS & PROGRESS" },
+    { key: "rank_movement", label: "GRIT RANK" },
     { key: "injury_plan", label: "INJURY WATCH + PLAN", flag: "warn" },
     { key: "goal_progress", label: "GOAL PROGRESS" },
     { key: "focus_next_week", label: "FOCUS NEXT WEEK" },
@@ -475,7 +586,7 @@ You are writing this week's Proof Feed digest. Return ONLY JSON with these keys 
       sections,
       questions: buildQuestionBank(brief, athlete, { activeInjury, injuryChange }),
       charts: null,
-      flags: { has_plateau: brief.plateaus.length > 0, has_pain: (brief.injuries.active || []).length > 0, has_missed: brief.sessions.thisWeek === 0, volume_gap: !!v?.material },
+      flags: { has_plateau: brief.plateaus.length > 0, has_pain: (brief.injuries.active || []).length > 0, has_missed: brief.sessions.thisWeek === 0, volume_gap: !!v?.material, rank_up: !!r?.rankUp },
     },
     has_plateau: brief.plateaus.length > 0,
     has_pain: (brief.injuries.active || []).length > 0,
