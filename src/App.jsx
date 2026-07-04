@@ -340,10 +340,14 @@ async function biometricEnroll({role, userId, name, pin}){
   if(!cred) throw new Error("Face ID setup was cancelled.");
   // Remember which transports this credential lives on so sign-in can pin the request
   // to the built-in (platform) authenticator and iOS goes straight to Face ID instead
-  // of offering the cross-device "scan QR / security key" flow. Falls back to internal
-  // since we requested a platform authenticator above.
+  // of offering the cross-device "scan QR / security key" flow.
+  //
+  // We deliberately keep ONLY "internal". iOS reports ["internal","hybrid"] for a synced
+  // iCloud passkey, and if we store+replay "hybrid" the sign-in request advertises the
+  // credential as reachable from another device — so the OS shows the QR / "use another
+  // device" picker instead of Face ID. Filter to local-only; never persist hybrid/cable.
   let transports = ["internal"];
-  try{ const t = cred.response?.getTransports?.(); if(Array.isArray(t) && t.length) transports = t; }catch{}
+  try{ const t = cred.response?.getTransports?.(); const local = Array.isArray(t) ? t.filter(x=>x==="internal") : []; if(local.length) transports = local; }catch{}
   setBioEnrollment(role, { credentialId: b64u.enc(cred.rawId), role, userId, name: name||null, pin, transports, enabledAt: Date.now() });
   clearBioFailures(role); // fresh credential — old failure streak is irrelevant
   return true;
@@ -356,7 +360,12 @@ async function biometricAssert(role){
   // Pin the request to the built-in authenticator (transports:["internal"]). Without
   // this hint iOS Safari can't tell the passkey is local and falls back to the hybrid
   // "scan QR / use a security key" flow instead of showing Face ID / Touch ID.
-  const transports = (Array.isArray(e.transports) && e.transports.length) ? e.transports : ["internal"];
+  //
+  // Filter the stored transports to local-only at request time too: older enrollments
+  // saved ["internal","hybrid"], and replaying "hybrid" here is exactly what makes iOS
+  // offer the QR / cross-device picker. Stripping it heals those without a re-setup.
+  const local = Array.isArray(e.transports) ? e.transports.filter(x=>x==="internal") : [];
+  const transports = local.length ? local : ["internal"];
   let assertion;
   try {
     assertion = await navigator.credentials.get({
@@ -364,6 +373,7 @@ async function biometricAssert(role){
         challenge: randBytes(32),
         allowCredentials: [{ id: b64u.dec(e.credentialId), type:"public-key", transports }],
         userVerification: "required",
+        hints: ["client-device"], // reinforce "use THIS device"; ignored where unsupported
         timeout: 60000,
       },
     });
