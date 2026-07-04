@@ -14,28 +14,54 @@
 // and the "/api/process-deletions" entry in vercel.json. This file's behavior is
 // otherwise unchanged.
 //
+// DISPATCH (proof-feed-v3): the pg_cron per-athlete fanout (2 SQL functions +
+// pg_cron jobs, see supabase/migrations/20260625_proof_feed_v2_cron.sql) existed
+// ONLY because of the old Vercel Hobby 10s duration wall — one invocation could
+// never loop the whole roster. Vercel Pro allows up to 300s, so this single Vercel
+// cron entry (vercel.json, mirrors the old pg_cron athlete-dispatch cadence) now
+// loops every DUE athlete SEQUENTIALLY in one invocation; one athlete's failure is
+// caught per-iteration and logged, never aborting the rest. The pg_cron dispatch
+// functions + jobs are dropped in supabase/migrations/20260704_drop_proof_feed_cron_fanout.sql
+// (NOT applied yet — runs at merge time, see that file's header). The per-id
+// (body.athlete_id) and per-coach (body.coach_id) entry modes below are KEPT as
+// generic single-target modes (still useful for support/debugging or a future
+// re-introduction of fanout at much higher scale) but are no longer load-bearing
+// for the daily schedule.
+//
 // TWO ENTRY MODES (spec §12):
 //   1. Scheduler — cron secret header (CRON_SECRET) or Vercel's x-vercel-cron.
-//      Sweeps all DUE athletes + generates coach reports. (Phase 6 replaces the
-//      sweep with pg_cron firing one request per due id — see the SQL migration.)
+//      Sweeps all DUE athletes + generates coach reports, one invocation, in order.
+//      Accepts an optional {dry_run:true} (cron-secret-gated ONLY — see below) that
+//      runs the full pipeline (compute + Claude generation) and returns the prose
+//      WITHOUT writing to proof_digests, advancing cycle state, sending email, or
+//      firing a push. Used to pull real-data samples for review before shipping
+//      prose changes (docs/proof-feed-v3-samples.md).
 //   2. Run-now — POST { auth:{role,id,pin}, run_now:true } from the app. Generates
 //      for THAT athlete only (own id), enforcing the once-per-day cap.
 //
+// FEED-DRIVEN PUSH (proof-feed-v3): once an entry is actually written (never in
+// dry-run), the athlete gets ONE push announcing it, capped at once/day via
+// athlete_nudge_state.last_feed_push_at (see 20260704_notification_policy_v2.sql).
+// This is entirely independent of the inactivity-nudge cooldown in api/push.js —
+// different table, different column, never touches each other's state.
+//
 // Env: ANTHROPIC_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY, RESEND_API_KEY,
-//      FROM_EMAIL, APP_URL (defaults below), CRON_SECRET.
+//      FROM_EMAIL, APP_URL (defaults below), CRON_SECRET, VAPID_*.
 
 import { sbSelect, sbInsert, sbWrite, sbDelete, authCaller, httpErr, askClaudeServer } from "./_supa.js";
 import {
   groupIntoSessions, aggregateInjuries, buildOneRMs, buildBrief,
-  parseProgramIfNeeded, compareProgramVsActual,
+  parseProgramIfNeeded, compareProgramVsActual, computeRankMovement, painTrend,
   generateWeekly, generateMonthly, generateCoach,
 } from "./_proof.js";
+import { sendToAthlete, pushPayload } from "./_push.js";
 
 const RESEND_KEY = process.env.RESEND_API_KEY;
 const FROM_EMAIL = process.env.FROM_EMAIL || "WILCO <noreply@trainwilco.com>";
 const APP_URL = process.env.APP_URL || "https://app.trainwilco.com";
 
 const todayStr = () => new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+const enc = encodeURIComponent;
 
 // ── Generic digest email (renders intro + sections[] + coach actions) ─────────
 const esc = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -83,8 +109,46 @@ const sendEmail = async (to, subject, html) => {
   } catch (e) { console.error("[proof-feed] email failed:", e.message); }
 };
 
+// ── Feed-driven push: one per athlete, capped once/day (proof-feed-v3) ────────
+// Independent of the inactivity-nudge cooldown (api/push.js uses athlete_nudge_state
+// too, but different columns — stage_14_sent_at/stage_30_sent_at vs this table's
+// last_feed_push_at — so the two features can never clobber each other's timers).
+async function sendFeedPush(athlete, digest, windowType) {
+  try {
+    const stateRows = await sbSelect("athlete_nudge_state", `?athlete_id=eq.${enc(athlete.id)}&select=last_feed_push_at`);
+    const lastPush = stateRows[0]?.last_feed_push_at;
+    if (lastPush && new Date(lastPush).toDateString() === new Date().toDateString()) return; // already pushed today
+
+    const subs = await sbSelect("push_subscriptions", `?athlete_id=eq.${enc(athlete.id)}&select=*`);
+    if (subs.length === 0) return;
+
+    // Short Joe-voice line referencing what's actually in the entry — never invents
+    // specifics; falls back to a plain "ready" line when nothing stood out.
+    const focus = digest.contentJson?.sections?.find((s) => s.label === "FOCUS NEXT WEEK");
+    const rankSection = digest.contentJson?.sections?.find((s) => s.label === "GRIT RANK");
+    const prSection = digest.contentJson?.sections?.find((s) => s.label === "PRS & PROGRESS");
+    let body;
+    if (rankSection) body = "New rank movement in your Proof Feed. Go see it.";
+    else if (prSection) body = "New PRs are in your Proof Feed. Go check it out.";
+    else if (focus) body = `Your ${windowType === "monthly" ? "monthly recap" : "weekly"} is ready — next week's focus is in there.`;
+    else body = windowType === "monthly" ? "Your monthly recap is ready." : "Your weekly Proof Feed is ready.";
+
+    const payload = pushPayload({ title: "Coach Joe", body, url: "/", type: "feed" });
+    await sendToAthlete(subs, payload);
+
+    await sbWrite({
+      method: "POST", table: "athlete_nudge_state", query: "?on_conflict=athlete_id",
+      body: { athlete_id: athlete.id, last_feed_push_at: new Date().toISOString() },
+      prefer: "resolution=merge-duplicates,return=minimal",
+    });
+  } catch (e) { console.error("[proof-feed] feed push failed:", e.message); }
+}
+
 // ── Build one athlete's brief from already-fetched batch data ──────────────────
-const briefFor = (athlete, batch, windowType) => {
+// `fullWorkouts`/`fullManual` (proof-feed-v3) are the athlete's UNWINDOWED history
+// (not just the 28-day batch window) — needed so Grit rank movement reflects PRs
+// set at any point, not just this month.
+const briefFor = (athlete, batch, windowType, fullWorkouts, fullManual, previousEntryAt) => {
   const w28 = (batch.workouts || []).filter((w) => w.athlete_id === athlete.id);
   const goals = (batch.goals || []).filter((g) => g.athlete_id === athlete.id);
   const prs = (batch.prs || []).filter((p) => p.athlete_id === athlete.id);
@@ -103,15 +167,31 @@ const briefFor = (athlete, batch, windowType) => {
     windowType === "monthly" ? monthSessions : [...lastWeekSessions, ...thisWeekSessions],
     athlete.resolved_pain || []
   );
+  // Pain trend needs a real this-week-vs-last-week comparison regardless of window
+  // type (the monthly digest still rides the weekly generator's injury section).
+  const painTrendData = painTrend(thisWeekSessions, lastWeekSessions, athlete.resolved_pain || []);
+
+  // Grit rank movement: current snapshot vs the athlete's own last feed entry.
+  // Skipped (rank stays null) when there's no bodyweight on file — the whole ladder
+  // is bodyweight-relative and computeGritSnapshot degrades to all-zero without it,
+  // which would read as a false "no lifts ranked" rather than "can't rank yet."
+  let rank = null;
+  const bodyweightLbs = athlete.weight_lbs || athlete.weight;
+  if (bodyweightLbs && (fullWorkouts || fullManual)) {
+    try { rank = computeRankMovement(fullWorkouts || [], fullManual || [], athlete, previousEntryAt); }
+    catch (e) { console.error("[proof-feed] rank movement failed:", e.message); }
+  }
 
   return {
     thisWeekSessions, lastWeekSessions, monthSessions, prs, oneRMs,
-    brief: buildBrief({ athlete, thisWeekSessions, lastWeekSessions, monthSessions, prs, goals, adherence: null, injuries, windowType }),
+    brief: buildBrief({ athlete, thisWeekSessions, lastWeekSessions, monthSessions, prs, goals, adherence: null, injuries, windowType, rank, painTrendData }),
   };
 };
 
-// ── Generate + persist one athlete digest ─────────────────────────────────────
-async function runAthlete(athlete, batch) {
+// ── Generate ONE athlete's digest. `dryRun` skips ALL persistence (no proof_digests
+// write, no cycle/cap advance, no email, no push) and returns the generated prose
+// alongside the normal result shape, for the sample-generation dry-run path. ──────
+async function runAthlete(athlete, batch, { dryRun = false } = {}) {
   const cycleCount = athlete.proof_cycle_count || 1;
   const isMonthly = cycleCount === 4;
   const windowType = isMonthly ? "monthly" : "weekly";
@@ -122,17 +202,44 @@ async function runAthlete(athlete, batch) {
   };
   const deps = { askClaudeServer, sbWrite, sbSelect, attribution };
 
-  const b = briefFor(athlete, batch, windowType);
+  // Full (unwindowed) history for Grit rank movement — bounded to the last 300
+  // workouts so an old, very active athlete's history can't blow up the request.
+  // The client's own Progress screen caps similarly (limit=100 on the read); 300
+  // gives the rank snapshot more runway server-side without being unbounded.
+  let fullWorkouts = [], fullManual = [];
+  try {
+    [fullWorkouts, fullManual] = await Promise.all([
+      sbSelect("workouts", `?athlete_id=eq.${enc(athlete.id)}&select=created_at,parsed_data&order=created_at.desc&limit=300`),
+      sbSelect("manual_one_rms", `?athlete_id=eq.${enc(athlete.id)}&select=exercise,normalized_exercise,weight,unit`),
+    ]);
+  } catch (e) { console.error("[proof-feed] full-history fetch failed:", e.message); }
+
+  // Find this athlete's most recent PRIOR entry (before today) to diff rank against.
+  let previousEntryAt = null;
+  try {
+    const prior = await sbSelect("proof_digests", `?athlete_id=eq.${enc(athlete.id)}&digest_type=in.(weekly,monthly)&select=created_at&order=created_at.desc&limit=1`);
+    previousEntryAt = prior[0]?.created_at || null;
+  } catch (e) { console.error("[proof-feed] prior-entry lookup failed:", e.message); }
+
+  const b = briefFor(athlete, batch, windowType, fullWorkouts, fullManual, previousEntryAt);
 
   // Phase 2: structured program parse (hash-guarded; free if unchanged), then the
   // code-only load+volume adherence comparison.
   const existingRx = (batch.prescriptions || []).find((p) => p.athlete_id === athlete.id) || null;
   try {
-    const parsed = athlete.temp_program_text ? null : await parseProgramIfNeeded(athlete, existingRx, deps);
+    // Dry-run must never write a program_prescriptions cache row from sample
+    // generation — parseProgramIfNeeded only writes when the hash changed, and
+    // sample runs don't touch prod program_text, so this is naturally a no-op in
+    // practice; the explicit dryRun deps guard below is defense in depth.
+    const parsed = athlete.temp_program_text ? null : await parseProgramIfNeeded(athlete, existingRx, dryRun ? { ...deps, sbWrite: async () => {} } : deps);
     if (parsed) b.brief.volume = compareProgramVsActual(parsed, b.thisWeekSessions, b.oneRMs);
   } catch (e) { console.error("[proof-feed] program parse failed:", e.message); }
 
   const digest = isMonthly ? await generateMonthly(athlete, b.brief, deps) : await generateWeekly(athlete, b.brief, deps);
+
+  if (dryRun) {
+    return { athlete: athlete.name, athlete_id: athlete.id, type: windowType, digest, brief: b.brief };
+  }
 
   // Replace any prior weekly/monthly digest for this athlete.
   await sbDelete("proof_digests", `?athlete_id=eq.${athlete.id}&digest_type=in.(weekly,monthly)`);
@@ -165,11 +272,15 @@ async function runAthlete(athlete, batch) {
       : `Your WILCO Weekly — Week of ${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric" })}`;
     await sendEmail(athlete.email, subject, buildDigestEmail(athlete.name, digest.contentJson, digest.label));
   }
+
+  // Feed-driven push (proof-feed-v3) — best-effort, capped 1/day, never blocks the result.
+  await sendFeedPush(athlete, digest, windowType);
+
   return { athlete: athlete.name, type: windowType };
 }
 
 // ── Generate + persist coach reports (team aggregate per coach) ────────────────
-// Bounded by total roster; at scale Phase 6's pg_cron fires one request per coach.
+// Bounded by total roster; loops in the same single invocation as the athlete sweep.
 async function runCoachReports(allAthletes, batch, coaches) {
   const results = [];
   const byCoach = {};
@@ -215,9 +326,12 @@ async function fetchBatch(ids) {
 }
 
 // ── MAIN HANDLER ─────────────────────────────────────────────────────────────
-// Vercel Pro: cap this function's execution time. Was implicitly the Hobby 10s
-// wall; 60s gives external Stripe/email/DB calls room without paying for idle time.
-export const maxDuration = 60;
+// Vercel Pro: cap this function's execution time. proof-feed-v3 makes the daily
+// scheduler sweep the PRIMARY dispatch path (was a bounded per-id fanout target
+// under the old Hobby 10s wall) — 300s (Vercel's own ceiling) gives one invocation
+// room to loop the whole roster sequentially, each athlete a Claude call + a few
+// DB round-trips.
+export const maxDuration = 300;
 
 export default async function handler(req, res) {
   const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
@@ -238,6 +352,11 @@ export default async function handler(req, res) {
   const cronSecret = process.env.CRON_SECRET;
   if (!cronSecret) return res.status(500).json({ error: "Missing CRON_SECRET" });
   const isCron = req.headers["authorization"] === `Bearer ${cronSecret}`;
+  // Dry-run (proof-feed-v3 sample generation): ONLY honored on the cron-secret path
+  // (never for an athlete's own run-now) — it's for pulling review samples, not a
+  // user-facing feature, and skipping it for run-now keeps that path's daily-cap
+  // semantics exactly as before (a real run-now always counts against the cap).
+  const dryRun = isCron && body.dry_run === true;
   let runNowAthleteId = null;
   if (!isCron) {
     try {
@@ -266,17 +385,30 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, ...results });
     }
 
-    // ── Cron single-target fanout (the scalable path; pg_cron fires one request
-    //    per due id so no invocation ever loops the whole roster) ──
+    // ── Dry-run sample pull: specific athlete ids, full pipeline, zero writes ──
+    if (dryRun && Array.isArray(body.sample_athlete_ids) && body.sample_athlete_ids.length) {
+      const ids = body.sample_athlete_ids.map(String);
+      const rows = await sbSelect("athletes", `?id=in.(${ids.map((id) => `"${id}"`).join(",")})&select=*`);
+      const batch = await fetchBatch(rows.map((a) => a.id));
+      const samples = [];
+      for (const athlete of rows) {
+        try { samples.push(await runAthlete(athlete, batch, { dryRun: true })); }
+        catch (e) { samples.push({ athlete: athlete.name, athlete_id: athlete.id, error: e.message }); }
+      }
+      return res.status(200).json({ ok: true, dry_run: true, samples });
+    }
+
+    // ── Single-target modes (id/coach) — generic utility entries, not the daily
+    //    schedule (kept for support/debugging; see file header). ──
     if (body.athlete_id) {
       const rows = await sbSelect("athletes", `?id=eq.${encodeURIComponent(body.athlete_id)}&select=*`);
       const athlete = rows[0];
       if (!athlete) return res.status(404).json({ error: "Athlete not found" });
-      if (athlete.proof_enabled === false || athlete.last_proof_run_date === todayStr()) {
+      if (!dryRun && (athlete.proof_enabled === false || athlete.last_proof_run_date === todayStr())) {
         return res.status(200).json({ ok: false, skipped: true });
       }
       const batch = await fetchBatch([athlete.id]);
-      return res.status(200).json({ ok: true, athlete: await runAthlete(athlete, batch) });
+      return res.status(200).json({ ok: true, dry_run: dryRun, athlete: await runAthlete(athlete, batch, { dryRun }) });
     }
     if (body.coach_id) {
       const roster = await sbSelect("athletes", `?coach_id=eq.${encodeURIComponent(body.coach_id)}&select=*`);
@@ -286,7 +418,9 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, coaches: coaches2 });
     }
 
-    // ── Scheduler sweep (backstop; Phase 6 pg_cron prefers the fanout above) ──
+    // ── Scheduler sweep — the PRIMARY dispatch path (proof-feed-v3). One Vercel
+    //    cron invocation (vercel.json) loops every due athlete sequentially, in
+    //    order, logging each outcome; one athlete's failure never aborts the rest. ──
     const now = new Date().toISOString();
     const due = await sbSelect("athletes", `?next_proof_due_at=lte.${now}&select=*&order=created_at.asc`);
 
@@ -306,8 +440,14 @@ export default async function handler(req, res) {
 
     const batch = await fetchBatch(allDue.map((a) => a.id));
     for (const athlete of allDue) {
-      try { results.athletes.push(await runAthlete(athlete, batch)); }
-      catch (e) { results.skipped.push({ athlete: athlete.name, error: e.message }); }
+      try {
+        const outcome = await runAthlete(athlete, batch);
+        results.athletes.push(outcome);
+        console.log(`[proof-feed] ok: ${athlete.name} (${athlete.id}) — ${outcome.type}`);
+      } catch (e) {
+        results.skipped.push({ athlete: athlete.name, error: e.message });
+        console.error(`[proof-feed] FAILED: ${athlete.name} (${athlete.id}) — ${e.message}`);
+      }
     }
 
     // Coach reports — aggregate over each coach's full roster.
@@ -320,6 +460,7 @@ export default async function handler(req, res) {
       results.coaches = await runCoachReports(roster, rosterBatch, coaches);
     }
 
+    console.log(`[proof-feed] sweep complete: ${results.athletes.length} ok, ${results.skipped.length} failed, ${results.coaches.length} coach reports`);
     return res.status(200).json({ processed: results.athletes.length, ...results });
   } catch (err) {
     console.error("[proof-feed] fatal:", err);

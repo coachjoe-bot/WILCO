@@ -7,6 +7,22 @@ const CoachDashboard = lazy(()=>import("./coach.jsx"));
 import { loadStripe } from "@stripe/stripe-js/pure";
 import { Elements, PaymentElement, useStripe, useElements } from "@stripe/react-stripe-js";
 import { ConsentFlow, LEGAL_VERSION } from "./legal.jsx";
+// Grit strength-ranking module (e1RM primitives, name normalization, tier ladder,
+// bodyweight/age-fair thresholds) — single canonical source shared with the server
+// Proof Feed engine (api/_grit.js re-exports this file's server-safe subset).
+// Re-exported (not just imported) because src/coach.jsx imports several of these
+// BY NAME from "./App.jsx" (its lazy-loaded-chunk convention) — re-exporting here
+// keeps that import working unchanged while grit.js stays the single source of truth.
+import {
+  epley1RM, getExerciseSets, bestE1RMForExercise,
+  normalizeExName, displayForKey, cleanerName, liftTier,
+  TIER_NAMES, TIER_COLORS, TIER_POINTS, TIER_DESC, BENCH_DISPLAY, BENCH_IS_BW,
+  BENCH_THRESHOLDS, tierForRatio, bwTierFactor, ageTierFactor, scaledThresholds, getBenchKey,
+} from "./grit.js";
+export {
+  epley1RM, getExerciseSets, bestE1RMForExercise,
+  normalizeExName, displayForKey, cleanerName, liftTier,
+};
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 export const SUPABASE_URL  = import.meta.env.VITE_SUPABASE_URL;
@@ -640,58 +656,8 @@ export const fmtDateRelative = (d) => {
 // Light haptic tick on supported devices (phones); silent no-op on desktop/unsupported.
 export const haptic = (pattern=10) => { try { navigator.vibrate && navigator.vibrate(pattern); } catch(_){} };
 
-// Epley estimated 1-rep max: weight × (1 + reps/30)
-// Lets us compare e.g. 225×5 vs 225×3 — more reps at same weight = more strength.
-export const epley1RM = (weight, reps) => {
-  if(!weight||weight<=0) return 0;
-  if(!reps||reps<=1) return weight;
-  return Math.round(weight * (1 + reps / 30));
-};
-
-// Expand a logged exercise entry into its individual sets.
-// Handles both the new "set_details" array (variable weight/reps per set) and
-// legacy entries that only have flat sets/reps/weight fields.
-export const getExerciseSets = (ex) => {
-  if(!ex) return [];
-  if(Array.isArray(ex.set_details) && ex.set_details.length>0){
-    return ex.set_details.map(s=>({weight:s.weight??ex.weight??0, reps:s.reps??ex.reps??1, warmup:!!s.warmup}));
-  }
-  const n = ex.sets||1;
-  return Array.from({length:n},()=>({weight:ex.weight??0, reps:ex.reps||1}));
-};
-
-// Best estimated 1RM across the WORKING sets of a logged exercise (lbs-equivalent).
-// e1RM is plain Epley — one definition used everywhere (Progress, PRs, and the server
-// Proof Feed) so the numbers always agree. RPE/RIR are captured and shown as context
-// tags but never silently inflate the 1RM: a PR must be a genuinely heavier performance,
-// not just a set logged with effort. Warm-ups are excluded (fall back to all sets if
-// somehow every set was flagged a warm-up).
-// Load-bearing bodyweight movements — dips, pull-ups, chin-ups, muscle-ups — where
-// the athlete's own bodyweight IS the resistance. Given their bodyweight we can
-// estimate a 1RM (plus any added weight, minus any assistance). Other bodyweight
-// work (push-ups, planks, air squats) has no meaningful 1RM.
-const LOAD_BEARING_BW = /\b(dips?|pull[ -]?ups?|chin[ -]?ups?|muscle[ -]?ups?)\b/;
-// `bwLbs` (athlete bodyweight) is optional: pass it to score load-bearing bodyweight
-// lifts; omit it and bodyweight lifts return 0, exactly as before.
-export const bestE1RMForExercise = (ex, bwLbs=0) => {
-  if(!ex) return 0;
-  const isBW = ex.unit==="bodyweight";
-  let bwLoad = 0;
-  if(isBW){
-    if(!bwLbs || !LOAD_BEARING_BW.test((ex.name||"").toLowerCase())) return 0;
-    bwLoad = bwLbs + (ex.added_weight||0) - (ex.assist_weight||0);
-    if(bwLoad<=0) return 0;
-  }
-  const all = getExerciseSets(ex);
-  const sets = all.some(s=>!s.warmup) ? all.filter(s=>!s.warmup) : all;
-  let best = 0;
-  sets.forEach(s=>{
-    const lbs = isBW ? bwLoad : toLbs(s.weight, ex.unit);
-    const e1rm = epley1RM(lbs, s.reps);
-    if(e1rm>best) best = e1rm;
-  });
-  return best;
-};
+// epley1RM, getExerciseSets, bestE1RMForExercise now live in ./grit.js (imported
+// above) — the single shared definition the server Proof Feed also uses.
 
 // Format a duration in seconds as a compact label: 30→"30s", 60→"1 min", 90→"1:30".
 const fmtDuration = (sec) => {
@@ -786,73 +752,9 @@ export const toLbs = (weight, unit) => (unit==="kg" ? weight*2.205 : weight);
 // A "real session" has at least one parsed exercise or run_data (filters out pure Q&A messages)
 export const isRealSession = (w) => w?.parsed_data?.exercises?.length > 0 || !!w?.parsed_data?.run_data;
 
-// Normalize exercise names so wording variations map to the same key. Two passes:
-//  (1) expand common abbreviations + unify spellings;
-//  (2) strip EXECUTION/SETUP wording — tempo, pause and start-position qualifiers
-//      that describe HOW a lift was performed, not WHICH lift it is. So
-//      "Back Squat (paused)", "Pause Back Squat" and "Paused Back Squat" all collapse
-//      to "back squat", and "Power Snatch from the Floor" collapses to "power snatch".
-// Lift-DEFINING words (front/back, incline/decline/flat, close-/wide-grip, sumo/
-// deficit/romanian, hang/power/full, high-/low-bar) are deliberately PRESERVED so
-// genuinely different lifts never merge.
-export const normalizeExName = (name) => {
-  if(!name) return "";
-  let n = name.toLowerCase().trim()
-    .replace(/\s+/g," ")
-    .replace(/\bohp\b/g,"overhead press")
-    .replace(/\bbb\b/g,"barbell")
-    .replace(/\bdb\b/g,"dumbbell")
-    .replace(/\bkb\b/g,"kettlebell")
-    .replace(/\brdl\b/g,"romanian deadlift")
-    .replace(/pull[ -]?ups?\b/g,"pull-up")
-    .replace(/chin[ -]?ups?\b/g,"chin-up")
-    .replace(/push[ -]?ups?\b/g,"push-up");
-  // (1b) Collapse simple English plurals on the head noun so "Deficit Deadlifts"
-  //      and "Deficit Deadlift" (or "Squats"/"Squat") don't split into two PRs.
-  //      Words ending in "ss" (press) are never plurals, so they're left alone.
-  n = n
-    .replace(/(ch|sh|x|z)es\b/g,"$1")   // snatches→snatch, crunches→crunch
-    .replace(/sses\b/g,"ss")            // presses→press
-    .replace(/([^s])s\b/g,"$1");        // deadlifts→deadlift, raises→raise, curls→curl
-  // (1c) "Bench" on its own means the bench press — merge it with "Bench Press"
-  //      (and "Incline Bench" with "Incline Bench Press", etc.).
-  n = n.replace(/\bbench\b(?!\s*press)/g,"bench press");
-  // (1d) A bare, unqualified "squat" (or "barbell squat") means the back squat —
-  //      merge it with "Back Squat". Done BEFORE stripping "pause" below, so an
-  //      ambiguous "pause squat" (could be a pause front/back/overhead) is NOT
-  //      collapsed into back squat — only a truly bare squat is. Qualified squats
-  //      (front/overhead/goblet/split/box/hack/...) keep their qualifier.
-  if(n==="squat"||n==="barbell squat") n="back squat";
-  // (2) Strip execution/setup qualifiers.
-  n = n
-    .replace(/\([^)]*\)/g," ")                                      // any parenthetical, e.g. "(paused)", "(tempo)"
-    .replace(/\b(?:from|off)(?:\s+(?:the|a))?\s+(?:floor|ground)\b/g," ") // "from the floor", "off the ground" (NOT "from the hang")
-    .replace(/\b(?:dead[\s-]?stop|touch[\s-]?and[\s-]?go|tng)\b/g," ")    // dead-stop / touch-and-go reps
-    .replace(/\b(?:paused?|tempo|slow|controlled|eccentric)\b/g," ")      // tempo/pause descriptors
-    .replace(/\bw\/?\b/g," ")                                       // dangling "w/" / "w" connector left by the above
-    .replace(/\s+/g," ").trim();
-  return n;
-};
+// normalizeExName, cleanerName, displayForKey, liftTier now live in ./grit.js
+// (imported above) — shared with the server Proof Feed's Grit rank computation.
 
-// Among raw names that share a normalized key, the shortest is almost always the
-// canonical display form ("Power Snatch" over "Power Snatch from the Floor",
-// "Back Squat" over "Paused Back Squat"). Used to label grouped exercises.
-export const cleanerName = (a,b) => !a ? (b||"") : !b ? a : (b.length<a.length ? b : a);
-
-// Preferred display label for normalized keys where the shortest raw name is a
-// poor label — e.g. the key "back squat" collects raw logs of just "Squat", and
-// "Squat" would otherwise win cleanerName. Force the full, proper lift name.
-const CANON_DISPLAY = { "back squat": "Back Squat" };
-export const displayForKey = (key, fallback) => CANON_DISPLAY[key] || fallback;
-
-// "Big lifts" cluster at the top of the Strength / PRs / Benchmarks lists, ahead of
-// accessories. We match a short list of movement ROOTS against the normalized key
-// (whole-word), so one root covers all its variants — "squat" catches back/front/
-// overhead squat — WITHOUT enumerating every exercise. This only sets sort priority;
-// it never merges lifts. Everything not on the list falls to the accessory tier.
-// Within each tier we sort by weight (heaviest 1RM first).
-const BIG_LIFT_RE = /\b(snatch|clean and jerk|clean|jerk|squat|deadlift|bench press|overhead press|dips?|pull[ -]?ups?|chin[ -]?ups?|rows?)\b/;
-export const liftTier = (key) => BIG_LIFT_RE.test(key||"") ? 0 : 1;   // 0 = big lift, 1 = accessory
 
 // Groups workout entries into sessions using time-gap logic.
 // Entries within gapMs of each other (same athlete) = same session.
@@ -1245,157 +1147,10 @@ const propagate1RM = (programText, exerciseName, old1RM, new1RM) => {
   return {text:updated.join("\n"),changed};
 };
 
-// ─── BENCHMARK TIERS ("Grit" ladder) ─────────────────────────────────────────
-// 8 tiers, ranking the LIFT not the lifter. Below the first cut-line = Rookie.
-const TIER_NAMES  = ["ROOKIE","GRITTY","SHARP","STRONG","ELITE","DOMINANT","UNTOUCHABLE","LEGENDARY"];
-const TIER_COLORS = ["#64748b","#3b82f6","#22d3ee","#10b981","#d4a017","#f97316","#ef4444","#a855f7"];
-// Strength Score points per tier — each level worth more than the last.
-const TIER_POINTS = [10, 25, 50, 100, 175, 275, 400, 600];
-// Flavor line per tier (shown in the Top Rank classification popover).
-const TIER_DESC = ["just off the ground","on the come-up","lookin' sharp","just plain solid","top of the gym","a cut above","national-class","truly incredible"];
-// Load-bearing bodyweight lifts show a cleaner name + a "bodyweight + added" readout.
-const BENCH_DISPLAY = { "weighted pull-up": "Pull-Ups", "weighted dip": "Dips" };
-const BENCH_IS_BW = { "weighted pull-up": true, "weighted dip": true };
-
-// Per-lift bodyweight-multiple cut-lines to REACH each tier 1..7 (Rookie = below [0]).
-// [Gritty, Sharp, Strong, Elite, Dominant, Untouchable, Legendary]. Anchored to
-// published standards (Strength Level) for the lower rungs and competition/record
-// ratios up top; first-draft values, tunable. Weighted pull-up/dip ratios are
-// (bodyweight + added load) / bodyweight, so 1.0 = a clean bodyweight rep.
-const BENCH_THRESHOLDS = {
-  male: {
-    "back squat":     [0.75, 1.25, 1.5,  2.0,  2.5,  2.75, 3.0 ],
-    "front squat":    [0.6,  1.0,  1.25, 1.75, 2.25, 2.5,  2.75],
-    "deadlift":       [1.0,  1.5,  1.75, 2.25, 2.75, 3.0,  3.25],
-    "bench press":    [0.5,  0.75, 1.25, 1.5,  2.0,  2.25, 2.5 ],
-    "overhead press": [0.4,  0.55, 0.75, 1.0,  1.25, 1.4,  1.55],
-    "barbell row":    [0.5,  0.75, 1.0,  1.25, 1.5,  1.75, 2.0 ],
-    "weighted pull-up":[1.0, 1.15, 1.3,  1.5,  1.75, 2.0,  2.25],
-    "weighted dip":   [1.0,  1.2,  1.4,  1.65, 1.9,  2.15, 2.4 ],
-    "snatch":         [0.5,  0.75, 1.0,  1.25, 1.5,  1.65, 1.75],
-    "clean and jerk": [0.5,  0.75, 1.25, 1.5,  1.75, 1.9,  2.1 ],
-    "clean":          [0.55, 0.8,  1.3,  1.55, 1.8,  1.95, 2.15],
-    "jerk":           [0.55, 0.8,  1.3,  1.6,  1.85, 2.0,  2.2 ],
-    "power clean":    [0.5,  0.75, 1.1,  1.35, 1.6,  1.75, 1.9 ],
-    "incline bench press":     [0.45, 0.65, 1.05, 1.3,  1.7,  1.9,  2.15],
-    "trap bar deadlift":       [1.05, 1.55, 1.85, 2.35, 2.85, 3.1,  3.4 ],
-    "romanian deadlift":       [0.85, 1.25, 1.5,  1.9,  2.35, 2.55, 2.75],
-    "hip thrust":              [0.9,  1.4,  1.8,  2.5,  3.1,  3.4,  3.75],
-    "push press":              [0.5,  0.7,  0.95, 1.25, 1.55, 1.75, 1.95],
-    "dumbbell bench press":    [0.25, 0.4,  0.55, 0.75, 0.95, 1.05, 1.15],
-    "dumbbell shoulder press": [0.15, 0.25, 0.35, 0.5,  0.65, 0.72, 0.8 ],
-    "barbell curl":            [0.2,  0.3,  0.45, 0.55, 0.7,  0.78, 0.85],
-  },
-  female: {
-    "back squat":     [0.6,  0.9,  1.1,  1.4,  1.75, 1.95, 2.2 ],
-    "front squat":    [0.45, 0.7,  0.9,  1.2,  1.5,  1.7,  1.9 ],
-    "deadlift":       [0.75, 1.1,  1.35, 1.6,  2.0,  2.2,  2.4 ],
-    "bench press":    [0.3,  0.5,  0.75, 1.0,  1.3,  1.45, 1.6 ],
-    "overhead press": [0.28, 0.4,  0.55, 0.7,  0.9,  1.0,  1.1 ],
-    "barbell row":    [0.35, 0.55, 0.7,  0.9,  1.1,  1.3,  1.5 ],
-    "weighted pull-up":[1.0, 1.1,  1.2,  1.35, 1.5,  1.65, 1.8 ],
-    "weighted dip":   [1.0,  1.1,  1.25, 1.4,  1.6,  1.8,  2.0 ],
-    "snatch":         [0.35, 0.5,  0.65, 0.85, 1.05, 1.15, 1.25],
-    "clean and jerk": [0.4,  0.55, 0.85, 1.05, 1.25, 1.35, 1.5 ],
-    "clean":          [0.42, 0.6,  0.9,  1.1,  1.3,  1.4,  1.55],
-    "jerk":           [0.42, 0.6,  0.9,  1.12, 1.32, 1.45, 1.6 ],
-    "power clean":    [0.38, 0.55, 0.8,  1.0,  1.2,  1.3,  1.45],
-    "incline bench press":     [0.25, 0.45, 0.65, 0.85, 1.1,  1.25, 1.4 ],
-    "trap bar deadlift":       [0.8,  1.15, 1.4,  1.7,  2.1,  2.3,  2.5 ],
-    "romanian deadlift":       [0.65, 0.95, 1.15, 1.35, 1.7,  1.85, 2.05],
-    "hip thrust":              [0.8,  1.2,  1.6,  2.2,  2.75, 3.0,  3.3 ],
-    "push press":              [0.35, 0.5,  0.7,  0.9,  1.15, 1.25, 1.4 ],
-    "dumbbell bench press":    [0.12, 0.2,  0.32, 0.45, 0.6,  0.67, 0.75],
-    "dumbbell shoulder press": [0.08, 0.15, 0.22, 0.3,  0.42, 0.47, 0.52],
-    "barbell curl":            [0.1,  0.18, 0.28, 0.35, 0.45, 0.5,  0.55],
-  }
-};
-
-// Current tier index (0=Rookie .. 7=Legendary) for a bodyweight ratio vs a lift's cut-lines.
-const tierForRatio = (ratio, thresh) => { let t=0; for(let i=0;i<thresh.length;i++){ if(ratio>=thresh[i]) t=i+1; } return t; };
-
-// Bodyweight-fair thresholds. The ×bodyweight multiple to reach a tier scales as
-// (refBW / BW)^exp: heavier lifters need a slightly lower multiple, lighter a slightly
-// higher one (so a 250 and a 150 lb lifter are judged fairly). We use a GENTLE exponent
-// (0.17, well under the pure 2/3-allometric 1/3) so small lifters aren't over-nerfed —
-// tuned so a 150 lb male hits Elite squat at ~2.1× (vs 2.0× at the 200 lb anchor).
-// Base multiples are anchored at these reference weights; factor clamped for sanity.
-const REF_BW = { male: 200, female: 150 };
-const BW_SCALE_EXP = 0.17;
-const bwTierFactor = (bodyweight, genderKey) => {
-  const ref = REF_BW[genderKey] || REF_BW.male;
-  if(!bodyweight || bodyweight<=0) return 1;
-  return Math.min(1.2, Math.max(0.85, Math.pow(ref / bodyweight, BW_SCALE_EXP)));
-};
-
-// Age-fair thresholds. Continuous multiplier on the cut-lines, anchored to the
-// inverse of the coefficients sanctioned meets score with (Foster for juniors
-// under 23, McCulloch for masters 40+): prime = 23–40 at 1.0, teens ramp up to
-// it, masters ease down from it. Piecewise-linear between anchors, clamped at
-// the ends; unknown age ranks as prime.
-const AGE_TIER_ANCHORS = [
-  [13,0.78],[14,0.81],[16,0.88],[18,0.94],[20,0.97],[23,1.0],
-  [40,1.0],[45,0.96],[50,0.92],[55,0.86],[60,0.79],[65,0.74],
-  [70,0.68],[75,0.62],[80,0.56],[85,0.51],[90,0.46],
-];
-const ageTierFactor = (age) => {
-  if(age==null || !(age>0)) return 1;
-  const a = AGE_TIER_ANCHORS;
-  if(age<=a[0][0]) return a[0][1];
-  if(age>=a[a.length-1][0]) return a[a.length-1][1];
-  for(let i=1;i<a.length;i++){
-    if(age<=a[i][0]){
-      const [x0,y0]=a[i-1], [x1,y1]=a[i];
-      return y0 + (y1-y0)*(age-x0)/(x1-x0);
-    }
-  }
-  return 1;
-};
-const scaledThresholds = (threshRaw, bodyweight, genderKey, age) => {
-  const f = bwTierFactor(bodyweight, genderKey) * ageTierFactor(age);
-  return threshRaw.map(t => t * f);
-};
-
-// Map a normalized exercise name to a BENCH_THRESHOLDS key (null if not benchmarked).
-// Order matters: most specific first, and Olympic PULL/DEADLIFT/BALANCE accessory
-// variants (much heavier than the competition lift) and complexes are excluded so
-// they never inflate a rank.
-const getBenchKey = (normalized) => {
-  if(!normalized) return null;
-  const n = normalized.toLowerCase();
-  if(n.includes("+")) return null;                                   // complexes aren't a single max
-  if(/(snatch|clean).*(pull|deadlift|balance|shrug|high\s*pull)/.test(n) ||
-     /(pull|deadlift|balance|shrug|high\s*pull).*(snatch|clean)/.test(n)) return null;
-  if(n.includes("overhead squat")) return null;
-  // Per-leg/light variants (no honest barbell standard) and heavy partials that
-  // dwarf the parent lift (shrugs, carries) are tracked, never ranked.
-  if(/(split squat|bulgarian|goblet|pistol|hack squat|sissy|single[ -]?leg)/.test(n)) return null;
-  if(/(shrug|carry|farmer|march|\bwalk)/.test(n)) return null;
-  if(n.includes("clean and jerk")||n.includes("clean & jerk")) return "clean and jerk";
-  if(n.includes("power clean")) return "power clean";
-  if(n.includes("snatch")) return "snatch";                          // incl. power/hang/muscle snatch
-  if(n.includes("push press")) return "push press";
-  if(n.includes("jerk")) return "jerk";                              // split/push jerk (standalone)
-  if(n.includes("clean")) return "clean";                            // clean, hang clean
-  if(n.includes("front squat")) return "front squat";
-  if(n.includes("squat")) return "back squat";
-  if(/(romanian|\brdl\b|stiff[ -]?leg)/.test(n)) return "romanian deadlift";
-  if(/(trap|hex)[ -]?bar/.test(n)) return "trap bar deadlift";
-  if(n.includes("deadlift")) return "deadlift";
-  if(n.includes("hip thrust")) return "hip thrust";
-  // Dumbbell presses rank per-dumbbell against their own standards, never the barbell's.
-  if(/\b(dumbbell|db)\b/.test(n) && /(press|bench)/.test(n))
-    return /(bench|floor|incline|chest)/.test(n) ? "dumbbell bench press" : "dumbbell shoulder press";
-  if(n.includes("arnold press")) return "dumbbell shoulder press";
-  if(n.includes("incline bench")||n.includes("incline press")) return "incline bench press";
-  if(n.includes("bench press")||n==="bench"||n.includes("barbell bench")) return "bench press";
-  if(n.includes("overhead press")||n.includes("ohp")||n==="press"||n.includes("military press")||n.includes("strict press")) return "overhead press";
-  if(/(barbell|\bbb\b|ez[ -]?bar)[ -]?curl/.test(n)) return "barbell curl";
-  if(/\b(pull[ -]?up|chin[ -]?up)\b/.test(n)) return "weighted pull-up";
-  if(/\bdips?\b/.test(n)) return "weighted dip";
-  if(n.includes("barbell row")||n.includes("bent over row")||n.includes("bent-over row")||n.includes("pendlay")) return "barbell row";
-  return null;
-};
+// The Grit benchmark ladder (TIER_NAMES/COLORS/POINTS/DESC, BENCH_THRESHOLDS,
+// tierForRatio, bwTierFactor, ageTierFactor, scaledThresholds, getBenchKey) now
+// lives in ./grit.js (imported above) — the single shared source with the
+// server Proof Feed's Grit rank computation (api/_grit.js).
 
 // ─── STYLES ──────────────────────────────────────────────────────────────────
 export const C = {navy:"#060d1e",navy2:"#0a1228",navy3:"#0d1836",border:"#1e2a4a",gold:"#d4a017",green:"#10b981",red:"#ef4444",text:"#e2e8f0",muted:"#64748b",muted2:"#94a3b8",blue:"#3b82f6"};

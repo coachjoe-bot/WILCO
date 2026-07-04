@@ -293,6 +293,25 @@ export default async function handler(req, res) {
         ? body.params
         : `?id=eq.${enc(str(body.id, { max: 64, name: "id" }))}`;
       const json = await sbWrite({ method: "PATCH", table, query: base + ownFilter, body: body.data });
+
+      // ── Coach programming-update notification hook (notification policy v2) ──
+      // ONLY a COACH-authored write to an athlete's program_text/temp_program_text
+      // enqueues a debounced push (api/notify-program-changes.js, 15-min batching).
+      // Deliberately narrow: `program_locked` (a lock TOGGLE, not programming
+      // content) does not qualify on its own, and athlete/Joe self-edits to the
+      // same columns never reach this branch (caller.role is "athlete" there).
+      // The client always updates ONE athlete per call here (coach.jsx's bulk
+      // assign loops one sbUpdate per athlete_id) — body.id is the athlete_id.
+      if (caller.role === "coach" && table === "athletes" && body.id &&
+          ("program_text" in body.data || "temp_program_text" in body.data)) {
+        try {
+          await sbWrite({
+            method: "POST", table: "program_change_events", prefer: "return=minimal",
+            body: { athlete_id: body.id },
+          });
+        } catch (e) { console.error("[data] program_change_events enqueue failed:", e.message); } // best-effort, never blocks the save
+      }
+
       return res.status(200).json(json);
     }
 
