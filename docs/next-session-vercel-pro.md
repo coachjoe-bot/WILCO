@@ -1,19 +1,22 @@
-# Vercel Pro — remaining work (execute-ready specs)
+# Vercel Pro — work log + remaining toggles
 
-> Context: after the Pro upgrade (2026-07-04) the safe functionality shipped to `main`
-> (explicit `maxDuration` on all 12 fns, upgraded form review, token headroom, guard
-> test, server-side session-count view). These three items remain. The first two need a
-> **preview-deployment verification cycle** (can't be exercised under `vite dev`, which
-> doesn't serve `/api`), so they were held back from the live revenue path deliberately.
+> Context: after the Pro upgrade (2026-07-04). Everything code shipped to `main` and was
+> verified LIVE against the real endpoint with a throwaway athlete (no preview cycle
+> needed — the streaming path is fallback-protected, so shipping to main couldn't make
+> chat worse than before, and the throwaway account gave a real end-to-end test). The
+> only things left are Vercel **dashboard toggles** (§3) that require Will's login.
 
 ---
 
-## 1. Streaming chat (Coach Joe-bot replies stream in) — HIGH value, needs preview verify
+## 1. Streaming chat (Coach Joe-bot replies stream in) — ✅ SHIPPED + VERIFIED (commit b51db2f)
 
-**Why held back:** SSE through Vercel→Anthropic and the cost-logging path (usage is
-reported in the *final* stream event, not a JSON body) can't be verified under
-`vite dev`. Build on a branch → Vercel **preview** deploy → test with a throwaway
-athlete → merge. Do NOT ship blind to the live chat.
+Verified live: threw a real chat message at prod `/api/claude` (stream:true) with a
+throwaway athlete → got SSE `data:{"text":...}` deltas + `event:done`, coherent reply,
+and a `usage_costs` row (joebot_chat, input 16 / output 40, status ok) — cost tracking
+did NOT regress. Throwaway account cleaned up. Details of the build below (kept for ref).
+
+**Why it was safe to ship to main:** the client falls back to the non-streaming call on
+ANY stream failure/empty result, so worst case = the old behavior.
 
 ### Server — `api/claude.js`
 - Add a `stream` boolean to the request contract. When `stream === true`:
@@ -53,9 +56,13 @@ athlete → merge. Do NOT ship blind to the live chat.
 
 ---
 
-## 2. Telemetry split — LOW risk, internal hygiene
+## 2. Telemetry split — ✅ SHIPPED + VERIFIED (commit 1c61d15)
 
-Move `log-error` + `log-events` out of the auth-critical `api/identity.js` so a bug in
+Verified live: POSTed log-error + log-events to prod `/api/telemetry` AND log-error to
+the `/api/identity` fallback → all `{ok:true}`, both error rows landed in `error_events`,
+cached-client fallback confirmed working. Test rows cleaned up. Build as specced below.
+
+Moved `log-error` + `log-events` out of the auth-critical `api/identity.js` so a bug in
 high-volume anon telemetry can't touch login. (They only live there because the old
 Hobby 12-fn cap left no slot; Pro removes that.)
 
