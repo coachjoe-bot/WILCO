@@ -133,6 +133,53 @@ let CURRENT_AUTH = null;
 // session to its own fetches (e.g. the now-authenticated send-coach-invite) —
 // CURRENT_AUTH itself is a module-private mutable binding.
 export const getAuth = () => CURRENT_AUTH;
+
+// ─── PERSISTENT SIGN-IN ───────────────────────────────────────────────────────
+// The login lived only in the in-memory CURRENT_AUTH, so whenever iOS evicted the
+// backgrounded PWA (often within an hour) a cold reopen landed on the homescreen
+// and forced a Face ID / PIN re-login. We now persist the session and restore it on
+// boot, so reopening drops straight back into the app for up to AUTH_TRUST_MS of
+// INACTIVITY (a rolling window — continued use keeps extending it). We store the
+// same {role,id,pin,token} the app already holds in memory because the identity
+// endpoints (get-athlete, coach-dashboard) still auth by pin and the data gateways
+// by token, plus a pin-free record for instant re-entry with no network round-trip.
+// Trade-off (accepted): within the trust window a reopen skips the Face ID gate, so
+// someone with the UNLOCKED phone could open the app; the window is short and the
+// blob is wiped the moment it lapses or on Log Out.
+const AUTH_SESSION_KEY = "wilco_auth_v1";
+const AUTH_TRUST_MS = 3 * 60 * 60 * 1000; // 3h of inactivity before Face ID is asked again
+const tokenExpMs = (t) => { try { const p = String(t).split("."); return p.length>=4 ? (Number(p[3])||0) : 0; } catch { return 0; } };
+function persistAuthSession(record){
+  try{
+    if(!CURRENT_AUTH || !CURRENT_AUTH.token) return;
+    const { pin:_omit, ...rec } = record || {};
+    localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify({
+      role: CURRENT_AUTH.role, id: CURRENT_AUTH.id, pin: CURRENT_AUTH.pin, token: CURRENT_AUTH.token,
+      record: rec, trustedUntil: Date.now() + AUTH_TRUST_MS,
+    }));
+  }catch{}
+}
+// Restore on boot: re-arm CURRENT_AUTH + the rolling window if still trusted AND the
+// 7-day token hasn't expired; otherwise wipe and return null (→ homescreen/Face ID).
+function restoreAuthSession(){
+  try{
+    const s = JSON.parse(localStorage.getItem(AUTH_SESSION_KEY) || "null");
+    if(!s || !s.token || !s.record) return null;
+    if(Date.now() > (s.trustedUntil||0) || Date.now() > tokenExpMs(s.token)){ localStorage.removeItem(AUTH_SESSION_KEY); return null; }
+    CURRENT_AUTH = { role:s.role, id:s.id, pin:s.pin, token:s.token };
+    s.trustedUntil = Date.now() + AUTH_TRUST_MS;   // opening the app counts as use
+    try{ localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(s)); }catch{}
+    return s;
+  }catch{ return null; }
+}
+function touchAuthSession(){   // extend the rolling window when the app is foregrounded
+  try{
+    const s = JSON.parse(localStorage.getItem(AUTH_SESSION_KEY) || "null");
+    if(s && s.token){ s.trustedUntil = Date.now() + AUTH_TRUST_MS; localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(s)); }
+  }catch{}
+}
+function clearAuthSession(){ try{ localStorage.removeItem(AUTH_SESSION_KEY); }catch{} CURRENT_AUTH = null; }
+
 const dataApi = async (op,table,{data,id,params}={}) => {
   const r = await fetch("/api/data",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth:CURRENT_AUTH,op,table,data,id,params})});
   const t = await r.text(); let d; try{ d = t?JSON.parse(t):null; }catch(_){ d=t; }
@@ -1838,10 +1885,21 @@ function WilcoRoot() {
   const [eventCtx] = useState(()=>{
     try { return eventFromPath(window.location.pathname); } catch { return null; }
   });
-  const [view,setView] = useState(eventCtx?.active ? "event" : "home");
-  const [athlete,setAthlete] = useState(null);
-  const [coach,setCoach] = useState(null);
+  // Restore a recent sign-in (see persistAuthSession) so a cold reopen skips the
+  // homescreen and lands back in the app. Runs once, before children mount, so
+  // CURRENT_AUTH is re-armed in time for the first data/identity call.
+  const [restored] = useState(()=>restoreAuthSession());
+  const [view,setView] = useState(eventCtx?.active ? "event" : (restored ? restored.role : "home"));
+  const [athlete,setAthlete] = useState(()=> restored?.role==="athlete" ? {...restored.record, pin:restored.pin} : null);
+  const [coach,setCoach] = useState(()=> restored?.role==="coach" ? {...restored.record, pin:restored.pin} : null);
   const [err,setErr] = useState("");
+
+  // Continued use extends the rolling trust window (so an active day never logs out).
+  useEffect(()=>{
+    const onVis = ()=>{ if(document.visibilityState==="visible") touchAuthSession(); };
+    document.addEventListener("visibilitychange", onVis);
+    return ()=>document.removeEventListener("visibilitychange", onVis);
+  },[]);
 
   // Install global error reporting once, on mount (before any early return so the
   // hook order stays stable). Captures uncaught errors + unhandled rejections.
@@ -1852,8 +1910,8 @@ function WilcoRoot() {
     else { try { window.history.replaceState({}, "", "/"); } catch {} }
   },[]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if(view==="athlete"&&athlete) return <AthleteView athlete={athlete} onLogout={()=>{setAthlete(null);setView("home");}}/>;
-  if(view==="coach"&&coach) return <Suspense fallback={<div style={{minHeight:"100vh",background:C.navy}}/>}><CoachDashboard coach={coach} onLogout={()=>{setCoach(null);setView("home");}}/></Suspense>;
+  if(view==="athlete"&&athlete) return <AthleteView athlete={athlete} onLogout={()=>{clearAuthSession();setAthlete(null);setView("home");}}/>;
+  if(view==="coach"&&coach) return <Suspense fallback={<div style={{minHeight:"100vh",background:C.navy}}/>}><CoachDashboard coach={coach} onLogout={()=>{clearAuthSession();setCoach(null);setView("home");}}/></Suspense>;
 
   return (
     <div style={{minHeight:"100vh",background:C.navy,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",paddingTop:"calc(24px + env(safe-area-inset-top, 0px))",paddingBottom:24,paddingLeft:24,paddingRight:24}}>
@@ -1892,6 +1950,7 @@ function HomeScreen({setView,setAthlete,setCoach}) {
       setBusy(true);
       try{
         const rec = await biometricLogin(role);
+        persistAuthSession(rec);
         if(role==="coach"){ setCoach(rec); setView("coach"); } else { setAthlete(rec); setView("athlete"); }
         return; // navigated in
       }catch(_){ /* cancelled / failed / stale -> show the manual form */ }
@@ -2371,7 +2430,9 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
         body:JSON.stringify({auth:CURRENT_AUTH,athleteName:data.name.trim(),athleteSport:data.sport,coachName:"WILCO Admin",coachEmail:"coachjoe@trainwilco.com",tier:"elite",isAdminAlert:true})
       }).catch(()=>{});
     }
-    setAthlete({...athleteForApp,tier:finalTier,goal:data.goal||"strength"});
+    const signedInAthlete = {...athleteForApp,tier:finalTier,goal:data.goal||"strength"};
+    setAthlete(signedInAthlete);
+    persistAuthSession(signedInAthlete);
     JUST_SIGNED_UP = true; // AthleteView auto-shows the install prompt once, on this entry only
     setView("athlete");
   };
@@ -2801,7 +2862,7 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
 
   useEffect(()=>{ let on=true; (async()=>{ if(getBioEnrollment("athlete") && await biometricSupported() && on) setBioReady(true); })(); return ()=>{on=false;}; },[]);
 
-  const enterApp = (athleteObj,pinVal) => { setAthlete({...athleteObj,pin:pinVal}); setView("athlete"); };
+  const enterApp = (athleteObj,pinVal) => { setAthlete({...athleteObj,pin:pinVal}); persistAuthSession(athleteObj); setView("athlete"); };
 
   const login = async () => {
     if(!name.trim()||pin.length!==4){setErr("Enter your name and 4-digit PIN.");return;}
@@ -2970,7 +3031,7 @@ function CoachLoginScreen({setView,setCoach,setErr,err}) {
 
   useEffect(()=>{ let on=true; (async()=>{ if(getBioEnrollment("coach") && await biometricSupported() && on) setBioReady(true); })(); return ()=>{on=false;}; },[]);
 
-  const enterDash = (coachObj,pinVal) => { setCoach({...coachObj,pin:pinVal}); setView("coach"); };
+  const enterDash = (coachObj,pinVal) => { setCoach({...coachObj,pin:pinVal}); persistAuthSession(coachObj); setView("coach"); };
 
   const login = async () => {
     if(pin.length!==4){setErr("Enter your 4-digit PIN.");return;}
@@ -3143,7 +3204,7 @@ function CoachSetupScreen({setView,setCoach,setErr,err}) {
     setLoading(true); setErr("");
     try {
       const spRes = await idApi("set-coach-pin",{coachId:coachRecord.id,accessCode:code.trim().toUpperCase(),pin});
-      CURRENT_AUTH={role:"coach",id:coachRecord.id,pin,token:spRes.token};track("login","auth",{role:"coach"});setCoach({...coachRecord,pin});setView("coach");
+      CURRENT_AUTH={role:"coach",id:coachRecord.id,pin,token:spRes.token};track("login","auth",{role:"coach"});setCoach({...coachRecord,pin});persistAuthSession(coachRecord);setView("coach");
     } catch(e){setErr("Connection error.");}
     setLoading(false);
   };
