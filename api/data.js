@@ -46,6 +46,12 @@ const READ_OWN_COL = {
   manual_one_rms: "athlete_id",
   athlete_goals: "athlete_id",
   athlete_context: "athlete_id",
+  // Server-side session-count rollup (SQL port of groupIntoSessions, verified to
+  // match the client row-for-row). Read-only VIEW; scoped by athlete_id exactly
+  // like the raw tables, so a coach only sees their own roster's counts. Lets the
+  // coach dashboard show session totals without pulling every raw workout to the
+  // browser (see docs/coach-experience-roadmap.md for the dashboard wiring).
+  v_athlete_session_counts: "athlete_id",
 };
 
 // Tables an ATHLETE caller may write, each mapped to the column that must equal
