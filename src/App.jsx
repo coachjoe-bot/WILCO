@@ -1677,7 +1677,12 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
     const body = sections.map(s=>`**${s.label}**\n${s.body}`).join("\n\n") || "Here's your check-in.";
     setMessages([{role:"assistant",content:intro + body}]);
   },[]); // eslint-disable-line
-  useEffect(()=>{ bottomRef.current?.scrollIntoView({behavior:"smooth"}); },[messages,loading,programPending]);
+  // Only auto-scroll to the bottom once the check-in Q&A is live — otherwise the
+  // freshly-opened letter would jump straight past itself to the bottom. In the
+  // "report" (and "done") phase the letter opens at the top to be read top-down.
+  useEffect(()=>{
+    if(phase==="dialogue"||phase==="acting") bottomRef.current?.scrollIntoView({behavior:"smooth"});
+  },[messages,loading,programPending,phase]);
 
   const liftSeries = (lift) => {
     const norm = s=>String(s||"").toLowerCase().replace(/[^a-z]/g,"");
