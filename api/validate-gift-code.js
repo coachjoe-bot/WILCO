@@ -4,6 +4,10 @@
 
 import { applyCors, verifyAthlete, getStripe, resolvePromotionCode } from "./_stripe.js";
 
+// Vercel Pro: cap this function's execution time. Was implicitly the Hobby 10s
+// wall; 15s gives external Stripe/email/DB calls room without paying for idle time.
+export const maxDuration = 15;
+
 export default async function handler(req, res) {
   if (applyCors(req, res)) return;
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });

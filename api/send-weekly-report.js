@@ -1,6 +1,10 @@
 // Vercel serverless function — sends weekly progress reports to external coaches.
 // Triggered by Vercel Cron every Monday at 9 AM ET, or manually via GET.
 
+// Vercel Pro: cap this function's execution time. Was implicitly the Hobby 10s
+// wall; 60s gives external Stripe/email/DB calls room without paying for idle time.
+export const maxDuration = 60;
+
 export default async function handler(req, res) {
   // Cron-only endpoint. Authenticate SOLELY via the Authorization: Bearer
   // <CRON_SECRET> that Vercel injects into cron invocations — not the forgeable

@@ -11,6 +11,10 @@ import { rateLimit, clientIp } from "./_supa.js";
 // Escape user-supplied text before interpolating into email HTML.
 const esc = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
+// Vercel Pro: cap this function's execution time. Was implicitly the Hobby 10s
+// wall; 30s gives external Stripe/email/DB calls room without paying for idle time.
+export const maxDuration = 30;
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });

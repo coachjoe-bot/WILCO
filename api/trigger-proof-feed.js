@@ -222,6 +222,10 @@ const triggerProcessDeletions = async (url, key) => {
 };
 
 // ── MAIN HANDLER ─────────────────────────────────────────────────────────────
+// Vercel Pro: cap this function's execution time. Was implicitly the Hobby 10s
+// wall; 60s gives external Stripe/email/DB calls room without paying for idle time.
+export const maxDuration = 60;
+
 export default async function handler(req, res) {
   const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
   const SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;

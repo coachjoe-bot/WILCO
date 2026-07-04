@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node scripts/check-api-config.mjs",
     "build": "vite build",
+    "check:api": "node scripts/check-api-config.mjs",
     "test:smoke": "playwright test"
   },
   "dependencies": {

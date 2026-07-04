@@ -3788,7 +3788,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // discarded when the function returns. They are never written to Supabase
   // storage, any DB table, or local/persistent storage. The source video object
   // URL is revoked in finish(). No biometric identifiers are derived.
-  const extractFrames = (file, numFrames=4) => new Promise((resolve) => {
+  const extractFrames = (file, numFrames=8) => new Promise((resolve) => {
     const url = URL.createObjectURL(file);
     const video = document.createElement("video");
     video.muted = true;
@@ -3806,6 +3806,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     let ti = 0;
     let started = false;
     let done    = false;
+    let capW = 320, capH = 240; // capture dims, set from the real video aspect in begin()
 
     const finish = () => {
       if(done) return; done = true;
@@ -3817,9 +3818,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     const snap = () => {
       try {
         const c = document.createElement("canvas");
-        c.width = 320; c.height = 240;
-        c.getContext("2d").drawImage(video, 0, 0, 320, 240);
-        const d = c.toDataURL("image/jpeg", 0.65).split(",")[1];
+        c.width = capW; c.height = capH;
+        c.getContext("2d").drawImage(video, 0, 0, capW, capH);
+        const d = c.toDataURL("image/jpeg", 0.72).split(",")[1];
         if(d && d.length > 500) frames.push(d); // blank frames are tiny — skip them
       } catch(_){}
     };
@@ -3840,6 +3841,15 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       if(started) return; started = true;
       // Prime the iOS video player: muted autoplay is allowed and unlocks seeking
       try { await video.play(); video.pause(); } catch(_){}
+      // Capture at the video's REAL aspect ratio (no more 320x240 distortion),
+      // scaled so the longer edge is <= MAX_EDGE. Correct aspect + higher res makes
+      // joint angles / bar path legible to the model; still cheap — a portrait
+      // 1080x1920 clip becomes 360x640 (~300 vision tokens/frame). Never upscale.
+      const MAX_EDGE = 640;
+      const vw = video.videoWidth || 320, vh = video.videoHeight || 240;
+      const sc = Math.min(1, MAX_EDGE / Math.max(vw, vh));
+      capW = Math.max(2, Math.round(vw * sc));
+      capH = Math.max(2, Math.round(vh * sc));
       const dur = video.duration;
       if(!dur || !isFinite(dur) || dur <= 0){
         snap(); finish(); return; // grab whatever frame is available
@@ -3875,7 +3885,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
 
     try {
       updateMsg("Extracting frames from your video...");
-      const frames = await extractFrames(file, 4);
+      const frames = await extractFrames(file, 8);
 
       if(frames.length === 0){
         throw new Error("Couldn't read that video. Try a shorter clip or a different format (MP4 works best).");
@@ -3915,7 +3925,7 @@ Fix these:
 
 Keep it under 200 words. No fluff. If the frames are unclear, use the clearest one.`;
 
-      const analysis = await askClaude(sys, `Here are ${frames.length} frames from ${athlete.name}'s workout video. Analyze their form.`, 400, frames, "claude-sonnet-5", "video_form_review");
+      const analysis = await askClaude(sys, `Here are ${frames.length} frames (in time order) from ${athlete.name}'s workout video. Analyze their form.`, 500, frames, "claude-sonnet-5", "video_form_review");
 
       updateMsg(analysis);
       await sbInsert("workouts",{

@@ -59,8 +59,13 @@ function modelParams(model) {
 
 // The app's largest legitimate call asks for 1300 tokens; cap above that with
 // headroom. (Sonnet 5's tokenizer yields ~30% more tokens for the same text than
-// 4.6, so the old 1500 cap is too tight for the biggest calls.)
-const MAX_TOKENS_CAP = 2000;
+// 4.6, so the old 1500 cap was too tight for the biggest calls.) Raised to 4000
+// on the Vercel Pro upgrade: the 10s function wall (which made long generations
+// risky) is gone (maxDuration=60 above), so richer replies / reports can complete.
+// This is a CEILING, not a default — the per-call max_tokens is still whatever the
+// client asks for (clamped here), so it doesn't raise cost unless a call needs it,
+// and the per-user rate limit + auth still bound a stolen session's spend.
+const MAX_TOKENS_CAP = 4000;
 // Per-user ceiling: far above any human's real usage, low enough to bound a stolen
 // session's spend. Every call (success or not) counts — each one costs money.
 const RATE = { max: 100, windowMin: 15 };
@@ -122,6 +127,10 @@ async function logUsage({ caller, feature, model, data, status, latency_ms, snap
     status,
   });
 }
+
+// Vercel Pro: cap this function's execution time. Was implicitly the Hobby 10s
+// wall; 60s gives vision/form-review + long Claude generations room without paying for idle time.
+export const maxDuration = 60;
 
 export default async function handler(req, res) {
   if (applyCors(req, res)) return;
