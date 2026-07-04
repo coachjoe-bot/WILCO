@@ -15,6 +15,7 @@ import {
   sbAthletePatch,
   epochToISO,
   subPeriodEnd,
+  subEntitlesPaidTier,
   STRIPE_MODE,
   EVENT_SOURCES,
 } from "./_stripe.js";
@@ -70,20 +71,36 @@ export default async function handler(req, res) {
 
     const stripe = getStripe();
 
-    // 0. Guard against double-subscribing. If a real subscription already exists,
-    //    don't create a second one (use Settings → change plan instead). A stale
-    //    incomplete attempt (e.g. abandoned card entry, or a gift code re-applied)
-    //    is cancelled so we can cleanly start over without orphaning subscriptions.
+    // 0. Guard against double-subscribing — but only against a subscription the
+    //    athlete actually COMPLETED. This endpoint is called on every checkout
+    //    render: the payment step recreates the subscription whenever the plan,
+    //    billing interval, or gift code changes (each needs a fresh client secret).
+    //    So an athlete mid-onboarding routinely already has a just-created trial or
+    //    promo subscription from a prior render. Treating that stale attempt as a
+    //    real subscription is exactly what locked gift-code users out — applying a
+    //    code re-ran this endpoint, which saw the trial sub the page had auto-created
+    //    a moment earlier and returned "You already have an active subscription",
+    //    stranding them on the payment step with no way to add a card.
+    //
+    //    The reliable signal for "finished checkout" is a saved payment method:
+    //    Stripe only sets default_payment_method once the SetupIntent/PaymentIntent
+    //    confirms (save_default_payment_method: "on_subscription"). So block only a
+    //    live sub that has a card on file; cancel any other lingering sub and cleanly
+    //    recreate below with the current selection (never orphaning a subscription).
     if (athlete.stripe_subscription_id) {
       try {
         const prev = await stripe.subscriptions.retrieve(athlete.stripe_subscription_id);
-        if (prev && ["trialing", "active", "past_due"].includes(prev.status)) {
-          return res
-            .status(400)
-            .json({ error: "You already have an active subscription. Manage it in Settings." });
-        }
-        if (prev && prev.status === "incomplete") {
-          await stripe.subscriptions.cancel(prev.id).catch(() => {});
+        if (prev) {
+          const live = ["trialing", "active", "past_due"].includes(prev.status);
+          const completed = !!prev.default_payment_method; // card saved = checkout done
+          if (live && completed) {
+            return res
+              .status(400)
+              .json({ error: "You already have an active subscription. Manage it in Settings." });
+          }
+          if (prev.status !== "canceled" && prev.status !== "incomplete_expired") {
+            await stripe.subscriptions.cancel(prev.id).catch(() => {});
+          }
         }
       } catch (_) {
         /* subscription not found / already gone — fine, continue */
@@ -167,12 +184,18 @@ export default async function handler(req, res) {
       console.warn("[create-subscription] no client secret on subscription", subscription.id);
     }
 
-    // 5. Optimistic persist; the webhook re-syncs authoritatively.
+    // 5. Optimistic persist; the webhook re-syncs authoritatively. Deliberately do
+    //    NOT grant the paid `tier` here unless a card is already on file: the card is
+    //    confirmed client-side via the SetupIntent AFTER this call, so a fresh sub has
+    //    no default_payment_method yet. Granting pro now would hand Pro to anyone who
+    //    reaches checkout and leaves before paying. The webhook flips tier to pro the
+    //    moment the card is attached (syncSubscription). The only time we grant here
+    //    is a re-subscribe that already carries a saved payment method.
     await sbAthletePatch(athlete.id, {
       stripe_subscription_id: subscription.id,
       stripe_price_id: priceId,
       subscription_status: subscription.status,
-      tier,
+      ...(subEntitlesPaidTier(subscription) ? { tier } : {}),
       billing: interval,
       trial_end: epochToISO(subscription.trial_end),
       current_period_end: epochToISO(subPeriodEnd(subscription)),

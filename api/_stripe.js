@@ -243,6 +243,19 @@ export const epochToISO = (s) => (s ? new Date(s * 1000).toISOString() : null);
 export const subPeriodEnd = (sub) =>
   sub?.current_period_end || sub?.items?.data?.[0]?.current_period_end || null;
 
+// Does this subscription entitle its athlete to the PAID tier? Only when checkout
+// is genuinely complete: a payment method is on file AND the subscription is live.
+// A trialing/active sub with NO default_payment_method is an abandoned or not-yet-
+// funded checkout — entitling it would hand Pro to anyone who starts signup and
+// walks away before adding a card (login has no paywall). Every subscription here
+// is created with save_default_payment_method:"on_subscription", so a finished
+// checkout — trial, gift/$0, or paid — always populates default_payment_method,
+// making this a reliable "checkout done" signal. This is the single source of truth
+// for granting `tier`; keep create-subscription and the webhook using it.
+export const subEntitlesPaidTier = (sub) =>
+  !!sub?.default_payment_method &&
+  ["trialing", "active", "past_due"].includes(sub?.status);
+
 // CORS preamble shared by the JSON endpoints. Returns true if the request was a
 // preflight (handler should stop).
 export function applyCors(req, res) {

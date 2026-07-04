@@ -14,6 +14,7 @@ import {
   tierForPrice,
   epochToISO,
   subPeriodEnd,
+  subEntitlesPaidTier,
   GIFT_COUPON_ID,
   randomGiftCode,
 } from "./_stripe.js";
@@ -102,7 +103,11 @@ async function syncSubscription(sub) {
     trial_end: epochToISO(sub.trial_end),
   };
   if (priceId) patch.stripe_price_id = priceId;
-  if (tier) patch.tier = tier; // keep the app's tier label in sync with the real plan
+  // Grant the paid tier ONLY when checkout is genuinely complete (card on file +
+  // live sub). A cardless trial, an abandoned incomplete, or a canceled/lapsed sub
+  // must NOT hold Pro — otherwise anyone could start checkout, bail before paying,
+  // and keep it. When the plan is known but not entitled, drop to free.
+  if (tier) patch.tier = subEntitlesPaidTier(sub) ? tier : "free";
   await sbAthletePatch(athlete.id, patch);
 }
 
