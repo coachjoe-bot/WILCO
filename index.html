@@ -19,11 +19,32 @@
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
     <script>
-      if('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-          navigator.serviceWorker.register('/sw.js');
-        });
-      }
+      // Service worker is registered ONLY on the canonical production host. Stale
+      // installs on old Vercel aliases (e.g. fortis-ten.vercel.app) kept a cached
+      // SW phoning home and polluting the error feed; here any non-canonical origin
+      // self-destructs instead — unregister every SW + drop its caches so the next
+      // navigation falls through to the vercel.json redirect to app.trainwilco.com.
+      // localhost/127.0.0.1 (dev) is left untouched so local PWA testing still works.
+      (function () {
+        if (!('serviceWorker' in navigator)) return;
+        var host = location.hostname;
+        var isCanonical = host === 'app.trainwilco.com';
+        var isDev = host === 'localhost' || host === '127.0.0.1';
+        if (isCanonical) {
+          window.addEventListener('load', function () {
+            navigator.serviceWorker.register('/sw.js');
+          });
+        } else if (!isDev) {
+          navigator.serviceWorker.getRegistrations()
+            .then(function (rs) { rs.forEach(function (r) { r.unregister(); }); })
+            .catch(function () {});
+          if (window.caches && caches.keys) {
+            caches.keys()
+              .then(function (ks) { ks.forEach(function (k) { caches.delete(k); }); })
+              .catch(function () {});
+          }
+        }
+      })();
     </script>
   </body>
 </html>

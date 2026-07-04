@@ -235,7 +235,28 @@ async function setCoachPinAction(req, res, body) {
 //
 // Always returns 200 — the client treats this as fire-and-forget and must never
 // surface a logging failure (or rate-limit) to the user.
+// Host that a legitimate production error can originate from. Errors POSTed from a
+// retired Vercel alias (e.g. fortis-ten.vercel.app) are a stale-install artifact,
+// not real production traffic — they were inflating the nav error rate. We read the
+// Origin/Referer of THIS request (not the client body), so it catches old clients
+// running pre-fix code too. Fail OPEN: if we can't determine the origin, we keep the
+// error rather than risk dropping a real one.
+const CANONICAL_ERROR_HOST = "app.trainwilco.com";
+function requestOriginHost(req) {
+  const raw = req.headers["origin"] || req.headers["referer"] || "";
+  if (!raw) return null;
+  try { return new URL(raw).hostname; } catch { return null; }
+}
+
 async function logErrorAction(req, res, body) {
+  // Drop errors reported from a non-canonical origin (stale installs on old Vercel
+  // aliases). Unknown origin → keep (fail open). localhost dev never reaches here.
+  const originHost = requestOriginHost(req);
+  if (originHost && originHost !== CANONICAL_ERROR_HOST &&
+      originHost !== "localhost" && originHost !== "127.0.0.1") {
+    return res.status(200).json({ ok: true, dropped: "non_canonical_origin" });
+  }
+
   // Bound abuse / storage-flooding. Generous (a janky client can burst) but capped.
   // The client also dedups + throttles before sending (see App.jsx reportError).
   try {

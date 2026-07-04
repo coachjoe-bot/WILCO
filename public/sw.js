@@ -1,6 +1,31 @@
 const CACHE = "wilco-v3";
 const ASSETS = ["/", "/index.html", "/manifest.json", "/icon-192.png", "/icon-512.png"];
 
+// SELF-DESTRUCT on non-canonical origins. A SW installed against an old Vercel
+// alias (e.g. fortis-ten.vercel.app) keeps serving cached code and phoning home
+// long after the alias is retired. If this script ever activates anywhere but the
+// canonical production host, it unregisters itself and wipes its caches so the
+// stale install cleans up and future loads follow the redirect to the real host.
+// localhost is exempt so local dev/PWA testing is unaffected.
+const CANONICAL_HOST = "app.trainwilco.com";
+const IS_CANONICAL =
+  self.location.hostname === CANONICAL_HOST ||
+  self.location.hostname === "localhost" ||
+  self.location.hostname === "127.0.0.1";
+
+if (!IS_CANONICAL) {
+  self.addEventListener("install", () => self.skipWaiting());
+  self.addEventListener("activate", e => {
+    e.waitUntil((async () => {
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+      await self.registration.unregister();
+      const clientList = await self.clients.matchAll({ type: "window" });
+      clientList.forEach(c => c.navigate(c.url).catch(() => {}));
+    })());
+  });
+} else {
+
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
   self.skipWaiting();
@@ -88,3 +113,5 @@ self.addEventListener("notificationclick", e => {
     })
   );
 });
+
+} // end canonical-host handlers (see SELF-DESTRUCT guard above)
