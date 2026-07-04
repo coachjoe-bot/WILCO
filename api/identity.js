@@ -18,6 +18,11 @@ import {
   authCaller, mintSessionToken, logError, logEvents,
 } from "./_supa.js";
 import { EVENT_SOURCES } from "./_stripe.js";
+// Telemetry ingestion moved to api/telemetry.js (Vercel Pro lifted the fn cap). These
+// cases stay here as a DEPRECATED fallback so cached PWA clients still posting to
+// /api/identity keep working; new clients post to /api/telemetry. Remove a release
+// later once old clients age out. Logic is shared in ./_telemetry.js.
+import { handleLogError, handleLogEvents } from "./_telemetry.js";
 
 const enc = encodeURIComponent;
 
@@ -53,8 +58,8 @@ export default async function handler(req, res) {
       case "hash-pin":             return await hashPinAction(req, res, body);
       case "create-athlete":       return await createAthleteAction(req, res, body);
       case "set-coach-pin":        return await setCoachPinAction(req, res, body);
-      case "log-error":            return await logErrorAction(req, res, body);
-      case "log-events":           return await logEventsAction(req, res, body);
+      case "log-error":            return await handleLogError(req, res, body);
+      case "log-events":           return await handleLogEvents(req, res, body);
       default:                     return res.status(400).json({ error: "Unknown action" });
     }
   } catch (e) {
@@ -236,138 +241,8 @@ async function setCoachPinAction(req, res, body) {
   return res.status(200).json({ ok: true, token: mintSessionToken("coach", coachId) });
 }
 
-// ── log-error (Phase 1.5 reliability ingestion) ──────────────────────────────
-// The single error-capture entry point for the browser. Deliberately accepts
-// UNAUTHENTICATED callers: many of the most important failures happen pre-login or
-// when auth itself is broken, and we must still capture those. Auth is OPTIONAL
-// ENRICHMENT, never a gate — a present+valid auth attaches the account + snapshot
-// so the future coach dashboard can scope by athlete/school; an absent or invalid
-// auth simply logs as role='anon'.
-//
-// This does NOT reopen the Phase-1 anon-write hole: the browser still cannot touch
-// error_events with the anon key (RLS denies it). It POSTs metadata here; the
-// server validates, rate-limits per IP, and writes with the SERVICE key. ALL
-// attribution (role/ids/snapshots) is derived server-side and never read from the
-// client body, so per-athlete / per-school numbers can't be forged.
-//
-// Always returns 200 — the client treats this as fire-and-forget and must never
-// surface a logging failure (or rate-limit) to the user.
-// Host that a legitimate production error can originate from. Errors POSTed from a
-// retired Vercel alias (e.g. fortis-ten.vercel.app) are a stale-install artifact,
-// not real production traffic — they were inflating the nav error rate. We read the
-// Origin/Referer of THIS request (not the client body), so it catches old clients
-// running pre-fix code too. Fail OPEN: if we can't determine the origin, we keep the
-// error rather than risk dropping a real one.
-const CANONICAL_ERROR_HOST = "app.trainwilco.com";
-function requestOriginHost(req) {
-  const raw = req.headers["origin"] || req.headers["referer"] || "";
-  if (!raw) return null;
-  try { return new URL(raw).hostname; } catch { return null; }
-}
-
-async function logErrorAction(req, res, body) {
-  // Drop errors reported from a non-canonical origin (stale installs on old Vercel
-  // aliases). Unknown origin → keep (fail open). localhost dev never reaches here.
-  const originHost = requestOriginHost(req);
-  if (originHost && originHost !== CANONICAL_ERROR_HOST &&
-      originHost !== "localhost" && originHost !== "127.0.0.1") {
-    return res.status(200).json({ ok: true, dropped: "non_canonical_origin" });
-  }
-
-  // Bound abuse / storage-flooding. Generous (a janky client can burst) but capped.
-  // The client also dedups + throttles before sending (see App.jsx reportError).
-  try {
-    await rateLimit(`log-error:${clientIp(req)}`, { max: 60, windowMin: 15 });
-  } catch {
-    return res.status(200).json({ ok: true, dropped: "rate_limited" });
-  }
-
-  const ev = body.event && typeof body.event === "object" ? body.event : {};
-
-  // Optional auth enrichment — SOFT: authCaller throws on bad creds, but an
-  // auth-failure error must still be logged, so we swallow and fall back to anon.
-  let enrich = { role: "anon" };
-  if (body.auth && typeof body.auth === "object") {
-    try {
-      enrich = await enrichFromCaller(await authCaller(body.auth));
-    } catch { /* keep anon */ }
-  }
-
-  await logError({
-    source: "client",
-    severity: ev.severity,
-    area: ev.area,
-    route: stripQuery(ev.route),
-    component: ev.component,
-    error_type: ev.error_type,
-    message: ev.message,
-    status_code: ev.status_code,
-    app_version: ev.app_version,
-    meta: ev.meta,
-    // Server-derived — client-supplied role/ids/snapshots are intentionally ignored.
-    user_agent: req.headers["user-agent"],
-    ...enrich,
-  });
-
-  return res.status(200).json({ ok: true });
-}
-
-// ── log-events (Phase 2 engagement ingestion) ────────────────────────────────
-// The single engagement-capture entry point for the browser. Batched: the client
-// buffers allowlisted events and flushes an ARRAY here (on a timer / when full / on
-// page-hide), so this is ~one request per flush, not one per event. Like log-error
-// it accepts UNAUTHENTICATED callers (app_open / session_start / signup_start are
-// captured pre-login) — auth is OPTIONAL ENRICHMENT, never a gate.
-//
-// Same lockdown as log-error: the browser cannot touch usage_events with the anon
-// key (RLS denies it). It POSTs metadata here; the server validates against the
-// EVENT_NAMES allowlist, rate-limits per IP, derives ALL attribution server-side,
-// and bulk-writes with the SERVICE key. Always returns 200 — fire-and-forget.
-async function logEventsAction(req, res, body) {
-  // Bound abuse / storage-flooding. A batch carries many events, so this caps
-  // batches/IP (event volume is additionally capped per-batch in logEvents()).
-  try {
-    await rateLimit(`log-events:${clientIp(req)}`, { max: 120, windowMin: 15 });
-  } catch {
-    return res.status(200).json({ ok: true, dropped: "rate_limited" });
-  }
-
-  const events = Array.isArray(body.events) ? body.events : [];
-
-  // Optional auth enrichment — SOFT: bad creds fall back to anon (pre-login events
-  // are the whole point), exactly like log-error.
-  let enrich = { role: "anon" };
-  if (body.auth && typeof body.auth === "object") {
-    try {
-      enrich = await enrichFromCaller(await authCaller(body.auth));
-    } catch { /* keep anon */ }
-  }
-
-  // user_agent is read server-side (never trusted from the client body).
-  await logEvents(events, { ...enrich, user_agent: req.headers["user-agent"] });
-
-  return res.status(200).json({ ok: true });
-}
-
-// Server-trusted attribution + snapshots for a verified caller (mirrors the
-// snapshot read in api/claude.js so cost and error rows attribute identically).
-async function enrichFromCaller(caller) {
-  if (caller.role === "athlete") {
-    const s = (await sbSelect("athletes", `?id=eq.${enc(caller.id)}&select=tier,school_id,coach_id`))[0] || {};
-    return {
-      role: "athlete", actor_id: caller.id, athlete_id: caller.id,
-      tier: s.tier ?? null, school_id: s.school_id ?? null, coach_id: s.coach_id ?? null,
-    };
-  }
-  if (caller.role === "coach") {
-    const s = (await sbSelect("coaches", `?id=eq.${enc(caller.id)}&select=school_id`))[0] || {};
-    return { role: "coach", actor_id: caller.id, coach_id: caller.id, school_id: s.school_id ?? null };
-  }
-  return { role: "anon" };
-}
-
-// Keep only the path of a route — query strings / fragments can carry tokens/ids.
-const stripQuery = (r) => (typeof r === "string" ? r.split(/[?#]/)[0] : r);
+// (log-error / log-events handlers + their helpers moved to ./_telemetry.js;
+// the switch above delegates to handleLogError/handleLogEvents.)
 
 // ── coach-athlete-fields (dashboard polling one athlete's program) ───────────
 async function coachAthleteFields(req, res, body) {

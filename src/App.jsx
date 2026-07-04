@@ -421,7 +421,9 @@ function reportError(area, error, extra={}){
       meta: (frame || extra.meta) ? {...(frame?{frame}:{}), ...(extra.meta||{})} : null,
     };
     // keepalive so it still flushes if the page is unloading; result is ignored.
-    fetch("/api/identity",{
+    // Telemetry now has its own endpoint (api/telemetry.js) — off the auth-critical
+    // login path. identity.js still accepts log-error as a deprecated fallback.
+    fetch("/api/telemetry",{
       method:"POST",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({action:"log-error",auth:CURRENT_AUTH,event}),
@@ -532,7 +534,7 @@ function flushEvents(){
     if(_evTimer){ clearTimeout(_evTimer); _evTimer = null; }
     if(_evBuf.length === 0) return;
     const events = _evBuf.splice(0, _evBuf.length);
-    fetch("/api/identity",{
+    fetch("/api/telemetry",{
       method:"POST",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({ action:"log-events", auth:CURRENT_AUTH, events }),
