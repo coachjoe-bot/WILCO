@@ -122,15 +122,11 @@ async function sendFeedPush(athlete, digest, windowType) {
     const subs = await sbSelect("push_subscriptions", `?athlete_id=eq.${enc(athlete.id)}&select=*`);
     if (subs.length === 0) return;
 
-    // Short Joe-voice line referencing what's actually in the entry — never invents
-    // specifics; falls back to a plain "ready" line when nothing stood out.
-    const focus = digest.contentJson?.sections?.find((s) => s.label === "FOCUS NEXT WEEK");
-    const rankSection = digest.contentJson?.sections?.find((s) => s.label === "GRIT RANK");
+    // Kept deliberately simple (Will's call): call out new PRs when there are any,
+    // otherwise a plain "ready" line. No rank-movement or focus-teaser variants.
     const prSection = digest.contentJson?.sections?.find((s) => s.label === "PRS & PROGRESS");
     let body;
-    if (rankSection) body = "New rank movement in your Proof Feed. Go see it.";
-    else if (prSection) body = "New PRs are in your Proof Feed. Go check it out.";
-    else if (focus) body = `Your ${windowType === "monthly" ? "monthly recap" : "weekly"} is ready — next week's focus is in there.`;
+    if (prSection) body = "New PRs are in your Proof Feed. Go check it out.";
     else body = windowType === "monthly" ? "Your monthly recap is ready." : "Your weekly Proof Feed is ready.";
 
     const payload = pushPayload({ title: "Coach Joe", body, url: "/", type: "feed" });

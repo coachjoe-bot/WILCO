@@ -147,6 +147,46 @@ an otherwise quiet week.
 
 ---
 
+## The dialogue that comes after (post-digest check-in) — REAL sample
+
+After reading the digest, the athlete taps into a guided check-in: Joe asks the
+question bank one at a time, and each answer runs a real `claude-sonnet-5` call
+(`react()` in `src/App.jsx`, the same prompt the app uses) that reacts to what they
+said and threads into the next question. Below is a real run for Will Higgins —
+answers authored to be realistic, Joe's replies generated live through prod. Joe
+decides per-answer whether a thin reply even deserves a reaction. (Generated via
+`scripts/gen-checkin-dialogue.mjs`, ~$0.005, throwaway caller cleaned up.)
+
+> **JOE:** *(opens with the full Sample 1 digest)*
+>
+> **JOE:** Bodyweight still 165 lbs, or has it moved?
+>
+> **WILL:** Still 165, maybe 164 first thing in the morning
+>
+> **JOE:** Solid, weight's holding steady which is what we want right now. That left pec — cleared, lingering, or still sharp?
+>
+> **WILL:** It's lingering. Not sharp anymore but I still feel it on heavy bench
+>
+> **JOE:** Good that it's not sharp anymore, but if you're still feeling it on heavy bench, that's a sign the tissue's not fully ready for max loading yet. To protect that left pec I'd cap bench press at 80% 1RM (~230lbs) for 2 weeks, swap flat bench for floor press 4x6, add band pull-aparts 3x20 and face pulls 3x15 before upper sessions. Apply it next week, keep it as written, or adjust?
+>
+> **WILL:** Yeah let's apply it, I'm good with floor press for a couple weeks
+>
+> **JOE:** Good call — floor press will still let you move real weight without loading that stretched position, so we should feel the difference right away. Keep an eye on how the pec responds to the pull-aparts and face pulls too, that's the stuff that actually fixes it long-term. Recovery this week — dialed, flat, or running on fumes?
+>
+> **WILL:** Flat this week honestly, newborn's got my sleep wrecked
+>
+> **JOE:** Yeah man, no shame in flat with a newborn in the house — that's real fatigue, not laziness. Let's keep the floor press cap and just focus on showing up, sleep will come back eventually and the strength will follow.
+>
+> **JOE:** That's the short version. Want to go deeper, or wrap it here?
+
+Note: agreeing to the injury adjustment ("let's apply it") triggers the protective
+program rewrite (a separate confirm step, not shown). Minor polish flagged: the raw
+`injury_apply` question template double-inserts the change string with a stray
+double-period ("I'd Cap bench… . Apply it") — the model smooths it in conversation,
+but the scripted first pose of that question reads slightly rough. Easy template fix.
+
+---
+
 ## Notification copy (notification policy v2) — for approval
 
 All four notification types + test. Every payload sets `icon: /icon-192.png`,
@@ -155,13 +195,12 @@ another in the tray). Titles: **"Coach Joe"** for the three Joe-voice types (fee
 both inactivity nudges, test) — **"Program Update"** for the coach-authored one, so
 an athlete can tell at a glance who's talking.
 
-### 1. Feed-live push (title: "Coach Joe")
-Fires when an entry is written (never in dry-run), capped 1/athlete/day. Body picks
-the strongest real signal in that entry — never invented copy:
-- If the entry has Grit rank movement: **"New rank movement in your Proof Feed. Go see it."**
-- Else if new PRs: **"New PRs are in your Proof Feed. Go check it out."**
-- Else if a normal entry: **"Your weekly is ready — next week's focus is in there."** (monthly: *"Your monthly recap is ready — next week's focus is in there."*)
-- Fallback (rare — no headline signal at all): **"Your weekly Proof Feed is ready."** / **"Your monthly recap is ready."**
+### 1. Feed-live push (title: "Coach Joe") — SIMPLIFIED per Will 2026-07-04
+Fires when an entry is written (never in dry-run), capped 1/athlete/day. Two cases only:
+- If the entry has new PRs: **"New PRs are in your Proof Feed. Go check it out."**
+- Otherwise: **"Your weekly Proof Feed is ready."** / **"Your monthly recap is ready."**
+
+(Dropped the rank-movement and "next week's focus is in there" variants — kept simple.)
 
 ### 2. Inactivity — 14-day touch (title: "Coach Joe")
 Fires once per quiet streak, at 14 days since the athlete's last logged workout:
