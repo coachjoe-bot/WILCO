@@ -458,8 +458,11 @@ export function buildQuestionBank(brief, athlete, opts = {}) {
     q.push({
       id: "injury_apply", kind: "injury_apply", deeper: false,
       meta: { area: activeInjury, change: injuryChange || null },
+      // Colon form + trailing-period strip so the model-generated `injuryChange`
+      // (often a capitalized "Cap bench…" clause ending in ".") reads clean instead
+      // of "I'd Cap bench… . Apply it" (mid-sentence capital + double period).
       text: injuryChange
-        ? `To protect that ${activeInjury} I'd ${injuryChange}. Apply it next week, keep it as written, or adjust?`
+        ? `To protect that ${activeInjury}: ${injuryChange.replace(/\.\s*$/, "")}. Apply it next week, keep it as written, or adjust?`
         : `I'd protect that ${activeInjury} with a targeted change next week — want the specifics applied, kept as written, or adjusted?`,
     });
   }
