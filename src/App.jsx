@@ -1530,25 +1530,65 @@ export function RunCard({runData, feel}) {
   );
 }
 
-// ─── PUSH SUBSCRIPTION REGISTRATION ─────────────────────────────────────────
-const VAPID_PUBLIC_KEY = import.meta.env.VITE_VAPID_PUBLIC_KEY || "";
+// ─── WEB PUSH (v1) ───────────────────────────────────────────────────────────
+// Notifications are opt-in: the athlete flips the toggle in Settings (or accepts
+// the one-time post-workout prompt). The VAPID public key comes from the server
+// (api/push.js) so the client bundle carries no push config; subscriptions are
+// registered server-side bound to the authed athlete. On unsupported platforms
+// (iOS Safari tab that isn't installed to the home screen) pushSupported() is
+// false and every push surface simply hides itself.
+const PUSH_PROMPT_KEY = "wilco_push_prompt_answered";
+const pushSupported = () =>
+  typeof window!=="undefined" && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
 
-const registerPushSubscription = async (athleteId) => {
-  if(!("serviceWorker" in navigator && "PushManager" in window)) return;
-  if(!VAPID_PUBLIC_KEY) return;
-  try {
-    const reg = await navigator.serviceWorker.ready;
-    let sub = await reg.pushManager.getSubscription();
-    if(!sub){
-      const keyBytes = Uint8Array.from(atob(VAPID_PUBLIC_KEY.replace(/-/g,"+").replace(/_/g,"/")),c=>c.charCodeAt(0));
-      sub = await reg.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: keyBytes,
-      });
-    }
-    // Upsert subscription in Supabase
-    await sbUpsert("push_subscriptions",{athlete_id:athleteId,subscription_json:sub.toJSON(),updated_at:new Date().toISOString()},"athlete_id");
-  } catch(_) {}
+const pushApi = async (payload) => {
+  const r = await fetch("/api/push",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth:CURRENT_AUTH,...payload})});
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(d.error||`Push request failed (${r.status})`);
+  return d;
+};
+
+const urlB64ToBytes = (s) => Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/")),c=>c.charCodeAt(0));
+
+const getPushSubscription = async () => {
+  if(!pushSupported()) return null;
+  try{ const reg = await navigator.serviceWorker.ready; return await reg.pushManager.getSubscription(); }catch{ return null; }
+};
+
+// Subscribe this browser (asks for permission if needed — call from a user
+// gesture) and register it server-side under the logged-in athlete.
+async function enablePush(){
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  if(!sub){
+    const { publicKey } = await pushApi({action:"vapid-public-key"});
+    sub = await reg.pushManager.subscribe({ userVisibleOnly:true, applicationServerKey:urlB64ToBytes(publicKey) });
+  }
+  const j = sub.toJSON();
+  await pushApi({action:"subscribe", subscription:{ endpoint:j.endpoint, keys:j.keys }});
+  track("push_enabled","nav");
+}
+
+async function disablePush(){
+  const sub = await getPushSubscription();
+  if(sub){
+    const endpoint = sub.endpoint;
+    try{ await sub.unsubscribe(); }catch{}
+    try{ await pushApi({action:"unsubscribe", endpoint}); }catch{}
+  }
+  track("push_disabled","nav");
+}
+
+// Boot-time best-effort re-sync: if this browser is ALREADY subscribed, re-register
+// it server-side so the row stays bound to the current athlete. Never subscribes
+// anew and never prompts.
+const syncPushSubscription = async () => {
+  try{
+    const sub = await getPushSubscription();
+    if(!sub) return;
+    const j = sub.toJSON();
+    await pushApi({action:"subscribe", subscription:{ endpoint:j.endpoint, keys:j.keys }});
+  }catch{}
 };
 
 // ─── PROOF CHAT MODAL ────────────────────────────────────────────────────────
@@ -3315,6 +3355,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [profileBannerDismissed,setProfileBannerDismissed] = useState(()=>{
     try{return!!localStorage.getItem(`wilco_profile_banner_${initialAthlete.id}`);}catch{return false;}
   });
+  const [showPushPrompt,setShowPushPrompt] = useState(false); // one-time post-workout notifications offer
   const [athleteGoals,setAthleteGoals] = useState([]);
   const [athleteContext,setAthleteContext] = useState(null);
   const [proofDigest,setProofDigest] = useState(null);
@@ -3436,8 +3477,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         if(Array.isArray(ctxRows)&&ctxRows.length>0) setAthleteContext(ctxRows.map(r=>r.content).join("\n\n"));
         if(Array.isArray(digestRows)&&digestRows.length>0) setProofDigest(digestRows[0]);
 
-        // Register push notification subscription (best-effort)
-        registerPushSubscription(athlete.id);
+        // Keep an already-enabled push subscription registered server-side
+        // (best-effort; never subscribes anew, never prompts)
+        syncPushSubscription();
 
         if(logs&&logs.length>0) setWorkoutHistory(logs);
 
@@ -3488,6 +3530,15 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     // Activation event — fired for ALL tiers (free tier logs but isn't persisted, so
     // tracking here, before the tier gate below, keeps the funnel honest).
     track("workout_logged","workout_log",{ persisted: tier!=="free" });
+    // One-time notifications offer, right after a log lands (the moment the value
+    // is obvious). Shown once ever: answering either way stamps PUSH_PROMPT_KEY.
+    // Skipped where push can't work (unsupported platform / permission denied) or
+    // when this browser is already subscribed.
+    try {
+      if(pushSupported() && !localStorage.getItem(PUSH_PROMPT_KEY) && Notification.permission!=="denied"){
+        getPushSubscription().then(sub=>{ if(!sub) setShowPushPrompt(true); });
+      }
+    } catch(_) {}
     try {
       const parsedFinal = isNewSession ? {...parsed,new_session:true} : parsed;
       // Free tier: no memory — don't persist workouts or PRs
@@ -4055,6 +4106,25 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           <div style={{display:"flex",gap:6,flexShrink:0}}>
             <button onClick={()=>setShowProfileCompletion(true)} style={{background:C.gold,border:"none",color:"#000",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontWeight:700}}>Complete Profile</button>
             <button onClick={()=>{setProfileBannerDismissed(true);try{localStorage.setItem(`wilco_profile_banner_${athlete.id}`,"1");}catch(_){}}} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11}}>Later</button>
+          </div>
+        </div>
+      )}
+
+      {/* One-time notifications offer (post-workout). Answering either way stamps
+          PUSH_PROMPT_KEY so it never shows again. */}
+      {showPushPrompt&&(
+        <div style={{background:`${C.gold}15`,borderBottom:`1px solid ${C.gold}40`,padding:"8px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexShrink:0}}>
+          <div style={{color:C.gold,fontSize:12}}>Want Joe to remind you when you go quiet?</div>
+          <div style={{display:"flex",gap:6,flexShrink:0}}>
+            <button onClick={async()=>{
+              try{localStorage.setItem(PUSH_PROMPT_KEY,"1");}catch(_){}
+              setShowPushPrompt(false);
+              try{ await enablePush(); }catch(_){}
+            }} style={{background:C.gold,border:"none",color:"#000",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontWeight:700}}>Turn On</button>
+            <button onClick={()=>{
+              try{localStorage.setItem(PUSH_PROMPT_KEY,"1");}catch(_){}
+              setShowPushPrompt(false);
+            }} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11}}>No Thanks</button>
           </div>
         </div>
       )}
@@ -5507,6 +5577,52 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
   const DOW = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
   const tz = (()=>{ try{ return Intl.DateTimeFormat().resolvedOptions().timeZone||"America/New_York"; }catch{ return "America/New_York"; } })();
 
+  // ── Push notifications (Web Push v1) ───────────────────────────────────────
+  // The whole section hides itself where push can't work (e.g. iOS Safari tab
+  // not installed to the home screen). pushOn reflects THIS browser's live
+  // subscription state, read on open.
+  const pushOk = pushSupported();
+  const [pushOn,setPushOn] = useState(false);
+  const [pushBusy,setPushBusy] = useState(false);
+  const [pushMsg,setPushMsg] = useState("");
+  const pushDenied = pushOk && Notification.permission==="denied";
+  useEffect(()=>{ if(pushOk) getPushSubscription().then(s=>setPushOn(!!s)); },[]);
+
+  const togglePush = async () => {
+    if(pushBusy) return;
+    setPushBusy(true); setPushMsg("");
+    try{
+      if(pushOn){
+        await disablePush();
+        setPushOn(false);
+        setPushMsg("Notifications are off.");
+      } else {
+        if(Notification.permission==="denied") throw new Error("denied");
+        await enablePush();
+        setPushOn(true);
+        try{localStorage.setItem(PUSH_PROMPT_KEY,"1");}catch(_){}
+        setPushMsg("You're set. Joe will keep you posted.");
+      }
+    }catch(e){
+      setPushMsg(Notification.permission==="denied"
+        ? "Notifications are blocked for this app in your device settings. Turn them on there first."
+        : "Couldn't update notifications. Try again.");
+    }
+    setPushBusy(false);
+    setTimeout(()=>setPushMsg(""),5000);
+  };
+
+  const sendTestPush = async () => {
+    if(pushBusy) return;
+    setPushBusy(true); setPushMsg("");
+    try{
+      const r = await pushApi({action:"test"});
+      setPushMsg(r.sent>0?"Test sent. Check your notifications.":"No devices registered yet. Toggle notifications off and on.");
+    }catch(e){ setPushMsg("Couldn't send the test. Try again."); }
+    setPushBusy(false);
+    setTimeout(()=>setPushMsg(""),5000);
+  };
+
   const saveProofSchedule = async () => {
     if(proofSaving) return;
     setProofSaving(true); setProofSaveMsg("");
@@ -5680,6 +5796,27 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
             {runNowMsg&&<div style={{color:runNowMsg.startsWith("✓")?C.green:C.muted,fontSize:11,marginTop:8,textAlign:"center",lineHeight:1.4}}>{runNowMsg}</div>}
           </div>
         </div>
+
+        {/* Push notifications (hidden entirely where the platform can't do push) */}
+        {pushOk&&(
+          <div style={{marginBottom:16}}>
+            <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>NOTIFICATIONS</div>
+            <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px"}}>
+              <label style={{display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer"}}>
+                <span style={{color:C.text,fontSize:13}}>Reminders from Coach Joe</span>
+                <input type="checkbox" checked={pushOn} disabled={pushBusy} onChange={togglePush} style={{width:18,height:18,accentColor:C.gold,cursor:"pointer"}}/>
+              </label>
+              <div style={{color:C.muted,fontSize:10,marginTop:6,lineHeight:1.5}}>Joe checks in when you go quiet for a few days. That's it. No spam.</div>
+              {pushDenied&&!pushOn&&(
+                <div style={{color:C.muted2,fontSize:11,marginTop:8,lineHeight:1.5}}>Notifications are blocked for this app in your device settings. Turn them on there first.</div>
+              )}
+              {pushOn&&(
+                <button onClick={sendTestPush} disabled={pushBusy} style={{marginTop:10,width:"100%",background:C.navy,border:`1px solid ${C.border}`,color:C.text,borderRadius:8,padding:"9px",cursor:pushBusy?"default":"pointer",fontSize:13,fontWeight:600}}>{pushBusy?"Working...":"Send a test"}</button>
+              )}
+              {pushMsg&&<div style={{color:pushMsg.startsWith("You're set")||pushMsg.startsWith("Test sent")?C.green:C.muted2,fontSize:11,marginTop:8,textAlign:"center",lineHeight:1.4}}>{pushMsg}</div>}
+            </div>
+          </div>
+        )}
 
         {/* Plan / subscription */}
         <div style={{marginBottom:16}}>

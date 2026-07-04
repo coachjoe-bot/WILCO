@@ -40,6 +40,10 @@
     {
       "path": "/api/trigger-proof-feed",
       "schedule": "0 14 * * *"
+    },
+    {
+      "path": "/api/push",
+      "schedule": "0 21 * * *"
     }
   ]
 }

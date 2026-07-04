@@ -435,6 +435,7 @@ export const EVENT_NAMES = new Set([
   "app_open", "session_start", "login", "signup_start", "signup_complete",
   "workout_logged", "chat_opened", "chat_message_sent", "screen_view",
   "coach_dashboard_view", "event_landing_view",
+  "push_enabled", "push_disabled",
 ]);
 // Coarse area vocabulary — SAME set as error_events so v_error_rate_by_area_daily
 // can divide errors by attempts on (area, day).
