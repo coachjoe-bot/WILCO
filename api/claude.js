@@ -14,6 +14,7 @@
 //
 // POST { auth:{role,id,pin}, model?, max_tokens?, system?, messages:[...] }
 
+import { waitUntil } from "@vercel/functions";
 import { applyCors, httpErr, authCaller, tryTokenAuth, rateLimit, sbSelect, sbInsert, logError, authThrottle, clientIp } from "./_supa.js";
 
 const enc = encodeURIComponent;
@@ -282,15 +283,20 @@ export default async function handler(req, res) {
 
     const data = await r.json().catch(() => ({}));
 
-    // Best-effort cost log. Awaited so the serverless fn doesn't freeze mid-write,
-    // but any failure is swallowed — logging must never break the AI response.
-    try {
-      await logUsage({
-        caller, feature, model, data, latency_ms,
-        status: r.ok ? "ok" : `error_${r.status}`,
-        snapP,
-      });
-    } catch { /* tracking is non-critical */ }
+    // Send the response FIRST, then log cost in the background via waitUntil.
+    // Under Fluid Compute, waitUntil keeps the function instance alive until this
+    // promise settles even though the response has already gone out — so cost
+    // logging (load-bearing for reports) still runs reliably, it just no longer
+    // adds its latency to the user-facing response. try/catch preserved: a
+    // logging failure must never surface anywhere, foreground or background.
+    const status = r.ok ? "ok" : `error_${r.status}`;
+    waitUntil(
+      (async () => {
+        try {
+          await logUsage({ caller, feature, model, data, latency_ms, status, snapP });
+        } catch (e) { console.error("[claude] cost log failed:", e.message); }
+      })()
+    );
 
     return res.status(r.status).json(data);
   } catch (e) {

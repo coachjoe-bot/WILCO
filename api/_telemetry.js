@@ -9,6 +9,7 @@
 // touch error_events / usage_events with the anon key (RLS denies it). These POST
 // metadata; the server validates, rate-limits per IP, derives ALL attribution
 // server-side (never from the client body), and writes with the SERVICE key.
+import { waitUntil } from "@vercel/functions";
 import { rateLimit, clientIp, logError, logEvents, authCaller, sbSelect } from "./_supa.js";
 
 const enc = encodeURIComponent;
@@ -74,21 +75,26 @@ export async function handleLogError(req, res, body) {
     try { enrich = await enrichFromCaller(await authCaller(body.auth)); } catch { /* keep anon */ }
   }
 
-  await logError({
-    source: "client",
-    severity: ev.severity,
-    area: ev.area,
-    route: stripQuery(ev.route),
-    component: ev.component,
-    error_type: ev.error_type,
-    message: ev.message,
-    status_code: ev.status_code,
-    app_version: ev.app_version,
-    meta: ev.meta,
-    // Server-derived — client-supplied role/ids/snapshots are intentionally ignored.
-    user_agent: req.headers["user-agent"],
-    ...enrich,
-  });
+  // This endpoint ALWAYS returns 200 regardless of write outcome (logError already
+  // swallows its own failures) — so the write is pure background bookkeeping.
+  // Respond first, finish the insert in the background via waitUntil.
+  waitUntil(
+    logError({
+      source: "client",
+      severity: ev.severity,
+      area: ev.area,
+      route: stripQuery(ev.route),
+      component: ev.component,
+      error_type: ev.error_type,
+      message: ev.message,
+      status_code: ev.status_code,
+      app_version: ev.app_version,
+      meta: ev.meta,
+      // Server-derived — client-supplied role/ids/snapshots are intentionally ignored.
+      user_agent: req.headers["user-agent"],
+      ...enrich,
+    })
+  );
 
   return res.status(200).json({ ok: true });
 }
@@ -111,8 +117,10 @@ export async function handleLogEvents(req, res, body) {
     try { enrich = await enrichFromCaller(await authCaller(body.auth)); } catch { /* keep anon */ }
   }
 
-  // user_agent is read server-side (never trusted from the client body).
-  await logEvents(events, { ...enrich, user_agent: req.headers["user-agent"] });
+  // Same reasoning as handleLogError: always 200, so the batch insert can finish
+  // in the background after the response goes out. user_agent is read server-side
+  // (never trusted from the client body).
+  waitUntil(logEvents(events, { ...enrich, user_agent: req.headers["user-agent"] }));
 
   return res.status(200).json({ ok: true });
 }

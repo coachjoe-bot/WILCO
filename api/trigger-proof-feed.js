@@ -1,16 +1,18 @@
 // ─── PROOF FEED ENGINE (Vercel) ──────────────────────────────────────────────
 // Generates weekly/monthly athlete digests + weekly/monthly coach reports, writes
-// them to proof_digests, and emails them. Also triggers the process-deletions
-// edge function (Privacy Policy §4/§5).
+// them to proof_digests, and emails them.
 //
 // HISTORY: the engine used to live in a Supabase edge function that read its DB
 // credential from a never-set secret and crashed on every run — the feature never
 // produced a digest. It now lives here on Vercel (auto-deploys on push, reads the
 // already-set SUPABASE_SERVICE_KEY). All compute + AI generation is in api/_proof.js.
 //
-// FUNCTION BUDGET: shares this one route with the deletions trigger; the heavy
-// logic is in `_`-prefixed helpers (_proof.js / _supa.js) that don't count. Still
-// 12/12 Vercel functions.
+// The daily account-deletion sweep (Privacy Policy §4/§5) used to be triggered
+// from the end of this handler's cron path (a fetch to a Supabase edge function),
+// sharing this route because of the old Hobby 12-function cap. Vercel Pro lifted
+// that cap, so it's now its own route + its own cron: see api/process-deletions.js
+// and the "/api/process-deletions" entry in vercel.json. This file's behavior is
+// otherwise unchanged.
 //
 // TWO ENTRY MODES (spec §12):
 //   1. Scheduler — cron secret header (CRON_SECRET) or Vercel's x-vercel-cron.
@@ -212,15 +214,6 @@ async function fetchBatch(ids) {
   return { workouts, goals, prs, manual, prescriptions };
 }
 
-const triggerProcessDeletions = async (url, key) => {
-  try {
-    const r = await fetch(`${url}/functions/v1/process-deletions`, {
-      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}`, apikey: key }, body: "{}",
-    });
-    return { fn: "process-deletions", status: r.status, ok: r.ok };
-  } catch (e) { return { fn: "process-deletions", status: 500, ok: false, error: e.message }; }
-};
-
 // ── MAIN HANDLER ─────────────────────────────────────────────────────────────
 // Vercel Pro: cap this function's execution time. Was implicitly the Hobby 10s
 // wall; 60s gives external Stripe/email/DB calls room without paying for idle time.
@@ -327,8 +320,7 @@ export default async function handler(req, res) {
       results.coaches = await runCoachReports(roster, rosterBatch, coaches);
     }
 
-    const deletions = await triggerProcessDeletions(SUPABASE_URL, SERVICE_KEY);
-    return res.status(200).json({ processed: results.athletes.length, ...results, deletions });
+    return res.status(200).json({ processed: results.athletes.length, ...results });
   } catch (err) {
     console.error("[proof-feed] fatal:", err);
     return res.status(500).json({ error: err.message });

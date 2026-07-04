@@ -42,6 +42,10 @@
       "schedule": "0 14 * * *"
     },
     {
+      "path": "/api/process-deletions",
+      "schedule": "30 8 * * *"
+    },
+    {
       "path": "/api/push",
       "schedule": "0 21 * * *"
     }

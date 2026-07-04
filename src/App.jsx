@@ -925,14 +925,22 @@ export const askClaude = async (system, user, maxTokens=600, images=[], model="c
 // (api/claude.js with stream:true), but relays Anthropic's text deltas as SSE so the
 // reply renders token-by-token. Calls onDelta(chunk) as text arrives and RESOLVES to
 // the full text. THROWS on any failure so the caller can fall back to non-streaming
-// askClaude — a broken stream must never leave a blank reply. Text-only (no images).
-export const askClaudeStream = async (system, user, {maxTokens=600, model="claude-sonnet-5", feature="other", onDelta}={}) => {
+// askClaude — a broken stream must never leave a blank reply. `images` is an optional
+// array of base64 JPEG strings (same shape as askClaude's) — the server's stream path
+// forwards `messages` verbatim same as the JSON path, so image content blocks work
+// unmodified; this just builds the same multi-block content array askClaude does.
+export const askClaudeStream = async (system, user, {maxTokens=600, model="claude-sonnet-5", feature="other", onDelta, images=[]}={}) => {
   const sysCached  = (system && typeof system === "object") ? (system.cached||"")  : "";
   const sysDynamic = (system && typeof system === "object") ? (system.dynamic||"") : system;
+  const content = [];
+  for(const img of images){
+    content.push({type:"image",source:{type:"base64",media_type:"image/jpeg",data:img}});
+  }
+  content.push({type:"text",text:user});
   const r = await fetch("/api/claude",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({auth:CURRENT_AUTH,model,max_tokens:maxTokens,stream:true,system:sysDynamic,...(sysCached?{system_cached:sysCached}:{}),messages:[{role:"user",content:[{type:"text",text:user}]}],feature})
+    body:JSON.stringify({auth:CURRENT_AUTH,model,max_tokens:maxTokens,stream:true,system:sysDynamic,...(sysCached?{system_cached:sysCached}:{}),messages:[{role:"user",content}],feature})
   });
   if(!r.ok || !r.body) throw new Error(`stream failed (${r.status})`);
   const reader = r.body.getReader();
@@ -4039,8 +4047,30 @@ Fix these:
 
 Keep it under 200 words. No fluff. If the frames are unclear, use the clearest one.`;
 
-      const analysis = await askClaude(sys, `Here are ${frames.length} frames (in time order) from ${athlete.name}'s workout video. Analyze their form.`, 500, frames, "claude-sonnet-5", "video_form_review");
+      const userMsg = `Here are ${frames.length} frames (in time order) from ${athlete.name}'s workout video. Analyze their form.`;
 
+      // Stream the critique into the same message bubble as it's written, same
+      // pattern as the chat reply above: grow the placeholder on each delta, and on
+      // ANY stream failure (or an empty stream) fall back to the one-shot call and
+      // replace the placeholder — a broken stream must never leave a blank review.
+      let firstDelta = true;
+      const applyDelta = (chunk)=>{
+        if(firstDelta){ firstDelta = false; setVideoLoading(false); }
+        setMessages(prev=>{
+          const u=[...prev]; const last=u[u.length-1];
+          if(last && last.role==="assistant") u[u.length-1]={role:"assistant",content:(last.content||"")+chunk};
+          return u;
+        });
+      };
+      updateMsg("");
+      let analysis="";
+      try {
+        analysis = await askClaudeStream(sys, userMsg, {maxTokens:500, model:"claude-sonnet-5", feature:"video_form_review", onDelta:applyDelta, images:frames});
+      } catch(_streamErr){ /* fall through to the one-shot call below */ }
+      if(!analysis || !analysis.trim()){
+        setVideoLoading(true);
+        analysis = await askClaude(sys, userMsg, 500, frames, "claude-sonnet-5", "video_form_review");
+      }
       updateMsg(analysis);
       await sbInsert("workouts",{
         athlete_id:athlete.id,
