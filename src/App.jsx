@@ -1583,8 +1583,103 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
         background:done?"transparent":"linear-gradient(180deg,#e3b32a,#c8941a)",color:done?C.gold:"#1a1200",
         fontFamily:NEWS.label,fontWeight:700,fontSize:15,letterSpacing:2,textAlign:"center",
         boxShadow:done?"none":`0 10px 24px ${C.gold}4d`,...(done?{border:`1px solid ${NEWS.rule2}`}:{})}}>
-        {done?"✓ CHECK-IN COMPLETE":"OPEN THIS WEEK'S EDITION →"}
+        {done?"RE-READ THIS EDITION →":"OPEN THIS WEEK'S EDITION →"}
       </button>
+    </div>
+  );
+}
+
+// The opened edition: the digest read as a full page (rank hero, distinct gold PR
+// block, receded routine sections, red injury card, closing FOCUS directive) — shown
+// when the athlete opens the front page, before the check-in begins below it.
+function ProofLetter({intro, sections, flags, label, dateStr}) {
+  const secs = sections || [];
+  const rankSec  = secs.find(s=>isRankLabel(s.label));
+  const prSec    = secs.find(s=>isPRLabel(s.label));
+  const injurySec= secs.find(s=>isInjuryLabel(s.label));
+  const focusSec = secs.find(s=>isFocusLabel(s.label));
+  const special = new Set([rankSec,prSec,injurySec,focusSec].filter(Boolean));
+  const routine = secs.filter(s=>!special.has(s));   // everything else, in original order
+  const hero = rankSec ? parseRankHero(rankSec.body, flags) : null;
+  const trend = injurySec ? injuryTrend(injurySec.body) : null;
+  let step = 0; const delay = () => ({animationDelay:`${(step++)*60}ms`});
+
+  return (
+    <div>
+      {/* Letterhead + greeting */}
+      <div className="proof-drop" style={{...delay(),display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:`1px solid ${C.border}`,paddingBottom:9,marginBottom:14}}>
+        <div style={{fontFamily:"'Bebas Neue'",fontSize:15,letterSpacing:3,color:C.gold}}>THE PROOF</div>
+        {dateStr&&<div style={{fontSize:10,letterSpacing:1.5,color:C.muted,fontWeight:600}}>{dateStr}</div>}
+      </div>
+      {intro&&<div className="proof-drop" style={{...delay(),fontFamily:"'Bebas Neue'",fontSize:28,letterSpacing:0.5,lineHeight:1,marginBottom:16,color:C.text}}>{intro}</div>}
+
+      {/* Rank hero */}
+      {rankSec&&hero&&(
+        <div className="proof-drop" style={{...delay(),borderRadius:16,padding:16,marginBottom:12,overflow:"hidden",
+          background:`linear-gradient(150deg, ${hero.tierColor}26, ${C.navy2} 62%)`, border:`1px solid ${hero.tierColor}59`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:hero.score!=null?12:6}}>
+            {hero.tier
+              ? <div style={{display:"inline-flex",alignItems:"center",gap:7,padding:"6px 13px",borderRadius:22,background:`${hero.tierColor}29`,border:`1px solid ${hero.tierColor}80`}}>
+                  <span style={{width:9,height:9,borderRadius:"50%",background:hero.tierColor,boxShadow:`0 0 10px ${hero.tierColor}`}}/>
+                  <span style={{fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2,color:hero.tierColor}}>{hero.tier}</span>
+                </div>
+              : <div style={{fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,color:C.gold}}>GRIT RANK</div>}
+            <div style={{textAlign:"right"}}>
+              <div style={{fontSize:9,letterSpacing:2,color:C.muted2}}>{hero.rankUp?"RANK UP":"RANK HELD"}</div>
+              {hero.tierDesc&&<div style={{fontSize:10,color:C.muted2,marginTop:3}}>{hero.tierDesc}</div>}
+            </div>
+          </div>
+          {hero.score!=null&&(
+            <div style={{display:"flex",alignItems:"baseline",gap:10,marginBottom:3}}>
+              <div style={{fontFamily:"'Bebas Neue'",fontSize:50,lineHeight:0.8,letterSpacing:1,color:hero.tierColor}}>{hero.score}</div>
+              {hero.delta!=null&&hero.delta!==0&&<div style={{fontSize:15,fontWeight:700,color:hero.delta>0?C.green:C.red}}>{hero.delta>0?"▲":"▼"} {hero.delta>0?"+":""}{hero.delta}</div>}
+            </div>
+          )}
+          {hero.score!=null&&<div style={{fontSize:10,letterSpacing:2,color:C.muted2,marginBottom:hero.tier?2:0}}>STRENGTH SCORE</div>}
+          <div style={{fontSize:12.5,lineHeight:1.6,color:"#c7d2e0",marginTop:10,whiteSpace:"pre-wrap"}}>{rankSec.body}</div>
+        </div>
+      )}
+
+      {/* PR block — distinct gold, not a routine card */}
+      {prSec&&(
+        <div className="proof-drop" style={{...delay(),background:`linear-gradient(150deg, ${C.gold}1f, ${C.navy2} 70%)`,border:`1px solid ${C.gold}52`,borderRadius:12,padding:"13px 14px",marginBottom:10}}>
+          <div style={{fontSize:9,letterSpacing:2,color:C.gold,fontWeight:700,marginBottom:8}}>🏅 {prSec.label}</div>
+          <div style={{fontSize:12.5,lineHeight:1.6,color:"#c7d2e0",whiteSpace:"pre-wrap"}}>{prSec.body}</div>
+        </div>
+      )}
+
+      {/* Routine sections — receded, except a flag:"warn" section (e.g. a volume gap),
+          which the generator marks as the week's real story, so it stays elevated (amber). */}
+      {routine.map((s,i)=> s.flag==="warn" ? (
+        <div key={i} className="proof-drop" style={{...delay(),background:`linear-gradient(150deg, #f59e0b1f, ${C.navy2} 70%)`,border:"1px solid #f59e0b66",borderRadius:12,padding:"13px 14px",marginBottom:10}}>
+          <div style={{fontSize:9,letterSpacing:2,color:"#f59e0b",fontWeight:700,marginBottom:7}}>⚠ {s.label}</div>
+          <div style={{fontSize:12.5,lineHeight:1.6,color:"#e0d3bf",whiteSpace:"pre-wrap"}}>{s.body}</div>
+        </div>
+      ) : (
+        <div key={i} className="proof-drop" style={{...delay(),background:"rgba(10,18,40,0.5)",border:`1px solid ${C.border}`,borderRadius:12,padding:"13px 14px",marginBottom:10}}>
+          <div style={{fontSize:9,letterSpacing:2,color:C.muted,fontWeight:700,marginBottom:7}}>{s.label}</div>
+          <div style={{fontSize:12.5,lineHeight:1.6,color:C.muted2,whiteSpace:"pre-wrap"}}>{s.body}</div>
+        </div>
+      ))}
+
+      {/* Injury — urgent red */}
+      {injurySec&&(
+        <div className="proof-drop" style={{...delay(),background:`linear-gradient(150deg, ${C.red}1f, ${C.navy2} 70%)`,border:`1px solid ${C.red}66`,borderRadius:12,padding:"13px 14px",marginBottom:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <div style={{fontSize:9,letterSpacing:2,color:C.red,fontWeight:700}}>⚠ {injurySec.label}</div>
+            {trend&&<div style={{fontSize:8,letterSpacing:1,padding:"3px 8px",borderRadius:12,background:`${trend.color}24`,border:`1px solid ${trend.color}66`,color:trend.color,fontWeight:700}}>{trend.color===C.green?"▲":"▼"} {trend.txt}</div>}
+          </div>
+          <div style={{fontSize:12,lineHeight:1.6,color:"#d9c2c4",whiteSpace:"pre-wrap"}}>{injurySec.body}</div>
+        </div>
+      )}
+
+      {/* Focus — closing directive */}
+      {focusSec&&(
+        <div className="proof-drop" style={{...delay(),borderLeft:`3px solid ${C.gold}`,background:`${C.gold}10`,borderRadius:"0 12px 12px 0",padding:"12px 14px",marginBottom:6}}>
+          <div style={{fontSize:9,letterSpacing:2,color:C.gold,fontWeight:700,marginBottom:6}}>▶ {focusSec.label}</div>
+          <div style={{fontSize:13,lineHeight:1.55,color:C.text,fontWeight:500,whiteSpace:"pre-wrap"}}>{focusSec.body}</div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1599,7 +1694,7 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
 // injury-protective program tweak. Backward-compatible with legacy digests.
 function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead, workoutHistory}) {
   const alreadyDone = !!(digest?.content_json?.checkin_done);
-  const [phase, setPhase] = useState(alreadyDone ? "done" : "dialogue"); // dialogue | acting | done — no "report" page; the front page already showed the digest, so opening goes straight into the check-in
+  const [phase, setPhase] = useState(alreadyDone ? "done" : "report"); // report | dialogue | acting | done
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -1641,14 +1736,11 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
   const activeQuestions = showDeeper ? [...topQuestions, ...deeperQuestions] : topQuestions;
 
   useEffect(()=>{
-    if(alreadyDone) return;
-    // Straight into the check-in — the Proof tab front page already showed the digest,
-    // so we don't re-render it here. Open with a short Coach Joe line, then question 1.
-    const opener = c.intro ? [{role:"assistant",content:c.intro}] : [];
-    const firstQ = activeQuestions[0]?.text;
-    if(!firstQ){ setPhase("done"); setMessages(opener); return; }
-    setMessages([...opener,{role:"assistant",content:firstQ}]);
-    setAskedIdx(0);
+    // messages[0] holds the raw digest text (kept for AI context); it is not shown as a
+    // bubble — the opened page renders it via <ProofLetter/>, then the check-in follows.
+    const intro = c.intro ? c.intro + "\n\n" : "";
+    const body = sections.map(s=>`**${s.label}**\n${s.body}`).join("\n\n") || "Here's your check-in.";
+    setMessages([{role:"assistant",content:intro + body}]);
   },[]); // eslint-disable-line
   // Only auto-scroll to the bottom once the check-in Q&A is live — otherwise the
   // freshly-opened letter would jump straight past itself to the bottom. In the
@@ -1656,6 +1748,12 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
   useEffect(()=>{
     if(phase==="dialogue"||phase==="acting") bottomRef.current?.scrollIntoView({behavior:"smooth"});
   },[messages,loading,programPending,phase]);
+
+  const startDialogue = () => {
+    setPhase("dialogue");
+    setAskedIdx(0);
+    setMessages(prev=>[...prev,{role:"assistant",content:activeQuestions[0].text}]);
+  };
 
   const liftSeries = (lift) => {
     const norm = s=>String(s||"").toLowerCase().replace(/[^a-z]/g,"");
@@ -1891,7 +1989,14 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
       <div style={{flex:1,overflowY:"auto",padding:"16px",display:"flex",flexDirection:"column",gap:10}}>
         {/* Straight into the check-in feed — the digest lives on the Proof tab front
             page, so the modal is just Coach Joe's conversation. */}
-        {messages.map((m,i)=>(
+        {/* The opened page — the digest, formatted with hierarchy. Stays at the top as
+            context once the check-in Q&A begins below it. */}
+        <ProofLetter intro={c.intro} sections={sections} flags={c.flags} label={label}
+          dateStr={digest?.generated_at?new Date(digest.generated_at).toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"}).toUpperCase():null}/>
+
+        {/* Check-in Q&A. messages[0] is the raw digest text (shown as the page above),
+            so render from index 1 onward. */}
+        {messages.slice(1).map((m,i)=>(
           <div key={i} className="proof-drop" style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
             <div style={{maxWidth:"86%",background:m.role==="user"?C.gold:C.navy2,color:m.role==="user"?"#1a1200":C.text,borderRadius:14,padding:"11px 14px",fontSize:14,lineHeight:1.6,whiteSpace:"pre-wrap",border:m.role==="user"?"none":`1px solid ${C.border}`,borderBottomLeftRadius:m.role==="user"?14:4,borderBottomRightRadius:m.role==="user"?4:14}}>
               {m.content}
@@ -1955,6 +2060,22 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
                 <button onClick={()=>setEditingProgram(true)} style={{width:"100%",marginTop:8,background:"transparent",color:C.muted2,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px",cursor:"pointer",fontSize:12}}>✏️ Edit or ask a question</button>
               </>
             )}
+          </div>
+        )}
+
+        {phase==="report"&&!loading&&activeQuestions.length>0&&(
+          <div className="proof-drop" style={{background:`linear-gradient(180deg,${C.navy3},${C.navy2})`,border:`1px solid ${C.gold}73`,borderRadius:14,padding:15,marginTop:6}}>
+            <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:8}}>
+              <div style={{width:30,height:30,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a5a12)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:15,color:"#1a1200",flexShrink:0}}>J</div>
+              <div>
+                <div style={{fontSize:12,fontWeight:700,color:C.text}}>Coach Joe has {topQuestions.length} question{topQuestions.length===1?"":"s"}</div>
+                <div style={{fontSize:10,color:C.muted}}>{isMonthly?"Monthly":"Weekly"} check-in · ~2 min</div>
+              </div>
+            </div>
+            <div style={{fontSize:13,lineHeight:1.5,color:"#c7d2e0",marginBottom:12}}>{activeQuestions[0].text}</div>
+            <button onClick={startDialogue} style={{width:"100%",padding:12,borderRadius:10,border:"none",cursor:"pointer",background:"linear-gradient(180deg,#e3b32a,#c8941a)",color:"#1a1200",fontFamily:"'Bebas Neue'",fontSize:15,letterSpacing:2,textAlign:"center"}}>
+              START CHECK-IN →
+            </button>
           </div>
         )}
 
