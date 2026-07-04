@@ -1455,168 +1455,234 @@ const injuryTrend = (body) => {
   return null;
 };
 
-// The opened letter: the digest, formatted with hierarchy. Rank hero first (when the
-// GRIT RANK section is present), then a distinct gold PR block, the injury card in
-// red, routine sections receded, and the FOCUS line as the closing directive.
+// Newspaper look-and-feel. The app is otherwise navy+gold; the Proof Feed reads as a
+// weekly broadsheet ("The Proof"), so it gets its own warm newsprint ink + serif type
+// (Playfair for the masthead/headlines, system Georgia for body columns — no heavy
+// dependency). Palette stays deliberately separate from C.
+const NEWS = {
+  serif: "'Playfair Display', Georgia, 'Times New Roman', serif",
+  body: "Georgia, 'Times New Roman', serif",
+  label: "'DM Sans', system-ui, sans-serif",
+  ink: "#e9e3d4", ink2: "#b7b0a0", ink3: "#8b8474",
+  rule: "rgba(233,227,212,.22)", rule2: "rgba(233,227,212,.42)",
+};
+const titleCase = (s) => String(s||"").toLowerCase().replace(/\b([a-z])/g,(m,ch)=>ch.toUpperCase());
+const truncate = (s, n) => {
+  const t = String(s||"").trim();
+  if(t.length<=n) return t;
+  const cut = t.slice(0,n); const sp = cut.lastIndexOf(" ");
+  return (sp>n*0.6?cut.slice(0,sp):cut).replace(/[,.;:—\- ]+$/,"") + "…";
+};
+const firstSentence = (s) => String(s||"").trim().split(/(?<=[.!?])\s+/)[0] || "";
+const kick = (color) => ({fontFamily:NEWS.label,fontSize:10,letterSpacing:2,textTransform:"uppercase",fontWeight:700,color:color||NEWS.ink3});
+const NRule = ({v="1px",m="6px 0",c=NEWS.rule}) => <div style={{borderTop:`${v} solid ${c}`,margin:m}}/>;
+// A justified newspaper column with a drop-cap first letter.
+const DropCol = ({text, cap=NEWS.ink}) => {
+  const t = String(text||""); const first = t.slice(0,1);
+  return <p style={{fontFamily:NEWS.body,fontSize:12.5,lineHeight:1.45,color:NEWS.ink2,textAlign:"justify",margin:0}}>
+    <span style={{float:"left",fontFamily:NEWS.serif,fontWeight:800,fontSize:32,lineHeight:0.72,padding:"3px 6px 0 0",color:cap}}>{first}</span>{t.slice(1)}
+  </p>;
+};
+
+// Derive the digest sections[] (new shape) with the legacy keyed-field fallback.
+const digestSections = (c) => Array.isArray(c?.sections)&&c.sections.length ? c.sections : [
+  ["week_vs_week","THIS WEEK VS LAST"],["month_summary","THIS MONTH"],["consistency","CONSISTENCY"],
+  ["goal_progress","GOAL PROGRESS"],["month_patterns","PATTERNS"],["trend_callouts","TRENDS"],
+  ["plateau_flag","PLATEAU FLAG"],["unresolved_plateaus","PLATEAUS"],["encouragement","FROM COACH JOE"],
+  ["focus_next_week","FOCUS NEXT WEEK"],
+].filter(([k])=>c&&c[k]).map(([k,l])=>({label:l,body:c[k]}));
+
+// A boxed newspaper bulletin (injury alert, volume warning, next-week orders).
+const NewsBox = ({kicker, kickerColor, title, body, dbl}) => (
+  <div className="proof-drop" style={{border:`${dbl?"1.5px double":"1.5px solid"} ${NEWS.rule2}`,padding:"10px 12px",marginBottom:10}}>
+    <div style={{...kick(kickerColor),borderBottom:`1px solid ${NEWS.rule}`,paddingBottom:4,marginBottom:6}}>{kicker}</div>
+    {title&&<div style={{fontFamily:NEWS.serif,fontWeight:700,fontSize:15,lineHeight:1.15,color:NEWS.ink,marginBottom:5}}>{title}</div>}
+    <div style={{fontFamily:NEWS.body,fontSize:12,lineHeight:1.4,color:NEWS.ink2,whiteSpace:"pre-wrap"}}>{body}</div>
+  </div>
+);
+
+// The opened edition: the digest read as a broadsheet — a lead rank story, the PR
+// card, the week's other stories, then a boxed INJURY ALERT and "orders for next
+// week", flowing into the check-in. (Component name kept for call-site stability.)
 function ProofLetter({intro, sections, flags, label, dateStr}) {
   const secs = sections || [];
   const rankSec  = secs.find(s=>isRankLabel(s.label));
   const prSec    = secs.find(s=>isPRLabel(s.label));
   const injurySec= secs.find(s=>isInjuryLabel(s.label));
   const focusSec = secs.find(s=>isFocusLabel(s.label));
-  const special = new Set([rankSec,prSec,injurySec,focusSec].filter(Boolean));
-  const routine = secs.filter(s=>!special.has(s));   // everything else, in original order
+  const special  = new Set([rankSec,prSec,injurySec,focusSec].filter(Boolean));
+  const rest     = secs.filter(s=>!special.has(s));
+  const warns    = rest.filter(s=>s.flag==="warn");
+  const stories  = rest.filter(s=>s.flag!=="warn");
   const hero = rankSec ? parseRankHero(rankSec.body, flags) : null;
-  const trend = injurySec ? injuryTrend(injurySec.body) : null;
-  let step = 0; const delay = () => ({animationDelay:`${(step++)*60}ms`});
+  const headline = hero&&hero.tier ? `${hero.delta>0?"Still ":"Holding "}${titleCase(hero.tier)}`
+    : (hero&&hero.delta!=null&&hero.delta>0 ? "Ranking Up" : "This Week's Proof");
 
   return (
     <div>
-      {/* Letterhead + greeting */}
-      <div className="proof-drop" style={{...delay(),display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:`1px solid ${C.border}`,paddingBottom:9,marginBottom:14}}>
-        <div style={{fontFamily:"'Bebas Neue'",fontSize:15,letterSpacing:3,color:C.gold}}>THE PROOF</div>
-        {dateStr&&<div style={{fontSize:10,letterSpacing:1.5,color:C.muted,fontWeight:600}}>{dateStr}</div>}
+      {/* Masthead */}
+      <div className="proof-drop" style={{textAlign:"center",marginBottom:2}}>
+        <div style={{display:"flex",justifyContent:"space-between",...kick(),marginBottom:5}}><span>Coach Joe, Editor</span><span>{dateStr||""}</span></div>
+        <NRule v="2px" m="0 0 5px" c={NEWS.rule2}/>
+        <div style={{fontFamily:NEWS.serif,fontWeight:900,fontSize:34,lineHeight:0.92,letterSpacing:-0.5,color:NEWS.ink}}>The Proof</div>
+        <NRule v="1px" m="5px 0 0" c={NEWS.rule2}/>
+        <NRule v="1px" m="2px 0 8px" c={NEWS.rule2}/>
       </div>
-      {intro&&<div className="proof-drop" style={{...delay(),fontFamily:"'Bebas Neue'",fontSize:28,letterSpacing:0.5,lineHeight:1,marginBottom:16,color:C.text}}>{intro}</div>}
 
-      {/* Rank hero */}
-      {rankSec&&hero&&(
-        <div className="proof-drop" style={{...delay(),borderRadius:16,padding:16,marginBottom:12,overflow:"hidden",
-          background:`linear-gradient(150deg, ${hero.tierColor}26, ${C.navy2} 62%)`, border:`1px solid ${hero.tierColor}59`}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:hero.score!=null?12:6}}>
-            {hero.tier
-              ? <div style={{display:"inline-flex",alignItems:"center",gap:7,padding:"6px 13px",borderRadius:22,background:`${hero.tierColor}29`,border:`1px solid ${hero.tierColor}80`}}>
-                  <span style={{width:9,height:9,borderRadius:"50%",background:hero.tierColor,boxShadow:`0 0 10px ${hero.tierColor}`}}/>
-                  <span style={{fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2,color:hero.tierColor}}>{hero.tier}</span>
-                </div>
-              : <div style={{fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,color:C.gold}}>GRIT RANK</div>}
-            <div style={{textAlign:"right"}}>
-              <div style={{fontSize:9,letterSpacing:2,color:C.muted2}}>{hero.rankUp?"RANK UP":"RANK HELD"}</div>
-              {hero.tierDesc&&<div style={{fontSize:10,color:C.muted2,marginTop:3}}>{hero.tierDesc}</div>}
-            </div>
+      {/* Lead — strength ranking */}
+      <div className="proof-drop" style={{textAlign:"center"}}>
+        <div style={{...kick(C.gold),textAlign:"center"}}>Strength Ranking</div>
+        <div style={{fontFamily:NEWS.serif,fontWeight:800,fontSize:28,lineHeight:1.02,color:NEWS.ink,margin:"2px 0 5px"}}>{headline}</div>
+        {rankSec&&<div style={{fontFamily:NEWS.body,fontStyle:"italic",fontSize:13,lineHeight:1.35,color:NEWS.ink2,padding:"0 4px 4px"}}>{truncate(firstSentence(rankSec.body),150)}</div>}
+        <div style={{...kick(),textAlign:"center",fontSize:8,marginBottom:hero&&hero.score!=null?6:2}}>Coach Joe · Strength Desk</div>
+        {hero&&hero.score!=null&&(
+          <div style={{display:"flex",justifyContent:"center",alignItems:"baseline",gap:10,paddingBottom:2}}>
+            <span style={{...kick(),fontSize:9}}>Strength Score</span>
+            <span style={{fontFamily:NEWS.serif,fontWeight:900,fontSize:42,lineHeight:0.8,color:C.gold}}>{hero.score}</span>
+            {hero.delta!=null&&hero.delta!==0&&<span style={{fontFamily:NEWS.label,fontWeight:700,fontSize:14,color:hero.delta>0?C.green:C.red}}>{hero.delta>0?"▲ +":"▼ "}{hero.delta>0?hero.delta:Math.abs(hero.delta)}</span>}
           </div>
-          {hero.score!=null&&(
-            <div style={{display:"flex",alignItems:"baseline",gap:10,marginBottom:3}}>
-              <div style={{fontFamily:"'Bebas Neue'",fontSize:50,lineHeight:0.8,letterSpacing:1,color:hero.tierColor}}>{hero.score}</div>
-              {hero.delta!=null&&hero.delta!==0&&<div style={{fontSize:15,fontWeight:700,color:hero.delta>0?C.green:C.red}}>{hero.delta>0?"▲":"▼"} {hero.delta>0?"+":""}{hero.delta}</div>}
-            </div>
-          )}
-          {hero.score!=null&&<div style={{fontSize:10,letterSpacing:2,color:C.muted2,marginBottom:hero.tier?2:0}}>STRENGTH SCORE</div>}
-          <div style={{fontSize:12.5,lineHeight:1.6,color:"#c7d2e0",marginTop:10,whiteSpace:"pre-wrap"}}>{rankSec.body}</div>
-        </div>
-      )}
+        )}
+      </div>
+      <NRule m="8px 0"/>
 
-      {/* PR block — distinct gold, not a routine card */}
+      {/* The PR card */}
       {prSec&&(
-        <div className="proof-drop" style={{...delay(),background:`linear-gradient(150deg, ${C.gold}1f, ${C.navy2} 70%)`,border:`1px solid ${C.gold}52`,borderRadius:12,padding:"13px 14px",marginBottom:10}}>
-          <div style={{fontSize:9,letterSpacing:2,color:C.gold,fontWeight:700,marginBottom:8}}>🏅 {prSec.label}</div>
-          <div style={{fontSize:12.5,lineHeight:1.6,color:"#c7d2e0",whiteSpace:"pre-wrap"}}>{prSec.body}</div>
+        <div className="proof-drop" style={{marginBottom:10}}>
+          <div style={{fontFamily:NEWS.serif,fontWeight:700,fontSize:17,lineHeight:1.05,color:NEWS.ink,marginBottom:4}}>The PR Card</div>
+          <DropCol text={prSec.body} cap={C.gold}/>
         </div>
       )}
 
-      {/* Routine sections — receded, except a flag:"warn" section (e.g. a volume gap),
-          which the generator marks as the week's real story, so it stays elevated (amber). */}
-      {routine.map((s,i)=> s.flag==="warn" ? (
-        <div key={i} className="proof-drop" style={{...delay(),background:`linear-gradient(150deg, #f59e0b1f, ${C.navy2} 70%)`,border:"1px solid #f59e0b66",borderRadius:12,padding:"13px 14px",marginBottom:10}}>
-          <div style={{fontSize:9,letterSpacing:2,color:"#f59e0b",fontWeight:700,marginBottom:7}}>⚠ {s.label}</div>
-          <div style={{fontSize:12.5,lineHeight:1.6,color:"#e0d3bf",whiteSpace:"pre-wrap"}}>{s.body}</div>
-        </div>
-      ) : (
-        <div key={i} className="proof-drop" style={{...delay(),background:"rgba(10,18,40,0.5)",border:`1px solid ${C.border}`,borderRadius:12,padding:"13px 14px",marginBottom:10}}>
-          <div style={{fontSize:9,letterSpacing:2,color:C.muted,fontWeight:700,marginBottom:7}}>{s.label}</div>
-          <div style={{fontSize:12.5,lineHeight:1.6,color:C.muted2,whiteSpace:"pre-wrap"}}>{s.body}</div>
+      {/* The week's other stories */}
+      {stories.map((s,i)=>(
+        <div key={i} className="proof-drop" style={{marginBottom:10}}>
+          <div style={{fontFamily:NEWS.serif,fontWeight:700,fontSize:15,lineHeight:1.1,color:NEWS.ink,marginBottom:4}}>{titleCase(s.label)}</div>
+          <div style={{fontFamily:NEWS.body,fontSize:12.5,lineHeight:1.45,color:NEWS.ink2,textAlign:"justify",whiteSpace:"pre-wrap"}}>{s.body}</div>
         </div>
       ))}
 
-      {/* Injury — urgent red */}
+      {/* Volume / other warnings — boxed */}
+      {warns.map((s,i)=>(
+        <NewsBox key={i} kicker={`⚠ ${titleCase(s.label)}`} kickerColor="#f59e0b" body={s.body}/>
+      ))}
+
+      {/* Injury — boxed alert. Header stays strictly "injury alert"; the trend (improving /
+          worsening) is already stated in the body prose, so no separate pill. */}
       {injurySec&&(
-        <div className="proof-drop" style={{...delay(),background:`linear-gradient(150deg, ${C.red}1f, ${C.navy2} 70%)`,border:`1px solid ${C.red}66`,borderRadius:12,padding:"13px 14px",marginBottom:10}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-            <div style={{fontSize:9,letterSpacing:2,color:C.red,fontWeight:700}}>⚠ {injurySec.label}</div>
-            {trend&&<div style={{fontSize:8,letterSpacing:1,padding:"3px 8px",borderRadius:12,background:`${trend.color}24`,border:`1px solid ${trend.color}66`,color:trend.color,fontWeight:700}}>{trend.color===C.green?"▲":"▼"} {trend.txt}</div>}
-          </div>
-          <div style={{fontSize:12,lineHeight:1.6,color:"#d9c2c4",whiteSpace:"pre-wrap"}}>{injurySec.body}</div>
-        </div>
+        <NewsBox kicker="⚠ Injury Alert" kickerColor={C.red} body={injurySec.body}/>
       )}
 
-      {/* Focus — closing directive */}
+      {/* Orders for next week — the closing directive */}
       {focusSec&&(
-        <div className="proof-drop" style={{...delay(),borderLeft:`3px solid ${C.gold}`,background:`${C.gold}10`,borderRadius:"0 12px 12px 0",padding:"12px 14px",marginBottom:6}}>
-          <div style={{fontSize:9,letterSpacing:2,color:C.gold,fontWeight:700,marginBottom:6}}>▶ {focusSec.label}</div>
-          <div style={{fontSize:13,lineHeight:1.55,color:C.text,fontWeight:500,whiteSpace:"pre-wrap"}}>{focusSec.body}</div>
+        <div className="proof-drop" style={{borderTop:`2px solid ${NEWS.rule2}`,borderBottom:`2px solid ${NEWS.rule2}`,padding:"9px 0",marginBottom:4}}>
+          <div style={{...kick(C.gold),textAlign:"center"}}>Orders For Next Week</div>
+          <div style={{fontFamily:NEWS.serif,fontWeight:700,fontSize:15,lineHeight:1.18,color:NEWS.ink,textAlign:"center",marginTop:3,whiteSpace:"pre-wrap"}}>{focusSec.body}</div>
         </div>
       )}
     </div>
   );
 }
 
-// The sealed letter shown on the Proof tab. One tap ("OPEN THE LETTER") reads it.
+// The Proof tab: this week's front page. Unlike a sealed letter, the front page shows
+// the headlines + snippets, so you see what's inside before opening the full edition.
 function ProofEnvelope({digest, athleteName, onOpen}) {
   const c = digest?.content_json || {};
   const isMonthly = digest?.digest_type === "monthly";
-  const unread = !digest?.is_read;
   const done = !!c.checkin_done;
-  const urgent = !!digest?.has_plateau || (!!digest?.has_pain && injuryTrend((c.sections||[]).find(s=>isInjuryLabel(s.label))?.body)?.txt==="WORSENING");
-  const seal = urgent ? C.red : C.gold;
+  const secs = digestSections(c);
+  const rankSec   = secs.find(s=>isRankLabel(s.label));
+  const prSec     = secs.find(s=>isPRLabel(s.label));
+  const injurySec = secs.find(s=>isInjuryLabel(s.label));
+  const focusSec  = secs.find(s=>isFocusLabel(s.label));
+  const special   = new Set([rankSec,prSec,injurySec,focusSec].filter(Boolean));
+  const rest      = secs.filter(s=>!special.has(s));
+  const teaserA   = prSec || rest[0];               // lead story teaser column
+  const hero = rankSec ? parseRankHero(rankSec.body, c.flags) : null;
+  const headline = hero&&hero.tier ? `${hero.delta>0?"Still ":"Holding "}${titleCase(hero.tier)}`
+    : (hero&&hero.delta!=null&&hero.delta>0 ? "Ranking Up" : "This Week's Proof");
+  const urgent = !!digest?.has_plateau || injuryTrend(injurySec?.body)?.txt==="WORSENING";
   const dt = digest?.generated_at || digest?.created_at;
   const d = dt ? new Date(dt) : null;
-  const mon = d ? d.toLocaleDateString("en-US",{month:"short"}).toUpperCase() : "";
-  const day = d ? d.toLocaleDateString("en-US",{day:"2-digit"}) : "";
-  const yr = d ? d.getFullYear() : "";
-  // Small chip: injury / plateau state, else PRs-are-in.
-  const injSec = (c.sections||[]).find(s=>isInjuryLabel(s.label));
-  const trend = injSec ? injuryTrend(injSec.body) : null;
-  const chip = digest?.has_plateau ? {t:"plateau flagged", c:C.red}
-    : digest?.has_pain ? {t:trend?`1 injury flag · ${trend.txt.toLowerCase()}`:"injury flagged", c:trend?.color||"#f0b429"}
-    : {t:"new bests inside", c:C.gold};
+  const dateLine = d ? d.toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"}).toUpperCase() : "";
+  const weekNo = d ? Math.ceil((((d - new Date(d.getFullYear(),0,1)) / 86400000) + new Date(d.getFullYear(),0,1).getDay()+1)/7) : null;
+  const who = (athleteName||digest?.athlete_name||"").split(" ")[0];
+  const editionLabel = who ? `${who.toUpperCase()}'S ${isMonthly?"MONTHLY":"WEEKLY"} EDITION` : (isMonthly?"MONTHLY EDITION":"WEEKLY EDITION");
 
   return (
-    <div style={{height:"100%",display:"flex",flexDirection:"column",justifyContent:"center",alignItems:"center",paddingBottom:40}}>
-      <div style={{fontFamily:"'Bebas Neue'",fontSize:13,letterSpacing:4,color:C.muted2,marginBottom:4}}>{done?"YOUR PROOF, OPENED":(isMonthly?"YOUR MONTHLY PROOF HAS ARRIVED":"THIS WEEK'S PROOF HAS ARRIVED")}</div>
-      <div style={{fontSize:12,color:C.muted,marginBottom:24}}>A letter from Coach Joe</div>
-
-      <div className={unread&&!done?"proof-drop env-float":"proof-drop"} style={{width:"100%",maxWidth:320,aspectRatio:"315 / 212",position:"relative",borderRadius:12,overflow:"hidden",
-        background:"linear-gradient(160deg,#0e1730 0%,#0a1228 55%,#070d1c 100%)",border:"1px solid #26345a",
-        boxShadow:"0 22px 44px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.04)", opacity:done?0.82:1}}>
-        {/* gold foil inner frame */}
-        <div style={{position:"absolute",inset:9,border:`1px solid ${seal}52`,borderRadius:7,pointerEvents:"none"}}/>
-        {/* flap */}
-        <div style={{position:"absolute",top:0,left:0,right:0,height:"56%",background:"linear-gradient(180deg,#111c38,#0c1530)",clipPath:"polygon(0 0,100% 0,50% 92%)",borderBottom:`1px solid ${seal}2e`}}/>
-        {/* return address */}
-        <div style={{position:"absolute",top:14,left:16}}>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:13,letterSpacing:2,color:C.gold}}>COACH JOE</div>
-          <div style={{fontSize:9,letterSpacing:1,color:C.muted,marginTop:1}}>WILCO TRAINING</div>
+    <div style={{minHeight:"100%",display:"flex",flexDirection:"column"}}>
+      {/* Masthead */}
+      <div className="proof-drop" style={{textAlign:"center"}}>
+        <div style={{display:"flex",justifyContent:"space-between",...kick()}}>
+          <span>Coach Joe, Editor</span>{weekNo&&<span>No. {weekNo}</span>}
         </div>
-        {/* postmark */}
-        {d&&(
-          <div style={{position:"absolute",top:14,right:16,width:64,height:64,borderRadius:"50%",border:`2px solid ${C.gold}73`,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",transform:"rotate(-11deg)",color:`${C.gold}bf`}}>
-            <div style={{fontFamily:"'Bebas Neue'",fontSize:10,letterSpacing:2,lineHeight:1}}>{mon}</div>
-            <div style={{fontFamily:"'Bebas Neue'",fontSize:24,letterSpacing:1,lineHeight:0.9}}>{day}</div>
-            <div style={{fontSize:7,letterSpacing:2}}>{yr}</div>
-          </div>
-        )}
-        {/* wax seal */}
-        <div className={unread&&!done?"proof-drop":undefined} style={{position:"absolute",left:"50%",top:"52%",transform:"translate(-50%,-50%)",width:60,height:60,borderRadius:"50%",
-          background:urgent?"radial-gradient(circle at 38% 32%,#e05a4a 0%,#a5342a 55%,#6e211a 100%)":"radial-gradient(circle at 38% 32%,#b8860b 0%,#8a5a12 55%,#5e3a0c 100%)",
-          boxShadow:"0 6px 16px rgba(0,0,0,.5), inset 0 2px 6px rgba(255,255,255,.22), inset 0 -4px 8px rgba(0,0,0,.4)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:5}}>
-          <span style={{fontFamily:"'Bebas Neue'",fontSize:28,color:urgent?"#3a0f0a":"#3a2606",letterSpacing:1}}>W</span>
-        </div>
-        {/* addressee */}
-        <div style={{position:"absolute",left:0,right:0,bottom:30,textAlign:"center"}}>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:3,color:C.text}}>{(athleteName||digest?.athlete_name||"").toUpperCase()||digest?.label||"YOUR WEEK"}</div>
-        </div>
-        {/* state chip */}
-        <div style={{position:"absolute",left:"50%",bottom:8,transform:"translateX(-50%)",fontSize:9,letterSpacing:0.5,color:chip.c,background:`${chip.c}1a`,border:`1px solid ${chip.c}4d`,borderRadius:20,padding:"2px 10px",fontWeight:600,whiteSpace:"nowrap"}}>{chip.t}</div>
+        <NRule v="2px" m="5px 0 5px" c={NEWS.rule2}/>
+        <div style={{fontFamily:NEWS.serif,fontWeight:900,fontSize:46,lineHeight:0.9,letterSpacing:-1,color:NEWS.ink}}>The Proof</div>
+        <NRule v="1px" m="5px 0 0" c={NEWS.rule2}/>
+        <NRule v="1px" m="2px 0 6px" c={NEWS.rule2}/>
+        <div style={{...kick(NEWS.ink2),textAlign:"center",fontSize:9,letterSpacing:1.5}}>{dateLine}{dateLine&&editionLabel?" · ":""}{editionLabel}</div>
+        <NRule m="6px 0 8px"/>
       </div>
 
-      <button onClick={onOpen} style={{marginTop:28,width:"100%",maxWidth:320,padding:16,borderRadius:14,border:"none",cursor:"pointer",
-        background:done?C.navy2:"linear-gradient(180deg,#e3b32a,#c8941a)",color:done?C.gold:"#1a1200",
-        fontFamily:"'Bebas Neue'",fontSize:19,letterSpacing:2.5,textAlign:"center",position:"relative",
-        boxShadow:done?"none":`0 12px 28px ${C.gold}52`,...(done?{border:`1px solid ${C.border}`}:{})}}>
-        {done?"REVIEW THE LETTER →":"OPEN THE LETTER"}
-        {unread&&!done&&<span style={{position:"absolute",top:"50%",right:20,transform:"translateY(-50%)",width:9,height:9,borderRadius:"50%",background:"#1a1200",opacity:0.5}}/>}
+      {/* Lead — strength ranking */}
+      <div className="proof-drop" style={{textAlign:"center"}}>
+        <div style={{...kick(C.gold),textAlign:"center"}}>Strength Ranking</div>
+        <div style={{fontFamily:NEWS.serif,fontWeight:800,fontSize:32,lineHeight:1.0,color:NEWS.ink,margin:"2px 0 5px"}}>{headline}</div>
+        {rankSec&&<div style={{fontFamily:NEWS.body,fontStyle:"italic",fontSize:13,lineHeight:1.35,color:NEWS.ink2,padding:"0 6px 6px"}}>{truncate(firstSentence(rankSec.body),120)}</div>}
+        {hero&&hero.score!=null&&(
+          <div style={{display:"flex",justifyContent:"center",alignItems:"baseline",gap:10,padding:"2px 0 4px"}}>
+            <span style={{...kick(),fontSize:9}}>Strength Score</span>
+            <span style={{fontFamily:NEWS.serif,fontWeight:900,fontSize:44,lineHeight:0.8,color:C.gold}}>{hero.score}</span>
+            {hero.delta!=null&&hero.delta!==0&&<span style={{fontFamily:NEWS.label,fontWeight:700,fontSize:14,color:hero.delta>0?C.green:C.red}}>{hero.delta>0?"▲ +":"▼ "}{hero.delta>0?hero.delta:Math.abs(hero.delta)}</span>}
+          </div>
+        )}
+      </div>
+      <NRule m="6px 0 8px"/>
+
+      {/* Two columns — a story teaser + an injury / orders box */}
+      <div className="proof-drop" style={{display:"flex",gap:12}}>
+        {teaserA&&(
+          <div style={{flex:1}}>
+            <div style={{fontFamily:NEWS.serif,fontWeight:700,fontSize:15,lineHeight:1.05,color:NEWS.ink,marginBottom:4}}>{prSec?"The PR Card":titleCase(teaserA.label)}</div>
+            <p style={{fontFamily:NEWS.body,fontSize:11.5,lineHeight:1.4,color:NEWS.ink2,textAlign:"justify",margin:0}}>
+              <span style={{float:"left",fontFamily:NEWS.serif,fontWeight:800,fontSize:30,lineHeight:0.72,padding:"2px 5px 0 0",color:prSec?C.gold:NEWS.ink}}>{String(teaserA.body||"").slice(0,1)}</span>
+              {truncate(String(teaserA.body||"").slice(1),140)}
+            </p>
+            <div style={{...kick(C.gold),fontSize:8,marginTop:4}}>Full story inside ▸</div>
+          </div>
+        )}
+        <div style={{width:1,background:NEWS.rule}}/>
+        <div style={{flex:1}}>
+          {injurySec ? (
+            <div style={{border:`1.5px solid ${urgent?C.red:NEWS.rule2}`,padding:"8px 9px"}}>
+              <div style={{...kick(C.red),borderBottom:`1px solid ${NEWS.rule}`,paddingBottom:3,marginBottom:4}}>⚠ Injury Alert</div>
+              <div style={{fontFamily:NEWS.body,fontSize:10.5,lineHeight:1.35,color:NEWS.ink2}}>{truncate(injurySec.body,115)}</div>
+            </div>
+          ) : focusSec ? (
+            <div style={{border:`1.5px solid ${NEWS.rule2}`,padding:"8px 9px"}}>
+              <div style={{...kick(C.gold),borderBottom:`1px solid ${NEWS.rule}`,paddingBottom:3,marginBottom:4}}>Orders Next Week</div>
+              <div style={{fontFamily:NEWS.body,fontSize:10.5,lineHeight:1.35,color:NEWS.ink2}}>{truncate(focusSec.body,115)}</div>
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      {/* Inside this edition */}
+      <div className="proof-drop" style={{borderTop:`1px solid ${NEWS.rule}`,borderBottom:`1px solid ${NEWS.rule}`,padding:"6px 0",margin:"10px 0 0",textAlign:"center"}}>
+        <div style={{...kick(),fontSize:9,marginBottom:2}}>Inside This Edition</div>
+        <div style={{fontFamily:NEWS.body,fontStyle:"italic",fontSize:11,color:NEWS.ink2,lineHeight:1.4}}>
+          {secs.map(s=>titleCase(s.label)).join(" · ")}{Array.isArray(c.questions)&&c.questions.length?" · Coach's Check-In":""}
+        </div>
+      </div>
+
+      <div style={{flex:1,minHeight:14}}/>
+
+      {/* Open the full edition */}
+      <button className="proof-drop" onClick={onOpen} style={{width:"100%",padding:15,borderRadius:12,border:"none",cursor:"pointer",
+        background:done?"transparent":"linear-gradient(180deg,#e3b32a,#c8941a)",color:done?C.gold:"#1a1200",
+        fontFamily:NEWS.label,fontWeight:700,fontSize:15,letterSpacing:2,textAlign:"center",
+        boxShadow:done?"none":`0 10px 24px ${C.gold}4d`,...(done?{border:`1px solid ${NEWS.rule2}`}:{})}}>
+        {done?"RE-READ THIS EDITION →":"OPEN THIS WEEK'S EDITION →"}
       </button>
-      <div style={{marginTop:14,fontSize:11,color:C.muted}}>{done?"Check-in complete · tap to revisit":`Sealed ${d?fmtDateRelative(dt):"recently"}${unread?" · unread":""}`}</div>
     </div>
   );
 }
@@ -1916,10 +1982,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
     <div style={{position:"fixed",inset:0,zIndex:500,background:C.navy,display:"flex",flexDirection:"column",maxWidth:600,margin:"0 auto"}}>
       <style>{GS}</style>
       <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,paddingTop:"calc(12px + env(safe-area-inset-top, 0px))",paddingBottom:"12px",paddingLeft:"16px",paddingRight:"16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
-        <div>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:C.gold,letterSpacing:2}}>{label}</div>
-          <div style={{color:C.muted,fontSize:11}}>{isMonthly?"Monthly":"Weekly"} Check-In · {athlete.name}</div>
-        </div>
+        <div style={{...kick(NEWS.ink3),fontSize:10}}>{isMonthly?"Monthly":"Weekly"} Edition · {athlete.name}</div>
         <button onClick={onClose} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:13}}>✕ Close</button>
       </div>
 
@@ -1999,17 +2062,12 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
         )}
 
         {phase==="report"&&!loading&&activeQuestions.length>0&&(
-          <div className="proof-drop" style={{background:`linear-gradient(180deg,${C.navy3},${C.navy2})`,border:`1px solid ${C.gold}73`,borderRadius:14,padding:15,marginTop:6}}>
-            <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:8}}>
-              <div style={{width:30,height:30,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a5a12)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:15,color:"#1a1200",flexShrink:0}}>J</div>
-              <div>
-                <div style={{fontSize:12,fontWeight:700,color:C.text}}>Coach Joe has {topQuestions.length} question{topQuestions.length===1?"":"s"}</div>
-                <div style={{fontSize:10,color:C.muted}}>{isMonthly?"Monthly":"Weekly"} check-in · ~2 min</div>
-              </div>
-            </div>
-            <div style={{fontSize:13,lineHeight:1.5,color:"#c7d2e0",marginBottom:12}}>{activeQuestions[0].text}</div>
-            <button onClick={startDialogue} style={{width:"100%",padding:12,borderRadius:10,border:"none",cursor:"pointer",background:"linear-gradient(180deg,#e3b32a,#c8941a)",color:"#1a1200",fontFamily:"'Bebas Neue'",fontSize:15,letterSpacing:2,textAlign:"center"}}>
-              START CHECK-IN →
+          <div className="proof-drop" style={{border:`1.5px double ${NEWS.rule2}`,padding:"14px 14px 15px",marginTop:8,textAlign:"center"}}>
+            <div style={{...kick(NEWS.ink3),fontSize:9}}>The Editor Will See You Now</div>
+            <div style={{fontFamily:NEWS.serif,fontWeight:700,fontSize:19,lineHeight:1.1,color:NEWS.ink,margin:"4px 0 3px"}}>Coach Joe has {topQuestions.length} question{topQuestions.length===1?"":"s"}</div>
+            <div style={{fontFamily:NEWS.body,fontStyle:"italic",fontSize:12.5,lineHeight:1.4,color:NEWS.ink2,margin:"0 auto 12px",maxWidth:280}}>“{activeQuestions[0].text}”</div>
+            <button onClick={startDialogue} style={{width:"100%",padding:12,borderRadius:10,border:"none",cursor:"pointer",background:"linear-gradient(180deg,#e3b32a,#c8941a)",color:"#1a1200",fontFamily:NEWS.label,fontWeight:700,fontSize:14,letterSpacing:2,textAlign:"center"}}>
+              BEGIN THE CHECK-IN →
             </button>
           </div>
         )}
