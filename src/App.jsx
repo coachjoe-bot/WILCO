@@ -14,7 +14,7 @@ import { ConsentFlow, LEGAL_VERSION } from "./legal.jsx";
 // BY NAME from "./App.jsx" (its lazy-loaded-chunk convention) — re-exporting here
 // keeps that import working unchanged while grit.js stays the single source of truth.
 import {
-  epley1RM, getExerciseSets, bestE1RMForExercise,
+  epley1RM, MAX_E1RM_REPS, getExerciseSets, bestE1RMForExercise,
   normalizeExName, displayForKey, cleanerName, liftTier,
   TIER_NAMES, TIER_COLORS, TIER_POINTS, TIER_DESC, BENCH_DISPLAY, BENCH_IS_BW,
   BENCH_THRESHOLDS, tierForRatio, bwTierFactor, ageTierFactor, scaledThresholds, getBenchKey,
@@ -1420,7 +1420,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
         const n=norm(e.name);
         if(n!==target && !n.includes(target) && !target.includes(n)) return;
         const wl=e.unit==="kg"?e.weight*2.205:e.weight;
-        const e1rm=(!e.reps||e.reps<=1)?Math.round(wl):Math.round(wl*(1+e.reps/30));
+        const e1rm=(!e.reps||e.reps<=1)?Math.round(wl):Math.round(wl*(1+Math.min(e.reps,MAX_E1RM_REPS)/30));
         pts.push({y:e1rm,label:new Date(w.created_at).toLocaleDateString("en-US",{month:"numeric",day:"numeric"})});
       });
     });

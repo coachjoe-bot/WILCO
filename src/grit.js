@@ -11,10 +11,16 @@
 // api/_grit.js, which re-exports this file). Extracted 2026-07 (proof-feed-v3).
 
 // ── Epley e1RM ────────────────────────────────────────────────────────────────
+// Epley only extrapolates a 1RM meaningfully from low-rep, near-maximal sets; past
+// ~15 reps the estimate is nonsense (a 100-rep Murph pull-up is conditioning, not a
+// max). So we cap the reps the formula ever sees, and — separately — drop above-cap
+// sets from benchmark consideration entirely (see bestE1RMForExercise). This bounds
+// every direct caller too (PRs, Proof Feed), so no path can mint a 953 lb "1RM".
+export const MAX_E1RM_REPS = 15;
 export const epley1RM = (weight, reps) => {
   if (!weight || weight <= 0) return 0;
   if (!reps || reps <= 1) return weight;
-  return Math.round(weight * (1 + reps / 30));
+  return Math.round(weight * (1 + Math.min(reps, MAX_E1RM_REPS) / 30));
 };
 
 // Expand a logged exercise entry into its individual sets. Handles both the new
@@ -52,6 +58,9 @@ export const bestE1RMForExercise = (ex, bwLbs = 0) => {
   const sets = all.some((s) => !s.warmup) ? all.filter((s) => !s.warmup) : all;
   let best = 0;
   sets.forEach((s) => {
+    // A set above the rep cap is endurance/conditioning, not a near-max effort — it
+    // carries no valid 1RM signal, so it never establishes or beats a benchmark.
+    if (s.reps > MAX_E1RM_REPS) return;
     const lbs = isBW ? bwLoad : toLbs(s.weight, ex.unit);
     const e1rm = epley1RM(lbs, s.reps);
     if (e1rm > best) best = e1rm;
