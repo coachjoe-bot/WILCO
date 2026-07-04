@@ -1147,6 +1147,33 @@ const propagate1RM = (programText, exerciseName, old1RM, new1RM) => {
   return {text:updated.join("\n"),changed};
 };
 
+// Does the program pin its numbers to an explicit basis the athlete set on
+// purpose (training max, working weights, a stated reference the %s hang off)
+// rather than tracking their true 1RM? If so, a new PR must NOT blindly rescale
+// those numbers. Used only as a guard on the deterministic fallback below.
+const hasExplicitWorkingBasis = (programText) =>
+  /training max|\bTM\b|working (?:max|weight|set|number)|work(?:ing)? weight|based (?:on|off)|%.{0,20}\bof\b.{0,20}(?:working|training)/i.test(programText||"");
+
+// AI-driven PR propagation. Reads the whole program, works out what each lift's
+// numbers are actually based on, and only updates weights that genuinely track
+// the athlete's max — leaving deliberately-chosen working weights / training
+// maxes alone. Returns null on any failure so the caller can fall back. Athletes
+// routinely program off working weights that differ from their PR/e1RM, and
+// blindly rescaling off the new 1RM overrides what they chose.
+export const propagateForPRs = async (programText, prs) => {
+  const prLines = prs.map(pr=>`${pr.exercise}: est. 1RM ${Math.round(pr.old1RM)} -> ${Math.round(pr.e1rm)} lbs`).join("\n");
+  const raw = await askClaude(
+    `You are Coach Joe Thomas updating an athlete's written program after they hit new PR(s). FIRST read the program and work out what each lift's numbers are based on. Many athletes set their own WORKING WEIGHTS or a TRAINING MAX that is deliberately different from their true 1RM/e1RM — never touch those. Only update a number if it clearly tracks the athlete's max (e.g. "@ 80% 1RM", a percentage table, or weights explicitly computed from a stated max that has now changed). If a lift lists fixed working weights, a training max, or numbers the athlete chose, LEAVE THEM UNCHANGED. When in doubt, leave it unchanged. Respond in EXACTLY this format and nothing else:\nCHANGED: <yes|no>\nSUMMARY: <if yes, ONE sentence naming what you updated, second person; if no, "No changes — your numbers aren't tied to your max.">\nPROGRAM:\n<the FULL program text, updated only where appropriate; if nothing changed, return it verbatim>`,
+    `New PR(s):\n${prLines}\n\nProgram:\n${programText}`,
+    1700, [], "claude-sonnet-5", "program_generate"
+  );
+  const m = String(raw||"").match(/CHANGED:\s*(yes|no)[\s\S]*?SUMMARY:\s*([\s\S]*?)\n\s*PROGRAM:\s*\n?([\s\S]*)$/i);
+  if(!m) return null;
+  const prog = m[3].trim();
+  if(!prog || prog.length<60) return null;
+  return {text:prog, summary:m[2].trim(), changed:/yes/i.test(m[1])};
+};
+
 // The Grit benchmark ladder (TIER_NAMES/COLORS/POINTS/DESC, BENCH_THRESHOLDS,
 // tierForRatio, bwTierFactor, ageTierFactor, scaledThresholds, getBenchKey) now
 // lives in ./grit.js (imported above) — the single shared source with the
@@ -1372,6 +1399,9 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
   const [askedIdx, setAskedIdx] = useState(0);          // index into the active question list
   const [answers, setAnswers] = useState([]);
   const [programPending, setProgramPending] = useState(null);
+  const [editingProgram, setEditingProgram] = useState(false);   // athlete is typing a question / change request into the card
+  const [programEditText, setProgramEditText] = useState("");
+  const [programRevising, setProgramRevising] = useState(false);
   const bottomRef = useRef(null);
   const followedUpRef = useRef(new Set()); // question ids that already got their one follow-up
 
@@ -1581,7 +1611,37 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
       }catch(_){}
     }
     setProgramPending(null);
+    setEditingProgram(false);
+    setProgramEditText("");
     await persistAndClose(answers, {}, applied);
+  };
+
+  // Athlete asked a question or requested different edits from the card. Post it to
+  // the thread, let Coach Joe answer AND revise the proposed change, then re-show
+  // the card with the updated proposal — a small back-and-forth before they commit.
+  const reviseProgramChange = async () => {
+    const ask = programEditText.trim();
+    if(!ask || !programPending?.newText) return;
+    setMessages(prev=>[...prev,{role:"user",content:ask}]);
+    setProgramEditText("");
+    setProgramRevising(true);
+    try{
+      const raw = await askClaude(
+        `You are Coach Joe Thomas. You proposed a program adjustment; the athlete responded with a question or a change request. Answer them, then give your (possibly revised) proposal. Keep changes small and safe. Respond in EXACTLY this format and nothing else:\nREPLY: <1-3 sentences answering them, in your voice>\nSUMMARY: <1-2 short sentences naming exactly what you're now changing, plain-spoken, second person ("your")>\nWHY: <1 sentence>\nPROGRAM:\n<the FULL updated program text — preserve structure/format>`,
+        `Current program:\n${athlete.program_text}\n\nYour proposed change:\nSUMMARY: ${programPending.summary||"(none given)"}\nWHY: ${programPending.why||"(none given)"}\nPROPOSED PROGRAM:\n${programPending.newText}\n\nAthlete's response:\n${ask}`,
+        1700, [], "claude-sonnet-5", "program_generate"
+      );
+      let replyTxt="", summary=programPending.summary, why=programPending.why, prog=programPending.newText;
+      const m = String(raw||"").match(/REPLY:\s*([\s\S]*?)\n\s*SUMMARY:\s*([\s\S]*?)\n\s*WHY:\s*([\s\S]*?)\n\s*PROGRAM:\s*\n?([\s\S]*)$/i);
+      if(m){ replyTxt=m[1].trim(); summary=m[2].trim(); why=m[3].trim(); if(m[4].trim().length>60) prog=m[4].trim(); }
+      else if(raw && raw.trim()){ replyTxt=raw.trim(); } // format not followed — at least show the reply, keep prior proposal
+      if(replyTxt) setMessages(prev=>[...prev,{role:"assistant",content:replyTxt}]);
+      setProgramPending({newText:prog, summary, why});
+    }catch(_){
+      setMessages(prev=>[...prev,{role:"assistant",content:"Couldn't work through that just now — you can still apply or skip the change below."}]);
+    }
+    setProgramRevising(false);
+    setEditingProgram(false);
   };
 
   const persistAndClose = async (finalAnswers, ex, newProgram) => {
@@ -1658,10 +1718,31 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
             ) : (
               <div style={{color:C.muted2,fontSize:12,marginBottom:10}}>I have a protective adjustment ready based on your check-in. Apply it now?</div>
             )}
-            <div style={{display:"flex",gap:8}}>
-              <button onClick={()=>applyProgramChange(true)} style={{flex:1,background:C.gold,color:"#000",border:"none",borderRadius:8,padding:"10px",fontWeight:700,cursor:"pointer",fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14}}>Yes — Apply</button>
-              <button onClick={()=>applyProgramChange(false)} style={{flex:1,background:"transparent",color:C.muted,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px",cursor:"pointer",fontSize:13}}>Skip</button>
-            </div>
+            {programRevising ? (
+              <div style={{display:"flex",alignItems:"center",gap:6,padding:"8px 2px",color:C.muted2,fontSize:12}}>
+                {[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:C.muted,animation:"pulse 1.2s ease-in-out infinite",animationDelay:`${i*0.2}s`}}/>)}
+                <span style={{marginLeft:4}}>Coach Joe's reworking it…</span>
+              </div>
+            ) : editingProgram ? (
+              <div>
+                <textarea value={programEditText} onChange={e=>setProgramEditText(e.target.value)} autoFocus
+                  placeholder="Ask a question or tell Coach Joe what to change…"
+                  onKeyDown={e=>{ if(e.key==="Enter"&&(e.metaKey||e.ctrlKey)){ e.preventDefault(); reviseProgramChange(); } }}
+                  style={{width:"100%",minHeight:64,background:C.navy2,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 12px",color:C.text,fontSize:13,lineHeight:1.5,outline:"none",resize:"vertical",fontFamily:"'DM Sans'",boxSizing:"border-box"}}/>
+                <div style={{display:"flex",gap:8,marginTop:8}}>
+                  <button onClick={reviseProgramChange} disabled={!programEditText.trim()} style={{flex:1,background:programEditText.trim()?C.gold:C.navy3,color:programEditText.trim()?"#000":C.muted,border:"none",borderRadius:8,padding:"10px",fontWeight:700,cursor:programEditText.trim()?"pointer":"not-allowed",fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14}}>Send</button>
+                  <button onClick={()=>{setEditingProgram(false);setProgramEditText("");}} style={{flex:1,background:"transparent",color:C.muted,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px",cursor:"pointer",fontSize:13}}>Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>applyProgramChange(true)} style={{flex:1,background:C.gold,color:"#000",border:"none",borderRadius:8,padding:"10px",fontWeight:700,cursor:"pointer",fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14}}>Yes — Apply</button>
+                  <button onClick={()=>applyProgramChange(false)} style={{flex:1,background:"transparent",color:C.muted,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px",cursor:"pointer",fontSize:13}}>Skip</button>
+                </div>
+                <button onClick={()=>setEditingProgram(true)} style={{width:"100%",marginTop:8,background:"transparent",color:C.muted2,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px",cursor:"pointer",fontSize:12}}>✏️ Edit or ask a question</button>
+              </>
+            )}
           </div>
         )}
 
@@ -3412,28 +3493,46 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       setWorkoutHistory(prev=>[{raw_message:msg,parsed_data:parsedFinal,created_at:new Date().toISOString()},...prev]);
 
       if(newPRs.length>0){
-        // 1RM propagation: recalculate program weights for each new PR
-        let currentProgramText = updatedAthlete.program_text;
+        // PR propagation: update program weights for each new PR — but only the
+        // numbers that actually track the athlete's max. The AI pass reads the
+        // program first and leaves deliberately-set working weights / training
+        // maxes alone (deterministic scaling is the offline fallback).
+        const prevProgramText = updatedAthlete.program_text;
+        let currentProgramText = prevProgramText;
+        let propagationSummary = "";
         const propagationLog = [];
         if(currentProgramText){
-          for(const pr of newPRs){
-            if(!pr.old1RM||pr.old1RM<=0) continue;
-            const {text,changed} = propagate1RM(currentProgramText,pr.exercise,pr.old1RM,pr.e1rm);
-            if(changed){
-              currentProgramText = text;
-              propagationLog.push(`${pr.exercise}: ${Math.round(pr.old1RM)}→${Math.round(pr.e1rm)}lbs est. 1RM`);
+          const propPRs = newPRs.filter(pr=>pr.old1RM>0);
+          let aiResult = null;
+          try{ if(propPRs.length) aiResult = await propagateForPRs(currentProgramText, propPRs); }catch(_){}
+          if(aiResult){
+            if(aiResult.changed && aiResult.text!==currentProgramText){
+              currentProgramText = aiResult.text;
+              propagationSummary = aiResult.summary;
+              propPRs.forEach(pr=>propagationLog.push(`${pr.exercise}: ${Math.round(pr.old1RM)}→${Math.round(pr.e1rm)}lbs est. 1RM`));
+            }
+            // aiResult with changed=false => program intentionally left as-is; do nothing.
+          } else if(!hasExplicitWorkingBasis(currentProgramText)){
+            // AI unavailable AND no explicit working-weight basis -> safe to scale.
+            for(const pr of propPRs){
+              const {text,changed} = propagate1RM(currentProgramText,pr.exercise,pr.old1RM,pr.e1rm);
+              if(changed){
+                currentProgramText = text;
+                propagationLog.push(`${pr.exercise}: ${Math.round(pr.old1RM)}→${Math.round(pr.e1rm)}lbs est. 1RM`);
+              }
             }
           }
           if(propagationLog.length>0){
             try {
               await sbUpdate("athletes",updatedAthlete.id,{program_text:currentProgramText});
               setAthlete(prev=>({...prev,program_text:currentProgramText}));
+              updatedAthlete.program_text = currentProgramText;
               // Log to program_modifications
               await sbInsert("program_modifications",{
                 athlete_id:updatedAthlete.id,
                 modification_type:"pr_propagation",
-                description:`Auto-updated program weights based on new PR(s): ${propagationLog.join(", ")}`,
-                old_value:updatedAthlete.program_text?.slice(0,500)||null,
+                description:propagationSummary || `Auto-updated program weights based on new PR(s): ${propagationLog.join(", ")}`,
+                old_value:prevProgramText?.slice(0,500)||null,
                 new_value:currentProgramText?.slice(0,500)||null
               });
             } catch(e){}
