@@ -487,6 +487,31 @@ function SchoolOnboardingForm({onCreated}) {
   );
 }
 
+// Fetch a scoped table through the gateway in bounded PAGES rather than one giant
+// request. This replaces the coach dashboard's fixed-cap / uncapped pulls, which
+// had two problems at scale: a single `limit=5000` query silently DROPPED the
+// oldest history past 5000 (so all-time session counts would under-count), and
+// PostgREST's own server-side max-rows (typically 1000) meant a large `limit` was
+// quietly truncated anyway. Paging with a stable (created_at,id) sort returns the
+// full scoped set correctly, one small request at a time, up to a hard ceiling we
+// log if ever hit (the signal to move the roster list to true server aggregation).
+// Ownership scoping is still forced server-side (api/data.js read op) — unchanged.
+const COACH_PAGE = 1000;              // rows per request (aligns with PostgREST max)
+const COACH_MAX_ROWS = 50000;         // safety ceiling across all pages
+async function sbReadPaged(table, order = "created_at.desc") {
+  const rows = [];
+  for (let offset = 0; offset < COACH_MAX_ROWS; offset += COACH_PAGE) {
+    const page = await sbRead(table, `?select=*&order=${order},id.desc&limit=${COACH_PAGE}&offset=${offset}`);
+    if (!Array.isArray(page) || page.length === 0) break;
+    rows.push(...page);
+    if (page.length < COACH_PAGE) break;   // short page => last page
+    if (offset + COACH_PAGE >= COACH_MAX_ROWS) {
+      console.warn(`[coach] ${table} hit the ${COACH_MAX_ROWS}-row page ceiling — move this read to server-side aggregation`);
+    }
+  }
+  return rows;
+}
+
 // ─── COACH DASHBOARD ──────────────────────────────────────────────────────────
 function CoachDashboard({coach,onLogout}) {
   const isMaster = coach.role==="master"||coach.access_code===MASTER_CODE;
@@ -553,14 +578,13 @@ function CoachDashboard({coach,onLogout}) {
       // workouts/prs now also go through the gateway, scoped to this coach's athletes
       // server-side (master -> all). The client-side filter below is kept as a harmless
       // belt-and-suspenders; the server has already narrowed the result set.
-      // limit=5000: a hard ceiling so this payload can't grow unbounded forever
-      // (these were fetch-EVERYTHING queries). Newest-first, so if the cap is ever
-      // hit it's the oldest history that falls off — revisit with real pagination
-      // before that (all-time session counts/leaderboard would start under-counting).
+      // Paged (sbReadPaged) instead of a single capped query: the full scoped history
+      // comes back correctly in bounded requests, without the old limit=5000 silently
+      // dropping the oldest sessions (which made all-time counts/leaderboards drift).
       const [dash,w,p] = await Promise.all([
         idApi("coach-dashboard",{coachId:coach.id,pin:coach.pin}),
-        sbRead("workouts","?order=created_at.desc&select=*&limit=5000"),
-        sbRead("prs","?order=created_at.desc&select=*&limit=5000"),
+        sbReadPaged("workouts"),
+        sbReadPaged("prs"),
       ]);
       const a  = dash.athletes||[];
       const c  = dash.coaches||[];
@@ -595,8 +619,9 @@ function CoachDashboard({coach,onLogout}) {
   const recalcAllPRs = async () => {
     setRecalcStatus("running");
     try {
-      // Fetch every workout ever logged (need all history, not just what's loaded)
-      const allWorkouts = await sbRead("workouts","?select=*&order=created_at.asc");
+      // Fetch every workout ever logged (need all history, not just what's loaded).
+      // Paged so this can't fire one unbounded query that OOMs/times out on a big team.
+      const allWorkouts = await sbReadPaged("workouts","created_at.asc");
       if(!Array.isArray(allWorkouts)) throw new Error("Could not load workouts");
       let done = 0;
       for(const ath of athletes){
