@@ -1545,12 +1545,18 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
     const wantsChange = ex.apply_injury_change && athlete.program_text && !athlete.program_locked && !athlete.temp_program_text;
     if(wantsChange){
       try{
-        const updated = await askClaude(
-          `You are Coach Joe Thomas. Apply a small, safe injury-protective adjustment to this athlete's program based on their check-in. Return ONLY the full updated program text — preserve structure/format, change only what's needed. No commentary.`,
+        // Ask for the change AND a plain-spoken explanation of what's changing and
+        // why, so the athlete approves knowing the specifics — not a blind yes.
+        const raw = await askClaude(
+          `You are Coach Joe Thomas. Propose a small, safe injury-protective adjustment to this athlete's program based on their check-in. Respond in EXACTLY this format and nothing else:\nSUMMARY: <1-2 short sentences naming exactly what you're changing, plain-spoken, second person ("your")>\nWHY: <1 sentence tying it to what they told you in the check-in>\nPROGRAM:\n<the FULL updated program text — preserve structure/format, change only what's needed>`,
           `Current program:\n${athlete.program_text}\n\nCheck-in:\n${qaText}`,
-          1300, [], "claude-sonnet-5", "program_generate"
+          1600, [], "claude-sonnet-5", "program_generate"
         );
-        if(updated && updated.trim().length>60) setProgramPending({newText:updated.trim()});
+        let summary="", why="", prog=null;
+        const m = String(raw||"").match(/SUMMARY:\s*([\s\S]*?)\n\s*WHY:\s*([\s\S]*?)\n\s*PROGRAM:\s*\n?([\s\S]*)$/i);
+        if(m){ summary=m[1].trim(); why=m[2].trim(); prog=m[3].trim(); }
+        else if(raw && raw.trim().length>60){ prog=raw.trim(); } // model ignored the format — still save the program
+        if(prog && prog.length>60) setProgramPending({newText:prog, summary, why});
       }catch(_){}
     }
 
@@ -1644,7 +1650,14 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
         {programPending&&!loading&&(
           <div style={{background:C.navy3,border:`1px solid ${C.gold}`,borderRadius:12,padding:14,margin:"6px 0"}}>
             <div style={{color:C.gold,fontSize:13,fontWeight:700,marginBottom:8}}>📋 Suggested program update</div>
-            <div style={{color:C.muted2,fontSize:12,marginBottom:10}}>I have a protective adjustment ready based on your check-in. Apply it now?</div>
+            {programPending.summary ? (
+              <>
+                <div style={{color:C.text,fontSize:13,lineHeight:1.5,marginBottom:programPending.why?6:10}}>{programPending.summary}</div>
+                {programPending.why&&(<div style={{color:C.muted2,fontSize:12,lineHeight:1.5,marginBottom:10,fontStyle:"italic"}}>{programPending.why}</div>)}
+              </>
+            ) : (
+              <div style={{color:C.muted2,fontSize:12,marginBottom:10}}>I have a protective adjustment ready based on your check-in. Apply it now?</div>
+            )}
             <div style={{display:"flex",gap:8}}>
               <button onClick={()=>applyProgramChange(true)} style={{flex:1,background:C.gold,color:"#000",border:"none",borderRadius:8,padding:"10px",fontWeight:700,cursor:"pointer",fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14}}>Yes — Apply</button>
               <button onClick={()=>applyProgramChange(false)} style={{flex:1,background:"transparent",color:C.muted,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px",cursor:"pointer",fontSize:13}}>Skip</button>
