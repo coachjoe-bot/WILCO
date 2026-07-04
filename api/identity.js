@@ -21,6 +21,12 @@ import { EVENT_SOURCES } from "./_stripe.js";
 
 const enc = encodeURIComponent;
 
+// Marketing attribution values originate in the query string (UTMs), so they're
+// user-controllable — keep them URL-safe and bounded before they reach the DB or
+// (via create-subscription) Stripe metadata.
+const sanitizeSignupSource = (s) =>
+  String(s || "").replace(/[^A-Za-z0-9/:._=-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 120);
+
 export default async function handler(req, res) {
   if (applyCors(req, res)) return;
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -186,12 +192,19 @@ async function createAthleteAction(req, res, body) {
   for (const k of ATHLETE_FIELDS) if (a[k] !== undefined) row[k] = a[k];
   row.tier = body.isSchool ? "school" : "free"; // never set from the client's tier
   if (body.isSchool && body.schoolPriceId) row.stripe_price_id = str(body.schoolPriceId, { max: 120, name: "price" });
-  // Event attribution (QR → landing → signup). Validated against the server-side
-  // event config, never stored free-form. Recorded even while the event is still
-  // disabled (attribution shouldn't be losable); the longer trial itself is gated
-  // separately in create-subscription.
-  if (body.signupSource && Object.prototype.hasOwnProperty.call(EVENT_SOURCES, String(body.signupSource))) {
-    row.signup_source = String(body.signupSource);
+  // Marketing attribution (go-forward only — existing rows stay null). An exact
+  // event key (QR → landing → signup) is stored as-is; it also gates the event
+  // trial in create-subscription, so it's matched strictly against the event
+  // config. Any other value is a free-form first-touch source (UTMs or referrer)
+  // and is sanitized/truncated since it's user-controllable input.
+  if (body.signupSource) {
+    const raw = String(body.signupSource);
+    if (Object.prototype.hasOwnProperty.call(EVENT_SOURCES, raw)) {
+      row.signup_source = raw;
+    } else {
+      const clean = sanitizeSignupSource(raw);
+      if (clean) row.signup_source = clean;
+    }
   }
 
   const created = await sbWrite({ method: "POST", table: "athletes", body: row });

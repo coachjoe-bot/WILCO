@@ -505,6 +505,64 @@ function installEngagementTracking(){
   window.addEventListener("pagehide",()=>{ flushEvents(); });
 }
 
+// ─── FIRST-TOUCH MARKETING ATTRIBUTION ──────────────────────────────────────
+// Record where a visitor first came from and keep it until they sign up, so a NEW
+// account can be stamped with its origin. UTMs (from ad / bio links) win; else the
+// referring site; else "direct". Go-forward only — this never reads or writes any
+// existing account. First touch wins: a stored value is never overwritten, so a
+// later visit can't rewrite the origin. Note: this tracks paid/link traffic only —
+// genuine word-of-mouth (someone types the URL) has no signal and lands in "direct".
+const FIRST_TOUCH_KEY = "wilco_first_touch";
+
+// Attribution strings come from the query string, so they're user-controllable.
+// Keep them URL-safe and bounded; the server sanitizes again on write.
+function sanitizeSource(s){
+  return String(s||"").replace(/[^A-Za-z0-9/:._=-]+/g,"-").replace(/^-+|-+$/g,"").slice(0,120);
+}
+
+// Run once on boot, BEFORE any history.replaceState wipes the query string. Only
+// stores when there's real signal (a UTM or an external referrer) so an initial
+// direct visit doesn't lock in "direct" ahead of a later ad click.
+function captureFirstTouch(){
+  try{
+    if(typeof window==="undefined") return;
+    if(localStorage.getItem(FIRST_TOUCH_KEY)) return; // first touch wins — never overwrite
+    const p = new URLSearchParams(window.location.search);
+    const utm = {
+      source:   p.get("utm_source")   || "",
+      medium:   p.get("utm_medium")   || "",
+      campaign: p.get("utm_campaign") || "",
+      content:  p.get("utm_content")  || "",
+    };
+    let referrer = "";
+    try{
+      if(document.referrer){
+        const h = new URL(document.referrer).hostname;
+        // Ignore our own domains — an internal navigation isn't a "source".
+        if(h && !/(^|\.)trainwilco\.com$/i.test(h) && h !== window.location.hostname) referrer = h;
+      }
+    }catch{}
+    if(!utm.source && !referrer) return; // no real signal yet — leave it open for a later touch
+    localStorage.setItem(FIRST_TOUCH_KEY, JSON.stringify({ ...utm, referrer }));
+  }catch{ /* attribution must never break boot */ }
+}
+
+// Compose the single source string at signup, in priority order:
+//   UTMs      → "source/medium/campaign/content"  (empty parts dropped)
+//   referrer  → "referrer:instagram.com"
+//   neither   → "direct"
+function composeSignupSource(){
+  try{
+    const raw = typeof window!=="undefined" && localStorage.getItem(FIRST_TOUCH_KEY);
+    if(raw){
+      const t = JSON.parse(raw);
+      if(t.source) return sanitizeSource([t.source,t.medium,t.campaign,t.content].filter(Boolean).join("/")) || "direct";
+      if(t.referrer) return sanitizeSource("referrer:"+t.referrer) || "direct";
+    }
+  }catch{}
+  return "direct";
+}
+
 // ─── UTILITIES ────────────────────────────────────────────────────────────────
 // Compare dates at midnight local time — fixes the "-1d" timezone bug
 export const daysBetween = (date) => {
@@ -1787,7 +1845,7 @@ function WilcoRoot() {
 
   // Install global error reporting once, on mount (before any early return so the
   // hook order stays stable). Captures uncaught errors + unhandled rejections.
-  useEffect(()=>{ installErrorReporting(); installEngagementTracking(); },[]);
+  useEffect(()=>{ captureFirstTouch(); installErrorReporting(); installEngagementTracking(); },[]);
   useEffect(()=>{
     if(!eventCtx) return;
     if(eventCtx.active) track("event_landing_view","billing",{source:eventCtx.source});
@@ -2209,7 +2267,7 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
     try {
       const r = await idApi("create-athlete",{
         pin:data.pin, isSchool:data.isSchool, schoolPriceId:SCHOOL_PRICE_ID,
-        signupSource:eventCtx?.source,
+        signupSource:eventCtx?.source || composeSignupSource(),
         athlete:{
           name:data.name.trim(), sport:data.sport, billing:data.billing,
           email:data.email.trim().toLowerCase(),

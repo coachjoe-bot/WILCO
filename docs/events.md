@@ -19,6 +19,12 @@ Fitness Winter Park (Aloma).
   create-athlete` records `athletes.signup_source` (validated against the same map,
   recorded even while disabled so attribution can't be lost). Gift codes don't
   combine with event offers.
+  - NB: `signup_source` is no longer event-only. Normal signups now also record a
+    free-form first-touch marketing source (`utm_source/medium/campaign/content`,
+    else `referrer:<host>`, else `direct`) captured client-side in `src/App.jsx`
+    (`captureFirstTouch`/`composeSignupSource`) and sanitized server-side. Only exact
+    `EVENT_SOURCES` keys grant the longer trial; free-form values are attribution
+    only. `create-subscription` mirrors whatever is on the athlete row into Stripe.
 - **Attribution queries** — signups per location:
   `select signup_source, count(*) from athletes where signup_source is not null group by 1;`
   Paid conversions: add `and subscription_status = 'active'`. Landing-page traffic:

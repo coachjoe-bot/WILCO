@@ -95,7 +95,9 @@ export default async function handler(req, res) {
         name: athlete.name || undefined,
         metadata: {
           athlete_id: String(athlete.id),
-          ...(event ? { signup_source: String(eventSource) } : {}),
+          // Mirror the attribution already stored on the athlete row (event key or
+          // free-form UTM/referrer source) so Stripe and Supabase never disagree.
+          ...(athlete.signup_source ? { signup_source: String(athlete.signup_source) } : {}),
         },
       });
       customerId = customer.id;
@@ -133,7 +135,7 @@ export default async function handler(req, res) {
         athlete_id: String(athlete.id),
         tier,
         billing: interval,
-        ...(event ? { signup_source: String(eventSource) } : {}),
+        ...(athlete.signup_source ? { signup_source: String(athlete.signup_source) } : {}),
       },
     };
     if (giftApplied) {
