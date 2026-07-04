@@ -1401,14 +1401,15 @@ const syncPushSubscription = async () => {
   }catch{}
 };
 
-// ─── PROOF FEED — envelope + letter presentation ─────────────────────────────
-// The Proof tab renders each weekly/monthly digest as a sealed "letter from Coach
-// Joe" (ProofEnvelope): a postmarked drop date + wax seal + one button to open.
-// Opening it (the ProofChatModal) reads the digest as a formatted letter
-// (ProofLetter) — a rank hero, distinct PR block, urgent injury card, and a closing
-// focus directive — then flows straight into the guided check-in. Presentation
+// ─── PROOF FEED — newspaper front page ───────────────────────────────────────
+// The Proof tab renders each weekly/monthly digest as a front page ("The Proof",
+// ProofEnvelope): a masthead + postmarked date, a lead strength-ranking story with
+// the Score stat, a story-teaser column, a boxed injury/orders alert, and an
+// "inside this edition" contents strip — so the headlines/snippets are visible
+// before opening. Tapping "OPEN THIS WEEK'S EDITION" goes STRAIGHT into the guided
+// check-in (ProofChatModal) — no separate re-render of the digest. Presentation
 // only: generation (api/_proof.js), notification policy, and the check-in question
-// logic are all unchanged. Built in the current gold palette; the app-wide swap to
+// logic are all unchanged. Built in the current gold accent; the app-wide swap to
 // the brand's electric-blue is a separate, deferred pass (docs/app-aesthetic-overhaul.md).
 
 // Section-label matchers — the generator's labels vary a little across digests
@@ -1476,14 +1477,6 @@ const truncate = (s, n) => {
 const firstSentence = (s) => String(s||"").trim().split(/(?<=[.!?])\s+/)[0] || "";
 const kick = (color) => ({fontFamily:NEWS.label,fontSize:10,letterSpacing:2,textTransform:"uppercase",fontWeight:700,color:color||NEWS.ink3});
 const NRule = ({v="1px",m="6px 0",c=NEWS.rule}) => <div style={{borderTop:`${v} solid ${c}`,margin:m}}/>;
-// A justified newspaper column with a drop-cap first letter.
-const DropCol = ({text, cap=NEWS.ink}) => {
-  const t = String(text||""); const first = t.slice(0,1);
-  return <p style={{fontFamily:NEWS.body,fontSize:12.5,lineHeight:1.45,color:NEWS.ink2,textAlign:"justify",margin:0}}>
-    <span style={{float:"left",fontFamily:NEWS.serif,fontWeight:800,fontSize:32,lineHeight:0.72,padding:"3px 6px 0 0",color:cap}}>{first}</span>{t.slice(1)}
-  </p>;
-};
-
 // Derive the digest sections[] (new shape) with the legacy keyed-field fallback.
 const digestSections = (c) => Array.isArray(c?.sections)&&c.sections.length ? c.sections : [
   ["week_vs_week","THIS WEEK VS LAST"],["month_summary","THIS MONTH"],["consistency","CONSISTENCY"],
@@ -1491,97 +1484,6 @@ const digestSections = (c) => Array.isArray(c?.sections)&&c.sections.length ? c.
   ["plateau_flag","PLATEAU FLAG"],["unresolved_plateaus","PLATEAUS"],["encouragement","FROM COACH JOE"],
   ["focus_next_week","FOCUS NEXT WEEK"],
 ].filter(([k])=>c&&c[k]).map(([k,l])=>({label:l,body:c[k]}));
-
-// A boxed newspaper bulletin (injury alert, volume warning, next-week orders).
-const NewsBox = ({kicker, kickerColor, title, body, dbl}) => (
-  <div className="proof-drop" style={{border:`${dbl?"1.5px double":"1.5px solid"} ${NEWS.rule2}`,padding:"10px 12px",marginBottom:10}}>
-    <div style={{...kick(kickerColor),borderBottom:`1px solid ${NEWS.rule}`,paddingBottom:4,marginBottom:6}}>{kicker}</div>
-    {title&&<div style={{fontFamily:NEWS.serif,fontWeight:700,fontSize:15,lineHeight:1.15,color:NEWS.ink,marginBottom:5}}>{title}</div>}
-    <div style={{fontFamily:NEWS.body,fontSize:12,lineHeight:1.4,color:NEWS.ink2,whiteSpace:"pre-wrap"}}>{body}</div>
-  </div>
-);
-
-// The opened edition: the digest read as a broadsheet — a lead rank story, the PR
-// card, the week's other stories, then a boxed INJURY ALERT and "orders for next
-// week", flowing into the check-in. (Component name kept for call-site stability.)
-function ProofLetter({intro, sections, flags, label, dateStr}) {
-  const secs = sections || [];
-  const rankSec  = secs.find(s=>isRankLabel(s.label));
-  const prSec    = secs.find(s=>isPRLabel(s.label));
-  const injurySec= secs.find(s=>isInjuryLabel(s.label));
-  const focusSec = secs.find(s=>isFocusLabel(s.label));
-  const special  = new Set([rankSec,prSec,injurySec,focusSec].filter(Boolean));
-  const rest     = secs.filter(s=>!special.has(s));
-  const warns    = rest.filter(s=>s.flag==="warn");
-  const stories  = rest.filter(s=>s.flag!=="warn");
-  const hero = rankSec ? parseRankHero(rankSec.body, flags) : null;
-  const headline = hero&&hero.tier ? `${hero.delta>0?"Still ":"Holding "}${titleCase(hero.tier)}`
-    : (hero&&hero.delta!=null&&hero.delta>0 ? "Ranking Up" : "This Week's Proof");
-
-  return (
-    <div>
-      {/* Masthead */}
-      <div className="proof-drop" style={{textAlign:"center",marginBottom:2}}>
-        <div style={{display:"flex",justifyContent:"space-between",...kick(),marginBottom:5}}><span>Coach Joe, Editor</span><span>{dateStr||""}</span></div>
-        <NRule v="2px" m="0 0 5px" c={NEWS.rule2}/>
-        <div style={{fontFamily:NEWS.serif,fontWeight:900,fontSize:34,lineHeight:0.92,letterSpacing:-0.5,color:NEWS.ink}}>The Proof</div>
-        <NRule v="1px" m="5px 0 0" c={NEWS.rule2}/>
-        <NRule v="1px" m="2px 0 8px" c={NEWS.rule2}/>
-      </div>
-
-      {/* Lead — strength ranking */}
-      <div className="proof-drop" style={{textAlign:"center"}}>
-        <div style={{...kick(C.gold),textAlign:"center"}}>Strength Ranking</div>
-        <div style={{fontFamily:NEWS.serif,fontWeight:800,fontSize:28,lineHeight:1.02,color:NEWS.ink,margin:"2px 0 5px"}}>{headline}</div>
-        {rankSec&&<div style={{fontFamily:NEWS.body,fontStyle:"italic",fontSize:13,lineHeight:1.35,color:NEWS.ink2,padding:"0 4px 4px"}}>{truncate(firstSentence(rankSec.body),150)}</div>}
-        <div style={{...kick(),textAlign:"center",fontSize:8,marginBottom:hero&&hero.score!=null?6:2}}>Coach Joe · Strength Desk</div>
-        {hero&&hero.score!=null&&(
-          <div style={{display:"flex",justifyContent:"center",alignItems:"baseline",gap:10,paddingBottom:2}}>
-            <span style={{...kick(),fontSize:9}}>Strength Score</span>
-            <span style={{fontFamily:NEWS.serif,fontWeight:900,fontSize:42,lineHeight:0.8,color:C.gold}}>{hero.score}</span>
-            {hero.delta!=null&&hero.delta!==0&&<span style={{fontFamily:NEWS.label,fontWeight:700,fontSize:14,color:hero.delta>0?C.green:C.red}}>{hero.delta>0?"▲ +":"▼ "}{hero.delta>0?hero.delta:Math.abs(hero.delta)}</span>}
-          </div>
-        )}
-      </div>
-      <NRule m="8px 0"/>
-
-      {/* The PR card */}
-      {prSec&&(
-        <div className="proof-drop" style={{marginBottom:10}}>
-          <div style={{fontFamily:NEWS.serif,fontWeight:700,fontSize:17,lineHeight:1.05,color:NEWS.ink,marginBottom:4}}>The PR Card</div>
-          <DropCol text={prSec.body} cap={C.gold}/>
-        </div>
-      )}
-
-      {/* The week's other stories */}
-      {stories.map((s,i)=>(
-        <div key={i} className="proof-drop" style={{marginBottom:10}}>
-          <div style={{fontFamily:NEWS.serif,fontWeight:700,fontSize:15,lineHeight:1.1,color:NEWS.ink,marginBottom:4}}>{titleCase(s.label)}</div>
-          <div style={{fontFamily:NEWS.body,fontSize:12.5,lineHeight:1.45,color:NEWS.ink2,textAlign:"justify",whiteSpace:"pre-wrap"}}>{s.body}</div>
-        </div>
-      ))}
-
-      {/* Volume / other warnings — boxed */}
-      {warns.map((s,i)=>(
-        <NewsBox key={i} kicker={`⚠ ${titleCase(s.label)}`} kickerColor="#f59e0b" body={s.body}/>
-      ))}
-
-      {/* Injury — boxed alert. Header stays strictly "injury alert"; the trend (improving /
-          worsening) is already stated in the body prose, so no separate pill. */}
-      {injurySec&&(
-        <NewsBox kicker="⚠ Injury Alert" kickerColor={C.red} body={injurySec.body}/>
-      )}
-
-      {/* Orders for next week — the closing directive */}
-      {focusSec&&(
-        <div className="proof-drop" style={{borderTop:`2px solid ${NEWS.rule2}`,borderBottom:`2px solid ${NEWS.rule2}`,padding:"9px 0",marginBottom:4}}>
-          <div style={{...kick(C.gold),textAlign:"center"}}>Orders For Next Week</div>
-          <div style={{fontFamily:NEWS.serif,fontWeight:700,fontSize:15,lineHeight:1.18,color:NEWS.ink,textAlign:"center",marginTop:3,whiteSpace:"pre-wrap"}}>{focusSec.body}</div>
-        </div>
-      )}
-    </div>
-  );
-}
 
 // The Proof tab: this week's front page. Unlike a sealed letter, the front page shows
 // the headlines + snippets, so you see what's inside before opening the full edition.
@@ -1681,7 +1583,7 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
         background:done?"transparent":"linear-gradient(180deg,#e3b32a,#c8941a)",color:done?C.gold:"#1a1200",
         fontFamily:NEWS.label,fontWeight:700,fontSize:15,letterSpacing:2,textAlign:"center",
         boxShadow:done?"none":`0 10px 24px ${C.gold}4d`,...(done?{border:`1px solid ${NEWS.rule2}`}:{})}}>
-        {done?"RE-READ THIS EDITION →":"OPEN THIS WEEK'S EDITION →"}
+        {done?"✓ CHECK-IN COMPLETE":"OPEN THIS WEEK'S EDITION →"}
       </button>
     </div>
   );
@@ -1697,7 +1599,7 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
 // injury-protective program tweak. Backward-compatible with legacy digests.
 function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead, workoutHistory}) {
   const alreadyDone = !!(digest?.content_json?.checkin_done);
-  const [phase, setPhase] = useState(alreadyDone ? "done" : "report"); // report | dialogue | acting | done
+  const [phase, setPhase] = useState(alreadyDone ? "done" : "dialogue"); // dialogue | acting | done — no "report" page; the front page already showed the digest, so opening goes straight into the check-in
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -1739,9 +1641,14 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
   const activeQuestions = showDeeper ? [...topQuestions, ...deeperQuestions] : topQuestions;
 
   useEffect(()=>{
-    const intro = c.intro ? c.intro + "\n\n" : "";
-    const body = sections.map(s=>`**${s.label}**\n${s.body}`).join("\n\n") || "Here's your check-in.";
-    setMessages([{role:"assistant",content:intro + body}]);
+    if(alreadyDone) return;
+    // Straight into the check-in — the Proof tab front page already showed the digest,
+    // so we don't re-render it here. Open with a short Coach Joe line, then question 1.
+    const opener = c.intro ? [{role:"assistant",content:c.intro}] : [];
+    const firstQ = activeQuestions[0]?.text;
+    if(!firstQ){ setPhase("done"); setMessages(opener); return; }
+    setMessages([...opener,{role:"assistant",content:firstQ}]);
+    setAskedIdx(0);
   },[]); // eslint-disable-line
   // Only auto-scroll to the bottom once the check-in Q&A is live — otherwise the
   // freshly-opened letter would jump straight past itself to the bottom. In the
@@ -1768,11 +1675,6 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
     return pts.slice(-8);
   };
 
-  const startDialogue = () => {
-    setPhase("dialogue");
-    setAskedIdx(0);
-    setMessages(prev=>[...prev,{role:"assistant",content:activeQuestions[0].text}]);
-  };
 
   const sendMessage = async () => {
     const msg = input.trim();
@@ -1987,14 +1889,9 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
       </div>
 
       <div style={{flex:1,overflowY:"auto",padding:"16px",display:"flex",flexDirection:"column",gap:10}}>
-        {/* The opened letter — the digest, formatted with hierarchy. Always at the top
-            so it stays as context once the check-in Q&A begins below it. */}
-        <ProofLetter intro={c.intro} sections={sections} flags={c.flags} label={label}
-          dateStr={digest?.generated_at?new Date(digest.generated_at).toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"}).toUpperCase():null}/>
-
-        {/* Check-in Q&A. messages[0] is the raw digest text (now shown as the letter
-            above), so render from index 1 onward. */}
-        {messages.slice(1).map((m,i)=>(
+        {/* Straight into the check-in feed — the digest lives on the Proof tab front
+            page, so the modal is just Coach Joe's conversation. */}
+        {messages.map((m,i)=>(
           <div key={i} className="proof-drop" style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
             <div style={{maxWidth:"86%",background:m.role==="user"?C.gold:C.navy2,color:m.role==="user"?"#1a1200":C.text,borderRadius:14,padding:"11px 14px",fontSize:14,lineHeight:1.6,whiteSpace:"pre-wrap",border:m.role==="user"?"none":`1px solid ${C.border}`,borderBottomLeftRadius:m.role==="user"?14:4,borderBottomRightRadius:m.role==="user"?4:14}}>
               {m.content}
@@ -2058,17 +1955,6 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
                 <button onClick={()=>setEditingProgram(true)} style={{width:"100%",marginTop:8,background:"transparent",color:C.muted2,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px",cursor:"pointer",fontSize:12}}>✏️ Edit or ask a question</button>
               </>
             )}
-          </div>
-        )}
-
-        {phase==="report"&&!loading&&activeQuestions.length>0&&(
-          <div className="proof-drop" style={{border:`1.5px double ${NEWS.rule2}`,padding:"14px 14px 15px",marginTop:8,textAlign:"center"}}>
-            <div style={{...kick(NEWS.ink3),fontSize:9}}>The Editor Will See You Now</div>
-            <div style={{fontFamily:NEWS.serif,fontWeight:700,fontSize:19,lineHeight:1.1,color:NEWS.ink,margin:"4px 0 3px"}}>Coach Joe has {topQuestions.length} question{topQuestions.length===1?"":"s"}</div>
-            <div style={{fontFamily:NEWS.body,fontStyle:"italic",fontSize:12.5,lineHeight:1.4,color:NEWS.ink2,margin:"0 auto 12px",maxWidth:280}}>“{activeQuestions[0].text}”</div>
-            <button onClick={startDialogue} style={{width:"100%",padding:12,borderRadius:10,border:"none",cursor:"pointer",background:"linear-gradient(180deg,#e3b32a,#c8941a)",color:"#1a1200",fontFamily:NEWS.label,fontWeight:700,fontSize:14,letterSpacing:2,textAlign:"center"}}>
-              BEGIN THE CHECK-IN →
-            </button>
           </div>
         )}
 
