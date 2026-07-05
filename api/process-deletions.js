@@ -43,6 +43,30 @@ const ATHLETE_TABLES = [
   "legal_acceptances",
 ];
 
+// Analytics ledgers carry athlete_id/actor_id but have NO foreign key to athletes,
+// so nothing cleans them on delete — they'd keep the personal linkage forever. We
+// don't hard-delete them (that would erase a churned athlete's cost/usage from the
+// aggregate business metrics); instead we ANONYMIZE — null the identifiers so the
+// row survives as an unattributed usage count. Honors the deletion promise (no
+// personal linkage remains) without wrecking the rollups.
+const ANON_TABLES = ["usage_costs", "error_events", "usage_events"];
+
+async function anonymizeAnalytics(aid) {
+  for (const tbl of ANON_TABLES) {
+    // Rows scoped to this athlete → drop the athlete link.
+    await sbWrite({
+      method: "PATCH", table: tbl, query: `?athlete_id=eq.${enc(aid)}`,
+      body: { athlete_id: null }, prefer: "return=minimal",
+    });
+    // Rows the athlete themselves initiated (actor_id == their id) → drop the actor
+    // link too. Scoped to actor_id=aid so a COACH acting on this athlete keeps theirs.
+    await sbWrite({
+      method: "PATCH", table: tbl, query: `?actor_id=eq.${enc(aid)}`,
+      body: { actor_id: null }, prefer: "return=minimal",
+    });
+  }
+}
+
 async function runDeletions() {
   const summary = { processed: 0, deleted: 0, failed: 0, skipped_orphan: 0 };
 
@@ -78,6 +102,8 @@ async function runDeletions() {
       for (const tbl of ATHLETE_TABLES) {
         await sbDelete(tbl, `?athlete_id=eq.${enc(aid)}`);
       }
+      // 1b. Anonymize the FK-less analytics ledgers (keep the counts, drop the link).
+      await anonymizeAnalytics(aid);
       // 2. Delete the athlete row itself (cascades any remaining FK children).
       await sbDelete("athletes", `?id=eq.${enc(aid)}`);
       // 3. Mark the request completed. athlete_id is now NULL (ON DELETE SET

@@ -16,6 +16,7 @@ import { ConsentFlow, LEGAL_VERSION } from "./legal.jsx";
 import {
   epley1RM, MAX_E1RM_REPS, getExerciseSets, bestE1RMForExercise,
   normalizeExName, displayForKey, cleanerName, liftTier,
+  resolveLift, displayForLift, bwLoadLabel, BW_LOADED_IDS,
   TIER_NAMES, TIER_COLORS, TIER_POINTS, TIER_DESC, BENCH_DISPLAY, BENCH_IS_BW,
   BENCH_THRESHOLDS, tierForRatio, bwTierFactor, ageTierFactor, scaledThresholds, getBenchKey,
 } from "./grit.js";
@@ -1047,6 +1048,13 @@ UNUSUAL TRAINING CONDITIONS (travel, cruise, hotel, beach, limited equipment, in
 - Once conditions ARE described: build a specific day-by-day program for exactly those conditions. Be clear it's temporary.
 - When athlete signals they're back to normal ("I'm back", "home now", "back at the gym"): transition them back to their regular program and reference it.
 
+PROGRAM REVIEW (athlete asks you to look at / review / give thoughts on their program):
+- Judge the program against THIS athlete's own goal, sport, level, and injury history — not against an ideal template or how you'd write it from scratch. There are many valid ways to program.
+- Assume a real program (whether it came from you, another coach, or the athlete) is fundamentally sound. Lead with what's working and WHY it fits their goal. Do NOT hunt for flaws or nitpick to seem useful.
+- Only raise something if it genuinely conflicts with their goal, their sport's demands, a known injury, or basic recovery/safety — and when you do, frame it as one specific, optional adjustment with the reason. No vague "you could add more X."
+- If the program is solid, say so plainly and stop. A short "This lines up well with your [goal] — here's what I'd keep an eye on" is a complete answer. At most 1-2 suggestions; never a teardown.
+- "What's my workout today?" → read their program, match today's day, and give exactly that session (exercises, sets, reps). Don't review it unless asked.
+
 SPORT PRACTICE + TRAINING LOAD:
 - Sport practices (practice, game, scrimmage, team conditioning) count as real workouts. A 2-hour basketball practice is significant physical stress — treat it as such.
 - When the current message OR recent history shows a practice AND a gym workout on the same day: acknowledge the double load. Ask about how they're feeling, sleep quality, or soreness before piling on more volume advice. Do not just say "Solid session" and move on.
@@ -1377,6 +1385,10 @@ async function enablePush(){
   const j = sub.toJSON();
   await pushApi({action:"subscribe", subscription:{ endpoint:j.endpoint, keys:j.keys }});
   track("push_enabled","nav");
+  // Immediately confirm it works with a welcome push ("Notifications are on…") — this
+  // replaces the old manual "Send a test" button and fires on every enable path
+  // (post-signup prompt + Settings toggle). Best-effort; never block the enable on it.
+  try{ await pushApi({action:"welcome"}); }catch(_){}
 }
 
 async function disablePush(){
@@ -4276,7 +4288,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
     setVideoLoading(false);
   };
 
-  const quick = ["No squat rack today","My knee is sore","I'm at the hotel gym","Can't do pull-ups","Bench alternative?","My program is..."];
+  const quick = ["What's my programmed workout for today?","Review my program and tell me what you think.","No squat rack today","My knee is sore","I'm at the hotel gym","I can't do pull-ups","Bench alternative?"];
 
   return (
     <div style={{height:"100dvh",display:"flex",flexDirection:"column",background:C.navy,maxWidth:600,margin:"0 auto"}}>
@@ -4378,8 +4390,12 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         <div ref={bottomRef}/>
       </div>
 
-      {/* Quick replies / Session check prompt */}
-      <div style={{padding:"0 16px 8px",display:"flex",gap:6,overflowX:"auto",flexShrink:0,alignItems:"center"}}>
+      {/* Quick replies / Session check prompt.
+          Session check = one centered row (Same workout / New session).
+          Quick suggestions = wrap up to ~2 rows tall, scroll down for the rest. */}
+      <div style={sessionCheckPending
+        ? {padding:"0 16px 8px",display:"flex",gap:6,overflowX:"auto",flexShrink:0,alignItems:"center"}
+        : {padding:"0 16px 8px",display:"flex",flexWrap:"wrap",gap:6,flexShrink:0,alignItems:"flex-start",maxHeight:76,overflowY:"auto"}}>
         {sessionCheckPending?(
           <>
             <span style={{color:C.muted,fontSize:12,flexShrink:0}}>↑</span>
@@ -4400,6 +4416,12 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
       </div>
 
       {/* Input area */}
+      {/* ⚠️ paddingBottom is a FLAT "8px" ON PURPOSE. Do NOT change it to
+          max(…, env(safe-area-inset-bottom)). That env() reserves the iPhone
+          home-indicator zone and renders as a dead navy band under the footer —
+          the "safety space" Will has had removed 3× now (47941e6). The textbook
+          iOS pattern is wrong for this app; leave it flat. Same rule for every
+          bottom bar / modal footer below. */}
       <div style={{padding:"8px 14px",paddingBottom:"8px",flexShrink:0,borderTop:`1px solid ${C.border}`,background:C.navy2}}>
         <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
           {/* Video upload button */}
@@ -4447,7 +4469,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             →
           </button>
         </div>
-        <div style={{color:C.muted,fontSize:10,marginTop:6,textAlign:"center"}}>Type naturally to log workouts · 🎬 upload a video for form review (MP4 works best)</div>
+        <div style={{color:C.muted,fontSize:10,marginTop:6,textAlign:"center"}}>Type naturally to log workouts, or use ⚡ Quick Log · 🎬 upload a video for form review (MP4 works best)</div>
       </div>
 
       {/* My Log Modal */}
@@ -5027,7 +5049,9 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
 
       </div>
 
-      {/* Sticky footer close button — sits above iPhone home bar / gesture area */}
+      {/* Sticky footer close button. ⚠️ paddingBottom stays FLAT — never
+          max(…, env(safe-area-inset-bottom)); that brings back the dead navy
+          band Will keeps having removed (47941e6). */}
       <div style={{padding:"10px 16px",paddingBottom:"10px",borderTop:`1px solid ${C.border}`,background:C.navy2,flexShrink:0}}>
         <button onClick={onClose} style={{width:"100%",background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"12px 14px",cursor:"pointer",fontSize:14,fontWeight:600}}>✕ Close</button>
       </div>
@@ -5154,6 +5178,7 @@ function EditWorkoutModal({session, onClose, setWorkoutHistory}) {
           ))}
           {err&&<div style={{color:"#ef4444",fontSize:12,marginBottom:10}}>{err}</div>}
         </div>
+        {/* ⚠️ Flat paddingBottom — never env(safe-area-inset-bottom) (47941e6). */}
         <div style={{padding:"12px 20px",paddingBottom:"12px",borderTop:`1px solid ${C.border}`,display:"flex",gap:10,flexShrink:0}}>
           <button onClick={onClose} style={{flex:1,background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"12px 14px",cursor:"pointer",fontSize:14,fontWeight:600}}>Cancel</button>
           <button onClick={save} disabled={saving} style={{flex:1,background:C.gold,border:"none",color:C.navy,borderRadius:8,padding:"12px 14px",cursor:saving?"default":"pointer",fontSize:14,fontWeight:700,opacity:saving?0.6:1}}>{saving?"Saving...":"Save changes"}</button>
@@ -5189,22 +5214,26 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
     : (athlete.age||null);
   const ageFactor = ageTierFactor(age);
 
-  // Build best estimated 1RM per exercise from workout history (uses every logged set,
-  // including variable weight/rep sets captured via set_details)
+  // Build best estimated 1RM per CANONICAL lift from workout history. resolveLift is
+  // the SINGLE grouping funnel (see grit.js taxonomy header): every tab keys off
+  // lift.id, so "deadlift" == "conventional deadlift", "deficit pull" == "deficit
+  // deadlift", the two sit-up spellings collapse, and junk ("lift") is dropped —
+  // and the Benchmarks/Strength/PR tabs can never bucket the same lift differently.
   const byEx = {};
   workoutHistory.forEach(w=>{
     const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
     (pd.exercises||[]).forEach(ex=>{
       if(!ex.name) return;
+      const lift = resolveLift(ex.name);
+      if(!lift.tracked) return;
       // Pass bodyweight (athlete.weight_lbs) so load-bearing bodyweight lifts (dips,
       // pull-ups) score a 1RM; every other bodyweight movement returns 0 and drops out.
       const e1rm = bestE1RMForExercise(ex, bodyweight);
       if(!e1rm) return;
-      const k=normalizeExName(ex.name);
       // A bodyweight lift's e1rm is already a lbs-equivalent, so label it "lbs".
       const unit = ex.unit==="bodyweight" ? "lbs" : (ex.unit||"lbs");
-      if(!byEx[k]) byEx[k]={key:k,name:displayForKey(k,ex.name),e1rm,unit};
-      else { byEx[k].name=displayForKey(k,cleanerName(byEx[k].name,ex.name)); if(e1rm>byEx[k].e1rm) byEx[k].e1rm=e1rm; }
+      if(!byEx[lift.id]) byEx[lift.id]={key:lift.id,name:lift.name,e1rm,unit,benchKey:lift.benchKey,bwLoaded:lift.bwLoaded};
+      else if(e1rm>byEx[lift.id].e1rm) byEx[lift.id].e1rm=e1rm;
     });
   });
 
@@ -5214,21 +5243,22 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   // PR beats a stale estimate. Seeds a benchmark even for a lift never logged in sets.
   // The `actual` flag (and PR badge) is set only when the actual is the number shown.
   manualRMs.forEach(m=>{
-    const k=normalizeExName(m.normalized_exercise||m.exercise);
+    const lift = resolveLift(m.normalized_exercise||m.exercise);
+    if(!lift.tracked) return;
     const lbs=toLbs(m.weight, m.unit);
-    if(!k || !(lbs>0)) return;
-    if(!byEx[k]) byEx[k]={key:k,name:displayForKey(k,m.exercise||k),e1rm:lbs,unit:"lbs",actual:true};
-    else if(lbs>=byEx[k].e1rm){ byEx[k].e1rm=lbs; byEx[k].actual=true; }
+    if(!(lbs>0)) return;
+    if(!byEx[lift.id]) byEx[lift.id]={key:lift.id,name:lift.name,e1rm:lbs,unit:"lbs",actual:true,benchKey:lift.benchKey,bwLoaded:lift.bwLoaded};
+    else if(lbs>=byEx[lift.id].e1rm){ byEx[lift.id].e1rm=lbs; byEx[lift.id].actual=true; }
   });
 
-  // Benchmark lifts the athlete has logged (or has an actual 1RM for)
-  const benchmarked = Object.entries(byEx).map(([k,ex])=>{
-    const benchKey=getBenchKey(k);
-    if(!benchKey) return null;
-    const threshRaw=BENCH_THRESHOLDS[genderKey]?.[benchKey];
+  // Benchmark lifts the athlete has logged (or has an actual 1RM for). benchKey is
+  // already resolved per canonical lift above, so no re-derivation here.
+  const benchmarked = Object.values(byEx).map(ex=>{
+    if(!ex.benchKey) return null;
+    const threshRaw=BENCH_THRESHOLDS[genderKey]?.[ex.benchKey];
     if(!threshRaw) return null;
     const thresh = scaledThresholds(threshRaw, bodyweight, genderKey, age);
-    return {key:k,name:ex.name,e1rm:ex.e1rm,benchKey,thresh,actual:!!ex.actual};
+    return {key:ex.key,name:ex.name,e1rm:ex.e1rm,benchKey:ex.benchKey,bwLoaded:ex.bwLoaded,thresh,actual:!!ex.actual};
   }).filter(Boolean);
 
   // Exactly ONE entry per bench key: keep the highest number; on a tie prefer the actual
@@ -5257,9 +5287,11 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
       const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
       (pd.exercises||[]).forEach(ex=>{
         if(!ex.name) return;
+        const lift = resolveLift(ex.name);
+        if(!lift.tracked) return;
         const e=bestE1RMForExercise(ex, bodyweight);
         if(!e) return;
-        const k=normalizeExName(ex.name);
+        const k=lift.id;
         if(!(k in best)){ best[k]=e; count++; }
         else if(e>best[k]+0.5){ best[k]=e; count++; }
       });
@@ -5267,23 +5299,27 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
     return count;
   })();
 
-  // Strength/running progress for other tabs
+  // Strength/running progress for other tabs. Entries are matched to a lift by the
+  // SAME canonical id (resolveLift), so an aliased spelling in history ("weighted
+  // pull-ups") still lands under its canonical lift ("Pull-Up").
   const exercises = Object.values(byEx).map(ex=>{
     const entries = workoutHistory.flatMap(w=>{
       const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
-      return (pd.exercises||[]).filter(e=>normalizeExName(e.name)===normalizeExName(ex.name)).map(e=>({date:new Date(w.created_at),e1rm:bestE1RMForExercise(e, bodyweight)})).filter(e=>e.e1rm>0);
+      return (pd.exercises||[]).filter(e=>e.name && resolveLift(e.name).id===ex.key).map(e=>({date:new Date(w.created_at),e1rm:bestE1RMForExercise(e, bodyweight)})).filter(e=>e.e1rm>0);
     }).sort((a,b)=>a.date-b.date);
     return {...ex,entries};
   }).sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.e1rm-a.e1rm).filter(ex=>matchesSearch(ex.name));
 
-  // PR tab — manual (actual) 1RM takes precedence over the estimated 1RM above
+  // PR tab — manual (actual) 1RM takes precedence over the estimated 1RM above.
   const prMap = {};
-  Object.entries(byEx).forEach(([k,ex])=>{ prMap[k]={key:k,name:ex.name,unit:ex.unit,estimated:ex.e1rm,manual:null}; });
+  Object.entries(byEx).forEach(([k,ex])=>{ prMap[k]={key:k,name:ex.name,unit:ex.unit,estimated:ex.e1rm,manual:null,bwLoaded:ex.bwLoaded}; });
   manualRMs.forEach(m=>{
-    // Re-normalize the stored key so manual 1RMs saved before a normalizer update
-    // (e.g. under "bench" or a plural) still land on the current merged exercise key.
-    const k=normalizeExName(m.normalized_exercise);
-    if(!prMap[k]) prMap[k]={key:k,name:m.exercise,unit:m.unit,estimated:0,manual:null};
+    // Resolve to the current canonical id so manual 1RMs saved before a taxonomy
+    // update (e.g. under "bench" or "weighted sit up") still land on the merged lift.
+    const lift = resolveLift(m.normalized_exercise||m.exercise);
+    if(!lift.tracked) return;
+    const k=lift.id;
+    if(!prMap[k]) prMap[k]={key:k,name:lift.name,unit:m.unit,estimated:0,manual:null,bwLoaded:lift.bwLoaded};
     prMap[k].manual=m;
   });
   const prList = Object.values(prMap)
@@ -5406,9 +5442,8 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
               const bounds = [0, ...b.thresh, maxRatio];       // 9 bounds → 8 segments
               const isTop = tierIdx>=TIER_NAMES.length-1;
               const toNext = isTop ? 0 : Math.max(0, Math.round(b.thresh[tierIdx]*bodyweight - b.e1rm));
-              const dispName = BENCH_DISPLAY[b.benchKey] || b.name;
-              const isBW = BENCH_IS_BW[b.benchKey];               // pull-ups / dips → show bodyweight + added
-              const added = Math.round(b.e1rm - bodyweight);
+              const dispName = b.name;                           // canonical (resolveLift)
+              const isBW = b.bwLoaded;                            // pull-ups / dips / chin-ups / muscle-ups → bodyweight + added
               return (
                 <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:12}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
@@ -5418,7 +5453,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                     </div>
                     <div style={{textAlign:"right"}}>
                       <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:TIER_COLORS[tierIdx],lineHeight:1}}>{Math.round(b.e1rm)}<span style={{fontSize:11,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span></div>
-                      <div style={{color:C.muted,fontSize:10}}>{isBW ? (added>0 ? `${Math.round(bodyweight)} + ${added} lbs` : `${Math.round(bodyweight)} lbs bodyweight`) : `${ratio.toFixed(2)}× bodyweight`}</div>
+                      <div style={{color:C.muted,fontSize:10}}>{isBW ? bwLoadLabel(b.e1rm, bodyweight) : `${ratio.toFixed(2)}× bodyweight`}</div>
                     </div>
                   </div>
                   {/* 8-segment tier bar */}
@@ -5462,6 +5497,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                   <div style={{textAlign:"right"}}>
                     <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>BEST EST. 1RM</div>
                     <div style={{fontFamily:"'Bebas Neue'",fontSize:28,color:C.gold,lineHeight:1}}>{Math.round(ex.e1rm)}<span style={{fontSize:11,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>{ex.unit==="kg"?"kg":"lbs"}</span></div>
+                    {ex.bwLoaded&&bwLoadLabel(ex.e1rm,bodyweight)&&<div style={{color:C.muted,fontSize:10,marginTop:3}}>{bwLoadLabel(ex.e1rm,bodyweight)}</div>}
                   </div>
                 </div>
                 {ex.entries.length>=2?(
@@ -5517,6 +5553,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                   </div>
                   <div style={{textAlign:"right"}}>
                     <div style={{fontFamily:"'Bebas Neue'",fontSize:28,color:C.gold,lineHeight:1}}>{Math.round(row.active)}<span style={{fontSize:11,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>{row.unit==="kg"?"kg":"lbs"}</span></div>
+                    {row.bwLoaded&&bwLoadLabel(row.active,bodyweight)&&<div style={{color:C.muted,fontSize:10,marginTop:2}}>{bwLoadLabel(row.active,bodyweight)}</div>}
                     {row.manual&&row.estimated>0&&<div style={{color:C.muted,fontSize:10,marginTop:2}}>est. {Math.round(row.estimated)}lbs</div>}
                   </div>
                 </div>
@@ -5587,7 +5624,9 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
         </div>
       )}
 
-      {/* Sticky footer close button — sits above iPhone home bar / gesture area */}
+      {/* Sticky footer close button. ⚠️ paddingBottom stays FLAT — never
+          max(…, env(safe-area-inset-bottom)); that brings back the dead navy
+          band Will keeps having removed (47941e6). */}
       <div style={{padding:"10px 16px",paddingBottom:"10px",borderTop:`1px solid ${C.border}`,background:C.navy2,flexShrink:0}}>
         <button onClick={onClose} style={{width:"100%",background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"12px 14px",cursor:"pointer",fontSize:14,fontWeight:600}}>✕ Close</button>
       </div>
@@ -5751,6 +5790,28 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
   const [confirmDeleteAccount,setConfirmDeleteAccount] = useState(false); // delete-account confirm dialog
   const [deleteBusy,setDeleteBusy] = useState(false);
   const [deleteMsg,setDeleteMsg] = useState("");
+  const [showPlan,setShowPlan] = useState(false);     // "Your Plan" collapsible drawer
+
+  // Auto-save a single-field patch as the user changes it (weight unit buttons,
+  // coach fields on blur) — replaces the old bulk "Save Changes" button. Optimistic:
+  // shows a brief "Saved." and rolls the parent state forward.
+  const persistField = async (patch) => {
+    try {
+      await sbUpdate("athletes",athlete.id,patch);
+      onCoachUpdate(patch);
+      setSavedMsg("Saved."); setTimeout(()=>setSavedMsg(""),2000);
+    } catch(e){ setSavedMsg("Couldn't save. Try again."); setTimeout(()=>setSavedMsg(""),3000); }
+  };
+  const saveCoachEmail = () => {
+    const v = coachEmail.trim();
+    if(v && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)){ setSavedMsg("Enter a valid email address."); return; }
+    if((v||null)!==(athlete.coach_email||null)) persistField({coach_email:v||null});
+  };
+  const saveCoachName = () => {
+    const v = coachName.trim();
+    if((v||null)!==(athlete.coach_name||null)) persistField({coach_name:v||null});
+  };
+  const setUnit = (u) => { setWeightUnit(u); if(u!==(athlete.weight_unit||"lbs")) persistField({weight_unit:u}); };
 
   // ── Proof Feed schedule (Phase 6) ──────────────────────────────────────────
   const [proofEnabled,setProofEnabled] = useState(athlete.proof_enabled!==false);
@@ -5794,17 +5855,6 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
         ? "Notifications are blocked for this app in your device settings. Turn them on there first."
         : "Couldn't update notifications. Try again.");
     }
-    setPushBusy(false);
-    setTimeout(()=>setPushMsg(""),5000);
-  };
-
-  const sendTestPush = async () => {
-    if(pushBusy) return;
-    setPushBusy(true); setPushMsg("");
-    try{
-      const r = await pushApi({action:"test"});
-      setPushMsg(r.sent>0?"Test sent. Check your notifications.":"No devices registered yet. Toggle notifications off and on.");
-    }catch(e){ setPushMsg("Couldn't send the test. Try again."); }
     setPushBusy(false);
     setTimeout(()=>setPushMsg(""),5000);
   };
@@ -5914,23 +5964,6 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
     setTimeout(()=>setUpgradeMsg(""),5000);
   };
 
-  const save = async () => {
-    if(saving) return;
-    if(coachEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(coachEmail)){
-      setSavedMsg("Enter a valid email address."); return;
-    }
-    setSaving(true); setSavedMsg("");
-    try {
-      await sbUpdate("athletes",athlete.id,{coach_name:coachName.trim()||null, coach_email:coachEmail.trim()||null, weight_unit:weightUnit});
-      onCoachUpdate({coach_name:coachName.trim()||null, coach_email:coachEmail.trim()||null, weight_unit:weightUnit});
-      setSavedMsg("Saved.");
-    } catch(e){
-      setSavedMsg("Couldn't save. Try again.");
-    }
-    setSaving(false);
-    setTimeout(()=>setSavedMsg(""),3000);
-  };
-
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:400,padding:24,overflowY:"auto"}}>
       <style>{GS}</style>
@@ -5983,7 +6016,56 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
           </div>
         </div>
 
-        {/* Push notifications (hidden entirely where the platform can't do push) */}
+        {/* Weight unit preference */}
+        <div style={{marginBottom:20}}>
+          <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>WEIGHT UNIT</div>
+          <div style={{display:"flex",gap:0,background:C.navy3,borderRadius:10,padding:4,border:`1px solid ${C.border}`}}>
+            {["lbs","kg"].map(u=>(
+              <button key={u} onClick={()=>setUnit(u)}
+                style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",cursor:"pointer",fontSize:13,fontWeight:700,letterSpacing:1,fontFamily:"'Bebas Neue'",background:weightUnit===u?C.gold:"transparent",color:weightUnit===u?"#000":C.muted,transition:"all 0.15s"}}>
+                {u.toUpperCase()}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Coach section — auto-saves on blur (no bulk Save button) */}
+        <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:6}}>MY COACH</div>
+        <div style={{color:C.muted2,fontSize:12,marginBottom:16,lineHeight:1.5}}>
+          {(athlete.tier||"free")==="free"
+            ? "Your coach will receive a welcome email. Upgrade to Pro for weekly progress reports."
+            : "Your coach receives weekly progress reports every Monday."}
+        </div>
+
+        <div style={{marginBottom:14}}>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH NAME</label>
+          <input
+            value={coachName}
+            onChange={e=>setCoachName(e.target.value)}
+            onBlur={saveCoachName}
+            placeholder="Coach's full name"
+            style={inp()}/>
+        </div>
+
+        <div style={{marginBottom:14}}>
+          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH EMAIL</label>
+          <input
+            type="email"
+            value={coachEmail}
+            onChange={e=>setCoachEmail(e.target.value)}
+            onBlur={saveCoachEmail}
+            placeholder="coach@example.com"
+            style={inp()}/>
+        </div>
+
+        {savedMsg&&(
+          <div style={{color:savedMsg==="Saved."?C.green:C.red,fontSize:12,textAlign:"center",marginBottom:16,fontWeight:600}}>
+            {savedMsg}
+          </div>
+        )}
+
+        {/* Push notifications (hidden entirely where the platform can't do push).
+            Turning it on auto-fires a welcome push (see enablePush) — no manual test. */}
         {pushOk&&(
           <div style={{marginBottom:16}}>
             <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>NOTIFICATIONS</div>
@@ -5996,17 +6078,33 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
               {pushDenied&&!pushOn&&(
                 <div style={{color:C.muted2,fontSize:11,marginTop:8,lineHeight:1.5}}>Notifications are blocked for this app in your device settings. Turn them on there first.</div>
               )}
-              {pushOn&&(
-                <button onClick={sendTestPush} disabled={pushBusy} style={{marginTop:10,width:"100%",background:C.navy,border:`1px solid ${C.border}`,color:C.text,borderRadius:8,padding:"9px",cursor:pushBusy?"default":"pointer",fontSize:13,fontWeight:600}}>{pushBusy?"Working...":"Send a test"}</button>
-              )}
-              {pushMsg&&<div style={{color:pushMsg.startsWith("You're set")||pushMsg.startsWith("Test sent")?C.green:C.muted2,fontSize:11,marginTop:8,textAlign:"center",lineHeight:1.4}}>{pushMsg}</div>}
+              {pushMsg&&<div style={{color:pushMsg.startsWith("You're set")?C.green:C.muted2,fontSize:11,marginTop:8,textAlign:"center",lineHeight:1.4}}>{pushMsg}</div>}
             </div>
           </div>
         )}
 
-        {/* Plan / subscription */}
+        {/* Install app — the persistent entry point for users who dismissed the
+            post-signup prompt. Hidden once the app is already on the home screen. */}
+        {onInstallApp&&!isStandalone()&&(
+          <button onClick={onInstallApp} style={btn("transparent",C.gold,{border:`1px solid ${C.gold}55`,fontSize:13,padding:"10px",letterSpacing:1,marginBottom:10})}>
+            Install the App on Your Phone
+          </button>
+        )}
+
+        {/* ── YOUR PLAN — collapsible drawer (plan + billing + gift codes + cancel) ──
+            Tucked away near the bottom so the settings list stays uncluttered. */}
         <div style={{marginBottom:16}}>
-          <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>YOUR PLAN</div>
+          <button onClick={()=>setShowPlan(s=>!s)}
+            style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"11px 14px",cursor:"pointer"}}>
+            <span style={{color:C.muted,fontSize:11,letterSpacing:1,fontWeight:700}}>YOUR PLAN</span>
+            <span style={{display:"flex",alignItems:"center",gap:8}}>
+              <span style={{color:C.text,fontSize:12,fontWeight:700,letterSpacing:1}}>{currentTier==="school"?"SCHOOL":currentTier.toUpperCase()}</span>
+              <span style={{color:C.muted,fontSize:11,transform:showPlan?"rotate(180deg)":"none",transition:"transform 0.15s",display:"inline-block"}}>▾</span>
+            </span>
+          </button>
+
+          {showPlan&&(
+          <div style={{marginTop:12}}>
 
           {currentTier==="school" ? (
             <div style={{background:`${C.blue}15`,border:`1px solid ${C.blue}55`,borderRadius:10,padding:"12px 14px"}}>
@@ -6116,59 +6214,8 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
           )}
           </>
           )}
-        </div>
 
-        {/* Weight unit preference */}
-        <div style={{marginBottom:20}}>
-          <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>WEIGHT UNIT</div>
-          <div style={{display:"flex",gap:0,background:C.navy3,borderRadius:10,padding:4,border:`1px solid ${C.border}`}}>
-            {["lbs","kg"].map(u=>(
-              <button key={u} onClick={()=>setWeightUnit(u)}
-                style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",cursor:"pointer",fontSize:13,fontWeight:700,letterSpacing:1,fontFamily:"'Bebas Neue'",background:weightUnit===u?C.gold:"transparent",color:weightUnit===u?"#000":C.muted,transition:"all 0.15s"}}>
-                {u.toUpperCase()}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Coach section */}
-        <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:6}}>MY COACH</div>
-        <div style={{color:C.muted2,fontSize:12,marginBottom:16,lineHeight:1.5}}>
-          {(athlete.tier||"free")==="free"
-            ? "Your coach will receive a welcome email. Upgrade to Pro for weekly progress reports."
-            : "Your coach receives weekly progress reports every Monday."}
-        </div>
-
-        <div style={{marginBottom:14}}>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH NAME</label>
-          <input
-            value={coachName}
-            onChange={e=>setCoachName(e.target.value)}
-            placeholder="Coach's full name"
-            style={inp()}/>
-        </div>
-
-        <div style={{marginBottom:20}}>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH EMAIL</label>
-          <input
-            type="email"
-            value={coachEmail}
-            onChange={e=>setCoachEmail(e.target.value)}
-            placeholder="coach@example.com"
-            style={inp()}/>
-        </div>
-
-        {savedMsg&&(
-          <div style={{color:savedMsg==="Saved."?C.green:C.red,fontSize:12,textAlign:"center",marginBottom:12,fontWeight:600}}>
-            {savedMsg}
-          </div>
-        )}
-
-        <button onClick={save} disabled={saving} style={btn(C.gold,"#000",{opacity:saving?0.7:1,cursor:saving?"not-allowed":"pointer",marginBottom:10})}>
-          {saving?"Saving...":"Save Changes →"}
-        </button>
-
-        {/* Gift codes — single-use friend codes (on first payment) OR a reusable founder code */}
+          {/* Gift codes — single-use friend codes (on first payment) OR a reusable founder code */}
         {(currentTier==="pro"||currentTier==="elite")&&(()=>{
           const codes = Array.isArray(athlete.gift_codes)?athlete.gift_codes:[];
           const hasFounder = codes.some(g=>g.unlimited);
@@ -6246,13 +6293,9 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
           </div>
         )}
 
-        {/* Install app — the persistent entry point for users who dismissed the
-            post-signup prompt. Hidden once the app is already on the home screen. */}
-        {onInstallApp&&!isStandalone()&&(
-          <button onClick={onInstallApp} style={btn("transparent",C.gold,{border:`1px solid ${C.gold}55`,fontSize:13,padding:"10px",letterSpacing:1,marginBottom:10})}>
-            Install the App on Your Phone
-          </button>
-        )}
+          </div>
+          )}
+        </div>
 
         {onLogout&&(
           <button onClick={onLogout} style={btn("transparent",C.muted,{border:`1px solid ${C.border}`,fontSize:13,padding:"10px",letterSpacing:1})}>

@@ -101,6 +101,81 @@ const CANON_DISPLAY = { "back squat": "Back Squat" };
 export const displayForKey = (key, fallback) => CANON_DISPLAY[key] || fallback;
 export const cleanerName = (a, b) => (!a ? (b || "") : !b ? a : (b.length < a.length ? b : a));
 
+// ─── CANONICAL LIFT TAXONOMY ──────────────────────────────────────────────────
+// The three progress surfaces (Benchmarks, Strength, PRs) and the server Proof Feed
+// USED to disagree about what counts as "the same lift": Benchmarks grouped by
+// getBenchKey (~25 canonical lifts) while Strength/PRs grouped by the raw normalized
+// name. So "deadlift" and "conventional deadlift" merged in one tab but split in the
+// others, weighted sit-ups showed up twice, and a bare "lift" charted as a mystery
+// bar. resolveLift() is the single funnel every surface now goes through, so they
+// can never bucket a lift differently again.
+//
+//   resolveLift(rawName) -> { id, name, benchKey, bwLoaded, tracked }
+//     id       — canonical grouping key. GROUP BY THIS everywhere.
+//     name     — canonical display name.
+//     benchKey — BENCH_THRESHOLDS key, or null if the lift isn't ranked.
+//     bwLoaded — load-bearing bodyweight lift (pull-up/dip/chin-up/muscle-up): its
+//                number is a "bodyweight + added" total, not a bare barbell weight.
+//     tracked  — false for junk / un-trackable names ("lift", "workout", a bare
+//                generic token) → dropped from every progress list.
+//
+// HOW IT STAYS CONSISTENT: exact synonyms live in LIFT_ALIASES (one line each);
+// everything else falls through to normalizeExName. Add a new alias and it fixes all
+// three tabs at once — that's the whole point. Merge only TRUE synonyms here; real
+// variants (deficit deadlift, RDL, trap-bar, sumo) stay their own tracked lift.
+
+// Vague / non-lift names that should never appear as a tracked lift or a chart.
+const LIFT_JUNK = new Set([
+  "lift", "lifts", "exercise", "exercises", "workout", "workouts", "movement",
+  "circuit", "wod", "amrap", "emom", "metcon", "conditioning", "cardio",
+  "accessory", "accessories", "warmup", "warm up", "cooldown", "cool down",
+  "stretch", "stretching", "mobility", "superset", "complex", "finisher",
+  "misc", "other", "training", "session", "set", "sets", "rep", "reps",
+]);
+
+// Exact-synonym → canonical id. Keys and values are BOTH normalizeExName output
+// (space form). A value that equals its key is a no-op; listed only for clarity.
+const LIFT_ALIASES = {
+  // Deadlift family — "conventional/standard/regular" all mean the default pull.
+  "conventional deadlift": "deadlift",
+  "standard deadlift": "deadlift",
+  "regular deadlift": "deadlift",
+  "straight bar deadlift": "deadlift",
+  // Deficit deadlift is its OWN lift — but "deficit pull" is just another name for it.
+  "deficit pull": "deficit deadlift",
+  // Sit-ups — every spelling collapses to one.
+  "situp": "sit-up",
+  "sit up": "sit-up",
+  "weighted situp": "weighted sit-up",
+  "weighted sit up": "weighted sit-up",
+  // Load-bearing bodyweight lifts — the added/strict qualifier is a modifier, not a
+  // separate lift, so a plain and a weighted pull-up are the SAME tracked lift.
+  "weighted pull-up": "pull-up",
+  "strict pull-up": "pull-up",
+  "weighted chin-up": "chin-up",
+  "strict chin-up": "chin-up",
+  "weighted dip": "dip",
+  "chest dip": "dip",
+  "muscle up": "muscle-up",
+  "weighted muscle up": "muscle-up",
+  "weighted muscle-up": "muscle-up",
+};
+
+// Load-bearing bodyweight lifts (by canonical id) — their number is a bodyweight +
+// added total. Membership by id, NOT substring, so "scapula pull-up" stays out.
+export const BW_LOADED_IDS = new Set(["pull-up", "chin-up", "dip", "muscle-up"]);
+
+// Canonical display names for alias TARGETS + lifts whose observed spelling we don't
+// want to surface. Anything not here falls back to the cleaner observed name.
+const LIFT_CANON = {
+  "deadlift": "Deadlift", "deficit deadlift": "Deficit Deadlift",
+  "romanian deadlift": "Romanian Deadlift", "trap bar deadlift": "Trap Bar Deadlift",
+  "sumo deadlift": "Sumo Deadlift", "back squat": "Back Squat", "front squat": "Front Squat",
+  "pull-up": "Pull-Up", "chin-up": "Chin-Up", "dip": "Dip", "muscle-up": "Muscle-Up",
+  "sit-up": "Sit-Up", "weighted sit-up": "Weighted Sit-Up",
+};
+export const displayForLift = (id, fallback) => LIFT_CANON[id] || CANON_DISPLAY[id] || fallback || id;
+
 const BIG_LIFT_RE = /\b(snatch|clean and jerk|clean|jerk|squat|deadlift|bench press|overhead press|dips?|pull[ -]?ups?|chin[ -]?ups?|rows?)\b/;
 export const liftTier = (key) => (BIG_LIFT_RE.test(key || "") ? 0 : 1);
 
@@ -226,6 +301,9 @@ export const getBenchKey = (normalized) => {
   if (n.includes("overhead squat")) return null;
   if (/(split squat|bulgarian|goblet|pistol|hack squat|sissy|single[ -]?leg)/.test(n)) return null;
   if (/(shrug|carry|farmer|march|\bwalk)/.test(n)) return null;
+  // Reduced-ROM / paused deadlift variants are their OWN lift — never let them rank
+  // against the full competition deadlift standard (they'd deflate the real rank).
+  if (/(deficit|block|rack pull|rack deadlift|pin pull|pin deadlift|halting|segment)/.test(n)) return null;
   if (n.includes("clean and jerk") || n.includes("clean & jerk")) return "clean and jerk";
   if (n.includes("power clean")) return "power clean";
   if (n.includes("snatch")) return "snatch";
@@ -245,10 +323,42 @@ export const getBenchKey = (normalized) => {
   if (n.includes("bench press") || n === "bench" || n.includes("barbell bench")) return "bench press";
   if (n.includes("overhead press") || n.includes("ohp") || n === "press" || n.includes("military press") || n.includes("strict press")) return "overhead press";
   if (/(barbell|\bbb\b|ez[ -]?bar)[ -]?curl/.test(n)) return "barbell curl";
-  if (/\b(pull[ -]?up|chin[ -]?up)\b/.test(n)) return "weighted pull-up";
-  if (/\bdips?\b/.test(n)) return "weighted dip";
+  // Pull-ups/dips rank on the bodyweight standard — but only the real movement.
+  // Machine, scapular, and assisted variants aren't the same lift and would corrupt
+  // the rank, so they fall through to null (still tracked, just not benchmarked).
+  if (/\b(pull[ -]?up|chin[ -]?up)\b/.test(n)) return /(scap|machine|assist)/.test(n) ? null : "weighted pull-up";
+  if (/\bdips?\b/.test(n)) return /(machine|assist)/.test(n) ? null : "weighted dip";
   if (n.includes("barbell row") || n.includes("bent over row") || n.includes("bent-over row") || n.includes("pendlay")) return "barbell row";
   return null;
+};
+
+// ── resolveLift — the one funnel every progress surface goes through ────────────
+// normalizeExName → alias-collapse → canonical descriptor. See the taxonomy header
+// above for the contract. `observedName` (optional) is the raw name as logged, used
+// only as the display fallback for lifts with no canonical entry.
+export const resolveLift = (rawName, observedName) => {
+  const norm = normalizeExName(rawName);
+  const isJunk = !norm || LIFT_JUNK.has(norm) || norm.length < 2;
+  if (isJunk) return { id: norm, name: observedName || rawName || "", benchKey: null, bwLoaded: false, tracked: false };
+  const id = LIFT_ALIASES[norm] || norm;
+  return {
+    id,
+    name: displayForLift(id, observedName || rawName),
+    benchKey: getBenchKey(id),
+    bwLoaded: BW_LOADED_IDS.has(id),
+    tracked: true,
+  };
+};
+
+// Shared "bodyweight + added" sub-label for load-bearing bodyweight lifts, used
+// identically in the Benchmarks, Strength, and PR tabs. e1rm is a lbs-equivalent
+// total (bodyweight + added). Returns null when we can't split it (no bodyweight).
+export const bwLoadLabel = (e1rm, bodyweightLbs) => {
+  if (!bodyweightLbs || bodyweightLbs <= 0) return null;
+  const added = Math.round(e1rm - bodyweightLbs);
+  return added > 0
+    ? `${Math.round(bodyweightLbs)} + ${added} lbs (bodyweight + added)`
+    : `${Math.round(bodyweightLbs)} lbs (bodyweight)`;
 };
 
 // ─── PURE SNAPSHOT COMPUTATION ─────────────────────────────────────────────────
@@ -272,28 +382,31 @@ export function computeGritSnapshot(workouts, manualRMs, opts = {}) {
     return w.parsed_data || {};
   };
 
-  // Best e1RM per normalized exercise from workout history.
+  // Best e1RM per CANONICAL lift from workout history (resolveLift is the single
+  // grouping funnel — see the taxonomy header — so this matches the app tabs exactly).
   const byEx = {};
   (workouts || []).forEach((w) => {
     const pd = getPD(w);
     (pd.exercises || []).forEach((ex) => {
       if (!ex.name) return;
+      const lift = resolveLift(ex.name);
+      if (!lift.tracked) return;
       const e1rm = bestE1RMForExercise(ex, bodyweight);
       if (!e1rm) return;
-      const k = normalizeExName(ex.name);
       const unit = ex.unit === "bodyweight" ? "lbs" : (ex.unit || "lbs");
-      if (!byEx[k]) byEx[k] = { key: k, name: displayForKey(k, ex.name), e1rm, unit };
-      else { byEx[k].name = displayForKey(k, cleanerName(byEx[k].name, ex.name)); if (e1rm > byEx[k].e1rm) byEx[k].e1rm = e1rm; }
+      if (!byEx[lift.id]) byEx[lift.id] = { key: lift.id, name: lift.name, e1rm, unit };
+      else if (e1rm > byEx[lift.id].e1rm) byEx[lift.id].e1rm = e1rm;
     });
   });
 
   // Overlay actual 1RMs (manual_one_rms) — higher of estimate vs actual wins.
   (manualRMs || []).forEach((m) => {
-    const k = normalizeExName(m.normalized_exercise || m.exercise);
+    const lift = resolveLift(m.normalized_exercise || m.exercise);
+    if (!lift.tracked) return;
     const lbs = toLbs(m.weight, m.unit);
-    if (!k || !(lbs > 0)) return;
-    if (!byEx[k]) byEx[k] = { key: k, name: displayForKey(k, m.exercise || k), e1rm: lbs, unit: "lbs", actual: true };
-    else if (lbs >= byEx[k].e1rm) { byEx[k].e1rm = lbs; byEx[k].actual = true; }
+    if (!(lbs > 0)) return;
+    if (!byEx[lift.id]) byEx[lift.id] = { key: lift.id, name: lift.name, e1rm: lbs, unit: "lbs", actual: true };
+    else if (lbs >= byEx[lift.id].e1rm) { byEx[lift.id].e1rm = lbs; byEx[lift.id].actual = true; }
   });
 
   // Benchmark lifts the athlete has logged (or has an actual 1RM for).
@@ -326,9 +439,11 @@ export function computeGritSnapshot(workouts, manualRMs, opts = {}) {
       const pd = getPD(w);
       (pd.exercises || []).forEach((ex) => {
         if (!ex.name) return;
+        const lift = resolveLift(ex.name);
+        if (!lift.tracked) return;
         const e = bestE1RMForExercise(ex, bodyweight);
         if (!e) return;
-        const k = normalizeExName(ex.name);
+        const k = lift.id;
         if (!(k in best)) { best[k] = e; prsHit++; }
         else if (e > best[k] + 0.5) { best[k] = e; prsHit++; }
       });

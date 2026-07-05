@@ -229,11 +229,13 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
-    if (body.action === "test") {
+    // "welcome" fires automatically the moment an athlete turns notifications on
+    // (client enablePush); "test" is the legacy manual variant. Same payload.
+    if (body.action === "test" || body.action === "welcome") {
       ensureVapid();
       const rows = await sbSelect("push_subscriptions", `?athlete_id=eq.${enc(caller.id)}&select=*`);
       if (rows.length === 0) return res.status(200).json({ sent: 0, pruned: 0 });
-      const payload = pushPayload({ title: "Coach Joe", body: "Notifications are on. I'll keep you posted.", url: "/", type: "test" });
+      const payload = pushPayload({ title: "Coach Joe", body: "Notifications are on. I'll keep you posted.", url: "/", type: body.action });
       let sent = 0;
       let pruned = 0;
       for (const sub of rows) {

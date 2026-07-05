@@ -15,9 +15,10 @@ test("upgrade payment step renders, and a blocked Stripe.js shows the failure st
 
   await loginAsAthlete(page, athlete);
 
-  // Settings -> pick PRO -> confirm with PIN -> Subscribe.
+  // Settings -> open the "Your Plan" drawer -> pick PRO -> confirm with PIN -> Subscribe.
   await page.getByTitle("Settings").click();
   await expect(page.getByText("SETTINGS", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /YOUR PLAN/ }).click();
   await page.getByText("PRO", { exact: true }).click();
   await page.getByPlaceholder("Enter PIN to confirm").fill("1234");
   await page.getByRole("button", { name: "Subscribe to PRO →" }).click();
