@@ -1820,7 +1820,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
     const NONE = "[[NONE]]";
     const soFar = newAnswers.map(a=>`Q: ${a.q}\nA: ${a.a}`).join("\n");
     const react = async () => {
-      const base = `You are Coach Joe Thomas running an athlete's ${isMonthly?"monthly":"weekly"} check-in — a real strength coach texting them back. Direct, specific, warm, no fluff, no lists, no emoji spam. The athlete just answered your question. First decide whether their answer actually warrants a genuine response: a real detail, a concern, effort, or something worth reacting to warrants one; a thin/low-effort/empty reply ("idk", "nothing", "fine", "n/a", a shrug) does NOT — don't force it.`;
+      const base = `You are Coach Joe Thomas running an athlete's ${isMonthly?"monthly":"weekly"} check-in — a real strength coach texting them back. Direct, specific, warm, no fluff, no lists, no emoji spam. The athlete just answered your question. First decide whether their answer actually warrants a genuine response: a real detail, a concern, effort, or something worth reacting to warrants one; a thin/low-effort/empty reply ("idk", "nothing", "fine", "n/a", a shrug) does NOT — don't force it. BODYWEIGHT RULE: if their answer is a change in bodyweight (up or down), do NOT judge it — not "small bump, nothing to worry about", not "good", not "watch that". The app has no nutrition/diet context yet, so any verdict is guesswork and can undercut an athlete who's intentionally bulking or cutting. Just acknowledge it's logged/noted and move on to the next thing. INJURY RULE: if you reference a protective program change, keep it PROPORTIONATE — the smallest change that protects the area, and never so drastic it silently abandons the athlete's stated goal; if babying it truly conflicts with the goal, say that plainly rather than pretending both are fine.`;
       const system = hasNext
         ? `${base} If it warrants a response: reply in 2-4 sentences that (1) react to what they actually said, referencing a real detail, and (2) then lead into the next thing you want to know: "${nextQ.text}" — keep that question's intent but phrase it as a natural follow-up. If it does NOT warrant a response: reply with ONLY the next question, phrased naturally ("${nextQ.text}"), no forced reaction. Ask only that one question either way. Talk like a text message.`
         : `${base} This is the last question, so do NOT ask anything new. If it warrants a response: reply in 1-3 sentences reacting to what they said, in your voice, closing the loop. If it does NOT warrant a response: reply with EXACTLY "${NONE}" and nothing else. Talk like a text message.`;
@@ -1889,7 +1889,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
         // Ask for the change AND a plain-spoken explanation of what's changing and
         // why, so the athlete approves knowing the specifics — not a blind yes.
         const raw = await askClaude(
-          `You are Coach Joe Thomas. Propose a small, safe injury-protective adjustment to this athlete's program based on their check-in. Respond in EXACTLY this format and nothing else:\nSUMMARY: <1-2 short sentences naming exactly what you're changing, plain-spoken, second person ("your")>\nWHY: <1 sentence tying it to what they told you in the check-in>\nPROGRAM:\n<the FULL updated program text — preserve structure/format, change only what's needed>`,
+          `You are Coach Joe Thomas. Propose the SMALLEST safe injury-protective adjustment to this athlete's program based on their check-in — proportionate to the pain, not drastic. Keep their stated goal intact wherever possible; any exercise swap must replace a SPECIFIC slot (name the day and what it replaces), never a floating add-on. If protecting the area genuinely conflicts with the goal timeline, say so honestly in WHY rather than pretending both are fine. Respond in EXACTLY this format and nothing else:\nSUMMARY: <1-2 short sentences naming exactly what you're changing and where it slots in, plain-spoken, second person ("your")>\nWHY: <1 sentence tying it to what they told you in the check-in>\nPROGRAM:\n<the FULL updated program text — preserve structure/format, change only what's needed>`,
           `Current program:\n${athlete.program_text}\n\nCheck-in:\n${qaText}`,
           1600, [], "claude-sonnet-5", "program_generate"
         );
@@ -2088,7 +2088,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
 
         {phase==="done"&&!loading&&(
           <div style={{textAlign:"center",marginTop:8}}>
-            <div style={{color:C.muted,fontSize:12,marginBottom:10}}>✓ Check-in complete for this report{alreadyDone?" — you've already done this one.":"."}</div>
+            <div style={{color:C.muted,fontSize:12,marginBottom:10}}>✓ Check-in complete for this report.</div>
             <button onClick={onClose} style={{background:"transparent",color:C.gold,border:`1px solid ${C.gold}`,borderRadius:10,padding:"11px 28px",cursor:"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>Done ✓</button>
           </div>
         )}

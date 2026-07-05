@@ -470,13 +470,15 @@ export function buildQuestionBank(brief, athlete, opts = {}) {
   if (gapLifts.length) {
     q.push({ id: "volume", kind: "context", deeper: false, meta: { lifts: gapLifts }, text: `Those light set counts on ${gapLifts.join(" and ")} — intentional recovery, or short on time/gas?` });
   }
-  // 5. recovery
+  // 5. goal check — ALWAYS a top (non-deeper) question so it's never buried behind
+  // "Go deeper" where athletes skip it. The goal is the spine of the check-in.
+  const goal = brief.goals[0]?.goal;
+  q.push({ id: "goal", kind: "goal", deeper: false, meta: { goal: goal || null }, text: goal ? `Still chasing "${goal}", or has the target shifted?` : `What's the main thing you're chasing right now?` });
+  // 6. recovery
   q.push({ id: "recovery", kind: "context", deeper: false, text: `Recovery this week — dialed, flat, or running on fumes?` });
 
   // ── go deeper ──
   q.push({ id: "niggles", kind: "context", deeper: true, text: `Low back, knees, anything nagging — managing it, or is it behind you?` });
-  const goal = brief.goals[0]?.goal;
-  q.push({ id: "goal", kind: "goal", deeper: true, meta: { goal: goal || null }, text: goal ? `Still chasing "${goal}", or has the target shifted?` : `What's the main thing you're chasing right now?` });
   if (athlete.height_finalized === false) {
     q.push({ id: "height", kind: "height", deeper: true, text: `Any change in height since we last checked?` });
   } else {
@@ -539,16 +541,18 @@ export async function generateWeekly(athlete, brief, deps) {
   const system = `${COACH_VOICE}
 You are writing this week's Proof Feed digest. Return ONLY JSON with these keys (string or null — null when there's nothing real to say):
 {"week_vs_week":..,"volume_headline":..,"program_load":..,"prs_progress":..,"rank_movement":..,"injury_plan":..,"injury_focus":..,"injury_change":..,"goal_progress":..,"focus_next_week":..}
-- week_vs_week: punchy — lifts that moved, est-1RM deltas, block context. Weave in the raw set-volume trend (VOLUME TREND note in the brief) if it's notable — more or fewer sets logged than last week is real signal even for athletes with no structured program.
+- week_vs_week: punchy — lifts that moved, est-1RM deltas, block context. Weave in the raw set-volume trend (VOLUME TREND note in the brief) if it's notable — more or fewer sets logged than last week is real signal even for athletes with no structured program. If they logged FEWER sessions than their program calls for (sessions.thisWeek vs sessions.programDaysPerWeek), name that gap plainly — "3 of your 6 days" — even when injury or a deliberate skip explains it; missing half the week is the single most important fact about it.
 - volume_headline: ONLY if the structured PROGRAM volume gap is material — make it the headline, name the set/rep shortfall by lift, allow that it may be intentional auto-regulation but name it. Else null. (This is different from the raw volume trend above — only fire this for an actual program-adherence gap.)
 - program_load: where loads track vs prescribed %. null if no program.
 - prs_progress: new PRs / block bests from the athlete's own log (the "prs" list in the brief). null if none.
 - rank_movement: ONLY if the brief's GRIT RANK note describes real movement (a tier-up, a Strength Score change worth naming, or a new best on a ranked/benchmarked lift) — call out the SPECIFIC lift(s) and tier by name (e.g. "Back Squat pushed you into STRONG territory"). If it's their first-ever check-in (no prior snapshot), you may state their current rank once but never claim "movement." If nothing changed, null.
-- injury_plan: ONLY if an injury is active — a warning PLUS a concrete example program change (e.g. cap a lift ~80%, swap to a variation, add prehab with real sets). Use the PAIN TREND note (worsening/improving/clearing) to calibrate urgency — worsening or recurring flags deserve a firmer plan than a single one-off mention. Else null.
+- injury_plan: ONLY if an injury is active — a warning PLUS the LEAST-restrictive concrete change that protects the area while keeping the athlete moving toward their stated goal. Match the change to the severity in the PAIN TREND note: a single "clearing"/one-off flag warrants a small tweak (add prehab, swap ONE variation, trim a top set) — NOT a big load cut; reserve aggressive load caps (e.g. dropping to ~80% for weeks) for WORSENING or recurring pain only. Never reflexively slash loads. Any exercise swap MUST name exactly what it replaces and on which day/slot (e.g. "swap flat bench for floor press in Thursday's main pressing slot") — never a floating "add floor press" with no home. Crucially, weigh the injury against the athlete's goals: if the protective change is compatible with the goal, keep pushing toward it and say so; if babying the area for weeks genuinely CONFLICTS with the goal timeline (you can't take it easy AND hit the number on schedule), say that honestly and talk about managing expectations / shifting the timeline — do NOT pretend they can do both. Else null.
 - injury_focus: if an injury is active, the SINGLE body area you are addressing (e.g. "left pec", "right knee"). MUST be the same area injury_plan and focus_next_week talk about — pick one and stay consistent across all three. Else null.
-- injury_change: if an injury is active, the SPECIFIC change you'd make, concrete enough to apply verbatim — name exercises, sets/reps, and %s (e.g. "cap pressing at 80% 1RM, swap flat bench for floor press 4x6, add band pull-aparts 3x20"). No vague "a small tweak". Else null.
-- goal_progress: vs stated goals. null if none.
-- focus_next_week: REQUIRED, never null. End the whole digest on exactly ONE concrete, specific directive for next week — a lift + a number (weight, sets/reps, or %), or a session-count target if that's the real gap. Never a vague "keep it up." Consistent with injury_focus if an injury is active.`;
+- injury_change: if an injury is active, the SPECIFIC change you'd make, concrete enough to apply verbatim — name exercises, sets/reps, and where it slots in (which day / what it replaces). Keep it PROPORTIONATE to the pain (see injury_plan) — the smallest change that protects the area, not the biggest. No vague "a small tweak", and no floating swap without a home. Else null.
+- goal_progress: vs stated goals. Compare each goal ONLY to the matching lift — never measure one lift's number against a different lift's target (a deadlift number is not progress toward a squat goal). State progress in the SAME unit the goal is written in; if you convert kg↔lb, convert correctly (1 kg = 2.205 lb) and show ONE unit, never a confusing kg/lb mix. If a goal has no matching logged lift this window, say so plainly rather than forcing a comparison. Keep it clear enough that the athlete instantly understands where they stand. null if no goals.
+- focus_next_week: REQUIRED, never null. End on exactly ONE concrete, specific directive for next week — ideally a progression tied to their program or goal (a lift + a number: weight, sets/reps, or %), or, if they logged fewer sessions than their program calls for (compare sessions.thisWeek to sessions.programDaysPerWeek), a session-count / adherence target. Aspire UP toward the goal — do NOT make the whole focus about managing an injury; an active injury can shape HOW they train next week but the headline directive should still move them forward. Never a vague "keep it up."
+
+Adapt to WHATEVER program the athlete runs — do not assume a long, multi-week periodized block. Many athletes run a single week, a 4-week block, or even a one-day plan. Only talk about "the block" / block context when the brief actually shows a multi-week structure; for short or simple programs, keep it about the lifts that moved, consistency vs the days they intended to train, and the stated goal. The weekly check-in cadence is the same regardless of program length.`;
 
   const user = `BRIEF (JSON):\n${JSON.stringify({ ...brief, volume: v ? { ...v, note: volNote } : null, volumeTrend: vt ? { ...vt, note: volumeTrendNote } : null, rank: r ? { ...r, note: rankNote } : null, painTrend: pt ? { ...pt, note: painTrendNote } : null }, null, 1)}`;
 
