@@ -934,7 +934,7 @@ Rules:
 - If the athlete mentions heart rate, bpm, avg HR, or max HR, populate heart_rate_avg and/or heart_rate_max in run_data.
 - Populate "practice_data" when the message describes a sport practice, game, scrimmage, team conditioning session, skill work, or film/walkthrough. Set practice_type to the best match. Intensity: light=walkthrough/film/skill_work (shooting, ball handling, passing drills — minimal physical exertion), moderate=half-speed/light practice, high=full practice, very_high=game/scrimmage/full-contact. Do NOT populate for gym workouts or standalone runs.
 - A single message may have BOTH practice_data AND exercises (e.g. athlete did practice then hit the weight room). Populate both when applicable.
-- Set is_program_update:true ONLY if the message itself CONTAINS the actual program content with specific exercises, sets, and reps. The program data must be present in the message itself — NOT for requests like "update my program", "save my program", "can you update that", or any message that requests an update without providing the program content.
+- Set is_program_update:true ONLY when the athlete is handing you their TRAINING PROGRAM / PLAN to save — a FORWARD-LOOKING prescription for future sessions (usually multiple days or weeks: "here's my program", "my new plan/split", "put me on this") AND the actual program content is present in the message. A past-tense WORKOUT LOG of what they just did is NOT a program update — even a full multi-exercise one with sets, reps and weights, and even a clean formatted Quick Log day list. Tell them apart by INTENT and tense: a program is what they WILL do (a plan); a log is what they DID ("did", "got", "hit today", "just finished", "logged"). Do NOT set it for content-free requests ("update my program", "save that"), and do NOT set it for a single day's session. When unsure, treat it as a LOG, not a program.
 - Set is_temp_program_update:true when the athlete has described their available equipment or conditions for a non-standard training situation (hotel, cruise, travel, beach, limited equipment, injury restrictions). Must include actual condition info — NOT set just because they mention traveling or ask what to do.
 - Set is_program_revert:true when the athlete signals they are returning to their normal training environment ("I'm back", "home now", "back at the gym", "back to normal", "cruise is over", etc.).
 - If weight is given in kg (e.g. "100kg squat"), set unit:"kg".
@@ -1210,6 +1210,11 @@ input,textarea,select,button{font-family:'DM Sans',sans-serif;}
 @keyframes fadeUp{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
 @keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.4;}}
 .fade-up{animation:fadeUp 0.25s ease forwards;}
+/* Streamed coach text: each word fades in as it mounts, so tokens arriving in
+   bursty SSE chunks feel like a gentle reveal instead of blocky pop-in. Settled
+   words never re-animate (stable keys), so it only plays on the growing edge. */
+@keyframes wordIn{from{opacity:0;}to{opacity:1;}}
+.word-in{animation:wordIn 0.42s ease both;}
 /* Proof Feed "drop" motion — elements are visible by default (final state),
    the animation only plays the entrance, so reduced-motion / no-anim = still shown. */
 @keyframes proofDrop{from{opacity:0;transform:translateY(14px) scale(0.985);}to{opacity:1;transform:translateY(0) scale(1);}}
@@ -1218,11 +1223,23 @@ input,textarea,select,button{font-family:'DM Sans',sans-serif;}
 .proof-drop{animation:proofDrop 0.5s cubic-bezier(.2,.7,.2,1) both;}
 .env-float{animation:envFloat 4.5s ease-in-out infinite;}
 @media (prefers-reduced-motion: reduce){
-  .proof-drop,.env-float{animation:none!important;}
+  .proof-drop,.env-float,.word-in{animation:none!important;}
 }
 `;
 export const inp = (extra={}) => ({width:"100%",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",color:C.text,fontSize:15,outline:"none",...extra});
 export const btn = (bg,color,extra={}) => ({background:bg,color,border:"none",borderRadius:12,padding:"14px",fontWeight:700,fontSize:16,cursor:"pointer",width:"100%",fontFamily:"'Bebas Neue'",letterSpacing:2,...extra});
+
+// Renders coach text word-by-word so streamed replies reveal gently. Splitting on
+// (\s+) keeps whitespace/newline tokens intact for whiteSpace:pre-wrap. Each token
+// is keyed by index, so as the stream appends only NEW tokens mount (and fade) —
+// already-shown words keep their identity and never re-animate. The growing tail
+// word just updates its text in place. Used for every assistant bubble (chat reply
+// AND video form review) so the reveal is consistent everywhere.
+function StreamText({text}){
+  return (text||"").split(/(\s+)/).map((tok,i)=>(
+    <span key={i} className={tok.trim()?"word-in":undefined}>{tok}</span>
+  ));
+}
 
 // ─── RESPONSIVE HOOK ──────────────────────────────────────────────────────────
 export function useIsMobile(bp=640) {
@@ -4373,7 +4390,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
               <div key={i} className="fade-up" style={{marginBottom:12,display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
                 {m.role==="assistant"&&<div style={{width:28,height:28,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#000",flexShrink:0,marginRight:8,marginTop:2}}>J</div>}
                 <div style={{maxWidth:"80%",padding:"10px 14px",borderRadius:m.role==="user"?"16px 16px 4px 16px":"16px 16px 16px 4px",background:m.role==="user"?C.gold:C.navy2,color:m.role==="user"?"#000":C.text,fontSize:14,lineHeight:1.7,border:m.role==="assistant"?`1px solid ${C.border}`:"none",whiteSpace:"pre-wrap"}}>
-                  {m.content}
+                  {m.role==="assistant"?<StreamText text={m.content}/>:m.content}
                 </div>
               </div>
             ))}
@@ -4391,11 +4408,9 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
       </div>
 
       {/* Quick replies / Session check prompt.
-          Session check = one centered row (Same workout / New session).
-          Quick suggestions = wrap up to ~2 rows tall, scroll down for the rest. */}
-      <div style={sessionCheckPending
-        ? {padding:"0 16px 8px",display:"flex",gap:6,overflowX:"auto",flexShrink:0,alignItems:"center"}
-        : {padding:"0 16px 8px",display:"flex",flexWrap:"wrap",gap:6,flexShrink:0,alignItems:"flex-start",maxHeight:76,overflowY:"auto"}}>
+          Both are ONE row that scrolls HORIZONTALLY — no wrapping, no vertical
+          scroll. (Will: keep it a single row, swipe sideways for the rest.) */}
+      <div style={{padding:"0 16px 8px",display:"flex",gap:6,overflowX:"auto",flexShrink:0,alignItems:"center",flexWrap:"nowrap"}}>
         {sessionCheckPending?(
           <>
             <span style={{color:C.muted,fontSize:12,flexShrink:0}}>↑</span>
@@ -4663,7 +4678,7 @@ Output exactly two sections separated by a line containing only "===" :
 
 SECTION 1 — WORKSHEET (shown to the athlete for reference; never sent to chat):
 - First line: which program day you picked and why, in a few words (e.g. "Block II, Week 1 — Thursday is Push B.").
-- Then ONE compact line per exercise showing your sourcing: percentage math written out ("Bench Press: 275 x 68% = 187, round to 185"), program notes worth seeing (tempo, RPE targets, rest, coach cues written in the program), last-time sourcing ("DB Lateral Raise: no program weight, last time 30 → use 30"), or "no data → blank".
+- Then ONE compact line per exercise showing your sourcing, IN HIERARCHY ORDER — a set working weight written in the program first ("Bench Press: program says 185 → 185"), else percentage math off the 1RM ("Bench Press: 68% x 275 = 187 → round to 185"), else last-time ("DB Lateral Raise: no program weight, last time 30 → 30"), else "no data → blank". Include program notes worth seeing (tempo, RPE targets, rest, coach cues written in the program).
 - Works for every program: if there are no percentages, still show the sourcing (program weight / last time / blank) and any program notes.
 
 ===
@@ -4671,8 +4686,13 @@ SECTION 1 — WORKSHEET (shown to the athlete for reference; never sent to chat)
 SECTION 2 — THE LOG (exactly what the athlete would type after the session):
 - FIRST LINE: the program day label (e.g. "Day 5 – Push B" or "Upper B"). Infer which day is NEXT from what they logged most recently and today's date. If the program has no day labels, use a short session name.
 - Then a blank line, then ONE line per exercise: "Name SETSxREPS @ WEIGHT" (e.g. "Back Squat 5x3 @ 225"). Weighted bodyweight: "Weighted Pull-ups 3x8 +25". Plain bodyweight: "Push-ups 3x20". Timed holds: "Plank 3x60s".
-- Weight priority — the PROGRAM always outranks history: (1) an explicit weight written in the program for that exercise; (2) a program percentage x the athlete's 1RM from the cheat sheet, rounded to the nearest 5 lbs. Only when the program gives NEITHER a weight NOR a percentage: (3) what they lifted last time on that exercise. Never let a last-time weight override a program prescription, even if last session differed.
-- If none of those three give you a number, write the weight as a fill-in blank: "Weighted Dips 3x8 @ ___" (or "+___" for added-load bodyweight work). NEVER guess a weight — a visible blank beats a made-up number.
+- WEIGHT HIERARCHY — check in this exact order and STOP at the first that applies. The PROGRAM always outranks both history and the 1RM cheat sheet:
+  1. A SET WORKING WEIGHT written in the program for that exercise (e.g. "Bench 3x5 @ 185", "185x5", "working weight 185") → use that number exactly as written. This is the DEFAULT — always look here FIRST. Do NOT recompute it off a 1RM.
+  2. ONLY if the program states no set weight but DOES give a percentage / RPE target → that percentage x the athlete's 1RM from the cheat sheet.
+  3. ONLY if the program gives neither a set weight nor a percentage → what they lifted last time on that exercise.
+  The 1RM cheat sheet exists ONLY for step 2. Never derive a weight from e1RM when the program already states a working weight for that lift.
+- ROUNDING: any weight you CALCULATE (a percentage result, or any number that isn't already a round gym weight) rounds to the NEAREST 5 lbs — lifters don't carry 1 or 2 lb plates. A weight the program states verbatim is used exactly as written, never re-rounded.
+- If none of the three levels give you a number, write the weight as a fill-in blank: "Weighted Dips 3x8 @ ___" (or "+___" for added-load bodyweight work). NEVER guess a weight — a visible blank beats a made-up number.
 - Include ONLY exercises programmed for the inferred day. Never invent exercises.
 
 If the program says today is a rest day and no training day is clearly next, output exactly REST_DAY (no sections, no separator).
@@ -4682,7 +4702,7 @@ const QL_EDIT_SYS = `You revise a prefilled workout-log draft per an athlete's i
 
 Rules:
 - Apply the instruction; keep everything else in the draft unchanged.
-- If the instruction names a DIFFERENT program day ("I did day 2"), rebuild BOTH sections for that day and output them in the draft format: the worksheet (day pick + per-exercise sourcing), then a line containing only "===", then the log — same weight rules (program weight, else % x 1RM rounded to 5 lbs, else last time, else a "___" fill-in blank — never a guessed number). This is the ONLY case where you output a worksheet.
+- If the instruction names a DIFFERENT program day ("I did day 2"), rebuild BOTH sections for that day and output them in the draft format: the worksheet (day pick + per-exercise sourcing), then a line containing only "===", then the log — same weight hierarchy (a SET working weight in the program FIRST, else % x 1RM rounded to the nearest 5 lbs, else last time, else a "___" fill-in blank — never derive off e1RM when the program states a working weight, and never guess). This is the ONLY case where you output a worksheet.
 - For every other instruction (weight tweaks, sets/reps changes, adding or removing exercises), output ONLY the revised log — no worksheet, no "===".
 - If the draft is empty and the instruction describes what they did, write the draft from it.
 - Same format: first line = day label, blank line, one exercise per line ("Name SETSxREPS @ WEIGHT").
@@ -6095,11 +6115,18 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
             Tucked away near the bottom so the settings list stays uncluttered. */}
         <div style={{marginBottom:16}}>
           <button onClick={()=>setShowPlan(s=>!s)}
-            style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"11px 14px",cursor:"pointer"}}>
-            <span style={{color:C.muted,fontSize:11,letterSpacing:1,fontWeight:700}}>YOUR PLAN</span>
+            style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:C.navy3,border:`1px solid ${showPlan?`${C.gold}66`:C.border}`,borderRadius:10,padding:"11px 14px",cursor:"pointer",transition:"border-color 0.15s"}}>
+            <span style={{display:"flex",flexDirection:"column",alignItems:"flex-start",gap:2}}>
+              <span style={{color:C.muted,fontSize:11,letterSpacing:1,fontWeight:700}}>YOUR PLAN</span>
+              <span style={{color:C.muted2,fontSize:10.5}}>Billing, upgrade &amp; gift codes</span>
+            </span>
             <span style={{display:"flex",alignItems:"center",gap:8}}>
-              <span style={{color:C.text,fontSize:12,fontWeight:700,letterSpacing:1}}>{currentTier==="school"?"SCHOOL":currentTier.toUpperCase()}</span>
-              <span style={{color:C.muted,fontSize:11,transform:showPlan?"rotate(180deg)":"none",transition:"transform 0.15s",display:"inline-block"}}>▾</span>
+              {/* Tier in its "cool box" — gold for Pro, blue for Elite/School — same
+                  badge language used elsewhere (nav badge, tier cards). */}
+              {(()=>{const pt=currentTier==="school"?{label:"SCHOOL",color:C.blue}:(TIERS[currentTier]||{label:(currentTier||"free").toUpperCase(),color:C.muted});return(
+                <span style={{background:`${pt.color}22`,border:`1px solid ${pt.color}`,borderRadius:6,padding:"3px 10px",color:pt.color,fontSize:13,fontWeight:700,letterSpacing:1.5,fontFamily:"'Bebas Neue'"}}>{pt.label}</span>
+              );})()}
+              <span style={{display:"flex",alignItems:"center",justifyContent:"center",width:22,height:22,borderRadius:"50%",background:C.navy2,border:`1px solid ${C.border}`,color:C.muted,fontSize:10,transform:showPlan?"rotate(180deg)":"none",transition:"transform 0.15s"}}>▾</span>
             </span>
           </button>
 
