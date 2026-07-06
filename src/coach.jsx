@@ -788,7 +788,8 @@ function CoachDashboard({coach,onLogout}) {
           <>
             {/* ── OVERVIEW TAB ── */}
             {activeTab==="overview"&&(
-              <CoachOverview athletes={athletes} workouts={workouts} prs={prs} manualRMs={manualRMs} prescriptions={prescriptions}/>
+              <CoachOverview athletes={athletes} workouts={workouts} prs={prs} manualRMs={manualRMs} prescriptions={prescriptions}
+                onOpenAthlete={(id)=>{const at=athletes.find(a=>a.id===id); if(at){setSelected(at);setActiveTab("athletes");}}}/>
             )}
 
             {/* ── ATHLETES TAB ── */}
@@ -1342,7 +1343,8 @@ function OverviewCard({title,trend,children,readout,tone}){
   );
 }
 
-function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions}){
+function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthlete}){
+  const [resolved,setResolved] = useState(()=>new Set());
   const D = useMemo(()=>{
     const now = Date.now();
     const dstart = (t)=>{const x=new Date(t);x.setHours(0,0,0,0);return x.getTime();};
@@ -1420,10 +1422,27 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions}){
       .sort((a,b)=>b.gain-a.gain).slice(0,3)
       .map(p=>({name:(athletes.find(a=>a.id===p.athlete_id)||{}).name||"Athlete", ex:p.exercise, weight:p.weight, unit:p.unit, gain:Math.round(p.gain)}));
 
-    return {rows,dayCounts,dayLabels,firstHalf,lastHalf,activeCount,activePct,teamAdh,noProgram,feelCounts,feelTotal,volWeeks,prWeeks,prThisWk,strengths,weaknesses,shoutouts};
+    // briefing triage — ranked "who needs you today" (injury > quiet > adherence drop)
+    const triage=[];
+    rows.forEach(r=>{
+      const inj=r.injuries;
+      if(inj&&((inj.recurring&&inj.recurring.length)||(inj.active&&inj.active.length))){
+        const rec=inj.recurring&&inj.recurring[0]; const area=rec?rec.area:inj.active[0];
+        triage.push({id:r.a.id,sev:"crit",kind:"Injury",name:r.a.name,what:`${area} flagged${rec?` ${rec.count} sessions running`:" this week"}`});
+      } else if(r.thisWk.length===0 && r.lastWk.length>0){
+        triage.push({id:r.a.id,sev:"warn",kind:"Quiet",name:r.a.name,what:`no session this week — trained last week`});
+      } else if(r.score!=null && r.score<55){
+        triage.push({id:r.a.id,sev:"warn",kind:"Adherence",name:r.a.name,what:`adherence slipping (${r.score}%)`});
+      }
+    });
+    triage.sort((a,b)=>(a.sev==="crit"?0:1)-(b.sev==="crit"?0:1));
+
+    return {rows,dayCounts,dayLabels,firstHalf,lastHalf,activeCount,activePct,teamAdh,noProgram,feelCounts,feelTotal,volWeeks,prWeeks,prThisWk,strengths,weaknesses,shoutouts,triage};
   },[athletes,workouts,prs,manualRMs,prescriptions]);
 
   if(!athletes.length) return <div style={{textAlign:"center",padding:60,color:C.muted}}>No athletes on your roster yet.</div>;
+
+  const triage = D.triage.filter(t=>!resolved.has(t.id));
 
   const feelPct = (k)=>D.feelTotal?Math.round(100*D.feelCounts[k]/D.feelTotal):0;
   const volMax = Math.max(1,...D.volWeeks), prMax = Math.max(1,...D.prWeeks);
@@ -1441,6 +1460,33 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions}){
 
   return (
     <div style={{maxWidth:1220}}>
+      {/* ── Briefing triage — who needs you today ── */}
+      <div style={{background:`linear-gradient(180deg,${C.navy3},${C.navy2})`,border:`1px solid ${C.border}`,borderRadius:16,overflow:"hidden",marginTop:4}}>
+        <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:12,padding:"15px 18px",borderBottom:`1px solid ${C.border}`,flexWrap:"wrap"}}>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:C.text,letterSpacing:1}}>{triage.length>0?`${triage.length} athlete${triage.length!==1?"s":""} need you today`:"You're all caught up"}</div>
+          <div style={{color:C.muted,fontSize:12}}>Today's briefing · auto-updated from this week's logs</div>
+        </div>
+        {triage.length===0
+          ? <div style={{padding:"26px 18px",textAlign:"center"}}><div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:C.green,letterSpacing:1}}>✓ Everything looks healthy</div><div style={{color:C.muted,fontSize:13,marginTop:4}}>Nothing needs you right now. The briefing refreshes as sessions come in.</div></div>
+          : triage.slice(0,6).map((t)=>(
+              <div key={t.id} style={{display:"flex",gap:12,padding:"12px 18px",borderBottom:`1px solid ${C.border}80`,alignItems:"center"}}>
+                <span style={{width:3,alignSelf:"stretch",borderRadius:3,background:t.sev==="crit"?C.red:C.gold,flexShrink:0}}/>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                    <span style={{fontSize:9.5,fontWeight:800,letterSpacing:1,textTransform:"uppercase",padding:"2px 7px",borderRadius:5,color:t.sev==="crit"?C.red:C.gold,background:t.sev==="crit"?`${C.red}22`:`${C.gold}22`,border:`1px solid ${t.sev==="crit"?C.red:C.gold}55`}}>{t.kind}</span>
+                    <span style={{fontWeight:700,color:C.text,fontSize:14}}>{t.name}</span>
+                    <span style={{color:C.muted,fontSize:13}}>— {t.what}</span>
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:6,flexShrink:0}}>
+                  {onOpenAthlete&&<button onClick={()=>onOpenAthlete(t.id)} style={{border:`1px solid ${C.border}`,background:"transparent",color:C.muted,borderRadius:8,padding:"5px 11px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Open</button>}
+                  <button onClick={()=>setResolved(s=>new Set(s).add(t.id))} style={{border:`1px solid ${C.border}`,background:"transparent",color:C.muted,borderRadius:8,padding:"5px 11px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Clear</button>
+                </div>
+              </div>
+            ))}
+        {triage.length>0&&<div style={{padding:"10px 18px",color:C.muted,fontSize:12,background:`${C.green}0d`}}>✓ {D.rows.length-triage.length} of {D.rows.length} on track · {D.prThisWk} true PR{D.prThisWk!==1?"s":""} this week</div>}
+      </div>
+
       {secLabel("Team Health")}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:14}}>
 
