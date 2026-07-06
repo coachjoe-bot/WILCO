@@ -12,7 +12,7 @@ import {
 // App.jsx's multi-athlete groupIntoSessions already imported above.
 import {
   groupIntoSessions as pcGroup, compareProgramVsActual, buildOneRMs, aggregateInjuries, totalSetVolume,
-  trueImprovementPRs, classifyTiers, blendAdherenceScore,
+  trueImprovementPRs, classifyTiers, blendAdherenceScore, buildLiftHistory,
 } from "./proofcore.js";
 import { computeGritSnapshot, TIER_NAMES, getBenchKey } from "./grit.js";
 // ─── SCHOOLS LIST (master only) ───────────────────────────────────────────────
@@ -1426,7 +1426,10 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
       const days = [];
       for(let i=6;i>=0;i--){ const ds=dstart(now-i*DAYMS), de=ds+DAYMS; days.push((wo.some(w=>{const t=new Date(w.created_at).getTime();return t>=ds&&t<de&&(w.parsed_data?.exercises?.length>0||w.parsed_data?.run_data);}))?1:0); }
       const snap = computeGritSnapshot(wo, manByAth[a.id]||[], {bodyweightLbs:a.weight_lbs||a.weight||0, gender:a.gender, age:a.age});
-      return {a, thisWk, lastWk, adherence, injuries, hasProgram, score, days, snap};
+      // per-lift e1RM delta this week vs last (for the team strength-movement win)
+      const twL=buildLiftHistory(thisWk), lwL=buildLiftHistory(lastWk);
+      const lifts=Object.entries(twL).map(([lift,entries])=>{ const best=entries.reduce((x,y)=>y.e1rm>x.e1rm?y:x); const lw=lwL[lift]; let delta=null; if(lw){const lb=lw.reduce((x,y)=>y.e1rm>x.e1rm?y:x); delta=best.e1rm-lb.e1rm;} return {lift,deltaVsLastWeek:delta}; });
+      return {a, thisWk, lastWk, adherence, injuries, hasProgram, score, days, snap, lifts};
     });
 
     // sessions/day last 7d (across roster)
@@ -1474,7 +1477,7 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
 
     // team strength movement — avg e1RM delta per lift this week (for wins + tooltips)
     const dlt={};
-    rows.forEach(r=>r.brief.lifts.forEach(l=>{ if(l.deltaVsLastWeek!=null)(dlt[l.lift]=dlt[l.lift]||[]).push(l.deltaVsLastWeek); }));
+    rows.forEach(r=>(r.lifts||[]).forEach(l=>{ if(l.deltaVsLastWeek!=null)(dlt[l.lift]=dlt[l.lift]||[]).push(l.deltaVsLastWeek); }));
     const movers=Object.entries(dlt).map(([lift,ds])=>({lift,avg:+(ds.reduce((a,b)=>a+b,0)/ds.length).toFixed(1),n:ds.length})).filter(m=>m.avg>0).sort((a,b)=>b.avg-a.avg);
 
     // wins — a MIX of notable stats + personal bests, deduped so it's never the same
