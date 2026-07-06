@@ -5503,7 +5503,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
               </div>
               <div style={{width:1,alignSelf:"stretch",background:CA.border}}/>
               <div style={{flex:1}}>
-                <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:CA.gold,lineHeight:1}}>{strengthScore.toLocaleString()}</div>
+                <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:CA.gold,lineHeight:1,textShadow:`0 0 16px ${CA.gold}66`}}>{strengthScore.toLocaleString()}</div>
                 <div style={{color:CA.muted,fontSize:10,letterSpacing:1,marginTop:2,display:"flex",alignItems:"center",justifyContent:"center",gap:4}}>
                   STRENGTH SCORE
                   <span onClick={()=>setShowScoreInfo(true)} title="How is this calculated?" style={{cursor:"pointer",border:`1px solid ${CA.border}`,borderRadius:"50%",width:14,height:14,display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:9,color:CA.muted2,lineHeight:1}}>i</span>
