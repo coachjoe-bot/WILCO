@@ -34,3 +34,14 @@ When we do it:
   with a rank hero, PR medal chips, red injury card, gold focus directive, and the
   guided check-in. Built in gold/orange per this deferral. Presentation only — no
   generation, notification, or check-in-logic changes.
+
+- **The Coach's Edition — upgrade to the athlete Proof newspaper look** (TODO, 2026-07-06):
+  the coach-side weekly/monthly team report (`CoachEdition` / `CoachCheckin` in
+  `src/coach.jsx`, on branch `feat/coach-overhaul`) currently renders in the plain
+  coach navy/gold with a Georgia serif masthead. Give it the SAME treatment as the
+  athlete "The Proof" edition — the sealed-letter envelope on the Reports tab
+  (postmark = week-of date, wax seal, "OPEN THIS WEEK'S EDITION"), then the full
+  broadsheet read (masthead, team-trajectory hero, warm-newsprint serif, section
+  hierarchy with the injury/focus cards) flowing into the conversational check-in.
+  Content/engine already done — this is presentation only, to be done in the same
+  brand pass so athlete + coach editions feel like one franchise.

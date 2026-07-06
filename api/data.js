@@ -30,6 +30,10 @@ const WRITABLE = new Set([
   "manual_one_rms", "program_modifications", "athlete_goals",
   "legal_acceptances", "deletion_requests", "athlete_context",
   "push_subscriptions", "proof_digests",
+  // Coach dashboard overhaul: the coach's own self-service data + the locked-program
+  // request loop. Scoping enforced below (coach_context/coach_push_subscriptions =
+  // own coach_id; program_change_requests = athlete inserts own, coach updates status).
+  "coach_context", "coach_push_subscriptions", "program_change_requests",
 ]);
 
 // ─── Phase 1b(b): scoped READS ────────────────────────────────────────────────
@@ -46,13 +50,31 @@ const READ_OWN_COL = {
   manual_one_rms: "athlete_id",
   athlete_goals: "athlete_id",
   athlete_context: "athlete_id",
+  // Parsed structured program cache (Haiku-parsed program_text, hash-keyed). Read-
+  // only for the coach dashboard's Overview adherence math (load %×1RM band). Scoped
+  // by athlete_id exactly like the raw tables, so a coach only sees their roster's
+  // prescriptions. Written server-side only (parseProgramIfNeeded, service key).
+  program_prescriptions: "athlete_id",
   // Server-side session-count rollup (SQL port of groupIntoSessions, verified to
   // match the client row-for-row). Read-only VIEW; scoped by athlete_id exactly
   // like the raw tables, so a coach only sees their own roster's counts. Lets the
   // coach dashboard show session totals without pulling every raw workout to the
   // browser (see docs/coach-experience-roadmap.md for the dashboard wiring).
   v_athlete_session_counts: "athlete_id",
+  // Coach overhaul. coach_context + coach_push_subscriptions are the coach's OWN
+  // rows (coach_id); program_change_requests is read by the ATHLETE by athlete_id
+  // (their own filed requests) and by the COACH by coach_id (their inbox — the coach
+  // branch below overrides the scope column to coach_id).
+  coach_context: "coach_id",
+  coach_push_subscriptions: "coach_id",
+  program_change_requests: "athlete_id",
 };
+
+// Tables read/written by COACH callers scoped to their OWN coach_id (not their
+// roster's athlete_ids) — the coach's own data + the aggregate/inbox rows.
+const COACH_SELF_SCOPED = new Set([
+  "proof_digests", "coach_context", "coach_push_subscriptions", "program_change_requests",
+]);
 
 // Tables an ATHLETE caller may write, each mapped to the column that must equal
 // their own id. Any table NOT listed here is denied outright for athlete callers.
@@ -68,6 +90,8 @@ const ATHLETE_OWN_COL = {
   proof_digests: "athlete_id",
   legal_acceptances: "athlete_id",
   deletion_requests: "athlete_id",
+  // An athlete may FILE a program-change request on their own locked program.
+  program_change_requests: "athlete_id",
 };
 
 // ── Per-COLUMN allowlist for athlete writes to sensitive tables ───────────────
@@ -96,6 +120,13 @@ const ATHLETE_COL_ALLOW = {
     // Value guards: an athlete may only ever DOWNGRADE their own tier to "free"
     // (paid tiers are granted server-side by Stripe), never self-grant pro/elite.
     values: { tier: (v) => v === "free" },
+  },
+  // A filed request is AI-extracted from free-text chat — pin down what the athlete
+  // side may set so it can never self-resolve (status) or misroute. status defaults
+  // to 'pending' in the DB; only the coach flips it (coach write path below).
+  program_change_requests: {
+    cols: new Set(["coach_id", "items", "reason", "source"]),
+    values: { source: (v) => ["plateau", "pr", "pain", "feedback"].includes(v) },
   },
 };
 
@@ -154,7 +185,9 @@ export default async function handler(req, res) {
           // the team-aggregate coach reports (weekly_coach/monthly_coach, which have
           // a NULL athlete_id). Scope those by coach_id so a coach gets their whole
           // report set — athlete-id membership would drop the aggregate rows.
-          if (rtable === "proof_digests") {
+          if (COACH_SELF_SCOPED.has(rtable)) {
+            // The coach's own aggregate/inbox/context rows carry coach_id directly —
+            // scope by it (athlete-id membership would drop coach-owned rows).
             scope = `&coach_id=eq.${enc(caller.id)}`;
           } else {
             // Other PII tables: non-master coaches (incl. admins) see only their own
@@ -254,14 +287,32 @@ export default async function handler(req, res) {
           // School records (tier, limits, codes) are master-only.
           throw httpErr(403, "This account can't write that data");
         } else if (table === "coaches") {
-          // Managing coaches is admin-only, and only within the admin's own school.
-          if (!isAdmin) throw httpErr(403, "This account can't write that data");
-          ownFilter = `&school_id=eq.${enc(sid)}`;
-          assertRows((r) => String(r.school_id) === String(sid));
+          if (!isAdmin) {
+            // Managing coaches is admin-only — EXCEPT a coach may update their OWN
+            // notification_prefs (self-service settings). Only that column, only their row.
+            const keys = Object.keys(body.data || {});
+            if (body.op === "update" && keys.length && keys.every((k) => k === "notification_prefs")) {
+              ownFilter = `&id=eq.${enc(caller.id)}`;
+            } else {
+              throw httpErr(403, "This account can't write that data");
+            }
+          } else {
+            // admin → coaches within their own school.
+            ownFilter = `&school_id=eq.${enc(sid)}`;
+            assertRows((r) => String(r.school_id) === String(sid));
+          }
         } else if (table === "athletes") {
           // admin → any athlete in their school; coach → only their own roster.
           ownFilter = isAdmin ? `&school_id=eq.${enc(sid)}` : `&coach_id=eq.${enc(caller.id)}`;
           assertRows((r) => (isAdmin ? String(r.school_id) === String(sid) : String(r.coach_id) === String(caller.id)));
+        } else if (table === "coach_context" || table === "coach_push_subscriptions" || table === "program_change_requests" || table === "proof_digests") {
+          // The coach's OWN data (context notes, push subs), their request inbox, and
+          // their reports — all carry coach_id (per-athlete digests carry the owning
+          // coach_id too, so this also lets a coach mark those read without widening).
+          // A regular coach may write these for themselves — the self-service carve-out
+          // around the coaches-table admin-only rule. Scope + assert on coach_id.
+          ownFilter = `&coach_id=eq.${enc(caller.id)}`;
+          assertRows((r) => String(r.coach_id) === String(caller.id));
         } else {
           // Athlete-owned data tables: scope to the coach's athlete set (the same set
           // the read path returns), keyed by athlete_id.

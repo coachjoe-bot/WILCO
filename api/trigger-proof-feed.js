@@ -52,9 +52,10 @@ import { sbSelect, sbInsert, sbWrite, sbDelete, authCaller, httpErr, askClaudeSe
 import {
   groupIntoSessions, aggregateInjuries, buildOneRMs, buildBrief,
   parseProgramIfNeeded, compareProgramVsActual, computeRankMovement, painTrend,
-  generateWeekly, generateMonthly, generateCoach,
+  generateWeekly, generateMonthly, generateCoach, blendAdherenceScore, trueImprovementPRs,
 } from "./_proof.js";
-import { sendToAthlete, pushPayload } from "./_push.js";
+import { computeGritSnapshot } from "./_grit.js";
+import { sendToAthlete, pushPayload, ensureVapid, sendTo } from "./_push.js";
 
 const RESEND_KEY = process.env.RESEND_API_KEY;
 const FROM_EMAIL = process.env.FROM_EMAIL || "WILCO <noreply@trainwilco.com>";
@@ -277,28 +278,82 @@ async function runAthlete(athlete, batch, { dryRun = false } = {}) {
 
 // ── Generate + persist coach reports (team aggregate per coach) ────────────────
 // Bounded by total roster; loops in the same single invocation as the athlete sweep.
-async function runCoachReports(allAthletes, batch, coaches) {
+// Enrich one athlete for the coach team brief: their per-athlete brief + program
+// adherence (needs the parsed prescription) + Grit snapshot + blended score.
+const enrichForCoach = (a, batch) => {
+  const bf = briefFor(a, batch, "weekly");
+  const parsed = (batch.prescriptions || []).find((p) => p.athlete_id === a.id)?.parsed_json || null;
+  const adherence = parsed ? compareProgramVsActual(parsed, bf.thisWeekSessions, bf.oneRMs) : null;
+  const wo = (batch.workouts || []).filter((w) => w.athlete_id === a.id);
+  const man = (batch.manual || []).filter((m) => m.athlete_id === a.id);
+  let snap = { rankedLifts: [] };
+  try { snap = computeGritSnapshot(wo, man, { bodyweightLbs: a.weight_lbs || a.weight || 0, gender: a.gender, age: a.age }); } catch { /* no bodyweight → no tiers */ }
+  const hasProgram = !!(a.program_text && a.program_text.trim().length > 10);
+  const presDays = a.training_days_per_week || parsed?.blocks?.[0]?.days?.length || null;
+  const score = blendAdherenceScore(bf.thisWeekSessions.length, adherence, hasProgram, presDays);
+  // True PRs (improvement over prior best) in the reporting window — honest counts,
+  // baselines excluded, ahead of the is_baseline persistence.
+  const weekCut = Date.now() - 7 * 864e5;
+  const truePRs = trueImprovementPRs(bf.prs).filter((p) => new Date(p.created_at || p.date || 0).getTime() >= weekCut);
+  return { athlete: a, brief: bf.brief, adherence, snap, score, hasProgram, prs: bf.prs, truePRs };
+};
+
+// ISO week number — used only to pick the monthly-coach cadence (every 4th week).
+const isoWeek = (d) => {
+  const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  t.setUTCDate(t.getUTCDate() + 4 - (t.getUTCDay() || 7));
+  const yearStart = new Date(Date.UTC(t.getUTCFullYear(), 0, 1));
+  return Math.ceil(((t - yearStart) / 864e5 + 1) / 7);
+};
+
+async function runCoachReports(allAthletes, batch, coaches, opts = {}) {
   const results = [];
   const byCoach = {};
   for (const a of allAthletes) {
     if (!a.coach_id) continue;
     (byCoach[a.coach_id] = byCoach[a.coach_id] || []).push(a);
   }
+  // Monthly cadence mirrors the athlete 4-week cycle: every 4th ISO week the coach
+  // gets the deeper MONTHLY edition instead of the weekly (tunable; no per-coach
+  // state). monthly_coach was coded but never fired before this.
+  const type = isoWeek(new Date()) % 4 === 0 ? "monthly_coach" : "weekly_coach";
+
   for (const [coachId, roster] of Object.entries(byCoach)) {
     const coach = (coaches || []).find((c) => c.id === coachId);
     if (!coach) continue;
     try {
-      const perAthlete = roster.map((a) => ({ athlete: a, brief: briefFor(a, batch, "weekly").brief }));
+      const perAthlete = roster.map((a) => enrichForCoach(a, batch));
+      // Prior context the coach gave us (season/goals/fatigue/notes) → written into
+      // the edition so it advises against the real situation. Defensive: the table
+      // may not exist yet on older environments.
+      let coachContext = "";
+      try {
+        const ctxRows = await sbSelect("coach_context", `?coach_id=eq.${enc(coach.id)}&select=note&order=created_at.desc&limit=8`);
+        if (Array.isArray(ctxRows) && ctxRows.length) coachContext = ctxRows.map((r) => r.note).filter(Boolean).join("\n");
+      } catch { /* no coach_context table/rows — fine */ }
+
       const attribution = { role: "coach", actor_id: coach.id, coach_id: coach.id, school_id: coach.school_id ?? null };
-      const report = await generateCoach(coach, perAthlete, { askClaudeServer, attribution }, "weekly_coach");
-      await sbDelete("proof_digests", `?coach_id=eq.${coach.id}&digest_type=eq.weekly_coach`);
+      const report = await generateCoach(coach, perAthlete, { askClaudeServer, attribution, coachContext }, type);
+      await sbDelete("proof_digests", `?coach_id=eq.${coach.id}&digest_type=eq.${type}`);
       await sbInsert("proof_digests", {
-        athlete_id: null, coach_id: coach.id, digest_type: "weekly_coach",
+        athlete_id: null, coach_id: coach.id, digest_type: type,
         label: report.label, content_json: report.contentJson, is_read: false,
         has_plateau: false, has_pain: report.has_pain, has_missed: report.has_missed,
       });
-      if (coach.email) await sendEmail(coach.email, `WILCO Coach Report — Week of ${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric" })}`, buildDigestEmail(coach.name || "Coach", report.contentJson, report.label));
-      results.push({ coach: coach.name, athletes: roster.length });
+      if (coach.email && !opts.skipEmail) await sendEmail(coach.email, `WILCO Coach's Edition — Week of ${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric" })}`, buildDigestEmail(coach.name || "Coach", report.contentJson, report.label));
+      // Digest-ready push (respects the coach's notification_prefs.digest toggle).
+      try {
+        const prefs = coach.notification_prefs || {};
+        if (prefs.digest !== false && !opts.skipEmail) {
+          const subs = await sbSelect("coach_push_subscriptions", `?coach_id=eq.${enc(coach.id)}&select=*`);
+          if (subs.length) {
+            ensureVapid();
+            const payload = pushPayload({ title: "WILCO", body: `Your ${type === "monthly_coach" ? "monthly recap" : "Coach's Edition"} is ready.`, url: "/", type: "coach_digest" });
+            for (const s of subs) { try { await sendTo(s, payload); } catch { /* per-device best-effort */ } }
+          }
+        }
+      } catch (e) { /* push best-effort — never fail the report on it */ }
+      results.push({ coach: coach.name, athletes: roster.length, type });
     } catch (e) { console.error(`[proof-feed] coach report failed for ${coachId}:`, e.message); results.push({ coach: coachId, ok: false, error: e.message }); }
   }
   return results;
@@ -409,8 +464,10 @@ export default async function handler(req, res) {
     if (body.coach_id) {
       const roster = await sbSelect("athletes", `?coach_id=eq.${encodeURIComponent(body.coach_id)}&select=*`);
       const rosterBatch = await fetchBatch(roster.map((a) => a.id));
-      const coaches = await sbSelect("coaches", `?id=eq.${encodeURIComponent(body.coach_id)}&select=id,name,email,school_id`);
-      const coaches2 = await runCoachReports(roster, rosterBatch, coaches);
+      const coaches = await sbSelect("coaches", `?id=eq.${encodeURIComponent(body.coach_id)}&select=id,name,email,school_id,notification_prefs`);
+      // skip_email: generate + persist the edition WITHOUT emailing (safe demo/support
+      // generation so an external coach isn't emailed a test run). Cron-gated already.
+      const coaches2 = await runCoachReports(roster, rosterBatch, coaches, { skipEmail: !!body.skip_email });
       return res.status(200).json({ ok: true, coaches: coaches2 });
     }
 
@@ -452,7 +509,7 @@ export default async function handler(req, res) {
       const rosterIdList = coachIds.map((id) => `"${id}"`).join(",");
       const roster = await sbSelect("athletes", `?coach_id=in.(${rosterIdList})&select=*`);
       const rosterBatch = await fetchBatch(roster.map((a) => a.id));
-      const coaches = await sbSelect("coaches", `?select=id,name,email,school_id`);
+      const coaches = await sbSelect("coaches", `?select=id,name,email,school_id,notification_prefs`);
       results.coaches = await runCoachReports(roster, rosterBatch, coaches);
     }
 

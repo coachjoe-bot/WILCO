@@ -3,10 +3,18 @@
 // Loaded via React.lazy from WilcoRoot; shares App.jsx helpers (incl. the module-
 // level CURRENT_AUTH session inside the sb*/idApi/askClaude helpers) by import —
 // the dynamic import means the cycle App→coach→App is resolved at load time.
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import {
-  C, GS, LineChart, MASTER_CODE, RunCard, SUPABASE_KEY, SUPABASE_URL, askClaude, bestE1RMForExercise, btn, cleanerName, daysBetween, displayForKey, epley1RM, fmtDate, fmtDateRelative, fmtDateShort, fmtWeight, formatSetDetails, getAuth, getExerciseSets, groupIntoSessions, haptic, idApi, inp, isRealSession, liftTier, normalizeExName, sbDelete, sbInsert, sbRead, sbUpdate, sbUpdateWhere, toLbs, track, useIsMobile
+  C, GS, LineChart, MASTER_CODE, RunCard, SUPABASE_KEY, SUPABASE_URL, askClaude, bestE1RMForExercise, btn, cleanerName, daysBetween, disablePush, displayForKey, enablePush, epley1RM, fmtDate, fmtDateRelative, fmtDateShort, fmtWeight, formatSetDetails, getAuth, getExerciseSets, getPushSubscription, groupIntoSessions, haptic, idApi, inp, isRealSession, liftTier, normalizeExName, sbDelete, sbInsert, sbRead, sbUpdate, sbUpdateWhere, toLbs, track, useIsMobile
 } from "./App.jsx";
+// Shared deterministic engine (Phase 0 extraction) — per-athlete session/adherence
+// math, computed live client-side for the Overview. Aliased to avoid colliding with
+// App.jsx's multi-athlete groupIntoSessions already imported above.
+import {
+  groupIntoSessions as pcGroup, compareProgramVsActual, buildOneRMs, aggregateInjuries, totalSetVolume,
+  trueImprovementPRs, classifyTiers, blendAdherenceScore, buildLiftHistory,
+} from "./proofcore.js";
+import { computeGritSnapshot, TIER_NAMES, TIER_COLORS, getBenchKey, resolveLift } from "./grit.js";
 // ─── SCHOOLS LIST (master only) ───────────────────────────────────────────────
 function SchoolsList({schools,coaches,onRefresh}) {
   const [confirmDelete,setConfirmDelete] = useState(null); // school id pending delete
@@ -521,7 +529,7 @@ function CoachDashboard({coach,onLogout}) {
   const [prs,setPrs] = useState([]);
   const [allCoaches,setAllCoaches] = useState([]);
   const [loading,setLoading] = useState(true);
-  const [activeTab,setActiveTab] = useState("athletes");
+  const [activeTab,setActiveTab] = useState("overview"); // graphs-first home (coach-experience-vision §1)
   const [selected,setSelected] = useState(null);
   const [search,setSearch] = useState("");
   const [filterPain,setFilterPain] = useState(false);
@@ -529,6 +537,15 @@ function CoachDashboard({coach,onLogout}) {
   const [sortBy,setSortBy] = useState("lastActive"); // "lastActive" | "name"
   const [recalcStatus,setRecalcStatus] = useState(null); // null | "running" | "done" | "error" | "X/Y
   const [allDigests,setAllDigests] = useState([]);
+  const [manualRMs,setManualRMs] = useState([]);        // manual_one_rms — Grit + adherence-load
+  const [prescriptions,setPrescriptions] = useState([]); // program_prescriptions (parsed programs) — Overview adherence
+  const [changeRequests,setChangeRequests] = useState([]); // program_change_requests — locked-program inbox
+  const [notifPrefs,setNotifPrefs] = useState(coach.notification_prefs||{injury:true,big_pr:true,inactive:true,digest:true});
+  const [pushOn,setPushOn] = useState(false);
+  const [pushBusy,setPushBusy] = useState(false);
+  useEffect(()=>{ (async()=>{ try{ setPushOn(!!(await getPushSubscription())); }catch{} })(); },[]);
+  const savePref = async (key,val)=>{ const next={...notifPrefs,[key]:val}; setNotifPrefs(next); try{ await sbUpdate("coaches",coach.id,{notification_prefs:next}); }catch(e){ console.error("pref save",e); } };
+  const togglePush = async ()=>{ setPushBusy(true); try{ if(pushOn){ await disablePush(); setPushOn(false); } else { await enablePush(); setPushOn(true); } }catch(e){ console.error("push toggle",e); } setPushBusy(false); };
   const [reportFilter,setReportFilter] = useState("all"); // "all" | "weekly" | "monthly"
   const [reportSearch,setReportSearch] = useState("");
   const [reportFlagFilter,setReportFlagFilter] = useState(false);
@@ -606,11 +623,23 @@ function CoachDashboard({coach,onLogout}) {
       // by digest_type — the gateway scopes both reads to this coach by coach_id).
       if(ids.length>0){
         const idList = ids.map(id=>`"${id}"`).join(",");
-        const [perAthlete, teamReports] = await Promise.all([
+        // Digests + manual 1RMs + parsed programs, all gateway-scoped to this roster.
+        // manual_one_rms feeds Grit strengths/weaknesses; program_prescriptions feeds
+        // the Overview load-adherence band (both read-only for the dashboard).
+        const [perAthlete, teamReports, manual, presc] = await Promise.all([
           sbRead("proof_digests",`?athlete_id=in.(${idList})&order=generated_at.desc&select=*`),
           sbRead("proof_digests",`?digest_type=in.(weekly_coach,monthly_coach)&order=generated_at.desc&select=*`),
+          sbRead("manual_one_rms",`?athlete_id=in.(${idList})&select=*`),
+          sbRead("program_prescriptions",`?athlete_id=in.(${idList})&select=*`),
         ]);
         setAllDigests([...(Array.isArray(perAthlete)?perAthlete:[]),...(Array.isArray(teamReports)?teamReports:[])]);
+        setManualRMs(Array.isArray(manual)?manual:[]);
+        setPrescriptions(Array.isArray(presc)?presc:[]);
+        // Locked-program change requests routed to this coach (gateway scopes by coach_id).
+        try {
+          const reqs = await sbRead("program_change_requests","?status=eq.pending&order=created_at.desc&select=*");
+          setChangeRequests(Array.isArray(reqs)?reqs:[]);
+        } catch(e){ /* table/rows may be empty */ }
       }
     } catch(e){console.error(e);}
     setLoading(false);
@@ -727,7 +756,7 @@ function CoachDashboard({coach,onLogout}) {
     return new Date(lb) - new Date(la);
   });
 
-  const tabs = ["athletes","stats","reports",...(isMaster?["coaches"]:[]),...(!isMaster&&isAdmin?["account"]:[])];
+  const tabs = ["overview","athletes","progress","reports",...(isMaster?[]:["settings"]),...(isMaster?["coaches"]:[]),...(!isMaster&&isAdmin?["account"]:[])];
 
   return (
     <div style={{minHeight:"100dvh",background:C.navy}}>
@@ -769,6 +798,12 @@ function CoachDashboard({coach,onLogout}) {
           <div style={{textAlign:"center",padding:60,color:C.muted}}>Loading...</div>
         ):(
           <>
+            {/* ── OVERVIEW TAB ── */}
+            {activeTab==="overview"&&(
+              <CoachOverview athletes={athletes} workouts={workouts} prs={prs} manualRMs={manualRMs} prescriptions={prescriptions}
+                onOpenAthlete={(id)=>{const at=athletes.find(a=>a.id===id); if(at){setSelected(at);setActiveTab("athletes");}}}/>
+            )}
+
             {/* ── ATHLETES TAB ── */}
             {activeTab==="athletes"&&(
               <div style={{display:"grid",gridTemplateColumns:(!isMobile&&selected)?"300px 1fr":"1fr",gap:20,alignItems:"start"}}>
@@ -866,6 +901,11 @@ function CoachDashboard({coach,onLogout}) {
                       athlete={selected}
                       workouts={workouts.filter(w=>w.athlete_id===selected.id)}
                       prs={prs.filter(p=>p.athlete_id===selected.id)}
+                      requests={changeRequests.filter(r=>r.athlete_id===selected.id)}
+                      onResolveRequest={async (req,status)=>{
+                        await sbUpdate("program_change_requests",req.id,{status,resolved_at:new Date().toISOString()});
+                        setChangeRequests(prev=>prev.filter(r=>r.id!==req.id));
+                      }}
                       onProgramSave={async (text)=>{
                         await sbUpdate("athletes",selected.id,{program_text:text});
                         setAthletes(prev=>prev.map(a=>a.id===selected.id?{...a,program_text:text}:a));
@@ -949,9 +989,50 @@ function CoachDashboard({coach,onLogout}) {
             })()}
 
             {/* ── GROUP STATS TAB ── */}
-            {activeTab==="stats"&&(
-              <GroupStats athletes={athletes} workouts={workouts} prs={prs}/>
+            {/* ── PROGRESS TAB (group trends) ── */}
+            {activeTab==="progress"&&(
+              <GroupProgress athletes={athletes} workouts={workouts} manualRMs={manualRMs}/>
             )}
+
+            {/* ── SETTINGS TAB (notifications) ── */}
+            {activeTab==="settings"&&(()=>{
+              const Toggle = ({on,onClick})=>(
+                <button onClick={onClick} style={{width:42,height:24,borderRadius:999,background:on?`${C.green}40`:C.navy3,border:`1px solid ${on?C.green:C.border}`,position:"relative",cursor:"pointer",flexShrink:0}}>
+                  <span style={{position:"absolute",top:2,left:on?20:2,width:18,height:18,borderRadius:"50%",background:on?C.green:C.muted,transition:"left 0.15s"}}/>
+                </button>
+              );
+              const Row = ({title,desc,pkey})=>(
+                <div style={{display:"flex",alignItems:"center",gap:14,padding:"13px 16px",borderBottom:`1px solid ${C.border}80`}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontWeight:700,fontSize:13.5,color:C.text}}>{title}</div>
+                    <div style={{color:C.muted,fontSize:12,marginTop:2}}>{desc}</div>
+                  </div>
+                  <Toggle on={notifPrefs[pkey]!==false} onClick={()=>savePref(pkey,!(notifPrefs[pkey]!==false))}/>
+                </div>
+              );
+              return (
+                <div style={{maxWidth:640}}>
+                  <div style={{display:"flex",alignItems:"center",gap:12,margin:"6px 2px 12px"}}>
+                    <span style={{fontSize:10.5,letterSpacing:1.4,textTransform:"uppercase",color:C.gold,fontWeight:700}}>Notifications</span>
+                    <span style={{height:1,background:C.border,flex:1}}/>
+                  </div>
+                  <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:"14px 16px",marginBottom:14,display:"flex",alignItems:"center",gap:14}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontWeight:700,fontSize:13.5,color:C.text}}>Push notifications on this device</div>
+                      <div style={{color:C.muted,fontSize:12,marginTop:2}}>{pushOn?"On — you'll get the alerts you've toggled below.":"Turn on to get alerts on this device."}</div>
+                    </div>
+                    <button onClick={togglePush} disabled={pushBusy} style={{background:pushOn?"transparent":C.gold,color:pushOn?C.muted:"#000",border:`1px solid ${pushOn?C.border:C.gold}`,borderRadius:9,padding:"8px 16px",fontWeight:700,fontSize:12.5,cursor:"pointer",fontFamily:"'DM Sans'",opacity:pushBusy?0.6:1}}>{pushBusy?"…":pushOn?"Turn off":"Enable"}</button>
+                  </div>
+                  <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden"}}>
+                    <Row title="Athlete injury / pain" desc="When an athlete flags pain in a session." pkey="injury"/>
+                    <Row title="Big PR" desc="Only real improvements on ranked lifts — never a first-time baseline." pkey="big_pr"/>
+                    <Row title="Athlete inactive" desc="When someone on your roster goes quiet." pkey="inactive"/>
+                    <Row title="Coach's Edition ready" desc="Your weekly + monthly team report, the moment it's generated." pkey="digest"/>
+                  </div>
+                  <div style={{color:C.muted,fontSize:11.5,marginTop:12,lineHeight:1.5}}>WILCO never messages your athletes on your behalf — these alerts go only to you.</div>
+                </div>
+              );
+            })()}
 
             {/* ── REPORTS TAB ── */}
             {activeTab==="reports"&&(()=>{
@@ -973,6 +1054,11 @@ function CoachDashboard({coach,onLogout}) {
               if(selectedDigest){
                 const c = selectedDigest.content_json||{};
                 const isTeam = selectedDigest.digest_type==="weekly_coach"||selectedDigest.digest_type==="monthly_coach";
+                // New rich team report (The Coach's Edition) → dedicated render + check-in.
+                // Legacy team reports (no content_json.team) fall through to the old view.
+                if(isTeam && c.team){
+                  return <CoachEdition digest={selectedDigest} athletes={athletes} coach={coach} onBack={()=>setSelectedDigest(null)} onRead={loadAll}/>;
+                }
                 const a = isTeam ? null : athleteById[selectedDigest.athlete_id];
                 // New shape: sections[]. Legacy fallback: keyed fields.
                 const sections = Array.isArray(c.sections)&&c.sections.length
@@ -1289,125 +1375,713 @@ function CoachDashboard({coach,onLogout}) {
 }
 
 // ─── GROUP STATS ──────────────────────────────────────────────────────────────
-function GroupStats({athletes,workouts,prs}) {
-  const now = new Date();
-  const weekAgo = new Date(now-7*24*60*60*1000);
+// ─── OVERVIEW (Coach Dashboard home) ─────────────────────────────────────────
+// Graphs-first team-health home. Every number here is computed LIVE, client-side,
+// from the shared proofcore engine (Phase 0) over the roster data already loaded —
+// zero tokens, no new round-trip. See docs/coach-experience-vision.md §1.
+const DAYMS = 86400000;
+const FEEL_ORDER = [["great","Great",C.green],["good","Good",C.blue],["average","OK",C.gold],["rough","Rough",C.red]];
+// prE1RM, trueImprovementPRs, classifyTiers, blendAdherenceScore now live in
+// proofcore (shared with the server Coach's Edition so the two never disagree).
 
-  const weekWorkouts = workouts.filter(w=>new Date(w.created_at)>=weekAgo&&isRealSession(w));
-  const weekPRs = prs.filter(p=>new Date(p.created_at||0)>=weekAgo);
-  const weekPain = weekWorkouts.filter(w=>w.parsed_data?.pain_flags?.length>0); // weekWorkouts already filtered to real sessions
+function StatBand({tone,label}){
+  const c = tone==="good"?C.green:tone==="warn"?C.gold:tone==="crit"?C.red:C.blue;
+  return <span style={{fontSize:9,fontWeight:800,letterSpacing:.5,textTransform:"uppercase",padding:"2px 8px",borderRadius:999,whiteSpace:"nowrap",color:c,background:`${c}22`,border:`1px solid ${c}55`}}>{label}</span>;
+}
+function OverviewCard({title,trend,children,readout,tone,style}){
+  return (
+    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16,...style}}>
+      <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:8,marginBottom:10}}>
+        <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.muted2,fontWeight:700}}>{title}</div>
+        {trend&&<div style={{fontSize:11.5,fontWeight:700,color:trend.dir==="up"?C.green:trend.dir==="down"?C.red:C.muted,whiteSpace:"nowrap"}}>{trend.dir==="up"?"▲":trend.dir==="down"?"▼":"—"} {trend.txt}</div>}
+      </div>
+      {children}
+      {readout&&<div style={{marginTop:11,display:"flex",alignItems:"center",gap:8,fontSize:12,color:C.muted2,lineHeight:1.4}}><span style={{flex:1}}>{readout}</span>{tone&&<StatBand tone={tone.k} label={tone.t}/>}</div>}
+    </div>
+  );
+}
 
-  const activeIds = new Set(weekWorkouts.map(w=>w.athlete_id));
-  const inactiveAthletes = athletes.filter(a=>!activeIds.has(a.id));
-  const activeAthletes = athletes.filter(a=>activeIds.has(a.id));
+function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthlete}){
+  const isMobile = useIsMobile();
+  const [resolved,setResolved] = useState(()=>new Set());
+  const [tip,setTip] = useState(null);
+  const D = useMemo(()=>{
+    const now = Date.now();
+    const dstart = (t)=>{const x=new Date(t);x.setHours(0,0,0,0);return x.getTime();};
+    const inWin = (w,from,to=now)=>{const t=new Date(w.created_at).getTime();return t>=from&&t<to;};
+    const woByAth={}, prByAth={}, manByAth={}, prescByAth={};
+    workouts.forEach(w=>{(woByAth[w.athlete_id]=woByAth[w.athlete_id]||[]).push(w);});
+    prs.forEach(p=>{(prByAth[p.athlete_id]=prByAth[p.athlete_id]||[]).push(p);});
+    manualRMs.forEach(m=>{(manByAth[m.athlete_id]=manByAth[m.athlete_id]||[]).push(m);});
+    prescriptions.forEach(pp=>{prescByAth[pp.athlete_id]=pp;});
+    const weekAgo=now-7*DAYMS, twoWk=now-14*DAYMS;
 
-  // Sessions per day this week for sparkline
-  const dayLabels = [];
-  const dayCounts = [];
-  for(let i=6;i>=0;i--){
-    const d = new Date(now);
-    d.setDate(d.getDate()-i);
-    d.setHours(0,0,0,0);
-    const next = new Date(d); next.setDate(next.getDate()+1);
-    dayLabels.push(d.toLocaleDateString("en-US",{weekday:"short"}));
-    dayCounts.push(groupIntoSessions(workouts.filter(w=>{const wd=new Date(w.created_at);return wd>=d&&wd<next;})).length);
-  }
+    const rows = athletes.map(a=>{
+      const wo = woByAth[a.id]||[];
+      const thisWk = pcGroup(wo.filter(w=>inWin(w,weekAgo)));
+      const lastWk = pcGroup(wo.filter(w=>inWin(w,twoWk,weekAgo)));
+      const parsed = prescByAth[a.id]?.parsed_json || null;
+      const oneRMs = buildOneRMs(prByAth[a.id]||[], manByAth[a.id]||[]);
+      const adherence = parsed ? compareProgramVsActual(parsed, thisWk, oneRMs) : null;
+      const injuries = aggregateInjuries([...lastWk,...thisWk]);
+      const hasProgram = !!(a.program_text && a.program_text.trim().length>10);
+      const presDays = a.training_days_per_week || parsed?.blocks?.[0]?.days?.length || null;
+      const score = blendAdherenceScore(thisWk.length, adherence, hasProgram, presDays);
+      // per-day logged flags for the heatmap (Mon..Sun of the last 7 days)
+      const days = [];
+      for(let i=6;i>=0;i--){ const ds=dstart(now-i*DAYMS), de=ds+DAYMS; days.push((wo.some(w=>{const t=new Date(w.created_at).getTime();return t>=ds&&t<de&&(w.parsed_data?.exercises?.length>0||w.parsed_data?.run_data);}))?1:0); }
+      const snap = computeGritSnapshot(wo, manByAth[a.id]||[], {bodyweightLbs:a.weight_lbs||a.weight||0, gender:a.gender, age:a.age});
+      // per-lift e1RM delta this week vs last (for the team strength-movement win)
+      const twL=buildLiftHistory(thisWk), lwL=buildLiftHistory(lastWk);
+      const lifts=Object.entries(twL).map(([lift,entries])=>{ const best=entries.reduce((x,y)=>y.e1rm>x.e1rm?y:x); const lw=lwL[lift]; let delta=null; if(lw){const lb=lw.reduce((x,y)=>y.e1rm>x.e1rm?y:x); delta=best.e1rm-lb.e1rm;} return {lift,deltaVsLastWeek:delta}; });
+      return {a, thisWk, lastWk, adherence, injuries, hasProgram, score, days, snap, lifts};
+    });
 
-  // Sport breakdown
-  const bySport = {};
-  activeAthletes.forEach(a=>{bySport[a.sport]=(bySport[a.sport]||0)+1;});
+    // sessions/day last 7d (across roster)
+    const dayCounts=[], dayLabels=[];
+    for(let i=6;i>=0;i--){ const ds=dstart(now-i*DAYMS), de=ds+DAYMS;
+      dayLabels.push(new Date(ds).toLocaleDateString("en-US",{weekday:"short"}));
+      dayCounts.push(athletes.reduce((s,a)=>s+pcGroup((woByAth[a.id]||[]).filter(w=>{const t=new Date(w.created_at).getTime();return t>=ds&&t<de;})).length,0));
+    }
+    const firstHalf = dayCounts.slice(0,3).reduce((a,b)=>a+b,0)||0, lastHalf = dayCounts.slice(4).reduce((a,b)=>a+b,0)||0;
+
+    // active this week
+    const activeCount = rows.filter(r=>r.thisWk.length>0).length;
+    const activePct = athletes.length?Math.round(100*activeCount/athletes.length):0;
+
+    // team adherence (only athletes with a score)
+    const scored = rows.filter(r=>r.score!=null);
+    const teamAdh = scored.length?Math.round(scored.reduce((s,r)=>s+r.score,0)/scored.length):null;
+    const noProgram = rows.filter(r=>r.score==null).length;
+
+    // session feel this week
+    const feelCounts={great:0,good:0,average:0,rough:0}; let feelTotal=0;
+    workouts.filter(w=>inWin(w,weekAgo)).forEach(w=>{const f=w.parsed_data?.session_feel; if(f&&feelCounts[f]!=null){feelCounts[f]++;feelTotal++;}});
+
+    // volume-load: total working sets across roster, last 4 weeks
+    const volWeeks=[];
+    for(let i=3;i>=0;i--){ const from=now-(i+1)*7*DAYMS, to=now-i*7*DAYMS;
+      volWeeks.push(athletes.reduce((s,a)=>s+totalSetVolume(pcGroup((woByAth[a.id]||[]).filter(w=>inWin(w,from,to)))),0));
+    }
+
+    // true PRs — this week + last 6 weeks (weekly bars)
+    const truePRs = trueImprovementPRs(prs);
+    const prWeeks=[];
+    for(let i=5;i>=0;i--){ const from=now-(i+1)*7*DAYMS, to=now-i*7*DAYMS;
+      prWeeks.push(truePRs.filter(p=>{const t=new Date(p.created_at||p.date||0).getTime();return t>=from&&t<to;}).length);
+    }
+    const prThisWk = prWeeks[prWeeks.length-1];
+
+    // strengths & weaknesses — avg Grit tier per benchmark lift across roster,
+    // classified by tier threshold (shared with the server so both agree).
+    const byBench={};
+    rows.forEach(r=>r.snap.rankedLifts.forEach(l=>{const bk=getBenchKey(l.key)||l.benchKey; if(!bk)return; (byBench[bk]=byBench[bk]||{name:l.name,tiers:[]}).tiers.push(l.tierIdx);}));
+    const benchAgg = Object.entries(byBench).map(([bk,v])=>{const avgTier=v.tiers.reduce((a,b)=>a+b,0)/v.tiers.length; return {bench:bk,name:v.name,avgTier,tierName:TIER_NAMES[Math.round(avgTier)],n:v.tiers.length};})
+      .sort((a,b)=>b.avgTier-a.avgTier);
+    const {strengths,weaknesses} = classifyTiers(benchAgg);
+
+    // team strength movement — avg e1RM delta per lift this week (for wins + tooltips)
+    const dlt={};
+    rows.forEach(r=>(r.lifts||[]).forEach(l=>{ if(l.deltaVsLastWeek!=null)(dlt[l.lift]=dlt[l.lift]||[]).push(l.deltaVsLastWeek); }));
+    const movers=Object.entries(dlt).map(([lift,ds])=>({lift,avg:+(ds.reduce((a,b)=>a+b,0)/ds.length).toFixed(1),n:ds.length})).filter(m=>m.avg>0).sort((a,b)=>b.avg-a.avg);
+
+    // wins — a MIX of notable stats + personal bests, deduped so it's never the same
+    // athlete twice and not always a person.
+    const recentTrue=truePRs.filter(p=>new Date(p.created_at||p.date||0).getTime()>=weekAgo).sort((a,b)=>b.gain-a.gain);
+    const seenAth=new Set(); const personalWins=[];
+    for(const p of recentTrue){ if(seenAth.has(p.athlete_id))continue; seenAth.add(p.athlete_id);
+      personalWins.push({icon:"🏆",title:(athletes.find(a=>a.id===p.athlete_id)||{}).name||"Athlete",detail:`${p.exercise} ${fmtWeight(p.weight,p.unit)} — +${Math.round(p.gain)} lbs e1RM`}); }
+    const statWins=[];
+    if(prThisWk>0) statWins.push({icon:"🔥",title:`${prThisWk} true PR${prThisWk!==1?"s":""}`,detail:"across the roster this week"});
+    if(movers[0]) statWins.push({icon:"📈",title:`${movers[0].lift} +${movers[0].avg} lbs`,detail:`team avg e1RM${movers[0].n>1?` · ${movers[0].n} athletes`:""}`});
+    if(teamAdh!=null&&teamAdh>=80) statWins.push({icon:"✅",title:`${teamAdh}% adherence`,detail:"team on plan this week"});
+    if(activePct>=80) statWins.push({icon:"⚡",title:`${activePct}% active`,detail:`${activeCount} of ${athletes.length} training this week`});
+    // interleave stat / personal so it reads varied
+    const wins=[]; while(wins.length<4){ if(statWins.length)wins.push(statWins.shift()); if(wins.length>=4)break; if(personalWins.length)wins.push(personalWins.shift()); if(!statWins.length&&!personalWins.length)break; }
+
+    // roster extras (folded in from the old Group Stats tab): active-by-sport,
+    // this-week pain flags, inactive athletes.
+    const bySport={}; rows.forEach(r=>{ if(r.thisWk.length>0){ const s=r.a.sport||"—"; bySport[s]=(bySport[s]||0)+1; } });
+    const weekPain=[]; workouts.filter(w=>inWin(w,weekAgo)).forEach(w=>{ const pf=w.parsed_data?.pain_flags; if(pf&&pf.length){ const a=athletes.find(x=>x.id===w.athlete_id); weekPain.push({name:a?.name||"Athlete",areas:pf.map(p=>p.area).join(", "),at:w.created_at}); } });
+    const inactive=rows.filter(r=>r.thisWk.length===0).map(r=>{ const last=(woByAth[r.a.id]||[])[0]||(woByAth[r.a.id]||[]).slice(-1)[0]; const days=last?Math.floor((now-new Date(last.created_at).getTime())/DAYMS):null; return {name:r.a.name, days}; }).sort((a,b)=>(a.days??9999)-(b.days??9999));
+
+    // briefing triage — ranked "who needs you today" (injury > quiet > adherence drop)
+    const triage=[];
+    rows.forEach(r=>{
+      const inj=r.injuries;
+      if(inj&&((inj.recurring&&inj.recurring.length)||(inj.active&&inj.active.length))){
+        const rec=inj.recurring&&inj.recurring[0]; const area=rec?rec.area:inj.active[0];
+        triage.push({id:r.a.id,sev:"crit",kind:"Injury",name:r.a.name,what:`${area} flagged${rec?` ${rec.count} sessions running`:" this week"}`});
+      } else if(r.thisWk.length===0 && r.lastWk.length>0){
+        triage.push({id:r.a.id,sev:"warn",kind:"Quiet",name:r.a.name,what:`no session this week — trained last week`});
+      } else if(r.score!=null && r.score<55){
+        triage.push({id:r.a.id,sev:"warn",kind:"Adherence",name:r.a.name,what:`adherence slipping (${r.score}%)`});
+      }
+    });
+    triage.sort((a,b)=>(a.sev==="crit"?0:1)-(b.sev==="crit"?0:1));
+
+    return {rows,dayCounts,dayLabels,firstHalf,lastHalf,activeCount,activePct,teamAdh,noProgram,volWeeks,prWeeks,prThisWk,strengths,weaknesses,wins,movers,bySport,weekPain,inactive,triage};
+  },[athletes,workouts,prs,manualRMs,prescriptions]);
+
+  if(!athletes.length) return <div style={{textAlign:"center",padding:60,color:C.muted}}>No athletes on your roster yet.</div>;
+
+  const triage = D.triage.filter(t=>!resolved.has(t.id));
+
+  const volMax = Math.max(1,...D.volWeeks), prMax = Math.max(1,...D.prWeeks), sMax = Math.max(1,...D.dayCounts);
+  const cell = (v)=>v?C.green:C.navy3;
+  // Hover tooltip shared across every chart data point.
+  const tipOn = (text)=>({onMouseEnter:(e)=>setTip({x:e.clientX,y:e.clientY,text}),onMouseMove:(e)=>setTip({x:e.clientX,y:e.clientY,text}),onMouseLeave:()=>setTip(null)});
+  const wkLabel = (i)=>i===D.prWeeks.length-1?"This week":`${D.prWeeks.length-1-i} wk ago`;
+  const span = (n)=>isMobile?{}:{gridColumn:`span ${n}`};
+  // top rows to show in the adherence heatmap: worst adherence first (needs attention)
+  const heatRows = [...D.rows].filter(r=>r.hasProgram||r.thisWk.length>0)
+    .sort((a,b)=>((a.score??999)-(b.score??999))).slice(0,6);
+
+  const secLabel = (t)=>(
+    <div style={{display:"flex",alignItems:"center",gap:12,margin:"24px 2px 12px"}}>
+      <span style={{fontSize:10.5,letterSpacing:1.4,textTransform:"uppercase",color:C.gold,fontWeight:700}}>{t}</span>
+      <span style={{height:1,background:C.border,flex:1}}/>
+    </div>
+  );
 
   return (
-    <div style={{maxWidth:900}}>
-      {/* Stat cards */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:12,marginBottom:24}}>
-        {[
-          {label:"Total Athletes",val:athletes.length,color:C.gold},
-          {label:"Active This Week",val:activeAthletes.length,color:C.green},
-          {label:"Sessions This Week",val:groupIntoSessions(weekWorkouts).length,color:C.green},
-          {label:"Pain Flags This Week",val:weekPain.length,color:C.red},
-          {label:"New PRs This Week",val:weekPRs.length,color:C.blue},
-        ].map(s=>(
-          <div key={s.label} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16}}>
-            <div style={{fontFamily:"'Bebas Neue'",fontSize:34,color:s.color}}>{s.val}</div>
-            <div style={{color:C.muted,fontSize:10,letterSpacing:1}}>{s.label}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Sessions this week sparkline */}
-      <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16,marginBottom:16}}>
-        <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>SESSIONS PER DAY — LAST 7 DAYS</div>
-        <LineChart data={dayLabels.map((l,i)=>({label:l,y:dayCounts[i]}))} color={C.green} unit=""/>
-      </div>
-
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginBottom:16}}>
-        {/* Pain flags */}
-        {weekPain.length>0&&(
-          <div style={{background:C.navy2,border:`1px solid ${C.red}40`,borderRadius:14,padding:16}}>
-            <div style={{color:C.red,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>PAIN FLAGS THIS WEEK</div>
-            {weekPain.slice(0,8).map((w,i)=>{
-              const a = athletes.find(at=>at.id===w.athlete_id);
-              return (
-                <div key={i} style={{padding:"5px 0",borderBottom:`1px solid ${C.border}20`,fontSize:12}}>
-                  <span style={{color:C.text,fontWeight:600}}>{a?.name||"Unknown"}</span>
-                  <span style={{color:C.muted}}> — {w.parsed_data.pain_flags.map(p=>p.area).join(", ")}</span>
-                  <span style={{color:C.muted,fontSize:10,marginLeft:6}}>{fmtDateShort(w.created_at)}</span>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* New PRs */}
-        {weekPRs.length>0&&(
-          <div style={{background:C.navy2,border:`1px solid ${C.blue}40`,borderRadius:14,padding:16}}>
-            <div style={{color:C.blue,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>NEW PRs THIS WEEK</div>
-            {weekPRs.slice(0,8).map((p,i)=>{
-              const a = athletes.find(at=>at.id===p.athlete_id);
-              return (
-                <div key={i} style={{padding:"5px 0",borderBottom:`1px solid ${C.border}20`,fontSize:12}}>
-                  <span style={{color:C.text,fontWeight:600}}>{a?.name||"Unknown"}</span>
-                  <span style={{color:C.muted}}> — {p.exercise} {fmtWeight(p.weight,p.unit)}</span>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* Inactive athletes */}
-      {inactiveAthletes.length>0&&(
-        <div style={{background:C.navy2,border:`1px solid ${C.gold}40`,borderRadius:14,padding:16,marginBottom:16}}>
-          <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>NO SESSIONS THIS WEEK ({inactiveAthletes.length})</div>
-          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-            {inactiveAthletes.map((a,i)=>{
-              const la = workouts.filter(w=>w.athlete_id===a.id)[0];
-              const d = la ? daysBetween(la.created_at) : null;
-              return (
-                <div key={i} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 12px"}}>
-                  <div style={{color:C.text,fontSize:12,fontWeight:600}}>{a.name}</div>
-                  <div style={{color:C.muted,fontSize:10}}>{d===null?"never logged":`Last: ${d}d ago`}</div>
-                </div>
-              );
-            })}
-          </div>
+    <div style={{maxWidth:1220}}>
+      {/* ── Briefing triage — who needs you today ── */}
+      <div style={{background:`linear-gradient(180deg,${C.navy3},${C.navy2})`,border:`1px solid ${C.border}`,borderRadius:16,overflow:"hidden",marginTop:4}}>
+        <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:12,padding:"15px 18px",borderBottom:`1px solid ${C.border}`,flexWrap:"wrap"}}>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:C.text,letterSpacing:1}}>{triage.length>0?`${triage.length} athlete${triage.length!==1?"s":""} need you today`:"You're all caught up"}</div>
+          <div style={{color:C.muted,fontSize:12}}>Today's briefing · auto-updated from this week's logs</div>
         </div>
-      )}
+        {triage.length===0
+          ? <div style={{padding:"26px 18px",textAlign:"center"}}><div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:C.green,letterSpacing:1}}>✓ Everything looks healthy</div><div style={{color:C.muted,fontSize:13,marginTop:4}}>Nothing needs you right now. The briefing refreshes as sessions come in.</div></div>
+          : triage.slice(0,6).map((t)=>(
+              <div key={t.id} style={{display:"flex",gap:12,padding:"12px 18px",borderBottom:`1px solid ${C.border}80`,alignItems:"center"}}>
+                <span style={{width:3,alignSelf:"stretch",borderRadius:3,background:t.sev==="crit"?C.red:C.gold,flexShrink:0}}/>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                    <span style={{fontSize:9.5,fontWeight:800,letterSpacing:1,textTransform:"uppercase",padding:"2px 7px",borderRadius:5,color:t.sev==="crit"?C.red:C.gold,background:t.sev==="crit"?`${C.red}22`:`${C.gold}22`,border:`1px solid ${t.sev==="crit"?C.red:C.gold}55`}}>{t.kind}</span>
+                    <span style={{fontWeight:700,color:C.text,fontSize:14}}>{t.name}</span>
+                    <span style={{color:C.muted,fontSize:13}}>— {t.what}</span>
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:6,flexShrink:0}}>
+                  {onOpenAthlete&&<button onClick={()=>onOpenAthlete(t.id)} style={{border:`1px solid ${C.border}`,background:"transparent",color:C.muted,borderRadius:8,padding:"5px 11px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Open</button>}
+                  <button onClick={()=>setResolved(s=>new Set(s).add(t.id))} style={{border:`1px solid ${C.border}`,background:"transparent",color:C.muted,borderRadius:8,padding:"5px 11px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Clear</button>
+                </div>
+              </div>
+            ))}
+        {triage.length>0&&<div style={{padding:"10px 18px",color:C.muted,fontSize:12,background:`${C.green}0d`}}>✓ {D.rows.length-triage.length} of {D.rows.length} on track · {D.prThisWk} true PR{D.prThisWk!==1?"s":""} this week</div>}
+      </div>
 
+      {secLabel("Team Health")}
+      <div style={{display:"grid",gridTemplateColumns:isMobile?"1fr":"repeat(6,minmax(0,1fr))",gap:14}}>
 
-      {/* Sport breakdown */}
-      {Object.keys(bySport).length>0&&(
+        {/* Program adherence + heatmap — widest tile */}
+        <OverviewCard style={span(4)} title="Program adherence · this week"
+          readout={D.teamAdh==null?`No parsed programs yet — assign & lock programs to track adherence.`:`Team average. ${D.noProgram>0?`${D.noProgram} without a program (excluded).`:"Everyone has a program."}`}
+          tone={D.teamAdh==null?null:(D.teamAdh>=80?{k:"good",t:"Healthy"}:D.teamAdh>=60?{k:"warn",t:"Slipping"}:{k:"crit",t:"At risk"})}>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:46,color:C.text,lineHeight:.9}}>{D.teamAdh==null?"—":D.teamAdh}<span style={{fontSize:18,color:C.muted}}> {D.teamAdh==null?"":"% team avg"}</span></div>
+          <div style={{display:"grid",gridTemplateColumns:"92px repeat(7,1fr)",gap:5,alignItems:"center",marginTop:14}}>
+            <span/>{D.dayLabels.map((l,i)=><span key={i} style={{fontSize:10,color:C.muted,textAlign:"center"}}>{l[0]}</span>)}
+            {heatRows.flatMap((r,ri)=>[
+              <span key={`n${ri}`} style={{fontSize:11.5,color:C.muted2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.a.name}</span>,
+              ...r.days.map((d,di)=><i key={`c${ri}-${di}`} style={{aspectRatio:"1",borderRadius:3,background:r.hasProgram?cell(d):(d?C.blue:C.navy3),opacity:r.hasProgram?1:.55,border:`1px solid #ffffff08`,cursor:"pointer"}} {...tipOn(`${r.a.name.split(" ")[0]} · ${D.dayLabels[di]}: ${d?"logged a session":"no session"}${r.hasProgram?"":" (no program)"}`)}/>)
+            ])}
+          </div>
+        </OverviewCard>
+
+        {/* Active this week gauge */}
+        <OverviewCard style={span(2)} title="Active this week"
+          readout={`${D.activeCount} of ${athletes.length} logged at least once.`}
+          tone={D.activePct>=70?{k:"good",t:"Healthy"}:D.activePct>=50?{k:"warn",t:"Watch"}:{k:"crit",t:"Low"}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"center",paddingTop:6}}>
+            <svg viewBox="0 0 120 120" style={{width:"100%",maxWidth:150}} {...tipOn(`${D.activeCount} of ${athletes.length} active — ${D.activePct}%`)}>
+              <circle cx="60" cy="60" r="50" fill="none" stroke={C.border} strokeWidth="12"/>
+              <circle cx="60" cy="60" r="50" fill="none" stroke={C.green} strokeWidth="12" strokeLinecap="round"
+                strokeDasharray={2*Math.PI*50} strokeDashoffset={2*Math.PI*50*(1-D.activePct/100)} transform="rotate(-90 60 60)"/>
+              <text x="60" y="58" textAnchor="middle" fill={C.text} fontFamily="'Bebas Neue'" fontSize="30">{D.activePct}%</text>
+              <text x="60" y="76" textAnchor="middle" fill={C.muted} fontSize="11">{D.activeCount} / {athletes.length}</text>
+            </svg>
+          </div>
+        </OverviewCard>
+
+        {/* Sessions/day */}
+        <OverviewCard style={span(3)} title="Sessions / day · last 7d"
+          trend={{dir:D.lastHalf>=D.firstHalf?"up":"down",txt:`${D.dayCounts.reduce((a,b)=>a+b,0)} total`}}
+          readout={D.lastHalf>=D.firstHalf?"Holding or climbing into the week.":"Sliding off through the week — worth a nudge."}
+          tone={D.lastHalf>=D.firstHalf?{k:"good",t:"Healthy"}:{k:"warn",t:"Watch"}}>
+          <svg viewBox="0 0 300 96" preserveAspectRatio="none" style={{width:"100%",height:96}}>
+            <line x1="0" y1="86" x2="300" y2="86" stroke={C.border}/>
+            <polyline fill="none" stroke={C.green} strokeWidth="2.5" points={D.dayCounts.map((v,i)=>`${i*50},${84-72*(v/sMax)}`).join(" ")}/>
+            {D.dayCounts.map((v,i)=><circle key={i} cx={i*50} cy={84-72*(v/sMax)} r="6" fill={C.green} style={{cursor:"pointer"}} {...tipOn(`${D.dayLabels[i]}: ${v} session${v!==1?"s":""}`)}/>)}
+          </svg>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:9.5,color:C.dim||C.muted,marginTop:2}}>{D.dayLabels.map((l,i)=><span key={i}>{l[0]}</span>)}</div>
+        </OverviewCard>
+
+        {/* True PRs bars */}
+        <OverviewCard style={span(3)} title="True PRs · 6 wk"
+          trend={{dir:"up",txt:`${D.prThisWk} this wk`}}
+          readout={D.prThisWk>0?`Real improvements over prior bests — baselines excluded.`:`No new bests logged this week yet.`}
+          tone={D.prThisWk>0?{k:"good",t:"Momentum"}:null}>
+          <svg viewBox="0 0 300 96" preserveAspectRatio="none" style={{width:"100%",height:96}}>
+            {D.prWeeks.map((v,i)=>{const w=36,gap=(300-w*6)/6;const x=gap/2+i*(w+gap);const h=Math.max(3,84*(v/prMax));return <rect key={i} x={x} y={88-h} width={w} height={h} rx="3" fill={i===D.prWeeks.length-1?C.green:C.gold} style={{cursor:"pointer"}} {...tipOn(`${wkLabel(i)}: ${v} PR${v!==1?"s":""}`)}/>;})}
+          </svg>
+        </OverviewCard>
+
+        {/* Team volume — full-width band */}
+        <OverviewCard style={span(6)} title="Team volume · 4 wk"
+          trend={{dir:D.volWeeks[3]>=D.volWeeks[0]?"up":"down",txt:"working sets"}}
+          readout={D.volWeeks[3]>D.volWeeks[0]*1.5?"Sharp jump vs 4 weeks ago — watch load spikes.":"Gradual, inside a safe band."}
+          tone={D.volWeeks[3]>D.volWeeks[0]*1.5?{k:"warn",t:"Watch"}:{k:"good",t:"Healthy"}}>
+          <svg viewBox="0 0 300 80" preserveAspectRatio="none" style={{width:"100%",height:80}}>
+            <polyline fill="none" stroke={C.blue} strokeWidth="2.5" points={D.volWeeks.map((v,i)=>`${i*100},${70-60*(v/volMax)}`).join(" ")}/>
+            {D.volWeeks.map((v,i)=><circle key={i} cx={i*100} cy={70-60*(v/volMax)} r="6" fill={C.blue} style={{cursor:"pointer"}} {...tipOn(`${i===3?"This week":`${3-i} wk ago`}: ${v} sets`)}/>)}
+          </svg>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:C.muted,marginTop:2}}>{D.volWeeks.map((v,i)=><span key={i}>{i===3?"This wk":`${3-i}w ago`}</span>)}</div>
+        </OverviewCard>
+
+      </div>
+
+      {secLabel("Program & Wins")}
+      <div style={{display:"grid",gridTemplateColumns:isMobile?"1fr":"1fr 1fr",gap:14}}>
+        {/* Strengths & weaknesses */}
         <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
-          <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>ACTIVE ATHLETES BY SPORT</div>
-          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-            {Object.entries(bySport).map(([sport,count])=>(
-              <div key={sport} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 14px"}}>
-                <div style={{color:C.text,fontWeight:600,fontSize:13}}>{sport}</div>
-                <div style={{color:C.muted,fontSize:11}}>{count} active this week</div>
+          <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.muted2,fontWeight:700}}>Where the program is strong &amp; weak</div>
+          <div style={{fontSize:12,color:C.muted2,margin:"8px 0 14px",lineHeight:1.4}}>Team Grit tiers by benchmark lift. Where the roster skews high, the program builds well; low tiers flag a gap.</div>
+          {D.strengths.length===0&&D.weaknesses.length===0&&<div style={{fontSize:12,color:C.muted}}>Not enough ranked lifts logged yet.</div>}
+          {D.strengths.length>0&&<div style={{fontSize:9.5,letterSpacing:1,textTransform:"uppercase",color:C.green,fontWeight:800,marginBottom:4}}>Strengths</div>}
+          {D.strengths.map((s,i)=>(
+            <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",cursor:"pointer"}} {...tipOn(`${s.name}: ${s.tierName} team avg · ${s.n} athlete${s.n!==1?"s":""} ranked`)}>
+              <span style={{width:120,fontSize:12.5,color:C.text,flexShrink:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.name}</span>
+              <span style={{flex:1,height:7,borderRadius:4,background:C.navy3,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${Math.round(100*(s.avgTier+1)/8)}%`,background:C.green}}/></span>
+              <span style={{fontSize:10,fontWeight:800,width:74,textAlign:"right",color:C.green}}>{s.tierName}</span>
+            </div>
+          ))}
+          {D.weaknesses.length>0&&<div style={{fontSize:9.5,letterSpacing:1,textTransform:"uppercase",color:C.red,fontWeight:800,margin:"14px 0 4px"}}>Weaknesses</div>}
+          {D.weaknesses.map((s,i)=>(
+            <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",cursor:"pointer"}} {...tipOn(`${s.name}: ${s.tierName} team avg · ${s.n} athlete${s.n!==1?"s":""} ranked`)}>
+              <span style={{width:120,fontSize:12.5,color:C.text,flexShrink:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.name}</span>
+              <span style={{flex:1,height:7,borderRadius:4,background:C.navy3,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${Math.round(100*(s.avgTier+1)/8)}%`,background:C.red}}/></span>
+              <span style={{fontSize:10,fontWeight:800,width:74,textAlign:"right",color:C.red}}>{s.tierName}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Wins — mixed notable stats + deduped personal bests */}
+        <div style={{background:`linear-gradient(180deg,${C.navy3},${C.navy2})`,border:`1px solid ${C.gold}44`,borderRadius:14,padding:16}}>
+          <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.gold,fontWeight:700}}>Wins this week</div>
+          {D.wins.length===0
+            ? <div style={{fontSize:12,color:C.muted2,marginTop:12}}>No wins logged yet this week — check back as sessions come in.</div>
+            : <div style={{marginTop:12}}>
+                {D.wins.map((w,i)=>(
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderBottom:i<D.wins.length-1?`1px solid ${C.border}80`:"none"}}>
+                    <span style={{width:30,height:30,borderRadius:8,background:`${C.gold}22`,border:`1px solid ${C.gold}55`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{w.icon}</span>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontWeight:700,fontSize:13,color:C.text}}>{w.title}</div>
+                      <div style={{color:C.muted2,fontSize:12}}>{w.detail}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>}
+          <div style={{fontSize:11,color:C.muted,marginTop:12,fontStyle:"italic"}}>Shareable image export lands in the weekly + monthly Coach's Edition.</div>
+        </div>
+      </div>
+
+      {/* Roster — folded in from the old Group Stats tab */}
+      {(Object.keys(D.bySport).length>0||D.weekPain.length>0||D.inactive.length>0)&&secLabel("Roster")}
+      <div style={{display:"grid",gridTemplateColumns:isMobile?"1fr":"repeat(auto-fit,minmax(240px,1fr))",gap:14}}>
+        {D.inactive.length>0&&(
+          <div style={{background:C.navy2,border:`1px solid ${C.gold}40`,borderRadius:14,padding:16}}>
+            <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.gold,fontWeight:700,marginBottom:10}}>No sessions this week ({D.inactive.length})</div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+              {D.inactive.map((a,i)=>(
+                <div key={i} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 11px"}}>
+                  <div style={{color:C.text,fontSize:12.5,fontWeight:600}}>{a.name}</div>
+                  <div style={{color:C.muted,fontSize:10.5}}>{a.days==null?"never logged":`${a.days}d ago`}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {D.weekPain.length>0&&(
+          <div style={{background:C.navy2,border:`1px solid ${C.red}40`,borderRadius:14,padding:16}}>
+            <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.red,fontWeight:700,marginBottom:10}}>Pain flags this week</div>
+            {D.weekPain.slice(0,8).map((p,i)=>(
+              <div key={i} style={{padding:"5px 0",borderBottom:`1px solid ${C.border}40`,fontSize:12}}>
+                <span style={{color:C.text,fontWeight:600}}>{p.name}</span><span style={{color:C.muted}}> — {p.areas}</span>
               </div>
             ))}
           </div>
+        )}
+        {Object.keys(D.bySport).length>0&&(
+          <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
+            <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.muted2,fontWeight:700,marginBottom:10}}>Active by sport</div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {Object.entries(D.bySport).sort((a,b)=>b[1]-a[1]).map(([sport,count])=>(
+                <div key={sport} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 13px"}}>
+                  <div style={{color:C.text,fontWeight:600,fontSize:13}}>{sport}</div>
+                  <div style={{color:C.muted,fontSize:11}}>{count} active</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* floating hover tooltip */}
+      {tip&&<div style={{position:"fixed",left:Math.min(tip.x+14,(typeof window!=="undefined"?window.innerWidth:9999)-220),top:tip.y+14,background:C.navy,border:`1px solid ${C.gold}`,borderRadius:8,padding:"6px 10px",fontSize:12,color:C.text,pointerEvents:"none",zIndex:200,boxShadow:"0 6px 20px rgba(0,0,0,0.5)",maxWidth:220}}>{tip.text}</div>}
+    </div>
+  );
+}
+
+// ─── THE COACH'S EDITION — Reports render + conversational check-in ───────────
+// The team-level mirror of the athlete Proof Feed: a newspaper the coach reads,
+// then a real back-and-forth check-in that gathers their calls + team context and
+// remembers it (coach_context) for next week's edition. See coach-experience-vision.
+const EDITION_SERIF = "Georgia,'Times New Roman',serif";
+
+// Did the coach ask a question back (vs. answer)? Mirrors the athlete check-in's
+// clarifying-question detection so WILCO answers once, then re-asks.
+const isAskingBack = (t)=>{
+  const s=String(t||"").trim();
+  return /\?\s*$/.test(s) || /^(what|why|how|when|which|who|should|can|could|would|do you|is it|are they|will it|any )\b/i.test(s);
+};
+// Quick-tap chips per question — the coach can always free-type instead.
+const chipsFor = (q)=>{
+  if(Array.isArray(q.options)&&q.options.length) return q.options;
+  if(q.kind==="program_focus") return ["Prioritize it next block","Not now"];
+  if(q.kind==="injury_apply") return ["Deload them this week","Leave it as is"];
+  if(q.kind==="reach_out") return ["Got it","Already on it"];
+  return null; // free-text only
+};
+
+function TierBar({name,tier,avgTier,color}){
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:9,padding:"4px 0"}}>
+      <span style={{width:120,fontSize:12.5,color:C.text,flexShrink:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{name}</span>
+      <span style={{flex:1,height:6,borderRadius:4,background:C.navy2,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${Math.round(100*((avgTier||0)+1)/8)}%`,background:color}}/></span>
+      <span style={{fontFamily:"'Bebas Neue'",fontSize:11,color,width:78,textAlign:"right"}}>{tier}</span>
+    </div>
+  );
+}
+
+// Client-side canvas export of the Wins block — no dependency, no server function.
+function exportWins(team, coach){
+  try{
+    const W=1080,H=1350, cv=document.createElement("canvas"); cv.width=W; cv.height=H;
+    const x=cv.getContext("2d");
+    x.fillStyle="#060d1e"; x.fillRect(0,0,W,H);
+    x.fillStyle="#d4a017"; x.font="700 40px Georgia"; x.fillText("THE COACH'S EDITION",70,110);
+    x.fillStyle="#94a3b8"; x.font="26px Georgia"; x.fillText(`${coach?.name||"Team"} · Wins of the week`,70,152);
+    x.fillStyle="#10b981"; x.font="700 130px Arial"; x.fillText(String(team.newPRs||0),70,320);
+    x.fillStyle="#e2e8f0"; x.font="34px Arial"; x.fillText("true PRs across the roster this week",70,372);
+    let y=490; x.fillStyle="#d4a017"; x.font="700 30px Arial"; x.fillText("STANDOUTS",70,y); y+=58;
+    (team.notablePRs||[]).slice(0,6).forEach(p=>{
+      x.fillStyle="#e2e8f0"; x.font="700 34px Arial"; x.fillText(String(p.athlete||""),70,y);
+      x.fillStyle="#94a3b8"; x.font="30px Arial"; x.fillText(`${p.exercise||""} ${p.weight||""}${p.gain?`   +${p.gain} lbs e1RM`:""}`,70,y+40); y+=104;
+    });
+    x.fillStyle="#64748b"; x.font="700 26px Arial"; x.fillText("WILCO",70,H-56);
+    const a=document.createElement("a"); a.href=cv.toDataURL("image/png"); a.download="wilco-wins.png"; a.click();
+  }catch(e){ console.error("wins export failed",e); }
+}
+
+function CoachCheckin({digest, team, coach, onRead}){
+  const c = digest.content_json||{};
+  const questions = c.questions||[];
+  const [msgs,setMsgs] = useState(()=>questions.length?[{role:"wilco",text:questions[0].text}]:[]);
+  const [qi,setQi] = useState(0);
+  const [answers,setAnswers] = useState({});
+  const [input,setInput] = useState("");
+  const [busy,setBusy] = useState(false);
+  const [done,setDone] = useState(!!c.checkin_done);
+  const endRef = useRef(null);
+  useEffect(()=>{ endRef.current?.scrollIntoView({behavior:"smooth",block:"nearest"}); },[msgs]);
+
+  const q = questions[qi];
+  const teamCtx = ()=> team? `Team read: ${team.n} athletes, ${team.activePct}% active, adherence ${team.adherenceAvg??"n/a"}%. Strengths: ${(team.strengths||[]).map(s=>s.name).join(", ")||"—"}. Weak spots: ${(team.weaknesses||[]).map(s=>s.name).join(", ")||"—"}. Slipping: ${(team.quiet||[]).map(v=>v.athlete).join(", ")||"none"}.` : "";
+
+  const finish = async (finalAnswers)=>{
+    setBusy(true);
+    setMsgs(m=>[...m,{role:"sys",text:"Saving to your team context…"}]);
+    try{
+      const sys = 'You are WILCO, distilling a strength coach\'s check-in into concise context notes for future team reports. From the Q&A, output ONLY JSON: {"season":str|null,"block_goal":str|null,"team_response":str|null,"athlete_notes":str|null,"decisions":[str]}. Each a short phrase in the coach\'s own words. decisions = the calls they made (e.g. "wants a pressing emphasis next block", "deloading Marcus\' knee"). null when a field wasn\'t covered.';
+      const transcript = questions.map(qq=>`Q(${qq.kind}): ${qq.text}\nA: ${finalAnswers[qq.id]||"(skipped)"}`).join("\n\n");
+      const raw = await askClaude(sys, transcript, 500, [], "claude-haiku-4-5", "coach_checkin");
+      let ext={}; try{ ext=JSON.parse(String(raw).replace(/```json|```/g,"").trim()); }catch{}
+      const rows=[];
+      const add=(kind,note,lt=false)=>{ if(note&&String(note).trim()) rows.push({coach_id:coach.id, note:`${kind}: ${String(note).trim()}`, meta:{kind}, is_long_term:lt}); };
+      add("season",ext.season); add("goal",ext.block_goal,true); add("response",ext.team_response); add("notes",ext.athlete_notes,true);
+      (Array.isArray(ext.decisions)?ext.decisions:[]).forEach(d=>add("decision",d));
+      for(const r of rows){ try{ await sbInsert("coach_context",r); }catch(e){ console.error("coach_context write",e); } }
+      try{ await sbUpdate("proof_digests", digest.id, {is_read:true, content_json:{...c, checkin_done:true}}); onRead&&onRead(); }catch(e){ console.error(e); }
+      setMsgs(m=>[...m.filter(x=>x.text!=="Saving to your team context…"),{role:"sys",text:"✓ Saved — I'll build next week's edition around this."}]);
+      setDone(true);
+    }catch(e){ setMsgs(m=>[...m,{role:"wilco",text:"Couldn't save that just now — try again in a moment."}]); }
+    setBusy(false);
+  };
+
+  const advance = (nextAnswers)=>{
+    const ni=qi+1;
+    if(ni>=questions.length){ finish(nextAnswers); return; }
+    setQi(ni);
+    setMsgs(m=>[...m,{role:"wilco",text:questions[ni].text}]);
+  };
+
+  const submit = async (text)=>{
+    const t=String(text||"").trim(); if(!t||busy||done||!q) return;
+    setInput("");
+    setMsgs(m=>[...m,{role:"coach",text:t}]);
+    if(isAskingBack(t)){
+      setBusy(true);
+      try{
+        const sys=`You are WILCO, a strength coach's AI assistant. The coach asked a question mid-check-in. Answer it directly and briefly (1-3 sentences), grounded in the team read, then stop — don't move on. ${teamCtx()}`;
+        const reply=await askClaude(sys, `They were asked: "${q.text}"\nThey replied: "${t}"`, 300, [], "claude-sonnet-5", "coach_checkin");
+        setMsgs(m=>[...m,{role:"wilco",text:reply||"Your call either way."},{role:"wilco",text:q.text}]);
+      }catch(e){ setMsgs(m=>[...m,{role:"wilco",text:q.text}]); }
+      setBusy(false);
+      return;
+    }
+    const na={...answers,[q.id]:t}; setAnswers(na);
+    // WILCO reacts to the answer before asking the next question — a real
+    // conversation, mirroring the athlete check-in (thin/dismissive answers get
+    // no forced reaction).
+    const thin = t.length<3 || /^(idk|no|nope|nothing|none|fine|na|n\/a|skip|dunno|meh|ok|okay|yes|yeah|yep|sure)\.?$/i.test(t);
+    if(!thin){
+      setBusy(true);
+      try{
+        const sys=`You are WILCO, a strength coach's AI assistant, mid-check-in with the coach. React to their answer in ONE short, natural sentence — acknowledge or reflect it like a real conversation. Do NOT ask a question, no lists, no emoji. ${teamCtx()}`;
+        const reply=await askClaude(sys, `You asked: "${q.text}"\nThey answered: "${t}"`, 160, [], "claude-haiku-4-5", "coach_checkin");
+        if(reply&&reply.trim()) setMsgs(m=>[...m,{role:"wilco",text:reply.trim()}]);
+      }catch{}
+      setBusy(false);
+    }
+    advance(na);
+  };
+
+  if(!questions.length) return null;
+  const chips = q?chipsFor(q):null;
+
+  return (
+    <div style={{marginTop:18,background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
+      <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:C.gold,letterSpacing:1.5}}>YOUR CALLS &amp; CONTEXT</div>
+      <div style={{color:C.muted,fontSize:12.5,margin:"3px 0 14px"}}>Talk it through — tap an option or type your own, ask me anything, push back. I'll remember it for next week.</div>
+      <div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:400,overflowY:"auto",paddingRight:4}}>
+        {msgs.map((m,i)=>(
+          m.role==="sys"
+            ? <div key={i} style={{alignSelf:"center",color:C.green,fontSize:12,fontFamily:"'Bebas Neue'",letterSpacing:0.5}}>{m.text}</div>
+            : <div key={i} style={{alignSelf:m.role==="coach"?"flex-end":"flex-start",maxWidth:"85%",background:m.role==="coach"?C.gold:C.navy3,color:m.role==="coach"?"#0a0a0a":C.text,padding:"9px 12px",borderRadius:12,fontSize:13.5,lineHeight:1.5,fontWeight:m.role==="coach"?500:400}}>{m.text}</div>
+        ))}
+        <div ref={endRef}/>
+      </div>
+      {!done&&q&&(
+        <div style={{marginTop:12}}>
+          {chips&&(
+            <div style={{display:"flex",flexWrap:"wrap",gap:7,marginBottom:9}}>
+              {chips.map((opt,i)=>(
+                <button key={i} disabled={busy} onClick={()=>submit(opt)} style={{fontSize:12.5,color:C.muted,background:C.navy3,border:`1px solid ${C.border}`,borderRadius:999,padding:"6px 13px",cursor:"pointer",fontFamily:"'DM Sans'"}}>{opt}</button>
+              ))}
+            </div>
+          )}
+          <div style={{display:"flex",gap:8,alignItems:"center",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:"6px 6px 6px 13px"}}>
+            <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")submit(input);}} placeholder="Answer, or ask me anything…" disabled={busy} style={{flex:1,background:"none",border:"none",color:C.text,fontSize:13.5,outline:"none",fontFamily:"'DM Sans'"}}/>
+            <button onClick={()=>submit(input)} disabled={busy||!input.trim()} style={{background:C.gold,color:"#0a0a0a",border:"none",borderRadius:9,padding:"8px 16px",fontWeight:700,fontSize:12,cursor:"pointer",opacity:busy||!input.trim()?0.5:1,fontFamily:"'DM Sans'"}}>{busy?"…":"Send"}</button>
+          </div>
+        </div>
+      )}
+      {done&&<div style={{marginTop:12,color:C.muted,fontSize:13,fontStyle:"italic",fontFamily:EDITION_SERIF}}>That's the edition. I've got the context now — I'll build next week around it.</div>}
+    </div>
+  );
+}
+
+function CoachEdition({digest, athletes, coach, onBack, onRead}){
+  const c = digest.content_json||{};
+  const team = c.team||null;
+  const sections = Array.isArray(c.sections)?c.sections:[];
+  const isMonthly = digest.digest_type==="monthly_coach";
+  const railCells = team?[["Roster",team.n],["Active",`${team.activePct}%`],["Adherence",team.adherenceAvg!=null?`${team.adherenceAvg}%`:"—"],["True PRs",team.newPRs]]:[];
+  const toneOf = (s)=> /FOCUS/i.test(s.label)?"focus": s.flag==="warn"?"warn":"plain";
+  return (
+    <div style={{maxWidth:720}}>
+      <button onClick={onBack} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:12,marginBottom:14}}>← Back to Reports</button>
+      <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:"18px 20px"}}>
+        <div style={{borderBottom:`2px solid ${C.border}`,paddingBottom:12,marginBottom:14,textAlign:"center"}}>
+          <div style={{fontFamily:EDITION_SERIF,fontWeight:700,fontSize:30,color:C.text,letterSpacing:-0.5,lineHeight:1}}>The Coach's Edition{isMonthly?" · Monthly":""}</div>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:12,letterSpacing:2,color:C.muted,marginTop:6}}>{coach?.name||"Coach"} · {new Date(digest.generated_at||Date.now()).toLocaleDateString("en-US",{month:"long",day:"numeric"})}{team?` · ${team.n} Athletes`:""}</div>
+        </div>
+        {c.intro&&<div style={{fontFamily:EDITION_SERIF,fontSize:16,color:C.text,fontStyle:"italic",marginBottom:14,textAlign:"center"}}>{c.intro}</div>}
+        {team&&(
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:1,background:C.border,border:`1px solid ${C.border}`,borderRadius:10,overflow:"hidden",marginBottom:16}}>
+            {railCells.map(([k,v],i)=>(
+              <div key={i} style={{background:C.navy3,padding:"10px 12px"}}>
+                <div style={{fontSize:9.5,letterSpacing:1,textTransform:"uppercase",color:C.muted}}>{k}</div>
+                <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:C.text,fontVariantNumeric:"tabular-nums"}}>{v}</div>
+              </div>
+            ))}
+          </div>
+        )}
+        {sections.map((s,i)=>{
+          const tone=toneOf(s);
+          const labelColor = tone==="warn"?C.red: tone==="focus"?C.gold:C.muted;
+          const box = tone==="focus"
+            ? {background:`${C.gold}0e`,borderLeft:`3px solid ${C.gold}`,borderRadius:"0 10px 10px 0"}
+            : {background:C.navy3,border:`1px solid ${tone==="warn"?`${C.red}40`:C.border}`,borderRadius:10};
+          return (
+            <div key={i} style={{...box,padding:"12px 14px",marginBottom:9}}>
+              <div style={{fontFamily:"'Bebas Neue'",fontSize:13,letterSpacing:1.5,color:labelColor,marginBottom:6}}>{s.label}</div>
+              <div style={{color:C.text,fontSize:13.5,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{s.body}</div>
+            </div>
+          );
+        })}
+        {team&&((team.strengths&&team.strengths.length)||(team.weaknesses&&team.weaknesses.length))&&(
+          <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:14,marginTop:6}}>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:13,letterSpacing:1.5,color:C.muted,marginBottom:8}}>PROGRAM STRENGTHS &amp; WEAKNESSES</div>
+            {(team.strengths||[]).map((s,i)=><TierBar key={"s"+i} name={s.name} tier={s.tierName} avgTier={s.avgTier} color={C.green}/>)}
+            {(team.weaknesses||[]).map((s,i)=><TierBar key={"w"+i} name={s.name} tier={s.tierName} avgTier={s.avgTier} color={C.red}/>)}
+          </div>
+        )}
+        {team&&team.notablePRs&&team.notablePRs.length>0&&(
+          <div style={{background:`linear-gradient(180deg,${C.navy3},${C.navy2})`,border:`1px solid ${C.gold}44`,borderRadius:10,padding:14,marginTop:12}}>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:13,letterSpacing:1.5,color:C.gold,marginBottom:8}}>WINS TO SHARE</div>
+            {team.notablePRs.slice(0,5).map((p,i,arr)=>(
+              <div key={i} style={{display:"flex",alignItems:"center",gap:9,padding:"6px 0",borderBottom:i<arr.length-1?`1px solid ${C.border}80`:"none"}}>
+                <span style={{width:24,height:24,borderRadius:6,background:`${C.gold}22`,border:`1px solid ${C.gold}55`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,flexShrink:0}}>🏆</span>
+                <div style={{flex:1,minWidth:0}}><span style={{color:C.text,fontWeight:650,fontSize:13}}>{p.athlete}</span> <span style={{color:C.muted,fontSize:12.5}}>{p.exercise} {fmtWeight(p.weight,p.unit)}{p.gain?` — +${p.gain} lbs e1RM`:""}</span></div>
+              </div>
+            ))}
+            <button onClick={()=>exportWins(team,coach)} style={{marginTop:12,width:"100%",background:C.gold,color:"#0a0a0a",border:"none",borderRadius:9,padding:10,fontWeight:800,letterSpacing:1,textTransform:"uppercase",fontSize:12,cursor:"pointer",fontFamily:"'DM Sans'"}}>⤓ Share as image</button>
+          </div>
+        )}
+        <CoachCheckin digest={digest} team={team} coach={coach} onRead={onRead}/>
+      </div>
+    </div>
+  );
+}
+
+// ─── GROUP PROGRESS (Coach Dashboard) ────────────────────────────────────────
+// The team-level mirror of the athlete Progress screen: all athletes' dated data
+// combined into GROUP trends. Same Benchmarks / Strength / Running tabs (no PRs —
+// there's no such thing as a group PR). Reuses the Grit engine + LineChart.
+function GroupProgress({athletes,workouts,manualRMs}){
+  const [tab,setTab] = useState("benchmarks");
+  const D = useMemo(()=>{
+    const now=Date.now(), WK=7*864e5, WEEKS=12, weekStart=now-WEEKS*WK;
+    const wl=(wi)=>new Date(weekStart+wi*WK).toLocaleDateString("en-US",{month:"short",day:"numeric"});
+    const pd=(w)=>typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
+    const woByAth={}, manByAth={};
+    workouts.forEach(w=>{(woByAth[w.athlete_id]=woByAth[w.athlete_id]||[]).push(w);});
+    manualRMs.forEach(m=>{(manByAth[m.athlete_id]=manByAth[m.athlete_id]||[]).push(m);});
+
+    // ── BENCHMARKS: aggregate each athlete's Grit snapshot by benchmark lift ──
+    const byBench={}; let scoreSum=0, scoreN=0, topTier=-1, rankedAthletes=0;
+    athletes.forEach(a=>{
+      let snap; try{ snap=computeGritSnapshot(woByAth[a.id]||[], manByAth[a.id]||[], {bodyweightLbs:a.weight_lbs||a.weight||0, gender:a.gender, age:a.age}); }catch{ snap={rankedLifts:[],strengthScore:0,topTierIdx:-1}; }
+      if(snap.rankedLifts.length){ rankedAthletes++; scoreSum+=snap.strengthScore; scoreN++; if(snap.topTierIdx>topTier)topTier=snap.topTierIdx; }
+      snap.rankedLifts.forEach(l=>{ const bk=getBenchKey(l.key)||l.benchKey; if(!bk)return; const e=(byBench[bk]=byBench[bk]||{name:l.name,tiers:[],e1rms:[]}); e.tiers.push(l.tierIdx); e.e1rms.push(l.e1rm); });
+    });
+    const benchmarks=Object.entries(byBench).map(([bk,v])=>{
+      const avgTier=v.tiers.reduce((a,b)=>a+b,0)/v.tiers.length;
+      const dist=Array(8).fill(0); v.tiers.forEach(t=>dist[t]++);
+      return {benchKey:bk,name:v.name,avgTier,n:v.tiers.length,dist,avgE1rm:Math.round(v.e1rms.reduce((a,b)=>a+b,0)/v.e1rms.length)};
+    }).sort((a,b)=>b.avgTier-a.avgTier);
+    const avgScore=scoreN?Math.round(scoreSum/scoreN):0;
+
+    // ── STRENGTH: weekly team-average e1RM per lift ──
+    const liftData={};
+    athletes.forEach(a=>{ const bw=a.weight_lbs||a.weight||0;
+      (woByAth[a.id]||[]).forEach(w=>{ const t=new Date(w.created_at).getTime(); if(t<weekStart)return; const wi=Math.floor((t-weekStart)/WK);
+        (pd(w).exercises||[]).forEach(ex=>{ if(!ex.name)return; const lift=resolveLift(ex.name); if(!lift.tracked)return; const e=bestE1RMForExercise(ex,bw); if(!e)return;
+          const L=(liftData[lift.id]=liftData[lift.id]||{name:lift.name,key:lift.id,weeks:{}}); const wk=(L.weeks[wi]=L.weeks[wi]||{}); if(!wk[a.id]||e>wk[a.id])wk[a.id]=e; });
+      });
+    });
+    const strength=Object.values(liftData).map(L=>{
+      const points=[]; for(let wi=0;wi<WEEKS;wi++){ const wk=L.weeks[wi]; if(wk){ const vals=Object.values(wk); points.push({label:wl(wi),y:Math.round(vals.reduce((a,b)=>a+b,0)/vals.length),n:vals.length}); } }
+      const best=points.length?Math.max(...points.map(p=>p.y)):0;
+      return {name:L.name,key:L.key,points,best};
+    }).filter(L=>L.points.length>=2).sort((a,b)=>liftTier(a.key)-liftTier(b.key)||b.best-a.best);
+
+    // ── RUNNING: weekly team totals / averages ──
+    const paceToMin=(p)=>{ if(!p)return null; const pts=String(p).split(":"); if(pts.length<2)return null; const m=parseFloat(pts[0]),s=parseFloat(pts[1]); return isNaN(m)||isNaN(s)?null:Math.round((m+s/60)*100)/100; };
+    const runWeeks={};
+    athletes.forEach(a=>{ (woByAth[a.id]||[]).forEach(w=>{ const t=new Date(w.created_at).getTime(); if(t<weekStart)return; const wi=Math.floor((t-weekStart)/WK); const rd=pd(w).run_data; if(!rd)return; const R=(runWeeks[wi]=runWeeks[wi]||{dist:0,pace:[],hr:[]}); const d=rd.distance_miles||rd.distance_km; if(d)R.dist+=d; const pc=paceToMin(rd.pace_per_mile||rd.pace_per_km); if(pc!=null)R.pace.push(pc); if(rd.heart_rate_avg)R.hr.push(rd.heart_rate_avg); }); });
+    const distSeries=[],paceSeries=[],hrSeries=[];
+    for(let wi=0;wi<WEEKS;wi++){ const R=runWeeks[wi]; if(!R)continue; const label=wl(wi); if(R.dist)distSeries.push({label,y:Math.round(R.dist*10)/10}); if(R.pace.length)paceSeries.push({label,y:Math.round(R.pace.reduce((a,b)=>a+b,0)/R.pace.length*100)/100}); if(R.hr.length)hrSeries.push({label,y:Math.round(R.hr.reduce((a,b)=>a+b,0)/R.hr.length)}); }
+
+    return {benchmarks,avgScore,rankedAthletes,topTier,strength,distSeries,paceSeries,hrSeries};
+  },[athletes,workouts,manualRMs]);
+
+  const subTab=(t,label)=>(
+    <button key={t} onClick={()=>setTab(t)} style={{padding:"10px 16px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?C.gold:"transparent"}`,color:tab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'"}}>{label}</button>
+  );
+
+  return (
+    <div style={{maxWidth:760}}>
+      <div style={{color:C.muted2,fontSize:12.5,marginBottom:12}}>Every athlete's dated data, combined into team trends.</div>
+      <div style={{display:"flex",borderBottom:`1px solid ${C.border}`,marginBottom:16}}>
+        {subTab("benchmarks","Benchmarks")}{subTab("strength","Strength")}{subTab("running","Running")}
+      </div>
+
+      {tab==="benchmarks"&&(
+        <div>
+          <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:16,display:"flex",justifyContent:"space-around",textAlign:"center",alignItems:"center"}}>
+            <div style={{flex:1}}><div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>{D.rankedAthletes}</div><div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:2}}>ATHLETES RANKED</div></div>
+            <div style={{width:1,alignSelf:"stretch",background:C.border}}/>
+            <div style={{flex:1}}><div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:D.topTier>=0?TIER_COLORS[D.topTier]:C.muted,lineHeight:1}}>{D.topTier>=0?TIER_NAMES[D.topTier]:"—"}</div><div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:5}}>TEAM TOP TIER</div></div>
+            <div style={{width:1,alignSelf:"stretch",background:C.border}}/>
+            <div style={{flex:1}}><div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>{D.avgScore.toLocaleString()}</div><div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:2}}>AVG STRENGTH SCORE</div></div>
+          </div>
+          {D.benchmarks.length===0
+            ? <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No benchmarked lifts logged across the roster yet.</div>
+            : D.benchmarks.map((b,i)=>{
+                const ti=Math.round(b.avgTier);
+                return (
+                  <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:12}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+                      <div>
+                        <div style={{color:C.text,fontWeight:700,fontSize:14}}>{b.name}</div>
+                        <div style={{color:TIER_COLORS[ti],fontSize:13,fontWeight:700,marginTop:2,letterSpacing:.5}}>{TIER_NAMES[ti]} <span style={{color:C.muted,fontWeight:400}}>team avg</span></div>
+                      </div>
+                      <div style={{textAlign:"right"}}>
+                        <div style={{fontFamily:"'Bebas Neue'",fontSize:24,color:TIER_COLORS[ti],lineHeight:1}}>{b.avgE1rm}<span style={{fontSize:11,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span></div>
+                        <div style={{color:C.muted,fontSize:10}}>avg e1RM · {b.n} athlete{b.n!==1?"s":""}</div>
+                      </div>
+                    </div>
+                    <div style={{position:"relative",height:12,borderRadius:6,display:"flex",overflow:"visible"}}>
+                      {TIER_COLORS.map((c,si)=><div key={si} style={{flex:1,background:c,opacity:si===ti?1:0.4,borderRight:si<7?"1px solid rgba(6,13,30,0.6)":""}}/>)}
+                      <div style={{position:"absolute",top:-3,left:`${b.avgTier/7*100}%`,transform:"translateX(-50%)",width:5,height:18,background:"#fff",borderRadius:3,boxShadow:"0 0 6px rgba(255,255,255,0.7)"}}/>
+                    </div>
+                    <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:10,justifyContent:"center"}}>
+                      {b.dist.map((cnt,ti2)=>cnt>0&&<span key={ti2} style={{fontSize:10,color:TIER_COLORS[ti2],background:`${TIER_COLORS[ti2]}18`,border:`1px solid ${TIER_COLORS[ti2]}44`,borderRadius:999,padding:"2px 8px",fontWeight:700}}>{TIER_NAMES[ti2]} {cnt}</span>)}
+                    </div>
+                  </div>
+                );
+              })}
+        </div>
+      )}
+
+      {tab==="strength"&&(
+        <div>
+          <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>TEAM STRENGTH — AVG EST. 1RM BY WEEK</div>
+          {D.strength.length===0
+            ? <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>Not enough weighted training logged across weeks yet.</div>
+            : D.strength.map((ex,i)=>(
+                <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+                    <div><div style={{color:C.text,fontWeight:700,fontSize:14}}>{ex.name}</div><div style={{color:C.muted,fontSize:11,marginTop:2}}>{ex.points.length} week{ex.points.length!==1?"s":""} of data</div></div>
+                    <div style={{textAlign:"right"}}><div style={{color:C.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>PEAK TEAM AVG</div><div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:C.gold,lineHeight:1}}>{ex.best}<span style={{fontSize:11,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span></div></div>
+                  </div>
+                  <LineChart data={ex.points} color={C.gold} unit=" lbs"/>
+                </div>
+              ))}
+        </div>
+      )}
+
+      {tab==="running"&&(
+        <div>
+          <div style={{color:C.blue,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>TEAM RUNNING — BY WEEK</div>
+          {D.distSeries.length>=2&&<div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:12}}>Total distance / week</div><LineChart data={D.distSeries} color={C.blue} unit=" mi"/></div>}
+          {D.paceSeries.length>=2&&<div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:4}}>Avg pace (min/mi) — lower is faster</div><LineChart data={D.paceSeries} color={C.green} unit=""/></div>}
+          {D.hrSeries.length>=2&&<div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:12}}>Avg heart rate (bpm)</div><LineChart data={D.hrSeries} color={C.red} unit=" bpm"/></div>}
+          {D.distSeries.length<2&&D.paceSeries.length<2&&D.hrSeries.length<2&&<div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:10,padding:16,color:C.muted2,fontSize:12}}>Not enough runs logged across the roster to trend yet.</div>}
         </div>
       )}
     </div>
@@ -1415,7 +2089,7 @@ function GroupStats({athletes,workouts,prs}) {
 }
 
 // ─── ATHLETE DETAIL (Coach Dashboard) ────────────────────────────────────────
-function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
+function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProgramSave,onAthleteDelete}) {
   const [tab,setTab] = useState("overview");
   const [programText,setProgramText] = useState(athlete.program_text||"");
   const [programLocked,setProgramLocked] = useState(!!athlete.program_locked);
@@ -1520,6 +2194,28 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
       </div>
 
       <div style={{padding:20,maxHeight:"calc(100vh - 320px)",overflowY:"auto"}}>
+
+        {/* ── Program change requests (locked-program collaboration) ── */}
+        {requests.length>0&&(
+          <div style={{background:`${C.gold}0d`,border:`1px solid ${C.gold}40`,borderRadius:12,padding:14,marginBottom:16}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+              <span style={{fontFamily:"'Bebas Neue'",fontSize:15,color:C.gold,letterSpacing:1}}>PROGRAM CHANGE REQUESTS</span>
+              <span style={{fontSize:10,fontWeight:800,color:C.gold,background:`${C.gold}22`,border:`1px solid ${C.gold}55`,borderRadius:999,padding:"1px 7px"}}>{requests.length}</span>
+              <span style={{marginLeft:"auto",fontSize:10.5,color:C.muted,textTransform:"uppercase",letterSpacing:.5}}>🔒 Locked</span>
+            </div>
+            {requests.map((r)=>(
+              <div key={r.id} style={{border:`1px solid ${C.border}`,background:C.navy2,borderRadius:10,padding:"11px 12px",marginBottom:8}}>
+                <div style={{color:C.text,fontSize:13,lineHeight:1.5}}>{r.reason || (Array.isArray(r.items)&&r.items[0]?.suggested_change) || "Requested a program change"}</div>
+                <div style={{color:C.dim||C.muted,fontSize:11,margin:"5px 0 10px"}}>Filed {fmtDateRelative?fmtDateRelative(r.created_at):new Date(r.created_at).toLocaleDateString()} · {r.source}</div>
+                <div style={{display:"flex",gap:6}}>
+                  <button onClick={()=>onResolveRequest&&onResolveRequest(r,"applied")} style={{background:C.gold,color:"#000",border:"none",borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Mark applied</button>
+                  <button onClick={()=>{setTab("program");}} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Edit program</button>
+                  <button onClick={()=>onResolveRequest&&onResolveRequest(r,"skipped")} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Skip</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* ── OVERVIEW TAB ── */}
         {tab==="overview"&&(
