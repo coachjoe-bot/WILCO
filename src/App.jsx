@@ -5466,12 +5466,16 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   const [showRankInfo,setShowRankInfo] = useState(false);
   const [rankedUp,setRankedUp] = useState(()=>new Set());   // lift keys whose tier rose since last open → rank-up flash
   const [benchGo,setBenchGo] = useState(false);             // flips on shortly after the Benchmarks tab opens → power cells charge up
-  useEffect(()=>{ if(tab!=="benchmarks"){ setBenchGo(false); return; } const t=setTimeout(()=>setBenchGo(true),80); return ()=>clearTimeout(t); },[tab]);
+  const [rmLoaded,setRmLoaded] = useState(false);           // actual-1RMs loaded → tier colours are final (no charge-up before this)
+  // Hold the charge-up until the manual 1RMs have loaded — otherwise a lift renders at
+  // its ESTIMATED tier first, then jumps to its ACTUAL tier when the data lands, flashing
+  // the wrong power-cell colour. Tube stays empty until then, then fills once, correctly.
+  useEffect(()=>{ if(tab!=="benchmarks"||!rmLoaded){ setBenchGo(false); return; } const t=setTimeout(()=>setBenchGo(true),80); return ()=>clearTimeout(t); },[tab,rmLoaded]);
 
   useEffect(()=>{
     sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`).then(rows=>{
       if(Array.isArray(rows)) setManualRMs(rows);
-    }).catch(()=>{});
+    }).catch(()=>{}).finally(()=>setRmLoaded(true));
   },[athlete.id]);
 
   const matchesSearch = (name) => !search.trim() || (name||"").toLowerCase().includes(search.trim().toLowerCase());
