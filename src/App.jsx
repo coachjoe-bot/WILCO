@@ -2287,7 +2287,7 @@ function WilcoRoot() {
   return (
     <div style={{minHeight:"100vh",position:"relative",background:PW.navy,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:coachEntry?"center":"flex-end",paddingTop:"calc(24px + env(safe-area-inset-top, 0px))",paddingBottom:40,paddingLeft:24,paddingRight:24}}>
       <style>{GS}{GSA}</style>
-      {!coachEntry && <div aria-hidden style={{position:"absolute",inset:0,zIndex:0,backgroundImage:"linear-gradient(180deg, rgba(4,7,15,0.42) 0%, rgba(4,7,15,0.28) 38%, rgba(4,7,15,0.86) 78%, rgba(4,7,15,0.96) 100%), url(/login-bg.jpg)",backgroundSize:"cover",backgroundPosition:"top center",backgroundRepeat:"no-repeat"}}/>}
+      {!coachEntry && <div aria-hidden style={{position:"absolute",inset:0,zIndex:0,backgroundImage:"linear-gradient(180deg, rgba(4,7,15,0.42) 0%, rgba(4,7,15,0.28) 38%, rgba(4,7,15,0.86) 78%, rgba(4,7,15,0.96) 100%), url(/login-bg.jpg)",backgroundSize:"cover",backgroundPosition:"center",backgroundRepeat:"no-repeat"}}/>}
       <div style={{width:"100%",maxWidth:420,position:"relative",zIndex:1}}>
         <div style={{textAlign:"center",marginBottom:coachEntry?40:22}}>
           {/* Athlete entry: the storefront's own neon WILCO is the masthead, so skip the
