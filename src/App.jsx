@@ -2422,8 +2422,8 @@ function HomeScreen({setView,setAthlete,setCoach}) {
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:12}}>
-      <button onClick={()=>start("athlete")} disabled={busy} style={btn(CA.gold,"#000",{opacity:busy?0.7:1,cursor:busy?"not-allowed":"pointer"})}>Athlete Login</button>
-      <button onClick={()=>setView("signup")} disabled={busy} style={btn("transparent",CA.gold,{border:`2px solid ${CA.gold}`})}>New Athlete Sign Up</button>
+      <button onClick={()=>start("athlete")} disabled={busy} style={btn(CA_BTN,"#02040c",{boxShadow:`0 0 20px ${CA_GLOW}`,opacity:busy?0.7:1,cursor:busy?"not-allowed":"pointer"})}>Athlete Login</button>
+      <button onClick={()=>setView("signup")} disabled={busy} style={btn("transparent",CA.cyan,{border:`1.5px solid ${CA.accent}`})}>New Athlete Sign Up</button>
       <div style={{height:1,background:CA.border,margin:"8px 0"}}/>
       <button onClick={()=>start("coach")} disabled={busy} style={btn(CA.navy2,CA.muted2,{border:`1px solid ${CA.border}`})}>Coach Login</button>
       <button onClick={()=>setView("coachSetup")} disabled={busy} style={{background:"none",border:"none",color:CA.muted,fontSize:12,cursor:"pointer",textAlign:"center",marginTop:4}}>
@@ -4494,7 +4494,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         </div>
       )}
       {/* Header */}
-      <div style={{background:CA.navy2,borderBottom:`1px solid ${CA.border}`,paddingTop:"calc(10px + env(safe-area-inset-top, 0px))",paddingBottom:"10px",paddingLeft:"14px",paddingRight:"14px",display:"flex",flexDirection:"column",gap:10,flexShrink:0}}>
+      <div style={{background:"rgba(4,6,12,.5)",backdropFilter:"blur(8px)",WebkitBackdropFilter:"blur(8px)",borderBottom:"1px solid rgba(120,150,210,.16)",paddingTop:"calc(10px + env(safe-area-inset-top, 0px))",paddingBottom:"10px",paddingLeft:"14px",paddingRight:"14px",display:"flex",flexDirection:"column",gap:10,flexShrink:0}}>
         {/* Row 1: identity */}
         <div style={{display:"flex",alignItems:"baseline",gap:10,minWidth:0}}>
           <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.cyan,letterSpacing:2,lineHeight:1,flexShrink:0,whiteSpace:"nowrap"}}>COACH JOE-BOT</div>
@@ -4601,7 +4601,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             {messages.map((m,i)=>(
               <div key={i} className="fade-up" style={{marginBottom:12,display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
                 {m.role==="assistant"&&<div style={{width:28,height:28,borderRadius:"50%",background:"linear-gradient(135deg,#3f7bff,#123a9e)",boxShadow:`0 0 12px ${CA_GLOW}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#fff",flexShrink:0,marginRight:8,marginTop:2}}>J</div>}
-                <div style={{maxWidth:"80%",padding:"10px 14px",borderRadius:m.role==="user"?"16px 16px 4px 16px":"16px 16px 16px 4px",background:m.role==="user"?"linear-gradient(180deg,#3f7bff,#2258e0)":CA.navy2,color:m.role==="user"?"#fff":CA.text,fontSize:14,lineHeight:1.7,border:m.role==="assistant"?`1px solid ${CA.border}`:"none",whiteSpace:"pre-wrap"}}>
+                <div style={{maxWidth:"80%",padding:"10px 14px",borderRadius:m.role==="user"?"15px 15px 4px 15px":"15px 15px 15px 4px",background:m.role==="user"?"linear-gradient(180deg,#3f7bff,#2258e0)":"rgba(10,18,38,.62)",backdropFilter:m.role==="assistant"?"blur(6px)":undefined,WebkitBackdropFilter:m.role==="assistant"?"blur(6px)":undefined,color:m.role==="user"?"#fff":"#dde5f2",fontSize:14,lineHeight:1.7,border:m.role==="assistant"?"1px solid rgba(120,150,210,.22)":"none",whiteSpace:"pre-wrap"}}>
                   {m.role==="assistant"?<StreamText text={m.content}/>:m.content}
                 </div>
               </div>
@@ -4642,7 +4642,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             {[...quick,...quick].map((p,idx)=>(
               <span key={idx} onClick={()=>setInput(p)} title="Tap to use" style={{display:"inline-flex",alignItems:"center",cursor:"pointer",whiteSpace:"nowrap"}}>
                 <span style={{color:CA.muted2,fontSize:12.5,padding:"0 14px",fontWeight:500}}>{p}</span>
-                <span aria-hidden style={{width:1,height:13,background:CA.accent,boxShadow:`0 0 7px ${CA.accent}`,flexShrink:0}}/>
+                <span aria-hidden style={{width:1,height:12,background:CA.cyan,boxShadow:`0 0 6px ${CA.cyan}`,flexShrink:0}}/>
               </span>
             ))}
           </div>
@@ -4656,7 +4656,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           the "safety space" Will has had removed 3× now (47941e6). The textbook
           iOS pattern is wrong for this app; leave it flat. Same rule for every
           bottom bar / modal footer below. */}
-      <div style={{padding:"6px 14px 8px",flexShrink:0,borderTop:`1px solid ${CA.border}`,background:CA.navy2}}>
+      <div style={{padding:"6px 14px 8px",flexShrink:0,borderTop:"1px solid rgba(120,150,210,.16)",background:"rgba(4,6,12,.5)",backdropFilter:"blur(8px)",WebkitBackdropFilter:"blur(8px)"}}>
         <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
           {/* Video upload button */}
           <input ref={videoInputRef} type="file" accept="video/*" style={{display:"none"}} onChange={handleVideoUpload}/>
@@ -4719,20 +4719,26 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
               <button onClick={()=>setShowProgram(false)} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"4px 12px",cursor:"pointer",fontSize:12}}>✕ Close</button>
             </div>
             {athlete.temp_program_text?(
-              <div style={{flex:1,overflowY:"auto",padding:"16px 20px",display:"flex",flexDirection:"column",gap:12}}>
-                <div style={{background:`${CA.amber}12`,border:`1px solid ${CA.amber}50`,borderRadius:12,padding:14}}>
-                  <div style={{color:CA.amber,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>✈️ TEMPORARY PROGRAM — ACTIVE NOW</div>
-                  <pre style={{color:CA.text,fontSize:12.5,lineHeight:1.8,fontFamily:"ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{athlete.temp_program_text}</pre>
+              // FIELD MODE — the away-ops re-skin of the temporary-program state (artifact .away-*)
+              <div style={{flex:1,overflowY:"auto",padding:"16px 18px",display:"flex",flexDirection:"column",gap:13}}>
+                <div>
+                  <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:9,letterSpacing:2,color:CA.amber,textTransform:"uppercase",display:"flex",gap:7,alignItems:"center"}}>
+                    <span style={{width:6,height:6,borderRadius:"50%",background:CA.amber,boxShadow:`0 0 8px ${CA.amber}`}}/>AWAY OPS · TEMPORARY PROGRAM
+                  </div>
+                  <div style={{fontFamily:"'Bebas Neue'",fontSize:26,letterSpacing:1,color:"#fff",margin:"9px 0 4px"}}>FIELD MODE</div>
+                  <div style={{fontSize:11.5,color:"#c9b98f"}}>No rack, no problem. Joe rebuilt today around what you've got.</div>
                 </div>
-                <div style={{color:CA.muted,fontSize:12,lineHeight:1.6,textAlign:"center"}}>
-                  Tell Joe-bot you're back home when you return and your regular program will resume automatically.
+                <div style={{border:`1px solid ${CA.amber}4d`,borderRadius:9,padding:12,background:"rgba(20,15,6,.5)"}}>
+                  <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:8.5,letterSpacing:1.5,color:CA.amber,textTransform:"uppercase",marginBottom:8}}>Today, Adapted</div>
+                  <pre style={{color:"#eee",fontSize:12.5,lineHeight:1.8,fontFamily:"ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{athlete.temp_program_text}</pre>
                 </div>
                 {athlete.program_text&&(
-                  <div style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,padding:14}}>
-                    <div style={{color:CA.muted,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>REGULAR PROGRAM — ON HOLD</div>
+                  <div style={{border:`1px solid ${CA.border}`,borderRadius:9,padding:12,background:"rgba(10,15,30,.4)"}}>
+                    <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:8.5,letterSpacing:1.5,color:CA.muted,textTransform:"uppercase",marginBottom:8}}>Regular Program — On Hold</div>
                     <pre style={{color:CA.muted2,fontSize:12,lineHeight:1.6,fontFamily:"'DM Sans'",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{athlete.program_text}</pre>
                   </div>
                 )}
+                <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:9,letterSpacing:1,color:CA.amber,textTransform:"uppercase",opacity:0.8,paddingTop:2}}>Resume full program when home →</div>
               </div>
             ):athlete.program_locked?(
               <>
@@ -6277,7 +6283,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
           <div style={{display:"flex",gap:0,background:CA.navy3,borderRadius:10,padding:4,border:`1px solid ${CA.border}`}}>
             {["lbs","kg"].map(u=>(
               <button key={u} onClick={()=>setUnit(u)}
-                style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",cursor:"pointer",fontSize:13,fontWeight:700,letterSpacing:1,fontFamily:"'Bebas Neue'",background:weightUnit===u?CA.gold:"transparent",color:weightUnit===u?"#000":CA.muted,transition:"all 0.15s"}}>
+                style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",cursor:"pointer",fontSize:13,fontWeight:700,letterSpacing:1,fontFamily:"'Bebas Neue'",background:weightUnit===u?CA_BTN:"transparent",color:weightUnit===u?"#02040c":CA.muted,transition:"all 0.15s"}}>
                 {u.toUpperCase()}
               </button>
             ))}
