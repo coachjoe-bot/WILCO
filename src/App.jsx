@@ -1303,9 +1303,9 @@ export const GSA = `
 /* ═══ artifact-faithful console skin — ported 1:1 from the athlete overhaul artifact
    (40b4a378). These are the pieces that give the app its HUD look. ═══ */
 /* blue grid ground for interior app screens (the single biggest "matches the artifact" change) */
-.cyber{background:#05060c;background-image:linear-gradient(rgba(58,123,255,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(58,123,255,.045) 1px,transparent 1px);background-size:22px 22px;}
+.cyber{background:#05060c;background-image:linear-gradient(rgba(58,123,255,.07) 1px,transparent 1px),linear-gradient(90deg,rgba(58,123,255,.07) 1px,transparent 1px);background-size:22px 22px;}
 /* amber grid ground for away / field mode */
-.cyber-away{background:#080a06;background-image:linear-gradient(rgba(245,165,36,.05) 1px,transparent 1px),linear-gradient(90deg,rgba(245,165,36,.05) 1px,transparent 1px);background-size:22px 22px;}
+.cyber-away{background:#080a06;background-image:linear-gradient(rgba(245,165,36,.075) 1px,transparent 1px),linear-gradient(90deg,rgba(245,165,36,.075) 1px,transparent 1px);background-size:22px 22px;}
 /* BENCHMARK POWER CELL — a single battery tube filled to --pct in the tier colour --tc;
    glow + brightness scale with tier via --tb (0..1). .go triggers the fill. */
 .htube{height:20px;border:1.5px solid ${CA.line2};border-radius:6px;position:relative;overflow:hidden;background:linear-gradient(180deg,#070d18,#05080f);}
@@ -1337,11 +1337,15 @@ export const GSA = `
 @keyframes stampIn{0%{opacity:0;transform:scale(2.4);}14%{opacity:1;transform:scale(.94);}22%{transform:scale(1);}80%{opacity:1;transform:scale(1);}100%{opacity:0;transform:scale(1.03);}}
 /* Proof cyan scanline overlay */
 .proof-scan::after{content:"";position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,transparent 0 3px,rgba(55,230,255,.035) 3px 4px);z-index:8;}
+/* Proof "living newspaper" — body loops up behind the fixed masthead (content duplicated → -50% seams) */
+@keyframes proofLoop{from{transform:translateY(0);}to{transform:translateY(-50%);}}
+.proof-loop{animation:proofLoop 30s linear infinite;will-change:transform;}
+.proof-scan:hover .proof-loop{animation-play-state:paused;}
 /* streak charge-chain — thin bars, trained days fill blue→cyan */
 .streaklnk{flex:1;height:6px;border-radius:2px;background:#0c1526;border:1px solid ${CA.line2};position:relative;overflow:hidden;}
 .streaklnk.on::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,${CA.accent},${CA.cyan});box-shadow:0 0 6px ${CA.cyan};}
 @media (prefers-reduced-motion: reduce){
-  .a-ticker,.a-rise,.a-charge,.a-flap,.a-scan,.a-pulse,.a-bar,.a-reactor,.a-diag,.a-stamp,.a-link,.a-dive,.a-draw,.radar::before,.ld-charge i,.ld-scan::before,.ld-hex i,.stamp{animation:none!important;transform:none!important;opacity:1!important;}
+  .a-ticker,.a-rise,.a-charge,.a-flap,.a-scan,.a-pulse,.a-bar,.a-reactor,.a-diag,.a-stamp,.a-link,.a-dive,.a-draw,.radar::before,.ld-charge i,.ld-scan::before,.ld-hex i,.stamp,.proof-loop{animation:none!important;transform:none!important;opacity:1!important;}
   .a-charge{transform:scaleX(var(--fill,1))!important;}
   .hcell.go .hfill{transform:scaleX(var(--pct,0))!important;}
   .a-draw{stroke-dasharray:none!important;}
@@ -1685,53 +1689,49 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
   const who = (athleteName||digest?.athlete_name||"").split(" ")[0];
   const editionLabel = who ? `${who.toUpperCase()}'S ${isMonthly?"MONTHLY":"WEEKLY"} EDITION` : (isMonthly?"MONTHLY EDITION":"WEEKLY EDITION");
 
-  return (
-    <div className="proof-scan" style={{minHeight:"100%",display:"flex",flexDirection:"column",position:"relative",background:"radial-gradient(120% 80% at 50% 0%,#0c1016,#06090e)"}}>
-      {/* Masthead */}
-      <div className="proof-drop" style={{textAlign:"center"}}>
-        <div style={{display:"flex",justifyContent:"space-between",...kick()}}>
-          <span>Coach Joe, Editor</span>{weekNo&&<span>No. {weekNo}</span>}
+  // Fixed masthead (editorial line → The Proof → date → kicker → split-flap headline).
+  const masthead = (
+    <>
+      <div style={{display:"flex",justifyContent:"space-between",...kick()}}>
+        <span>Coach Joe, Editor</span><span style={{...kick(CA.cyan),display:"flex",gap:5,alignItems:"center"}}><span style={{width:5,height:5,borderRadius:"50%",background:CA.cyan,boxShadow:`0 0 7px ${CA.cyan}`}}/>LIVE{weekNo?` · No. ${weekNo}`:""}</span>
+      </div>
+      <NRule v="2px" m="4px 0 4px" c={NEWS.rule2}/>
+      <div style={{fontFamily:NEWS.serif,fontWeight:900,fontSize:40,lineHeight:0.9,letterSpacing:-1,color:NEWS.ink,textAlign:"center"}}>The Proof</div>
+      <NRule v="1px" m="4px 0 5px" c={NEWS.rule2}/>
+      <div style={{...kick(NEWS.ink2),textAlign:"center",fontSize:8.5,letterSpacing:1.5}}>{dateLine}{dateLine&&editionLabel?" · ":""}{editionLabel}</div>
+      <div style={{...kick(CA.cyan),textAlign:"center",marginTop:5,fontSize:9,letterSpacing:2}}>Strength Ranking</div>
+      <div style={{fontFamily:NEWS.serif,fontWeight:800,fontSize:26,lineHeight:1.0,color:NEWS.ink,textAlign:"center",margin:"2px 0 0"}}>{String(headline||"").split(" ").map((w,i)=>(<span key={i} className="a-flap" style={{animationDelay:`${i*0.06}s`,marginRight:"0.26em"}}>{w}</span>))}</div>
+    </>
+  );
+  // Scrolling body (score → two columns → inside-this-edition). Rendered twice so the
+  // 30s loop seams cleanly at translateY(-50%).
+  const body = (
+    <>
+      {rankSec&&<div style={{fontFamily:NEWS.body,fontStyle:"italic",fontSize:12.5,lineHeight:1.35,color:NEWS.ink2,textAlign:"center",padding:"0 6px 6px"}}>{truncate(firstSentence(rankSec.body),120)}</div>}
+      {hero&&hero.score!=null&&(
+        <div style={{display:"flex",justifyContent:"center",alignItems:"baseline",gap:10,padding:"2px 0 8px"}}>
+          <span style={{...kick(),fontSize:9}}>Strength Score</span>
+          <span style={{fontFamily:NEWS.serif,fontWeight:900,fontSize:40,lineHeight:0.8,color:CA.gold}}>{hero.score}</span>
+          {hero.delta!=null&&hero.delta!==0&&<span style={{fontFamily:NEWS.label,fontWeight:700,fontSize:14,color:hero.delta>0?CA.green:CA.red}}>{hero.delta>0?"▲ +":"▼ "}{hero.delta>0?hero.delta:Math.abs(hero.delta)}</span>}
         </div>
-        <NRule v="2px" m="5px 0 5px" c={NEWS.rule2}/>
-        <div style={{fontFamily:NEWS.serif,fontWeight:900,fontSize:46,lineHeight:0.9,letterSpacing:-1,color:NEWS.ink}}>The Proof</div>
-        <NRule v="1px" m="5px 0 0" c={NEWS.rule2}/>
-        <NRule v="1px" m="2px 0 6px" c={NEWS.rule2}/>
-        <div style={{...kick(NEWS.ink2),textAlign:"center",fontSize:9,letterSpacing:1.5}}>{dateLine}{dateLine&&editionLabel?" · ":""}{editionLabel}</div>
-        <NRule m="6px 0 8px"/>
-      </div>
-
-      {/* Lead — strength ranking */}
-      <div className="proof-drop" style={{textAlign:"center"}}>
-        <div style={{...kick(CA.gold),textAlign:"center"}}>Strength Ranking</div>
-        <div style={{fontFamily:NEWS.serif,fontWeight:800,fontSize:32,lineHeight:1.0,color:NEWS.ink,margin:"2px 0 5px"}}>{String(headline||"").split(" ").map((w,i)=>(<span key={i} className="a-flap" style={{animationDelay:`${i*0.06}s`,marginRight:"0.26em"}}>{w}</span>))}</div>
-        {rankSec&&<div style={{fontFamily:NEWS.body,fontStyle:"italic",fontSize:13,lineHeight:1.35,color:NEWS.ink2,padding:"0 6px 6px"}}>{truncate(firstSentence(rankSec.body),120)}</div>}
-        {hero&&hero.score!=null&&(
-          <div style={{display:"flex",justifyContent:"center",alignItems:"baseline",gap:10,padding:"2px 0 4px"}}>
-            <span style={{...kick(),fontSize:9}}>Strength Score</span>
-            <span style={{fontFamily:NEWS.serif,fontWeight:900,fontSize:44,lineHeight:0.8,color:CA.gold}}>{hero.score}</span>
-            {hero.delta!=null&&hero.delta!==0&&<span style={{fontFamily:NEWS.label,fontWeight:700,fontSize:14,color:hero.delta>0?CA.green:CA.red}}>{hero.delta>0?"▲ +":"▼ "}{hero.delta>0?hero.delta:Math.abs(hero.delta)}</span>}
-          </div>
-        )}
-      </div>
-      <NRule m="6px 0 8px"/>
-
-      {/* Two columns — a story teaser + an injury / orders box */}
-      <div className="proof-drop" style={{display:"flex",gap:12}}>
+      )}
+      <NRule m="2px 0 8px"/>
+      <div style={{display:"flex",gap:12}}>
         {teaserA&&(
           <div style={{flex:1}}>
             <div style={{fontFamily:NEWS.serif,fontWeight:700,fontSize:15,lineHeight:1.05,color:NEWS.ink,marginBottom:4}}>{prSec?"The PR Card":titleCase(teaserA.label)}</div>
             <p style={{fontFamily:NEWS.body,fontSize:11.5,lineHeight:1.4,color:NEWS.ink2,textAlign:"justify",margin:0}}>
-              <span style={{float:"left",fontFamily:NEWS.serif,fontWeight:800,fontSize:30,lineHeight:0.72,padding:"2px 5px 0 0",color:prSec?CA.gold:NEWS.ink}}>{String(teaserA.body||"").slice(0,1)}</span>
+              <span style={{float:"left",fontFamily:NEWS.serif,fontWeight:800,fontSize:30,lineHeight:0.72,padding:"2px 5px 0 0",color:prSec?CA.cyan:NEWS.ink}}>{String(teaserA.body||"").slice(0,1)}</span>
               {truncate(String(teaserA.body||"").slice(1),140)}
             </p>
-            <div style={{...kick(CA.gold),fontSize:8,marginTop:4}}>Full story inside ▸</div>
+            <div style={{...kick(CA.cyan),fontSize:8,marginTop:4}}>Full story inside ▸</div>
           </div>
         )}
         <div style={{width:1,background:NEWS.rule}}/>
         <div style={{flex:1}}>
           {injurySec ? (
             <div style={{border:`1.5px solid ${urgent?CA.red:NEWS.rule2}`,padding:"8px 9px"}}>
-              <div style={{...kick(CA.red),borderBottom:`1px solid ${NEWS.rule}`,paddingBottom:3,marginBottom:4}}>⚠ Injury Alert</div>
+              <div style={{...kick(CA.gold),borderBottom:`1px solid ${NEWS.rule}`,paddingBottom:3,marginBottom:4}}>⚠ Injury Alert</div>
               <div style={{fontFamily:NEWS.body,fontSize:10.5,lineHeight:1.35,color:NEWS.ink2}}>{truncate(injurySec.body,115)}</div>
             </div>
           ) : focusSec ? (
@@ -1742,22 +1742,34 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
           ) : null}
         </div>
       </div>
-
-      {/* Inside this edition */}
-      <div className="proof-drop" style={{borderTop:`1px solid ${NEWS.rule}`,borderBottom:`1px solid ${NEWS.rule}`,padding:"6px 0",margin:"10px 0 0",textAlign:"center"}}>
+      <div style={{borderTop:`1px solid ${NEWS.rule}`,borderBottom:`1px solid ${NEWS.rule}`,padding:"6px 0",margin:"12px 0 0",textAlign:"center"}}>
         <div style={{...kick(),fontSize:9,marginBottom:2}}>Inside This Edition</div>
         <div style={{fontFamily:NEWS.body,fontStyle:"italic",fontSize:11,color:NEWS.ink2,lineHeight:1.4}}>
           {secs.map(s=>titleCase(s.label)).join(" · ")}{Array.isArray(c.questions)&&c.questions.length?" · Coach's Check-In":""}
         </div>
       </div>
-
-      <div style={{flex:1,minHeight:14}}/>
-
-      {/* Open the full edition */}
-      <button className="proof-drop" onClick={onOpen} style={{width:"100%",padding:15,borderRadius:12,border:"none",cursor:"pointer",
-        background:done?"transparent":"CA.gold",color:done?CA.gold:"#04070f",
-        fontFamily:NEWS.label,fontWeight:700,fontSize:15,letterSpacing:2,textAlign:"center",
-        boxShadow:done?"none":`0 10px 24px ${CA.gold}4d`,...(done?{border:`1px solid ${NEWS.rule2}`}:{})}}>
+    </>
+  );
+  const MASK = "linear-gradient(180deg,transparent 150px,#000 178px,#000 84%,transparent)";
+  return (
+    <div className="proof-scan" style={{position:"relative",height:"100%",overflow:"hidden",background:"radial-gradient(120% 80% at 50% 0%,#0c1016,#06090e)"}}>
+      {/* body loops up behind the fixed masthead (masked top+bottom) */}
+      <div style={{position:"absolute",inset:0,overflow:"hidden",WebkitMaskImage:MASK,maskImage:MASK}}>
+        <div className="proof-loop" style={{position:"absolute",left:0,right:0,padding:"168px 8px 40px"}}>
+          {body}
+          <div style={{height:26}}/>
+          {body}
+        </div>
+      </div>
+      {/* fixed masthead */}
+      <div style={{position:"absolute",top:0,left:0,right:0,zIndex:6,padding:"10px 14px 12px",background:"linear-gradient(180deg,#0b0f16 70%,rgba(11,15,22,.92) 86%,transparent)"}}>
+        {masthead}
+      </div>
+      {/* fixed "open the edition" CTA */}
+      <button onClick={onOpen} style={{position:"absolute",left:12,right:12,bottom:12,zIndex:7,padding:14,borderRadius:12,cursor:"pointer",
+        background:done?"transparent":CA_BTN,color:done?CA.cyan:"#02040c",border:done?`1px solid ${NEWS.rule2}`:"none",
+        fontFamily:NEWS.label,fontWeight:700,fontSize:14,letterSpacing:2,textAlign:"center",
+        boxShadow:done?"none":`0 8px 22px ${CA_GLOW}`}}>
         {done?"RE-READ THIS EDITION →":"OPEN THIS WEEK'S EDITION →"}
       </button>
     </div>
@@ -4588,8 +4600,10 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             {(loading||videoLoading)&&(
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
                 <div style={{width:28,height:28,borderRadius:"50%",background:"linear-gradient(135deg,#3f7bff,#123a9e)",boxShadow:`0 0 12px ${CA_GLOW}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#fff"}}>J</div>
-                <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:"16px 16px 16px 4px",padding:"12px 16px",display:"flex",gap:5}}>
-                  {[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:CA.muted,animation:`pulse 1.2s ease ${i*0.2}s infinite`}}/>)}
+                <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:"16px 16px 16px 4px",padding:"12px 16px",display:"flex",alignItems:"center",gap:12}}>
+                  {videoLoading
+                    ? <><div className="ld-scan" style={{width:42,height:42}}/><span style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:11,color:CA.muted}}>Reviewing form</span></>
+                    : <><div className="ld-hex"><i/><i/><i/><i/><i/><i/><i/><i/><i/></div><span style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:11,color:CA.muted}}>Joe is thinking</span></>}
                 </div>
               </div>
             )}
@@ -4734,7 +4748,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
                   onChange={e=>setAthleteProgramText(e.target.value)}
                   placeholder="Paste or type your program here, or use the photo upload above..."
                   rows={10}
-                  style={{flex:1,minHeight:180,background:CA.navy3,border:`1px solid ${athleteProgramText!==(athlete.program_text||"")?CA.gold:CA.border}`,borderRadius:12,padding:"12px 14px",color:CA.text,fontSize:12.5,outline:"none",resize:"none",lineHeight:1.75,fontFamily:"ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",transition:"border-color 0.15s"}}
+                  style={{flex:1,minHeight:180,background:"rgba(58,123,255,0.03)",border:`1px solid ${athleteProgramText!==(athlete.program_text||"")?CA.gold:CA.line2}`,borderRadius:12,padding:"12px 14px",color:CA.text,fontSize:12.5,outline:"none",resize:"none",lineHeight:1.75,fontFamily:"ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",transition:"border-color 0.15s"}}
                 />
                 {athleteProgramMsg&&(
                   <div style={{color:athleteProgramMsg==="Saved."?CA.green:CA.red,fontSize:12,fontWeight:600,textAlign:"center"}}>
@@ -5002,10 +5016,8 @@ function QuickLogSheet({athlete, workoutHistory, onClose, onAddProgram, onSend})
         </div>
       ):phase==="loading"?(
         <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14}}>
-          <div style={{display:"flex",gap:6}}>
-            {[0,1,2].map(i=><div key={i} style={{width:8,height:8,borderRadius:"50%",background:CA.gold,animation:`pulse 1.2s ease ${i*0.2}s infinite`}}/>)}
-          </div>
-          <div style={{color:CA.muted,fontSize:13}}>Building today's log from your program…</div>
+          <div className="ld-hex"><i/><i/><i/><i/><i/><i/><i/><i/><i/></div>
+          <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:12,letterSpacing:0.5,color:CA.muted}}>Building today's log…</div>
         </div>
       ):phase==="error"?(
         <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"0 32px",gap:14,textAlign:"center"}}>
@@ -5170,7 +5182,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                   const runDotColor = isRunSession ? CA.blue : CA.green;
 
                   return (
-                    <div key={i} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:14,marginBottom:10}}>
+                    <div key={i} style={{background:"rgba(58,123,255,0.03)",border:`1px solid ${CA.line2}`,borderRadius:12,padding:14,marginBottom:10}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
                           <div style={{width:6,height:6,borderRadius:"50%",background:runDotColor,flexShrink:0}}/>
@@ -5222,7 +5234,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                 if(item.type==="formcheck"){
                   const w = item.data;
                   return (
-                    <div key={i} style={{background:CA.navy2,border:`1px solid ${CA.blue}30`,borderRadius:12,padding:14,marginBottom:10}}>
+                    <div key={i} style={{background:"rgba(58,123,255,0.03)",border:`1px solid ${CA.blue}30`,borderRadius:12,padding:14,marginBottom:10}}>
                       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
                         <div style={{width:6,height:6,borderRadius:"50%",background:CA.blue,flexShrink:0}}/>
                         <div style={{color:CA.blue,fontSize:11,fontWeight:700,letterSpacing:1}}>FORM CHECK — {fmtDateRelative(w.created_at)}</div>
@@ -5569,9 +5581,6 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
     .map(row=>({...row,active: row.manual ? toLbs(row.manual.weight,row.manual.unit) : row.estimated}))
     .sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.active-a.active)
     .filter(row=>matchesSearch(row.name));
-  // Per-lift est-1RM history, so the PR tab can draw the same trend line the
-  // Strength tab does (Will's ask: bring the line chart + draw-in to PRs too).
-  const exByKey = Object.fromEntries(exercises.map(e=>[e.key,e]));
 
   const saveManual = async (row) => {
     const w = parseFloat(editVal);
@@ -5682,10 +5691,13 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
             {bodyweight&&dedupedBench.map((b,i)=>{
               const ratio = b.e1rm / bodyweight;
               const tierIdx = tierForRatio(ratio, b.thresh);   // 0=Rookie .. 7=Legendary
-              // Tube fills 0 → a bit past the Legendary cut-line; --pct = how far along.
-              const maxRatio = b.thresh[b.thresh.length-1]*1.12;
-              const markerPct = Math.min(Math.max(ratio/maxRatio*100,1),99);
               const isTop = tierIdx>=TIER_NAMES.length-1;
+              // Fill = progress THROUGH the CURRENT tier band, so on a rank-up the tube resets to
+              // ~empty in the new (brighter) colour and recharges toward the next rank. --tb (glow)
+              // scales with RANK, not fill. (artifact .hcell: STRONG=.52 fill / .3 glow, etc.)
+              const tierFloor = tierIdx===0 ? 0 : b.thresh[tierIdx-1];
+              const tierCeil  = isTop ? b.thresh[tierIdx-1]*1.25 : b.thresh[tierIdx];
+              const fillPct = Math.min(Math.max((ratio - tierFloor)/(tierCeil - tierFloor), 0.03), 1);
               const toNext = isTop ? 0 : Math.max(0, Math.round(b.thresh[tierIdx]*bodyweight - b.e1rm));
               const dispName = b.name;                           // canonical (resolveLift)
               const isBW = b.bwLoaded;                            // pull-ups / dips / chin-ups / muscle-ups → bodyweight + added
@@ -5701,7 +5713,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                     {up&&<span className="a-stamp" style={{fontFamily:"ui-monospace,Menlo,monospace",fontSize:8,color:CA.cyan,border:`1px solid ${CA.cyan}`,borderRadius:3,padding:"0 4px",letterSpacing:0.5}}>⬆ RANK UP</span>}
                     <span style={{marginLeft:"auto",fontFamily:"'Bebas Neue'",fontSize:16,color:CA.led,fontVariantNumeric:"tabular-nums"}}>{Math.round(b.e1rm)}<small style={{fontFamily:"'DM Sans'",fontSize:9,color:CA.muted,marginLeft:2}}>lbs</small></span>
                   </div>
-                  <div className="htube"><div className="hfill" style={{"--tc":TIER_COLORS[tierIdx],"--tb":tierIdx/(TIER_NAMES.length-1),"--pct":markerPct/100}}/></div>
+                  <div className="htube"><div className="hfill" style={{"--tc":TIER_COLORS[tierIdx],"--tb":tierIdx/(TIER_NAMES.length-1),"--pct":fillPct}}/></div>
                   <div style={{fontFamily:"ui-monospace,Menlo,monospace",fontSize:8.5,color:CA.faint,marginTop:5,letterSpacing:0.3}}>
                     {isTop ? "TRULY INCREDIBLE 🏆" : `${toNext} LBS TO ${TIER_NAMES[tierIdx+1]}`}<span style={{color:CA.steel}}>{"  ·  "+bwSub}</span>
                   </div>
@@ -5802,12 +5814,6 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                     {row.manual?"Update actual 1RM":"Set actual 1RM"}
                   </button>
                 )}
-                {(()=>{const ex=exByKey[row.key];return ex&&ex.entries&&ex.entries.length>=2?(
-                  <div style={{marginTop:14,borderTop:`1px solid ${CA.border}`,paddingTop:12}}>
-                    <div style={{color:CA.muted,fontSize:9,letterSpacing:1,fontWeight:700,marginBottom:6}}>EST. 1RM OVER TIME</div>
-                    <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={CA.cyan} palette={CA} unit={row.unit==="kg"?"kg":"lbs"}/>
-                  </div>
-                ):null;})()}
               </div>
             ))}
           </div>
