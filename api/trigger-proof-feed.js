@@ -306,7 +306,7 @@ const isoWeek = (d) => {
   return Math.ceil(((t - yearStart) / 864e5 + 1) / 7);
 };
 
-async function runCoachReports(allAthletes, batch, coaches) {
+async function runCoachReports(allAthletes, batch, coaches, opts = {}) {
   const results = [];
   const byCoach = {};
   for (const a of allAthletes) {
@@ -340,11 +340,11 @@ async function runCoachReports(allAthletes, batch, coaches) {
         label: report.label, content_json: report.contentJson, is_read: false,
         has_plateau: false, has_pain: report.has_pain, has_missed: report.has_missed,
       });
-      if (coach.email) await sendEmail(coach.email, `WILCO Coach's Edition — Week of ${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric" })}`, buildDigestEmail(coach.name || "Coach", report.contentJson, report.label));
+      if (coach.email && !opts.skipEmail) await sendEmail(coach.email, `WILCO Coach's Edition — Week of ${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric" })}`, buildDigestEmail(coach.name || "Coach", report.contentJson, report.label));
       // Digest-ready push (respects the coach's notification_prefs.digest toggle).
       try {
         const prefs = coach.notification_prefs || {};
-        if (prefs.digest !== false) {
+        if (prefs.digest !== false && !opts.skipEmail) {
           const subs = await sbSelect("coach_push_subscriptions", `?coach_id=eq.${enc(coach.id)}&select=*`);
           if (subs.length) {
             ensureVapid();
@@ -465,7 +465,9 @@ export default async function handler(req, res) {
       const roster = await sbSelect("athletes", `?coach_id=eq.${encodeURIComponent(body.coach_id)}&select=*`);
       const rosterBatch = await fetchBatch(roster.map((a) => a.id));
       const coaches = await sbSelect("coaches", `?id=eq.${encodeURIComponent(body.coach_id)}&select=id,name,email,school_id,notification_prefs`);
-      const coaches2 = await runCoachReports(roster, rosterBatch, coaches);
+      // skip_email: generate + persist the edition WITHOUT emailing (safe demo/support
+      // generation so an external coach isn't emailed a test run). Cron-gated already.
+      const coaches2 = await runCoachReports(roster, rosterBatch, coaches, { skipEmail: !!body.skip_email });
       return res.status(200).json({ ok: true, coaches: coaches2 });
     }
 
