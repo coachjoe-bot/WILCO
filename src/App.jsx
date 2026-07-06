@@ -1039,7 +1039,7 @@ RESERVED (only when situation genuinely matches):
 - "You're only in competition with the you of yesterday.": Athlete comparing to others only.
 
 FORMATTING: Use numbered lists for exercises/alternatives/steps. Never paragraph format for exercise lists.
-Keep under 200 words. Use their name once naturally.
+Match length to the question: a sentence or two for logs and simple asks; go longer only for genuinely technical or programming questions that need the detail — thorough, never padded. Never cut off mid-thought; if you're running long, tighten the wording but finish the point. Use their name once naturally.
 Pain → suggest alternatives. Equipment unavailable → 2-3 specific alternatives.
 Out of scope: "That's one for Coach Joe directly -- email support@trainwilco.com."
 
@@ -1137,8 +1137,10 @@ SPORT: ${JOEBOT_SPORTS[athlete.sport]||"Build a general strength base."}${pastCo
   const sysObj = {cached:JOEBOT_STATIC_SYS, dynamic:sys+goalsContext+contextMemory};
   const userMsg = `${hist}\n\n${athlete.name}: ${message}`;
   // Stream when the caller wants live rendering; otherwise the classic one-shot call.
-  if(onDelta) return askClaudeStream(sysObj, userMsg, {maxTokens:450, model:"claude-sonnet-5", feature:"joebot_chat", onDelta});
-  return askClaude(sysObj, userMsg, 450, [], "claude-sonnet-5", "joebot_chat");
+  // 800 tokens (was 450): technical/programming answers were getting guillotined
+  // mid-sentence. Logs stay short via the length rule in the prompt, not the cap.
+  if(onDelta) return askClaudeStream(sysObj, userMsg, {maxTokens:800, model:"claude-sonnet-5", feature:"joebot_chat", onDelta});
+  return askClaude(sysObj, userMsg, 800, [], "claude-sonnet-5", "joebot_chat");
 };
 
 // ─── 1RM PROPAGATION ─────────────────────────────────────────────────────────
@@ -2623,6 +2625,7 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
         signupSource:eventCtx?.source || composeSignupSource(),
         athlete:{
           name:data.name.trim(), sport:data.sport, billing:data.billing,
+          level:data.level||null, // how they train (self/club/highschool/college) — persisted go-forward for future coaching use
           email:data.email.trim().toLowerCase(),
           birthday:data.birthday, age:ageYears, height_inches:heightIn,
           weight_lbs:+data.weight, gender:data.gender,
@@ -3562,6 +3565,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [showProgram,setShowProgram] = useState(false);
   const [showProgress,setShowProgress] = useState(false);
   const [showQuickLog,setShowQuickLog] = useState(false);
+  const quickLogPending = useRef(false); // the pending/next send() is a Quick Log draft — a pure workout log that must never write program_text
   const [showProfileCompletion,setShowProfileCompletion] = useState(false);
   const [profileBannerDismissed,setProfileBannerDismissed] = useState(()=>{
     try{return!!localStorage.getItem(`wilco_profile_banner_${initialAthlete.id}`);}catch{return false;}
@@ -3933,6 +3937,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const send = async (overrideText) => {
     const msg = (typeof overrideText==="string" ? overrideText : input).trim();
     if(!msg||loading||videoLoading||!historyLoaded) return;
+    // Quick Log drafts are pure workout logs. Consume the flag for THIS send so a
+    // draft can NEVER be classified as a program and overwrite program_text.
+    const fromQuickLog = quickLogPending.current;
+    quickLogPending.current = false;
     track("chat_message_sent","ai");
 
     // ── Goal collection flow (first chat only) ──────────────────────────────
@@ -4039,7 +4047,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       };
 
       // Detect and save program updates — any tier, as long as coach hasn't locked it
-      if(parsed.is_program_update && !updatedAthlete.program_locked){
+      if(parsed.is_program_update && !updatedAthlete.program_locked && !fromQuickLog){
         try {
           const programText = await extractProgramText(msg);
           // Guard: only save if there's real program content (not a one-line command)
@@ -4067,7 +4075,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       }
 
       // Temporary adapted program — conditions described, extract program from Joe-bot's reply
-      if(parsed.is_temp_program_update && !updatedAthlete.program_locked){
+      if(parsed.is_temp_program_update && !updatedAthlete.program_locked && !fromQuickLog){
         try {
           const tempText = await extractProgramText(reply);
           await sbUpdate("athletes",athlete.id,{temp_program_text:tempText});
@@ -4077,7 +4085,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       }
 
       // Revert — athlete is back, clear temp program
-      if(parsed.is_program_revert && updatedAthlete.temp_program_text){
+      if(parsed.is_program_revert && updatedAthlete.temp_program_text && !fromQuickLog){
         try {
           await sbUpdate("athletes",athlete.id,{temp_program_text:null});
           updatedAthlete.temp_program_text = null;
@@ -4577,6 +4585,9 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           onAddProgram={()=>{setShowQuickLog(false);setShowProgram(true);}}
           onSend={(text)=>{
             setShowQuickLog(false);
+            // Mark this as a Quick Log draft so send() can never route it into a
+            // program overwrite (survives the parked-input path below too).
+            quickLogPending.current = true;
             // If a send is already in flight, park the draft in the input box
             // instead of silently dropping it (send() early-returns while busy).
             if(loading||videoLoading||!historyLoaded) setInput(text);
