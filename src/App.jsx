@@ -1262,6 +1262,9 @@ export const GSA = `
 /* line-chart / bar draw-in (scaleY from baseline) */
 @keyframes aRise{from{transform:scaleY(0);}to{transform:scaleY(1);}}
 .a-rise{transform-origin:bottom;animation:aRise .7s cubic-bezier(.2,.7,.2,1) both;}
+/* line-chart draw-in (stroke reveals left-to-right); overestimated dash length is fine */
+@keyframes aDraw{from{stroke-dashoffset:1000;}to{stroke-dashoffset:0;}}
+.a-draw{stroke-dasharray:1000;animation:aDraw 1.05s ease-out forwards;}
 /* power cell fill (battery charges up) */
 @keyframes aCharge{from{transform:scaleX(0);}to{transform:scaleX(var(--fill,1));}}
 .a-charge{transform-origin:left;animation:aCharge .9s cubic-bezier(.2,.7,.2,1) both;}
@@ -1291,8 +1294,9 @@ export const GSA = `
 @keyframes aDive{0%{opacity:0;transform:scale(1.08);}12%{opacity:1;}100%{opacity:1;transform:scale(1);}}
 .a-dive{animation:aDive 1.1s cubic-bezier(.2,.7,.2,1) both;}
 @media (prefers-reduced-motion: reduce){
-  .a-ticker,.a-rise,.a-charge,.a-flap,.a-scan,.a-pulse,.a-bar,.a-reactor,.a-diag,.a-stamp,.a-link,.a-dive{animation:none!important;transform:none!important;opacity:1!important;}
+  .a-ticker,.a-rise,.a-charge,.a-flap,.a-scan,.a-pulse,.a-bar,.a-reactor,.a-diag,.a-stamp,.a-link,.a-dive,.a-draw{animation:none!important;transform:none!important;opacity:1!important;}
   .a-charge{transform:scaleX(var(--fill,1))!important;}
+  .a-draw{stroke-dasharray:none!important;}
 }
 `;
 export const inp = (extra={}) => ({width:"100%",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",color:C.text,fontSize:15,outline:"none",...extra});
@@ -1350,7 +1354,7 @@ export function LineChart({data, color=C.gold, unit="", palette=C}) {
         <stop offset="100%" stopColor={color} stopOpacity="0"/>
       </linearGradient></defs>
       <polygon points={area} fill={`url(#${gid})`}/>
-      <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round"/>
+      <polyline className={palette!==C?"a-draw":undefined} points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round"/>
       {data.map((d,i)=>(
         <g key={i}>
           <circle cx={px(i)} cy={py(d.y)} r={selected===i?3.5:2.5} fill={color}/>
@@ -1685,7 +1689,7 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
 
       {/* Open the full edition */}
       <button className="proof-drop" onClick={onOpen} style={{width:"100%",padding:15,borderRadius:12,border:"none",cursor:"pointer",
-        background:done?"transparent":"linear-gradient(180deg,#e3b32a,#c8941a)",color:done?CA.gold:"#1a1200",
+        background:done?"transparent":"CA.gold",color:done?CA.gold:"#04070f",
         fontFamily:NEWS.label,fontWeight:700,fontSize:15,letterSpacing:2,textAlign:"center",
         boxShadow:done?"none":`0 10px 24px ${CA.gold}4d`,...(done?{border:`1px solid ${NEWS.rule2}`}:{})}}>
         {done?"RE-READ THIS EDITION →":"OPEN THIS WEEK'S EDITION →"}
@@ -2103,7 +2107,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
             so render from index 1 onward. */}
         {messages.slice(1).map((m,i)=>(
           <div key={i} className="proof-drop" style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
-            <div style={{maxWidth:"86%",background:m.role==="user"?CA.gold:CA.navy2,color:m.role==="user"?"#1a1200":CA.text,borderRadius:14,padding:"11px 14px",fontSize:14,lineHeight:1.6,whiteSpace:"pre-wrap",border:m.role==="user"?"none":`1px solid ${CA.border}`,borderBottomLeftRadius:m.role==="user"?14:4,borderBottomRightRadius:m.role==="user"?4:14}}>
+            <div style={{maxWidth:"86%",background:m.role==="user"?CA.gold:CA.navy2,color:m.role==="user"?"#04070f":CA.text,borderRadius:14,padding:"11px 14px",fontSize:14,lineHeight:1.6,whiteSpace:"pre-wrap",border:m.role==="user"?"none":`1px solid ${CA.border}`,borderBottomLeftRadius:m.role==="user"?14:4,borderBottomRightRadius:m.role==="user"?4:14}}>
               {m.content}
             </div>
           </div>
@@ -2178,7 +2182,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
               </div>
             </div>
             <div style={{fontSize:13,lineHeight:1.5,color:"#c7d2e0",marginBottom:12}}>{activeQuestions[0].text}</div>
-            <button onClick={startDialogue} style={{width:"100%",padding:12,borderRadius:10,border:"none",cursor:"pointer",background:"linear-gradient(180deg,#e3b32a,#c8941a)",color:"#1a1200",fontFamily:"'Bebas Neue'",fontSize:15,letterSpacing:2,textAlign:"center"}}>
+            <button onClick={startDialogue} style={{width:"100%",padding:12,borderRadius:10,border:"none",cursor:"pointer",background:"CA.gold",color:"#04070f",fontFamily:"'Bebas Neue'",fontSize:15,letterSpacing:2,textAlign:"center"}}>
               START CHECK-IN →
             </button>
           </div>
