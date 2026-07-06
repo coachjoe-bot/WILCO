@@ -295,11 +295,12 @@ export default async function handler(req, res) {
           // admin → any athlete in their school; coach → only their own roster.
           ownFilter = isAdmin ? `&school_id=eq.${enc(sid)}` : `&coach_id=eq.${enc(caller.id)}`;
           assertRows((r) => (isAdmin ? String(r.school_id) === String(sid) : String(r.coach_id) === String(caller.id)));
-        } else if (table === "coach_context" || table === "coach_push_subscriptions" || table === "program_change_requests") {
-          // The coach's OWN data (context notes, their push subscriptions) and their
-          // request inbox — all carry coach_id. A regular coach may write these for
-          // themselves (this is the self-service carve-out that the coaches-table
-          // admin-only rule would otherwise block). Scope + assert on coach_id.
+        } else if (table === "coach_context" || table === "coach_push_subscriptions" || table === "program_change_requests" || table === "proof_digests") {
+          // The coach's OWN data (context notes, push subs), their request inbox, and
+          // their reports — all carry coach_id (per-athlete digests carry the owning
+          // coach_id too, so this also lets a coach mark those read without widening).
+          // A regular coach may write these for themselves — the self-service carve-out
+          // around the coaches-table admin-only rule. Scope + assert on coach_id.
           ownFilter = `&coach_id=eq.${enc(caller.id)}`;
           assertRows((r) => String(r.coach_id) === String(caller.id));
         } else {

@@ -995,6 +995,11 @@ function CoachDashboard({coach,onLogout}) {
               if(selectedDigest){
                 const c = selectedDigest.content_json||{};
                 const isTeam = selectedDigest.digest_type==="weekly_coach"||selectedDigest.digest_type==="monthly_coach";
+                // New rich team report (The Coach's Edition) → dedicated render + check-in.
+                // Legacy team reports (no content_json.team) fall through to the old view.
+                if(isTeam && c.team){
+                  return <CoachEdition digest={selectedDigest} athletes={athletes} coach={coach} onBack={()=>setSelectedDigest(null)} onRead={loadAll}/>;
+                }
                 const a = isTeam ? null : athleteById[selectedDigest.athlete_id];
                 // New shape: sections[]. Legacy fallback: keyed fields.
                 const sections = Array.isArray(c.sections)&&c.sections.length
@@ -1556,6 +1561,216 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions}){
               </div>}
           <div style={{fontSize:11,color:C.muted,marginTop:12,fontStyle:"italic"}}>Shareable image export coming with the monthly recap.</div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── THE COACH'S EDITION — Reports render + conversational check-in ───────────
+// The team-level mirror of the athlete Proof Feed: a newspaper the coach reads,
+// then a real back-and-forth check-in that gathers their calls + team context and
+// remembers it (coach_context) for next week's edition. See coach-experience-vision.
+const EDITION_SERIF = "Georgia,'Times New Roman',serif";
+
+// Did the coach ask a question back (vs. answer)? Mirrors the athlete check-in's
+// clarifying-question detection so WILCO answers once, then re-asks.
+const isAskingBack = (t)=>{
+  const s=String(t||"").trim();
+  return /\?\s*$/.test(s) || /^(what|why|how|when|which|who|should|can|could|would|do you|is it|are they|will it|any )\b/i.test(s);
+};
+// Quick-tap chips per question — the coach can always free-type instead.
+const chipsFor = (q)=>{
+  if(Array.isArray(q.options)&&q.options.length) return q.options;
+  if(q.kind==="program_focus") return ["Prioritize it next block","Not now"];
+  if(q.kind==="injury_apply") return ["Deload them this week","Leave it as is"];
+  if(q.kind==="reach_out") return ["Got it","Already on it"];
+  return null; // free-text only
+};
+
+function TierBar({name,tier,avgTier,color}){
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:9,padding:"4px 0"}}>
+      <span style={{width:120,fontSize:12.5,color:C.text,flexShrink:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{name}</span>
+      <span style={{flex:1,height:6,borderRadius:4,background:C.navy2,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${Math.round(100*((avgTier||0)+1)/8)}%`,background:color}}/></span>
+      <span style={{fontFamily:"'Bebas Neue'",fontSize:11,color,width:78,textAlign:"right"}}>{tier}</span>
+    </div>
+  );
+}
+
+// Client-side canvas export of the Wins block — no dependency, no server function.
+function exportWins(team, coach){
+  try{
+    const W=1080,H=1350, cv=document.createElement("canvas"); cv.width=W; cv.height=H;
+    const x=cv.getContext("2d");
+    x.fillStyle="#060d1e"; x.fillRect(0,0,W,H);
+    x.fillStyle="#d4a017"; x.font="700 40px Georgia"; x.fillText("THE COACH'S EDITION",70,110);
+    x.fillStyle="#94a3b8"; x.font="26px Georgia"; x.fillText(`${coach?.name||"Team"} · Wins of the week`,70,152);
+    x.fillStyle="#10b981"; x.font="700 130px Arial"; x.fillText(String(team.newPRs||0),70,320);
+    x.fillStyle="#e2e8f0"; x.font="34px Arial"; x.fillText("true PRs across the roster this week",70,372);
+    let y=490; x.fillStyle="#d4a017"; x.font="700 30px Arial"; x.fillText("STANDOUTS",70,y); y+=58;
+    (team.notablePRs||[]).slice(0,6).forEach(p=>{
+      x.fillStyle="#e2e8f0"; x.font="700 34px Arial"; x.fillText(String(p.athlete||""),70,y);
+      x.fillStyle="#94a3b8"; x.font="30px Arial"; x.fillText(`${p.exercise||""} ${p.weight||""}${p.gain?`   +${p.gain} lbs e1RM`:""}`,70,y+40); y+=104;
+    });
+    x.fillStyle="#64748b"; x.font="700 26px Arial"; x.fillText("WILCO",70,H-56);
+    const a=document.createElement("a"); a.href=cv.toDataURL("image/png"); a.download="wilco-wins.png"; a.click();
+  }catch(e){ console.error("wins export failed",e); }
+}
+
+function CoachCheckin({digest, team, coach, onRead}){
+  const c = digest.content_json||{};
+  const questions = c.questions||[];
+  const [msgs,setMsgs] = useState(()=>questions.length?[{role:"wilco",text:questions[0].text}]:[]);
+  const [qi,setQi] = useState(0);
+  const [answers,setAnswers] = useState({});
+  const [input,setInput] = useState("");
+  const [busy,setBusy] = useState(false);
+  const [done,setDone] = useState(!!c.checkin_done);
+  const endRef = useRef(null);
+  useEffect(()=>{ endRef.current?.scrollIntoView({behavior:"smooth",block:"nearest"}); },[msgs]);
+
+  const q = questions[qi];
+  const teamCtx = ()=> team? `Team read: ${team.n} athletes, ${team.activePct}% active, adherence ${team.adherenceAvg??"n/a"}%. Strengths: ${(team.strengths||[]).map(s=>s.name).join(", ")||"—"}. Weak spots: ${(team.weaknesses||[]).map(s=>s.name).join(", ")||"—"}. Slipping: ${(team.quiet||[]).map(v=>v.athlete).join(", ")||"none"}.` : "";
+
+  const finish = async (finalAnswers)=>{
+    setBusy(true);
+    setMsgs(m=>[...m,{role:"sys",text:"Saving to your team context…"}]);
+    try{
+      const sys = 'You are WILCO, distilling a strength coach\'s check-in into concise context notes for future team reports. From the Q&A, output ONLY JSON: {"season":str|null,"block_goal":str|null,"team_response":str|null,"athlete_notes":str|null,"decisions":[str]}. Each a short phrase in the coach\'s own words. decisions = the calls they made (e.g. "wants a pressing emphasis next block", "deloading Marcus\' knee"). null when a field wasn\'t covered.';
+      const transcript = questions.map(qq=>`Q(${qq.kind}): ${qq.text}\nA: ${finalAnswers[qq.id]||"(skipped)"}`).join("\n\n");
+      const raw = await askClaude(sys, transcript, 500, [], "claude-haiku-4-5", "coach_checkin");
+      let ext={}; try{ ext=JSON.parse(String(raw).replace(/```json|```/g,"").trim()); }catch{}
+      const rows=[];
+      const add=(kind,note,lt=false)=>{ if(note&&String(note).trim()) rows.push({coach_id:coach.id, note:`${kind}: ${String(note).trim()}`, meta:{kind}, is_long_term:lt}); };
+      add("season",ext.season); add("goal",ext.block_goal,true); add("response",ext.team_response); add("notes",ext.athlete_notes,true);
+      (Array.isArray(ext.decisions)?ext.decisions:[]).forEach(d=>add("decision",d));
+      for(const r of rows){ try{ await sbInsert("coach_context",r); }catch(e){ console.error("coach_context write",e); } }
+      try{ await sbUpdate("proof_digests", digest.id, {is_read:true, content_json:{...c, checkin_done:true}}); onRead&&onRead(); }catch(e){ console.error(e); }
+      setMsgs(m=>[...m.filter(x=>x.text!=="Saving to your team context…"),{role:"sys",text:"✓ Saved — I'll build next week's edition around this."}]);
+      setDone(true);
+    }catch(e){ setMsgs(m=>[...m,{role:"wilco",text:"Couldn't save that just now — try again in a moment."}]); }
+    setBusy(false);
+  };
+
+  const advance = (nextAnswers)=>{
+    const ni=qi+1;
+    if(ni>=questions.length){ finish(nextAnswers); return; }
+    setQi(ni);
+    setMsgs(m=>[...m,{role:"wilco",text:questions[ni].text}]);
+  };
+
+  const submit = async (text)=>{
+    const t=String(text||"").trim(); if(!t||busy||done||!q) return;
+    setInput("");
+    setMsgs(m=>[...m,{role:"coach",text:t}]);
+    if(isAskingBack(t)){
+      setBusy(true);
+      try{
+        const sys=`You are WILCO, a strength coach's AI assistant. The coach asked a question mid-check-in. Answer it directly and briefly (1-3 sentences), grounded in the team read, then stop — don't move on. ${teamCtx()}`;
+        const reply=await askClaude(sys, `They were asked: "${q.text}"\nThey replied: "${t}"`, 300, [], "claude-sonnet-5", "coach_checkin");
+        setMsgs(m=>[...m,{role:"wilco",text:reply||"Your call either way."},{role:"wilco",text:q.text}]);
+      }catch(e){ setMsgs(m=>[...m,{role:"wilco",text:q.text}]); }
+      setBusy(false);
+      return;
+    }
+    const na={...answers,[q.id]:t}; setAnswers(na);
+    advance(na);
+  };
+
+  if(!questions.length) return null;
+  const chips = q?chipsFor(q):null;
+
+  return (
+    <div style={{marginTop:18,background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
+      <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:C.gold,letterSpacing:1.5}}>YOUR CALLS &amp; CONTEXT</div>
+      <div style={{color:C.muted,fontSize:12.5,margin:"3px 0 14px"}}>Talk it through — tap an option or type your own, ask me anything, push back. I'll remember it for next week.</div>
+      <div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:400,overflowY:"auto",paddingRight:4}}>
+        {msgs.map((m,i)=>(
+          m.role==="sys"
+            ? <div key={i} style={{alignSelf:"center",color:C.green,fontSize:12,fontFamily:"'Bebas Neue'",letterSpacing:0.5}}>{m.text}</div>
+            : <div key={i} style={{alignSelf:m.role==="coach"?"flex-end":"flex-start",maxWidth:"85%",background:m.role==="coach"?C.gold:C.navy3,color:m.role==="coach"?"#0a0a0a":C.text,padding:"9px 12px",borderRadius:12,fontSize:13.5,lineHeight:1.5,fontWeight:m.role==="coach"?500:400}}>{m.text}</div>
+        ))}
+        <div ref={endRef}/>
+      </div>
+      {!done&&q&&(
+        <div style={{marginTop:12}}>
+          {chips&&(
+            <div style={{display:"flex",flexWrap:"wrap",gap:7,marginBottom:9}}>
+              {chips.map((opt,i)=>(
+                <button key={i} disabled={busy} onClick={()=>submit(opt)} style={{fontSize:12.5,color:C.muted,background:C.navy3,border:`1px solid ${C.border}`,borderRadius:999,padding:"6px 13px",cursor:"pointer",fontFamily:"'DM Sans'"}}>{opt}</button>
+              ))}
+            </div>
+          )}
+          <div style={{display:"flex",gap:8,alignItems:"center",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:"6px 6px 6px 13px"}}>
+            <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")submit(input);}} placeholder="Answer, or ask me anything…" disabled={busy} style={{flex:1,background:"none",border:"none",color:C.text,fontSize:13.5,outline:"none",fontFamily:"'DM Sans'"}}/>
+            <button onClick={()=>submit(input)} disabled={busy||!input.trim()} style={{background:C.gold,color:"#0a0a0a",border:"none",borderRadius:9,padding:"8px 16px",fontWeight:700,fontSize:12,cursor:"pointer",opacity:busy||!input.trim()?0.5:1,fontFamily:"'DM Sans'"}}>{busy?"…":"Send"}</button>
+          </div>
+        </div>
+      )}
+      {done&&<div style={{marginTop:12,color:C.muted,fontSize:13,fontStyle:"italic",fontFamily:EDITION_SERIF}}>That's the edition. I've got the context now — I'll build next week around it.</div>}
+    </div>
+  );
+}
+
+function CoachEdition({digest, athletes, coach, onBack, onRead}){
+  const c = digest.content_json||{};
+  const team = c.team||null;
+  const sections = Array.isArray(c.sections)?c.sections:[];
+  const isMonthly = digest.digest_type==="monthly_coach";
+  const railCells = team?[["Roster",team.n],["Active",`${team.activePct}%`],["Adherence",team.adherenceAvg!=null?`${team.adherenceAvg}%`:"—"],["True PRs",team.newPRs]]:[];
+  const toneOf = (s)=> /FOCUS/i.test(s.label)?"focus": s.flag==="warn"?"warn":"plain";
+  return (
+    <div style={{maxWidth:720}}>
+      <button onClick={onBack} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:12,marginBottom:14}}>← Back to Reports</button>
+      <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:"18px 20px"}}>
+        <div style={{borderBottom:`2px solid ${C.border}`,paddingBottom:12,marginBottom:14,textAlign:"center"}}>
+          <div style={{fontFamily:EDITION_SERIF,fontWeight:700,fontSize:30,color:C.text,letterSpacing:-0.5,lineHeight:1}}>The Coach's Edition{isMonthly?" · Monthly":""}</div>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:12,letterSpacing:2,color:C.muted,marginTop:6}}>{coach?.name||"Coach"} · {new Date(digest.generated_at||Date.now()).toLocaleDateString("en-US",{month:"long",day:"numeric"})}{team?` · ${team.n} Athletes`:""}</div>
+        </div>
+        {c.intro&&<div style={{fontFamily:EDITION_SERIF,fontSize:16,color:C.text,fontStyle:"italic",marginBottom:14,textAlign:"center"}}>{c.intro}</div>}
+        {team&&(
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:1,background:C.border,border:`1px solid ${C.border}`,borderRadius:10,overflow:"hidden",marginBottom:16}}>
+            {railCells.map(([k,v],i)=>(
+              <div key={i} style={{background:C.navy3,padding:"10px 12px"}}>
+                <div style={{fontSize:9.5,letterSpacing:1,textTransform:"uppercase",color:C.muted}}>{k}</div>
+                <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:C.text,fontVariantNumeric:"tabular-nums"}}>{v}</div>
+              </div>
+            ))}
+          </div>
+        )}
+        {sections.map((s,i)=>{
+          const tone=toneOf(s);
+          const labelColor = tone==="warn"?C.red: tone==="focus"?C.gold:C.muted;
+          const box = tone==="focus"
+            ? {background:`${C.gold}0e`,borderLeft:`3px solid ${C.gold}`,borderRadius:"0 10px 10px 0"}
+            : {background:C.navy3,border:`1px solid ${tone==="warn"?`${C.red}40`:C.border}`,borderRadius:10};
+          return (
+            <div key={i} style={{...box,padding:"12px 14px",marginBottom:9}}>
+              <div style={{fontFamily:"'Bebas Neue'",fontSize:13,letterSpacing:1.5,color:labelColor,marginBottom:6}}>{s.label}</div>
+              <div style={{color:C.text,fontSize:13.5,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{s.body}</div>
+            </div>
+          );
+        })}
+        {team&&((team.strengths&&team.strengths.length)||(team.weaknesses&&team.weaknesses.length))&&(
+          <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:14,marginTop:6}}>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:13,letterSpacing:1.5,color:C.muted,marginBottom:8}}>PROGRAM STRENGTHS &amp; WEAKNESSES</div>
+            {(team.strengths||[]).map((s,i)=><TierBar key={"s"+i} name={s.name} tier={s.tierName} avgTier={s.avgTier} color={C.green}/>)}
+            {(team.weaknesses||[]).map((s,i)=><TierBar key={"w"+i} name={s.name} tier={s.tierName} avgTier={s.avgTier} color={C.red}/>)}
+          </div>
+        )}
+        {team&&team.notablePRs&&team.notablePRs.length>0&&(
+          <div style={{background:`linear-gradient(180deg,${C.navy3},${C.navy2})`,border:`1px solid ${C.gold}44`,borderRadius:10,padding:14,marginTop:12}}>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:13,letterSpacing:1.5,color:C.gold,marginBottom:8}}>WINS TO SHARE</div>
+            {team.notablePRs.slice(0,5).map((p,i,arr)=>(
+              <div key={i} style={{display:"flex",alignItems:"center",gap:9,padding:"6px 0",borderBottom:i<arr.length-1?`1px solid ${C.border}80`:"none"}}>
+                <span style={{width:24,height:24,borderRadius:6,background:`${C.gold}22`,border:`1px solid ${C.gold}55`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,flexShrink:0}}>🏆</span>
+                <div style={{flex:1,minWidth:0}}><span style={{color:C.text,fontWeight:650,fontSize:13}}>{p.athlete}</span> <span style={{color:C.muted,fontSize:12.5}}>{p.exercise} {fmtWeight(p.weight,p.unit)}{p.gain?` — +${p.gain} lbs e1RM`:""}</span></div>
+              </div>
+            ))}
+            <button onClick={()=>exportWins(team,coach)} style={{marginTop:12,width:"100%",background:C.gold,color:"#0a0a0a",border:"none",borderRadius:9,padding:10,fontWeight:800,letterSpacing:1,textTransform:"uppercase",fontSize:12,cursor:"pointer",fontFamily:"'DM Sans'"}}>⤓ Share as image</button>
+          </div>
+        )}
+        <CoachCheckin digest={digest} team={team} coach={coach} onRead={onRead}/>
       </div>
     </div>
   );
