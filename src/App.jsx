@@ -2280,13 +2280,20 @@ function WilcoRoot() {
   if(view==="athlete"&&athlete) return <AthleteView athlete={athlete} onLogout={()=>{clearAuthSession();setAthlete(null);setView("home");}}/>;
   if(view==="coach"&&coach) return <Suspense fallback={<div style={{minHeight:"100vh",background:C.navy}}/>}><CoachDashboard coach={coach} onLogout={()=>{clearAuthSession();setCoach(null);setView("home");}}/></Suspense>;
 
+  // Coach entry stays on the legacy look (fence); athlete entry gets the night-gym brand
+  // world: the electric-blue WILCO storefront as a full-bleed backdrop behind a dark scrim.
+  const coachEntry = view==="coachLogin" || view==="coachSetup";
+  const PW = coachEntry ? C : CA;
   return (
-    <div style={{minHeight:"100vh",background:CA.navy,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",paddingTop:"calc(24px + env(safe-area-inset-top, 0px))",paddingBottom:24,paddingLeft:24,paddingRight:24}}>
+    <div style={{minHeight:"100vh",position:"relative",background:PW.navy,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:coachEntry?"center":"flex-end",paddingTop:"calc(24px + env(safe-area-inset-top, 0px))",paddingBottom:40,paddingLeft:24,paddingRight:24}}>
       <style>{GS}{GSA}</style>
-      <div style={{width:"100%",maxWidth:420}}>
-        <div style={{textAlign:"center",marginBottom:40}}>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:56,color:CA.gold,letterSpacing:6,lineHeight:1}}>WILCO</div>
-          <div style={{color:CA.muted,fontSize:12,letterSpacing:4,marginTop:4}}>COACH JOE-BOT</div>
+      {!coachEntry && <div aria-hidden style={{position:"absolute",inset:0,zIndex:0,backgroundImage:"linear-gradient(180deg, rgba(4,7,15,0.42) 0%, rgba(4,7,15,0.28) 38%, rgba(4,7,15,0.86) 78%, rgba(4,7,15,0.96) 100%), url(/login-bg.jpg)",backgroundSize:"cover",backgroundPosition:"top center",backgroundRepeat:"no-repeat"}}/>}
+      <div style={{width:"100%",maxWidth:420,position:"relative",zIndex:1}}>
+        <div style={{textAlign:"center",marginBottom:coachEntry?40:22}}>
+          {/* Athlete entry: the storefront's own neon WILCO is the masthead, so skip the
+              app wordmark (avoids a doubled WILCO) and lead with the tagline. */}
+          {coachEntry && <div style={{fontFamily:"'Bebas Neue'",fontSize:56,color:PW.gold,letterSpacing:6,lineHeight:1}}>WILCO</div>}
+          <div style={{color:coachEntry?PW.muted:CA.led,fontSize:coachEntry?12:13,fontWeight:coachEntry?400:600,letterSpacing:4,marginTop:coachEntry?4:0,textShadow:coachEntry?"none":"0 1px 12px rgba(4,7,15,0.9)"}}>COACH JOE-BOT</div>
         </div>
         {view==="home"      && <HomeScreen setView={setView} setAthlete={setAthlete} setCoach={setCoach}/>}
         {view==="event"     && <EventLanding event={eventCtx} onStart={()=>{ try { window.history.replaceState({}, "", "/"); } catch {} setView("eventSignup"); }} onLogin={()=>{ try { window.history.replaceState({}, "", "/"); } catch {} setView("login"); }}/>}
