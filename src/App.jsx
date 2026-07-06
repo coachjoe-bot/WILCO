@@ -1378,6 +1378,26 @@ export function LineChart({data, color=C.gold, unit="", palette=C}) {
   );
 }
 
+// ─── AWAITING SIGNAL ──────────────────────────────────────────────────────────
+// Athlete-side empty state: a "no signal yet" console readout instead of a flat
+// gray line. A pulsing hex node + mono kicker, on the CA palette. Pure
+// transform/opacity motion (.a-pulse), so reduced-motion degrades to the static
+// end state. `hint` is the plain-language "how to fill this" line.
+export function AwaitingSignal({hint, label="AWAITING SIGNAL"}) {
+  return (
+    <div style={{textAlign:"center",padding:"40px 20px",display:"flex",flexDirection:"column",alignItems:"center",gap:12}}>
+      <div className="a-pulse" aria-hidden style={{width:34,height:34,display:"flex",alignItems:"center",justifyContent:"center"}}>
+        <svg viewBox="0 0 40 44" width="34" height="34">
+          <polygon points="20,2 37,12 37,32 20,42 3,32 3,12" fill="none" stroke={CA.accent} strokeWidth="2"/>
+          <circle cx="20" cy="22" r="4" fill={CA.accent}/>
+        </svg>
+      </div>
+      <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:11,letterSpacing:3,color:CA.accent,fontWeight:600}}>{label}</div>
+      {hint&&<div style={{color:CA.muted2,fontSize:12.5,lineHeight:1.5,maxWidth:280}}>{hint}</div>}
+    </div>
+  );
+}
+
 // ─── RUN CARD ─────────────────────────────────────────────────────────────────
 // Reusable component for displaying a parsed run workout.
 const RUN_TYPE_LABELS = {
@@ -3642,6 +3662,19 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [loading,setLoading] = useState(false);
   const [videoLoading,setVideoLoading] = useState(false);
   const [saved,setSaved] = useState(false);
+  const [prStamp,setPrStamp] = useState(null);   // {exercise,weight,unit} → "NEW MAX" stamp overlay when a PR lands
+  // Entrance walk-through: play the door-dive clip once per session on first
+  // sign-in, then never again until a fresh session (sessionStorage flag).
+  // Reduced-motion or any playback error skips straight to the chat.
+  const [entrance,setEntrance] = useState(()=>{
+    try{
+      if(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return false;
+      return !sessionStorage.getItem("wilco_entered");
+    }catch{ return false; }
+  });
+  const dismissEntrance = () => { try{ sessionStorage.setItem("wilco_entered","1"); }catch{} setEntrance(false); };
+  // Safety net: never let a stalled clip trap the athlete outside the app.
+  useEffect(()=>{ if(!entrance) return; const t=setTimeout(dismissEntrance,6500); return ()=>clearTimeout(t); },[entrance]);   // eslint-disable-line react-hooks/exhaustive-deps
   const [workoutHistory,setWorkoutHistory] = useState([]);
   const [historyLoaded,setHistoryLoaded] = useState(false);
   const [movementPrompt,setMovementPrompt] = useState(false);
@@ -3983,6 +4016,12 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           }
         }
 
+        // Stamp the biggest of this batch straight onto the chat — "NEW MAX",
+        // pressed on (aStamp), auto-clears. Fires with the congrats haptic.
+        {
+          const topPR=[...newPRs].sort((a,b)=>b.diff-a.diff)[0];
+          if(topPR){ setPrStamp({exercise:topPR.exercise,weight:topPR.weight,unit:topPR.unit}); setTimeout(()=>setPrStamp(null),2600); }
+        }
         try {
           const prCallout = newPRs.map(pr=>pr.isActual1RM
             ? `${pr.exercise}: NEW ACTUAL 1RM ${fmtWeight(pr.weight,pr.unit)} (+${Math.round(pr.diff)}lbs-equiv over prev)`
@@ -4400,6 +4439,26 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
   return (
     <div style={{height:"100dvh",display:"flex",flexDirection:"column",backgroundColor:CA.navy,backgroundImage:"linear-gradient(rgba(4,7,15,0.60), rgba(4,7,15,0.72)), url(/chat-bg.jpg)",backgroundSize:"cover",backgroundPosition:"center",maxWidth:600,margin:"0 auto"}}>
       <style>{GS}{GSA}</style>
+      {/* Entrance walk-through — the door-dive into the gym on first sign-in of a
+          session. Muted+playsInline so it autoplays; tap or clip-end or any error
+          drops straight into the chat. Phone-width frame on wider viewports. */}
+      {entrance&&(
+        <div onClick={dismissEntrance} style={{position:"fixed",inset:0,zIndex:900,background:CA.navy,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}>
+          <video src="/enter.mp4" autoPlay muted playsInline onEnded={dismissEntrance} onError={dismissEntrance}
+            style={{width:"100%",maxWidth:600,height:"100%",objectFit:"cover"}}/>
+          <div style={{position:"absolute",bottom:"calc(26px + env(safe-area-inset-bottom,0px))",left:0,right:0,textAlign:"center",color:CA.led,fontSize:11,letterSpacing:3,fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",opacity:0.65,pointerEvents:"none"}}>TAP TO ENTER</div>
+        </div>
+      )}
+      {/* PR "NEW MAX" stamp — pressed straight on when a logged lift beats the old best */}
+      {prStamp&&(
+        <div style={{position:"fixed",inset:0,zIndex:700,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
+          <div className="a-stamp" style={{textAlign:"center",padding:"22px 42px",border:`3px solid ${CA.accent}`,borderRadius:14,background:"rgba(4,7,15,0.82)",boxShadow:`0 0 44px -6px ${CA.accent}, inset 0 0 26px -10px ${CA.accent}`}}>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:52,letterSpacing:4,color:CA.accent,lineHeight:0.9,textShadow:`0 0 18px ${CA.accent}88`}}>NEW MAX</div>
+            <div style={{color:CA.led,fontSize:15,fontWeight:700,letterSpacing:1,marginTop:6}}>{prStamp.exercise}</div>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:CA.led,letterSpacing:1,marginTop:2}}>{fmtWeight(prStamp.weight,prStamp.unit)}</div>
+          </div>
+        </div>
+      )}
       {/* Header */}
       <div style={{background:CA.navy2,borderBottom:`1px solid ${CA.border}`,paddingTop:"calc(10px + env(safe-area-inset-top, 0px))",paddingBottom:"10px",paddingLeft:"14px",paddingRight:"14px",display:"flex",flexDirection:"column",gap:10,flexShrink:0}}>
         {/* Row 1: identity */}
@@ -4412,9 +4471,36 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           </div>
           )}
           <div style={{flex:1,minWidth:0,color:CA.muted,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{athlete.name}</div>
-          {(()=>{const t=TIERS[athlete.tier||"free"];return(<span style={{flexShrink:0,background:`${t.color}22`,border:`1px solid ${t.color}`,borderRadius:4,padding:"1px 6px",color:t.color,fontSize:9,fontWeight:700,letterSpacing:1}}>{t.badge}</span>);})()}
+          {/* Tier badge — athlete world holds the accent electric-blue (TIERS.color stays
+              gold for the coach side / pricing; we repoint just this render). */}
+          {(()=>{const t=TIERS[athlete.tier||"free"];const bc=CA.accent;return(<span style={{flexShrink:0,background:`${bc}22`,border:`1px solid ${bc}`,borderRadius:4,padding:"1px 6px",color:bc,fontSize:9,fontWeight:700,letterSpacing:1}}>{t.badge}</span>);})()}
           {athlete.certified_badge_earned_at&&(()=>{const cnt=athlete.total_sessions_logged||0;const tier=cnt>=1000?"×4":cnt>=500?"×3":cnt>=250?"×2":"";return<span title="WILCO Certified" style={{flexShrink:0,background:`${CA.gold}22`,border:`1px solid ${CA.gold}`,borderRadius:4,padding:"1px 6px",color:CA.gold,fontSize:9,fontWeight:700,letterSpacing:1}}>✦ CERTIFIED{tier?` ${tier}`:""}</span>;})()}
         </div>
+        {/* Row 1.5: streak charge-chain — this week's training as a row of links,
+            trained days lit + glowing (electric blue), rest cooled steel. Today is
+            marked by a brighter letter. Staggered light-up via .a-link on mount. */}
+        {historyLoaded&&(()=>{
+          const now=new Date();
+          const dow=(now.getDay()+6)%7;                       // Mon=0 .. Sun=6
+          const monday=new Date(now); monday.setHours(0,0,0,0); monday.setDate(now.getDate()-dow);
+          const trained=new Set();
+          workoutHistory.forEach(w=>{const d=new Date(w.created_at); if(d>=monday) trained.add((d.getDay()+6)%7);});
+          const L=["M","T","W","T","F","S","S"];
+          return (
+            <div style={{display:"flex",alignItems:"center",gap:10,marginTop:-2}} title="Your training this week">
+              <div style={{position:"relative",display:"flex",alignItems:"flex-start",gap:13}}>
+                <div aria-hidden style={{position:"absolute",left:5,right:5,top:5,height:1.5,background:CA.border,opacity:0.5,zIndex:0}}/>
+                {L.map((ltr,i)=>{const on=trained.has(i);const today=i===dow;return(
+                  <div key={i} style={{position:"relative",zIndex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
+                    <div className={on?"a-link":undefined} style={{"--d":`${i*0.06}s`,width:on?10:8,height:on?10:8,borderRadius:"50%",background:on?CA.accent:CA.navy,border:`1.5px solid ${on?CA.accent:CA.steel}`,boxShadow:on?`0 0 8px ${CA.accent}`:"none",transition:"all .25s"}}/>
+                    <span style={{fontSize:8,letterSpacing:0.5,lineHeight:1,color:today?CA.led:on?CA.muted2:CA.steel,fontWeight:today?700:500}}>{ltr}</span>
+                  </div>
+                );})}
+              </div>
+              <span style={{fontSize:9,letterSpacing:1,color:CA.muted,fontWeight:600,whiteSpace:"nowrap"}}>{trained.size} DAY{trained.size===1?"":"S"} THIS WK</span>
+            </div>
+          );
+        })()}
         {/* Row 2: nav — Quick Log owns the left slot; marginRight:auto keeps the
             right-side group pinned right even when Quick Log is hidden (free tier). */}
         <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:8}}>
@@ -4473,7 +4559,12 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
       {/* Messages */}
       <div style={{flex:1,overflowY:"auto",padding:"16px 16px 8px"}}>
         {!historyLoaded?(
-          <div style={{textAlign:"center",padding:40,color:CA.muted}}>Loading...</div>
+          <div style={{textAlign:"center",padding:"48px 20px",display:"flex",flexDirection:"column",alignItems:"center",gap:14}}>
+            <div style={{width:150,height:3,borderRadius:2,background:CA.navy3,overflow:"hidden",position:"relative"}}>
+              <div className="a-bar" style={{position:"absolute",inset:0,width:"55%",borderRadius:2,background:`linear-gradient(90deg,transparent,${CA.accent},transparent)`,boxShadow:`0 0 10px ${CA.accent}`}}/>
+            </div>
+            <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:11,letterSpacing:3,color:CA.muted2}}>LOADING</div>
+          </div>
         ):(
           <>
             {messages.map((m,i)=>(
@@ -5312,6 +5403,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   const [editVal,setEditVal] = useState("");
   const [showScoreInfo,setShowScoreInfo] = useState(false);
   const [showRankInfo,setShowRankInfo] = useState(false);
+  const [rankedUp,setRankedUp] = useState(()=>new Set());   // lift keys whose tier rose since last open → rank-up flash
 
   useEffect(()=>{
     sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`).then(rows=>{
@@ -5395,6 +5487,30 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   const tierIdxOf = (b) => (bodyweight ? tierForRatio(b.e1rm/bodyweight, b.thresh) : 0);
   const strengthScore = bodyweight ? rankedLifts.reduce((s,b)=>s+TIER_POINTS[tierIdxOf(b)],0) : 0;
   const topTierIdx = (bodyweight && rankedLifts.length) ? Math.max(...rankedLifts.map(tierIdxOf)) : -1;
+  // Rank-up detection: compare each lift's current tier to the tier we last showed
+  // (persisted per athlete, from a PREVIOUS session) and flash any lift that climbed.
+  // Baseline is read once on mount; the compare is debounced 600ms so async loads
+  // (manual 1RMs, history) settle first — otherwise the initial partial render would
+  // read as a "rank up" every time. After firing we rebaseline so it only flashes once.
+  const benchSig = bodyweight ? dedupedBench.map(b=>`${b.key}:${tierIdxOf(b)}`).join("|") : "";
+  const baselineRef = useRef(null);
+  useEffect(()=>{
+    if(baselineRef.current!==null) return;
+    try{ baselineRef.current=JSON.parse(localStorage.getItem(`wilco_bench_tiers_${athlete.id}`)||"{}"); }catch{ baselineRef.current={}; }
+  },[athlete.id]);
+  useEffect(()=>{
+    if(!bodyweight || baselineRef.current===null) return;
+    const storeKey=`wilco_bench_tiers_${athlete.id}`;
+    const id=setTimeout(()=>{
+      const base=baselineRef.current||{};
+      const cur={}; const ups=new Set();
+      dedupedBench.forEach(b=>{ const t=tierIdxOf(b); cur[b.key]=t; if(b.key in base && t>base[b.key]) ups.add(b.key); });
+      if(ups.size) setRankedUp(ups);
+      try{ localStorage.setItem(storeKey,JSON.stringify(cur)); }catch{}
+      baselineRef.current=cur;   // rebaseline so it doesn't re-fire within this open
+    },600);
+    return ()=>clearTimeout(id);
+  },[benchSig,bodyweight]);   // eslint-disable-line react-hooks/exhaustive-deps
   // PRs Hit — lifetime count of new-best moments across every lift (first best counts).
   const prsHit = (()=>{
     const best={}; let count=0;
@@ -5441,6 +5557,9 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
     .map(row=>({...row,active: row.manual ? toLbs(row.manual.weight,row.manual.unit) : row.estimated}))
     .sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.active-a.active)
     .filter(row=>matchesSearch(row.name));
+  // Per-lift est-1RM history, so the PR tab can draw the same trend line the
+  // Strength tab does (Will's ask: bring the line chart + draw-in to PRs too).
+  const exByKey = Object.fromEntries(exercises.map(e=>[e.key,e]));
 
   const saveManual = async (row) => {
     const w = parseFloat(editVal);
@@ -5559,25 +5678,28 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
               const toNext = isTop ? 0 : Math.max(0, Math.round(b.thresh[tierIdx]*bodyweight - b.e1rm));
               const dispName = b.name;                           // canonical (resolveLift)
               const isBW = b.bwLoaded;                            // pull-ups / dips / chin-ups / muscle-ups → bodyweight + added
+              const up = rankedUp.has(b.key);                     // climbed a tier since last open → flash
               return (
-                <div key={i} style={{background:CA.navy2,border:`1px solid ${tierIdx>=4?`${TIER_COLORS[tierIdx]}66`:CA.border}`,borderRadius:12,padding:16,marginBottom:12,boxShadow:tierIdx>=2?`0 0 ${6+tierIdx*3}px -3px ${TIER_COLORS[tierIdx]}55`:"none",transition:"box-shadow .3s,border-color .3s"}}>
+                <div key={i} style={{background:CA.navy2,border:`1px solid ${up?TIER_COLORS[tierIdx]:tierIdx>=4?`${TIER_COLORS[tierIdx]}66`:CA.border}`,borderRadius:12,padding:16,marginBottom:12,boxShadow:up?`0 0 26px -4px ${TIER_COLORS[tierIdx]}`:tierIdx>=2?`0 0 ${6+tierIdx*3}px -3px ${TIER_COLORS[tierIdx]}55`:"none",transition:"box-shadow .3s,border-color .3s"}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
                     <div>
                       <div style={{color:CA.text,fontWeight:700,fontSize:14,display:"flex",alignItems:"center",gap:6}}>{dispName}{b.actual&&<span title="Using your actual 1RM" style={{background:`${CA.gold}22`,border:`1px solid ${CA.gold}`,color:CA.gold,borderRadius:4,padding:"0 5px",fontSize:9,fontWeight:700,letterSpacing:1}}>PR</span>}</div>
-                      <div style={{color:TIER_COLORS[tierIdx],fontSize:13,fontWeight:700,marginTop:2,letterSpacing:0.5}}>{TIER_NAMES[tierIdx]}</div>
+                      <div style={{color:TIER_COLORS[tierIdx],fontSize:13,fontWeight:700,marginTop:2,letterSpacing:0.5,display:"flex",alignItems:"center",gap:6}}>{TIER_NAMES[tierIdx]}{up&&<span className="a-stamp" style={{background:`${TIER_COLORS[tierIdx]}22`,border:`1px solid ${TIER_COLORS[tierIdx]}`,color:TIER_COLORS[tierIdx],borderRadius:4,padding:"0 6px",fontSize:9,fontWeight:700,letterSpacing:1}}>⬆ RANK UP</span>}</div>
                     </div>
                     <div style={{textAlign:"right"}}>
                       <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:TIER_COLORS[tierIdx],lineHeight:1}}>{Math.round(b.e1rm)}<span style={{fontSize:11,color:CA.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span></div>
                       <div style={{color:CA.muted,fontSize:10}}>{isBW ? bwLoadLabel(b.e1rm, bodyweight) : `${ratio.toFixed(2)}× bodyweight`}</div>
                     </div>
                   </div>
-                  {/* 8-segment tier bar */}
-                  <div style={{position:"relative",height:14,borderRadius:7,overflow:"visible",display:"flex"}}>
-                    {bounds.slice(1).map((hi,si)=>{
-                      const w=(hi-bounds[si])/maxRatio*100;
-                      return <div key={si} style={{width:`${w}%`,height:"100%",background:TIER_COLORS[si],opacity:si===tierIdx?1:0.45,
-                        borderRadius:si===0?"7px 0 0 7px":si===7?"0 7px 7px 0":"0",borderRight:si<7?"1px solid rgba(6,13,30,0.6)":""}}/>;
-                    })}
+                  {/* 8-segment tier bar — the "power cells" charge up from the left on open */}
+                  <div style={{position:"relative",height:14,borderRadius:7,overflow:"visible"}}>
+                    <div className="a-charge" style={{"--fill":1,position:"absolute",inset:0,display:"flex",borderRadius:7,overflow:"hidden"}}>
+                      {bounds.slice(1).map((hi,si)=>{
+                        const w=(hi-bounds[si])/maxRatio*100;
+                        return <div key={si} style={{width:`${w}%`,height:"100%",background:TIER_COLORS[si],opacity:si===tierIdx?1:0.45,
+                          borderRight:si<7?"1px solid rgba(6,13,30,0.6)":""}}/>;
+                      })}
+                    </div>
                     <div style={{position:"absolute",top:-3,left:`${markerPct}%`,transform:"translateX(-50%)",width:5,height:20,background:"#fff",borderRadius:3,boxShadow:"0 0 6px rgba(255,255,255,0.7)"}}/>
                   </div>
                   {/* Next-tier target */}
@@ -5601,7 +5723,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
           <div>
             <div style={{color:CA.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>STRENGTH PROGRESS</div>
             {exercises.filter(ex=>ex.entries.length>0).length===0?(
-              <div style={{color:CA.muted,textAlign:"center",padding:40,fontSize:13}}>No weighted exercises logged yet.</div>
+              <AwaitingSignal hint="Log a few weighted lifts and your strength curve builds itself — est. 1RM over time, per exercise."/>
             ):exercises.filter(ex=>ex.entries.length>0).map((ex,i)=>(
               <div key={i} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:14}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
@@ -5634,7 +5756,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
             const pd=typeof w.parsed_data==="string"?JSON.parse(w.parsed_data):(w.parsed_data||{});
             return{date:new Date(w.created_at),run:pd.run_data};
           }).sort((a,b)=>a.date-b.date);
-          if(runs.length===0) return <div style={{color:CA.muted,textAlign:"center",padding:40,fontSize:13}}>No runs logged yet.</div>;
+          if(runs.length===0) return <AwaitingSignal hint="Tell Coach Joe about a run — distance, pace, heart rate — and your pace and mileage trends light up here."/>;
           const paceToMin=(p)=>{if(!p)return null;const pts=p.split(":");if(pts.length<2)return null;const m=parseFloat(pts[0]),s=parseFloat(pts[1]);return isNaN(m)||isNaN(s)?null:Math.round((m+s/60)*100)/100;};
           const distData=runs.filter(r=>r.run.distance_miles||r.run.distance_km).map(r=>({label:fmtDateShort(r.date),y:r.run.distance_miles||r.run.distance_km}));
           const paceData=runs.filter(r=>r.run.pace_per_mile||r.run.pace_per_km).map(r=>({label:fmtDateShort(r.date),y:paceToMin(r.run.pace_per_mile||r.run.pace_per_km)})).filter(d=>d.y!==null);
@@ -5658,7 +5780,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
               Set your actual 1RM here, or just tell Coach Joe in chat when you hit one (e.g. "hit a true 1RM of 315 on squat"). Your actual 1RM always overrides the estimate for program math — until then, programming uses your best estimated 1RM.
             </div>
             {prList.length===0?(
-              <div style={{color:CA.muted,textAlign:"center",padding:40,fontSize:13}}>Log some lifts to start tracking 1RMs.</div>
+              <AwaitingSignal hint="Log some lifts, or tell Coach Joe an actual 1RM in chat, and your maxes start tracking here."/>
             ):prList.map((row,i)=>(
               <div key={row.key} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:12}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
@@ -5683,6 +5805,12 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                     {row.manual?"Update actual 1RM":"Set actual 1RM"}
                   </button>
                 )}
+                {(()=>{const ex=exByKey[row.key];return ex&&ex.entries&&ex.entries.length>=2?(
+                  <div style={{marginTop:14,borderTop:`1px solid ${CA.border}`,paddingTop:12}}>
+                    <div style={{color:CA.muted,fontSize:9,letterSpacing:1,fontWeight:700,marginBottom:6}}>EST. 1RM OVER TIME</div>
+                    <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={CA.gold} palette={CA} unit={row.unit==="kg"?"kg":"lbs"}/>
+                  </div>
+                ):null;})()}
               </div>
             ))}
           </div>
