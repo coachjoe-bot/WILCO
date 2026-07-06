@@ -3562,6 +3562,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [showProgram,setShowProgram] = useState(false);
   const [showProgress,setShowProgress] = useState(false);
   const [showQuickLog,setShowQuickLog] = useState(false);
+  const quickLogPending = useRef(false); // the pending/next send() is a Quick Log draft — a pure workout log that must never write program_text
   const [showProfileCompletion,setShowProfileCompletion] = useState(false);
   const [profileBannerDismissed,setProfileBannerDismissed] = useState(()=>{
     try{return!!localStorage.getItem(`wilco_profile_banner_${initialAthlete.id}`);}catch{return false;}
@@ -3933,6 +3934,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const send = async (overrideText) => {
     const msg = (typeof overrideText==="string" ? overrideText : input).trim();
     if(!msg||loading||videoLoading||!historyLoaded) return;
+    // Quick Log drafts are pure workout logs. Consume the flag for THIS send so a
+    // draft can NEVER be classified as a program and overwrite program_text.
+    const fromQuickLog = quickLogPending.current;
+    quickLogPending.current = false;
     track("chat_message_sent","ai");
 
     // ── Goal collection flow (first chat only) ──────────────────────────────
@@ -4039,7 +4044,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       };
 
       // Detect and save program updates — any tier, as long as coach hasn't locked it
-      if(parsed.is_program_update && !updatedAthlete.program_locked){
+      if(parsed.is_program_update && !updatedAthlete.program_locked && !fromQuickLog){
         try {
           const programText = await extractProgramText(msg);
           // Guard: only save if there's real program content (not a one-line command)
@@ -4054,7 +4059,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       }
 
       // Temporary adapted program — conditions described, extract program from Joe-bot's reply
-      if(parsed.is_temp_program_update && !updatedAthlete.program_locked){
+      if(parsed.is_temp_program_update && !updatedAthlete.program_locked && !fromQuickLog){
         try {
           const tempText = await extractProgramText(reply);
           await sbUpdate("athletes",athlete.id,{temp_program_text:tempText});
@@ -4064,7 +4069,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       }
 
       // Revert — athlete is back, clear temp program
-      if(parsed.is_program_revert && updatedAthlete.temp_program_text){
+      if(parsed.is_program_revert && updatedAthlete.temp_program_text && !fromQuickLog){
         try {
           await sbUpdate("athletes",athlete.id,{temp_program_text:null});
           updatedAthlete.temp_program_text = null;
@@ -4564,6 +4569,9 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           onAddProgram={()=>{setShowQuickLog(false);setShowProgram(true);}}
           onSend={(text)=>{
             setShowQuickLog(false);
+            // Mark this as a Quick Log draft so send() can never route it into a
+            // program overwrite (survives the parked-input path below too).
+            quickLogPending.current = true;
             // If a send is already in flight, park the draft in the input box
             // instead of silently dropping it (send() early-returns while busy).
             if(loading||videoLoading||!historyLoaded) setInput(text);
