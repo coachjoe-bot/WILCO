@@ -186,7 +186,7 @@ async function hashPinAction(req, res, body) {
 // set by the server (never trust a client claiming "elite"). Returns the row
 // without the PIN; the browser keeps the plaintext PIN it just typed.
 const ATHLETE_FIELDS = [
-  "sport", "billing", "birthday", "age", "height_inches", "weight_lbs", "gender",
+  "sport", "billing", "level", "birthday", "age", "height_inches", "weight_lbs", "gender",
   "training_days_per_week", "equipment", "position_or_event", "injury_history",
   "recruiting_intent", "graduation_year", "first_chat_complete",
 ];

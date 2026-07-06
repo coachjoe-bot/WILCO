@@ -1039,7 +1039,7 @@ RESERVED (only when situation genuinely matches):
 - "You're only in competition with the you of yesterday.": Athlete comparing to others only.
 
 FORMATTING: Use numbered lists for exercises/alternatives/steps. Never paragraph format for exercise lists.
-Keep under 200 words. Use their name once naturally.
+Match length to the question: a sentence or two for logs and simple asks; go longer only for genuinely technical or programming questions that need the detail — thorough, never padded. Never cut off mid-thought; if you're running long, tighten the wording but finish the point. Use their name once naturally.
 Pain → suggest alternatives. Equipment unavailable → 2-3 specific alternatives.
 Out of scope: "That's one for Coach Joe directly -- email support@trainwilco.com."
 
@@ -1137,8 +1137,10 @@ SPORT: ${JOEBOT_SPORTS[athlete.sport]||"Build a general strength base."}${pastCo
   const sysObj = {cached:JOEBOT_STATIC_SYS, dynamic:sys+goalsContext+contextMemory};
   const userMsg = `${hist}\n\n${athlete.name}: ${message}`;
   // Stream when the caller wants live rendering; otherwise the classic one-shot call.
-  if(onDelta) return askClaudeStream(sysObj, userMsg, {maxTokens:450, model:"claude-sonnet-5", feature:"joebot_chat", onDelta});
-  return askClaude(sysObj, userMsg, 450, [], "claude-sonnet-5", "joebot_chat");
+  // 800 tokens (was 450): technical/programming answers were getting guillotined
+  // mid-sentence. Logs stay short via the length rule in the prompt, not the cap.
+  if(onDelta) return askClaudeStream(sysObj, userMsg, {maxTokens:800, model:"claude-sonnet-5", feature:"joebot_chat", onDelta});
+  return askClaude(sysObj, userMsg, 800, [], "claude-sonnet-5", "joebot_chat");
 };
 
 // ─── 1RM PROPAGATION ─────────────────────────────────────────────────────────
@@ -2623,6 +2625,7 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
         signupSource:eventCtx?.source || composeSignupSource(),
         athlete:{
           name:data.name.trim(), sport:data.sport, billing:data.billing,
+          level:data.level||null, // how they train (self/club/highschool/college) — persisted go-forward for future coaching use
           email:data.email.trim().toLowerCase(),
           birthday:data.birthday, age:ageYears, height_inches:heightIn,
           weight_lbs:+data.weight, gender:data.gender,
