@@ -7,7 +7,24 @@ branch `feat/athlete-aesthetic` (based off `main` `6ae602e`). Preview: launch.js
 To SEE inner screens: `npm run dev` in the worktree proxies `/api` to prod (vite.config.js, uncommitted).
 Log in as **Will Higgins / PIN 7707**.
 
-## DONE + verified in preview (this session closed the gap vs the athlete artifact 40b4a378)
+## 2026-07-06 correction — ported the artifact's REAL CSS (was shipping approximations)
+
+Will flagged the app didn't match the artifact (power cells / grid / animations). Root cause: earlier
+passes rebuilt from notes, not the artifact. Fixed by extracting the artifact's actual inline CSS and
+porting it 1:1 into `GSA` + retuning `CA` to the artifact `:root`. Landed:
+- **`.cyber` blue grid ground** on program/log/progress (amber grid on temp/away) — the missing texture.
+- **Battery-tube power cells** (`.htube`/`.hfill`) filled to position in the tier colour, glow by tier —
+  replaced the 8-segment rainbow bar. Charges up on tab open.
+- **Radar-sweep** AWAITING SIGNAL empty state (was a hex node).
+- **`.ld-charge`** loader on chat load; charge/scan/hex classes ported.
+- Palette → artifact values: ground #04060c, **blue #3a7bff + cyan #37e6ff duotone**; gradient+glow
+  buttons + chat avatar; cyan titles/tabs/section-labels/line-chart strokes.
+- PR NEW MAX stamp → artifact `.stamp` (cyan). Streak → thin bars. Proof → cyan scanline + radial ground.
+- **Removed the Kling entrance video** (Will: tacky).
+Branch tip 8e09dea. Not added: Proof `paperUp` auto-scroll (real front page opens the full edition on
+tap; a loop would look broken).
+
+## Earlier (superseded parts corrected above)
 
 Everything shown on the athlete overhaul artifact is now built on the branch:
 
