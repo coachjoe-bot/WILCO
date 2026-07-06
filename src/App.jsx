@@ -1703,11 +1703,14 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
       <div style={{fontFamily:NEWS.serif,fontWeight:800,fontSize:26,lineHeight:1.0,color:NEWS.ink,textAlign:"center",margin:"2px 0 0"}}>{String(headline||"").split(" ").map((w,i)=>(<span key={i} className="a-flap" style={{animationDelay:`${i*0.06}s`,marginRight:"0.26em"}}>{w}</span>))}</div>
     </>
   );
-  // Scrolling body (score → two columns → inside-this-edition). Rendered twice so the
-  // 30s loop seams cleanly at translateY(-50%).
+  // The FULL edition, laid out as a newspaper and scrolled in one continuous loop:
+  // rank lead + score → PR card + injury/focus box → every remaining section in full →
+  // closing "inside this edition". Rendered twice so the loop seams at translateY(-50%).
+  const boxSec = injurySec || focusSec;                    // section shown in the right box
+  const flowSecs = rest.concat(injurySec&&focusSec ? [focusSec] : []);  // full sections below
   const body = (
     <>
-      {rankSec&&<div style={{fontFamily:NEWS.body,fontStyle:"italic",fontSize:12.5,lineHeight:1.35,color:NEWS.ink2,textAlign:"center",padding:"0 6px 6px"}}>{truncate(firstSentence(rankSec.body),120)}</div>}
+      {rankSec&&<div style={{fontFamily:NEWS.body,fontStyle:"italic",fontSize:12.5,lineHeight:1.4,color:NEWS.ink2,textAlign:"center",padding:"0 6px 6px"}}>{rankSec.body}</div>}
       {hero&&hero.score!=null&&(
         <div style={{display:"flex",justifyContent:"center",alignItems:"baseline",gap:10,padding:"2px 0 8px"}}>
           <span style={{...kick(),fontSize:9}}>Strength Score</span>
@@ -1717,40 +1720,39 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
       )}
       <NRule m="2px 0 8px"/>
       <div style={{display:"flex",gap:12}}>
-        {teaserA&&(
+        {prSec&&(
           <div style={{flex:1}}>
-            <div style={{fontFamily:NEWS.serif,fontWeight:700,fontSize:15,lineHeight:1.05,color:NEWS.ink,marginBottom:4}}>{prSec?"The PR Card":titleCase(teaserA.label)}</div>
+            <div style={{fontFamily:NEWS.serif,fontWeight:700,fontSize:15,lineHeight:1.05,color:NEWS.ink,marginBottom:4}}>The PR Card</div>
             <p style={{fontFamily:NEWS.body,fontSize:11.5,lineHeight:1.4,color:NEWS.ink2,textAlign:"justify",margin:0}}>
-              <span style={{float:"left",fontFamily:NEWS.serif,fontWeight:800,fontSize:30,lineHeight:0.72,padding:"2px 5px 0 0",color:prSec?CA.cyan:NEWS.ink}}>{String(teaserA.body||"").slice(0,1)}</span>
-              {truncate(String(teaserA.body||"").slice(1),140)}
+              <span style={{float:"left",fontFamily:NEWS.serif,fontWeight:800,fontSize:30,lineHeight:0.72,padding:"2px 5px 0 0",color:CA.cyan}}>{String(prSec.body||"").slice(0,1)}</span>
+              {String(prSec.body||"").slice(1)}
             </p>
-            <div style={{...kick(CA.cyan),fontSize:8,marginTop:4}}>Full story inside ▸</div>
           </div>
         )}
-        <div style={{width:1,background:NEWS.rule}}/>
-        <div style={{flex:1}}>
-          {injurySec ? (
-            <div style={{border:`1.5px solid ${urgent?CA.red:NEWS.rule2}`,padding:"8px 9px"}}>
-              <div style={{...kick(CA.gold),borderBottom:`1px solid ${NEWS.rule}`,paddingBottom:3,marginBottom:4}}>⚠ Injury Alert</div>
-              <div style={{fontFamily:NEWS.body,fontSize:10.5,lineHeight:1.35,color:NEWS.ink2}}>{truncate(injurySec.body,115)}</div>
+        {boxSec&&(
+          <div style={{flex:1}}>
+            <div style={{border:`1.5px solid ${injurySec&&urgent?CA.red:NEWS.rule2}`,padding:"8px 9px"}}>
+              <div style={{...kick(injurySec?CA.gold:CA.cyan),borderBottom:`1px solid ${NEWS.rule}`,paddingBottom:3,marginBottom:4}}>{injurySec?"⚠ Injury Alert":"Focus Next Week"}</div>
+              <div style={{fontFamily:NEWS.body,fontSize:10.5,lineHeight:1.4,color:NEWS.ink2}}>{boxSec.body}</div>
             </div>
-          ) : focusSec ? (
-            <div style={{border:`1.5px solid ${NEWS.rule2}`,padding:"8px 9px"}}>
-              <div style={{...kick(CA.gold),borderBottom:`1px solid ${NEWS.rule}`,paddingBottom:3,marginBottom:4}}>Focus Next Week</div>
-              <div style={{fontFamily:NEWS.body,fontSize:10.5,lineHeight:1.35,color:NEWS.ink2}}>{truncate(focusSec.body,115)}</div>
-            </div>
-          ) : null}
-        </div>
+          </div>
+        )}
       </div>
-      <div style={{borderTop:`1px solid ${NEWS.rule}`,borderBottom:`1px solid ${NEWS.rule}`,padding:"6px 0",margin:"12px 0 0",textAlign:"center"}}>
-        <div style={{...kick(),fontSize:9,marginBottom:2}}>Inside This Edition</div>
-        <div style={{fontFamily:NEWS.body,fontStyle:"italic",fontSize:11,color:NEWS.ink2,lineHeight:1.4}}>
-          {secs.map(s=>titleCase(s.label)).join(" · ")}{Array.isArray(c.questions)&&c.questions.length?" · Coach's Check-In":""}
+      {flowSecs.map((s,i)=>(
+        <div key={i} style={{marginTop:12,borderTop:`1px solid ${NEWS.rule}`,paddingTop:9}}>
+          <div style={{fontFamily:NEWS.serif,fontWeight:700,fontSize:15,lineHeight:1.05,color:NEWS.ink,marginBottom:4}}>{titleCase(s.label)}</div>
+          <p style={{fontFamily:NEWS.body,fontSize:11.5,lineHeight:1.45,color:NEWS.ink2,textAlign:"justify",margin:0}}>{s.body}</p>
         </div>
-      </div>
+      ))}
+      {Array.isArray(c.questions)&&c.questions.length>0&&(
+        <div style={{marginTop:12,borderTop:`1px solid ${NEWS.rule}`,paddingTop:9}}>
+          <div style={{fontFamily:NEWS.serif,fontWeight:700,fontSize:15,color:NEWS.ink,marginBottom:4}}>Coach's Check-In</div>
+          <p style={{fontFamily:NEWS.body,fontStyle:"italic",fontSize:11.5,lineHeight:1.45,color:NEWS.ink2,margin:0}}>{c.questions.map(q=>typeof q==="string"?q:q?.q).filter(Boolean).join("  ·  ")}</p>
+        </div>
+      )}
     </>
   );
-  const MASK = "linear-gradient(180deg,transparent 150px,#000 178px,#000 84%,transparent)";
+  const MASK = "linear-gradient(180deg,transparent 150px,#000 178px,#000 86%,transparent)";
   return (
     <div className="proof-scan" style={{position:"relative",height:"100%",overflow:"hidden",background:"radial-gradient(120% 80% at 50% 0%,#0c1016,#06090e)"}}>
       {/* body loops up behind the fixed masthead (masked top+bottom) */}
@@ -1767,7 +1769,7 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
       </div>
       {/* fixed "open the edition" CTA */}
       <button onClick={onOpen} style={{position:"absolute",left:12,right:12,bottom:12,zIndex:7,padding:14,borderRadius:12,cursor:"pointer",
-        background:done?"transparent":CA_BTN,color:done?CA.cyan:"#02040c",border:done?`1px solid ${NEWS.rule2}`:"none",
+        background:done?"#0b0f16":CA_BTN,color:done?CA.cyan:"#02040c",border:done?`1px solid ${CA.cyan}55`:"none",
         fontFamily:NEWS.label,fontWeight:700,fontSize:14,letterSpacing:2,textAlign:"center",
         boxShadow:done?"none":`0 8px 22px ${CA_GLOW}`}}>
         {done?"RE-READ THIS EDITION →":"OPEN THIS WEEK'S EDITION →"}
@@ -2185,7 +2187,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
             so render from index 1 onward. */}
         {messages.slice(1).map((m,i)=>(
           <div key={i} className="proof-drop" style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
-            <div style={{maxWidth:"86%",background:m.role==="user"?CA.gold:CA.navy2,color:m.role==="user"?"#04070f":CA.text,borderRadius:14,padding:"11px 14px",fontSize:14,lineHeight:1.6,whiteSpace:"pre-wrap",border:m.role==="user"?"none":`1px solid ${CA.border}`,borderBottomLeftRadius:m.role==="user"?14:4,borderBottomRightRadius:m.role==="user"?4:14}}>
+            <div style={{maxWidth:"86%",background:m.role==="user"?"linear-gradient(180deg,#3f7bff,#2258e0)":CA.navy2,color:m.role==="user"?"#fff":CA.text,borderRadius:14,padding:"11px 14px",fontSize:14,lineHeight:1.6,whiteSpace:"pre-wrap",border:m.role==="user"?"none":`1px solid ${CA.border}`,borderBottomLeftRadius:m.role==="user"?14:4,borderBottomRightRadius:m.role==="user"?4:14}}>
               {m.content}
             </div>
           </div>
@@ -4516,7 +4518,14 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           const dow=(now.getDay()+6)%7;                       // Mon=0 .. Sun=6
           const monday=new Date(now); monday.setHours(0,0,0,0); monday.setDate(now.getDate()-dow);
           const trained=new Set();
-          workoutHistory.forEach(w=>{const d=new Date(w.created_at); if(d>=monday) trained.add((d.getDay()+6)%7);});
+          // Only a REAL logged session lights a day — a row with actual exercises or a
+          // run. Chat messages / form-review rows (empty exercises) must NOT count.
+          workoutHistory.forEach(w=>{
+            const d=new Date(w.created_at); if(d<monday) return;
+            const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
+            const hasWork=(Array.isArray(pd.exercises)&&pd.exercises.length>0)||!!pd.run_data;
+            if(hasWork) trained.add((d.getDay()+6)%7);
+          });
           return (
             <div style={{display:"flex",alignItems:"center",gap:3,padding:"2px 0 4px"}} title="Your training this week">
               <span style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:8,letterSpacing:1,color:CA.faint,textTransform:"uppercase",marginRight:4}}>WK</span>
@@ -4592,7 +4601,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             {messages.map((m,i)=>(
               <div key={i} className="fade-up" style={{marginBottom:12,display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
                 {m.role==="assistant"&&<div style={{width:28,height:28,borderRadius:"50%",background:"linear-gradient(135deg,#3f7bff,#123a9e)",boxShadow:`0 0 12px ${CA_GLOW}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#fff",flexShrink:0,marginRight:8,marginTop:2}}>J</div>}
-                <div style={{maxWidth:"80%",padding:"10px 14px",borderRadius:m.role==="user"?"16px 16px 4px 16px":"16px 16px 16px 4px",background:m.role==="user"?CA.gold:CA.navy2,color:m.role==="user"?"#000":CA.text,fontSize:14,lineHeight:1.7,border:m.role==="assistant"?`1px solid ${CA.border}`:"none",whiteSpace:"pre-wrap"}}>
+                <div style={{maxWidth:"80%",padding:"10px 14px",borderRadius:m.role==="user"?"16px 16px 4px 16px":"16px 16px 16px 4px",background:m.role==="user"?"linear-gradient(180deg,#3f7bff,#2258e0)":CA.navy2,color:m.role==="user"?"#fff":CA.text,fontSize:14,lineHeight:1.7,border:m.role==="assistant"?`1px solid ${CA.border}`:"none",whiteSpace:"pre-wrap"}}>
                   {m.role==="assistant"?<StreamText text={m.content}/>:m.content}
                 </div>
               </div>
@@ -4996,7 +5005,7 @@ function QuickLogSheet({athlete, workoutHistory, onClose, onAddProgram, onSend})
   const canSend = phase==="ready" && !!draft.trim() && !editBusy;
 
   return (
-    <div style={{position:"fixed",inset:0,background:CA.navy,display:"flex",flexDirection:"column",zIndex:400,maxWidth:600,margin:"0 auto"}}>
+    <div className="cyber" style={{position:"fixed",inset:0,display:"flex",flexDirection:"column",zIndex:400,maxWidth:600,margin:"0 auto"}}>
       <style>{GS}</style>
       <div style={{paddingTop:"calc(16px + env(safe-area-inset-top, 0px))",paddingBottom:"12px",paddingLeft:"20px",paddingRight:"20px",borderBottom:`1px solid ${CA.border}`,background:CA.navy2,display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
         <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.cyan,letterSpacing:2,flexShrink:0}}>⚡ QUICK LOG</div>
