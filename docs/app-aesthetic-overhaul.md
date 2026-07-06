@@ -1,47 +1,60 @@
 # WILCO App — Aesthetic Overhaul
 
-Running log of the app's visual direction. The app currently leans **navy + gold**
-(palette `C` at `src/App.jsx`: navy `#060d1e` / gold `#d4a017`). The marketing brand
-language is **cold electric-blue** (see `~/dev/wilco-carousel-style`,
-`project-wilco-taste-corpus`). These do not yet match — that reconciliation is a
-deliberate, separate project, not tied to any single feature.
+Living log of the app's visual direction: moving from **navy + gold** to the cinematic
+**electric-blue "night gym"** brand world (near-black ground, blue `#3a7bff` + cyan
+`#37e6ff` duotone, HUD grid, condensed display type).
 
-## Open decision: app palette → brand electric-blue (DEFERRED)
+## Status — ATHLETE SIDE: SHIPPED ✅ (2026-07-06)
 
-**Decision: keep the existing navy + gold accent for now. Migrate the whole app to the
-electric-blue brand palette on a later, dedicated pass — NOT feature-by-feature.**
+The full athlete-side overhaul is **live on `main`** (merged `18b0337`, Vercel prod
+deploy READY → app.trainwilco.com). Built in an isolated worktree on
+`feat/athlete-aesthetic`, reconciled with the parallel coach-overhaul merge, and
+verified screen-by-screen against the design artifact with real data.
 
-Why deferred:
-- The color system (`C`) is referenced everywhere in `src/App.jsx`. A palette swap is
-  an app-wide job that should be done in one coherent sweep so the app stays internally
-  consistent — doing it piecemeal inside individual features leaves a half-and-half app.
-- Each new feature (e.g. the Proof Feed envelope, 2026-07) is therefore built in the
-  **current gold** so it's consistent with everything shipping around it. When the
-  brand-color pass happens, it re-skins the whole app at once, including these features.
+**The athlete palette lives in the `CA` object** (`src/App.jsx`), the motion + component
+CSS in `GSA` (both athlete-only; `C`/`GS` stay navy-gold for `src/coach.jsx`, which is
+untouched). Source of truth for the look = the athlete artifact
+`https://claude.ai/code/artifact/40b4a378-4f88-4a3f-...` (full extracted CSS saved for
+reference during the build).
 
-When we do it:
-- Pick the electric-blue brand hues from `~/dev/wilco-carousel-style` and map them onto
-  the `C` tokens (and any hard-coded gold/orange in feature code).
-- Decide the fate of the gold accent (drop entirely vs keep as a warm secondary).
-- Re-check tier colors (`TIER_COLORS` in `src/grit.js`) against the new palette so the
-  Grit ladder still reads.
-- Verify contrast/legibility on the installed iPhone PWA in daylight.
+What shipped, matched 1:1 to the artifact:
+- **`.cyber` blue grid ground** on every interior screen (program / log / progress /
+  quick-log); amber grid in Field/Away mode.
+- **Benchmark power cells** — a tier-colored battery tube filled to *within-tier*
+  progress (resets + recharges on rank-up), glow scaled by rank; charges up on open.
+- **Radar-sweep** "AWAITING SIGNAL" empty states.
+- **Loader trio** — charge "Syncing feed" (chat load), scan "Reviewing form" (video),
+  hex "Joe is thinking" (chat reply + quick-log).
+- **The Proof** — living-newspaper infinite scroll (full edition scrolls behind a fixed
+  masthead + fixed CTA), cyan scanline, split-flap headline.
+- **Chat** — translucent glass bubbles/header/input over the 9:16 gym backdrop, blue
+  gradient avatar + user bubbles, cyan title, scrolling suggestion ticker, week streak
+  bars (only real logged workouts count).
+- **NEW MAX** cyan stamp on PRs; cyan line charts; gradient+glow primary buttons
+  everywhere (login, send, quick-log, toggles); **Field/Away mode** amber `.away-*`
+  treatment of the temporary-program state.
+- Login = 9:16 night storefront still. (The Kling entrance video was tried and pulled —
+  looked tacky.)
 
-## Feature work built in current (gold) palette — will inherit the brand pass
+Minor deferred polish (not blocking, unmentioned by Will): settings group labels not yet
+mono `.setgrp`; chat glass uses runtime backdrop-blur (a deliberate deviation from the
+old no-blur perf rule for artifact fidelity — watch on-device).
 
-- **Proof Feed — envelope redesign** (2026-07): the Proof tab becomes a sealed letter
-  (postmarked drop date, wax seal, "OPEN THE LETTER") that opens into the full digest
-  with a rank hero, PR medal chips, red injury card, gold focus directive, and the
-  guided check-in. Built in gold/orange per this deferral. Presentation only — no
-  generation, notification, or check-in-logic changes.
+## NEXT — COACH DASHBOARD (pick up here)
 
-- **The Coach's Edition — upgrade to the athlete Proof newspaper look** (TODO, 2026-07-06):
-  the coach-side weekly/monthly team report (`CoachEdition` / `CoachCheckin` in
-  `src/coach.jsx`, on branch `feat/coach-overhaul`) currently renders in the plain
-  coach navy/gold with a Georgia serif masthead. Give it the SAME treatment as the
-  athlete "The Proof" edition — the sealed-letter envelope on the Reports tab
-  (postmark = week-of date, wax seal, "OPEN THIS WEEK'S EDITION"), then the full
-  broadsheet read (masthead, team-trajectory hero, warm-newsprint serif, section
-  hierarchy with the injury/focus cards) flowing into the conversational check-in.
-  Content/engine already done — this is presentation only, to be done in the same
-  brand pass so athlete + coach editions feel like one franchise.
+Bring the same night-gym language to the **coach side** (`src/coach.jsx`, currently still
+navy + gold). This is the next session's work. Groundwork:
+- The coach functional overhaul (graphs-first Overview, The Coach's Edition, grouped
+  Progress tab, notifications) already shipped on `main` — so the coach side is now
+  stable to re-skin.
+- Re-skin approach mirrors the athlete build: keep `coach.jsx` importing `C`/`GS` OR give
+  it its own palette object, apply the same `.cyber` grid + Blue-Steel/Command registers,
+  power-cell/HUD language, and cyan/blue duotone. Decide gold's fate on the coach side
+  (the plan pitched B "Blue Steel" everywhere + a dash of C "Command" on the dashboard).
+- **The Coach's Edition** should get the same "The Proof" newspaper treatment as the
+  athlete edition so athlete + coach editions read as one franchise.
+- Coach hero image still TBD.
+
+See `project-wilco-aesthetic-build` and `project-wilco-app-redesign` in memory for the
+locked direction, the 3-register system (A gym-world / B Blue-Steel / C Command), and the
+per-screen decisions.
