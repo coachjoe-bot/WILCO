@@ -14,7 +14,7 @@ import {
   groupIntoSessions as pcGroup, compareProgramVsActual, buildOneRMs, aggregateInjuries, totalSetVolume,
   trueImprovementPRs, classifyTiers, blendAdherenceScore, buildLiftHistory,
 } from "./proofcore.js";
-import { computeGritSnapshot, TIER_NAMES, getBenchKey } from "./grit.js";
+import { computeGritSnapshot, TIER_NAMES, TIER_COLORS, getBenchKey, resolveLift } from "./grit.js";
 // ─── SCHOOLS LIST (master only) ───────────────────────────────────────────────
 function SchoolsList({schools,coaches,onRefresh}) {
   const [confirmDelete,setConfirmDelete] = useState(null); // school id pending delete
@@ -756,7 +756,7 @@ function CoachDashboard({coach,onLogout}) {
     return new Date(lb) - new Date(la);
   });
 
-  const tabs = ["overview","athletes","reports",...(isMaster?[]:["settings"]),...(isMaster?["coaches"]:[]),...(!isMaster&&isAdmin?["account"]:[])];
+  const tabs = ["overview","athletes","progress","reports",...(isMaster?[]:["settings"]),...(isMaster?["coaches"]:[]),...(!isMaster&&isAdmin?["account"]:[])];
 
   return (
     <div style={{minHeight:"100dvh",background:C.navy}}>
@@ -989,6 +989,11 @@ function CoachDashboard({coach,onLogout}) {
             })()}
 
             {/* ── GROUP STATS TAB ── */}
+            {/* ── PROGRESS TAB (group trends) ── */}
+            {activeTab==="progress"&&(
+              <GroupProgress athletes={athletes} workouts={workouts} manualRMs={manualRMs}/>
+            )}
+
             {/* ── SETTINGS TAB (notifications) ── */}
             {activeTab==="settings"&&(()=>{
               const Toggle = ({on,onClick})=>(
@@ -1948,6 +1953,137 @@ function CoachEdition({digest, athletes, coach, onBack, onRead}){
         )}
         <CoachCheckin digest={digest} team={team} coach={coach} onRead={onRead}/>
       </div>
+    </div>
+  );
+}
+
+// ─── GROUP PROGRESS (Coach Dashboard) ────────────────────────────────────────
+// The team-level mirror of the athlete Progress screen: all athletes' dated data
+// combined into GROUP trends. Same Benchmarks / Strength / Running tabs (no PRs —
+// there's no such thing as a group PR). Reuses the Grit engine + LineChart.
+function GroupProgress({athletes,workouts,manualRMs}){
+  const [tab,setTab] = useState("benchmarks");
+  const D = useMemo(()=>{
+    const now=Date.now(), WK=7*864e5, WEEKS=12, weekStart=now-WEEKS*WK;
+    const wl=(wi)=>new Date(weekStart+wi*WK).toLocaleDateString("en-US",{month:"short",day:"numeric"});
+    const pd=(w)=>typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
+    const woByAth={}, manByAth={};
+    workouts.forEach(w=>{(woByAth[w.athlete_id]=woByAth[w.athlete_id]||[]).push(w);});
+    manualRMs.forEach(m=>{(manByAth[m.athlete_id]=manByAth[m.athlete_id]||[]).push(m);});
+
+    // ── BENCHMARKS: aggregate each athlete's Grit snapshot by benchmark lift ──
+    const byBench={}; let scoreSum=0, scoreN=0, topTier=-1, rankedAthletes=0;
+    athletes.forEach(a=>{
+      let snap; try{ snap=computeGritSnapshot(woByAth[a.id]||[], manByAth[a.id]||[], {bodyweightLbs:a.weight_lbs||a.weight||0, gender:a.gender, age:a.age}); }catch{ snap={rankedLifts:[],strengthScore:0,topTierIdx:-1}; }
+      if(snap.rankedLifts.length){ rankedAthletes++; scoreSum+=snap.strengthScore; scoreN++; if(snap.topTierIdx>topTier)topTier=snap.topTierIdx; }
+      snap.rankedLifts.forEach(l=>{ const bk=getBenchKey(l.key)||l.benchKey; if(!bk)return; const e=(byBench[bk]=byBench[bk]||{name:l.name,tiers:[],e1rms:[]}); e.tiers.push(l.tierIdx); e.e1rms.push(l.e1rm); });
+    });
+    const benchmarks=Object.entries(byBench).map(([bk,v])=>{
+      const avgTier=v.tiers.reduce((a,b)=>a+b,0)/v.tiers.length;
+      const dist=Array(8).fill(0); v.tiers.forEach(t=>dist[t]++);
+      return {benchKey:bk,name:v.name,avgTier,n:v.tiers.length,dist,avgE1rm:Math.round(v.e1rms.reduce((a,b)=>a+b,0)/v.e1rms.length)};
+    }).sort((a,b)=>b.avgTier-a.avgTier);
+    const avgScore=scoreN?Math.round(scoreSum/scoreN):0;
+
+    // ── STRENGTH: weekly team-average e1RM per lift ──
+    const liftData={};
+    athletes.forEach(a=>{ const bw=a.weight_lbs||a.weight||0;
+      (woByAth[a.id]||[]).forEach(w=>{ const t=new Date(w.created_at).getTime(); if(t<weekStart)return; const wi=Math.floor((t-weekStart)/WK);
+        (pd(w).exercises||[]).forEach(ex=>{ if(!ex.name)return; const lift=resolveLift(ex.name); if(!lift.tracked)return; const e=bestE1RMForExercise(ex,bw); if(!e)return;
+          const L=(liftData[lift.id]=liftData[lift.id]||{name:lift.name,key:lift.id,weeks:{}}); const wk=(L.weeks[wi]=L.weeks[wi]||{}); if(!wk[a.id]||e>wk[a.id])wk[a.id]=e; });
+      });
+    });
+    const strength=Object.values(liftData).map(L=>{
+      const points=[]; for(let wi=0;wi<WEEKS;wi++){ const wk=L.weeks[wi]; if(wk){ const vals=Object.values(wk); points.push({label:wl(wi),y:Math.round(vals.reduce((a,b)=>a+b,0)/vals.length),n:vals.length}); } }
+      const best=points.length?Math.max(...points.map(p=>p.y)):0;
+      return {name:L.name,key:L.key,points,best};
+    }).filter(L=>L.points.length>=2).sort((a,b)=>liftTier(a.key)-liftTier(b.key)||b.best-a.best);
+
+    // ── RUNNING: weekly team totals / averages ──
+    const paceToMin=(p)=>{ if(!p)return null; const pts=String(p).split(":"); if(pts.length<2)return null; const m=parseFloat(pts[0]),s=parseFloat(pts[1]); return isNaN(m)||isNaN(s)?null:Math.round((m+s/60)*100)/100; };
+    const runWeeks={};
+    athletes.forEach(a=>{ (woByAth[a.id]||[]).forEach(w=>{ const t=new Date(w.created_at).getTime(); if(t<weekStart)return; const wi=Math.floor((t-weekStart)/WK); const rd=pd(w).run_data; if(!rd)return; const R=(runWeeks[wi]=runWeeks[wi]||{dist:0,pace:[],hr:[]}); const d=rd.distance_miles||rd.distance_km; if(d)R.dist+=d; const pc=paceToMin(rd.pace_per_mile||rd.pace_per_km); if(pc!=null)R.pace.push(pc); if(rd.heart_rate_avg)R.hr.push(rd.heart_rate_avg); }); });
+    const distSeries=[],paceSeries=[],hrSeries=[];
+    for(let wi=0;wi<WEEKS;wi++){ const R=runWeeks[wi]; if(!R)continue; const label=wl(wi); if(R.dist)distSeries.push({label,y:Math.round(R.dist*10)/10}); if(R.pace.length)paceSeries.push({label,y:Math.round(R.pace.reduce((a,b)=>a+b,0)/R.pace.length*100)/100}); if(R.hr.length)hrSeries.push({label,y:Math.round(R.hr.reduce((a,b)=>a+b,0)/R.hr.length)}); }
+
+    return {benchmarks,avgScore,rankedAthletes,topTier,strength,distSeries,paceSeries,hrSeries};
+  },[athletes,workouts,manualRMs]);
+
+  const subTab=(t,label)=>(
+    <button key={t} onClick={()=>setTab(t)} style={{padding:"10px 16px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?C.gold:"transparent"}`,color:tab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'"}}>{label}</button>
+  );
+
+  return (
+    <div style={{maxWidth:760}}>
+      <div style={{color:C.muted2,fontSize:12.5,marginBottom:12}}>Every athlete's dated data, combined into team trends.</div>
+      <div style={{display:"flex",borderBottom:`1px solid ${C.border}`,marginBottom:16}}>
+        {subTab("benchmarks","Benchmarks")}{subTab("strength","Strength")}{subTab("running","Running")}
+      </div>
+
+      {tab==="benchmarks"&&(
+        <div>
+          <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:16,display:"flex",justifyContent:"space-around",textAlign:"center",alignItems:"center"}}>
+            <div style={{flex:1}}><div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>{D.rankedAthletes}</div><div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:2}}>ATHLETES RANKED</div></div>
+            <div style={{width:1,alignSelf:"stretch",background:C.border}}/>
+            <div style={{flex:1}}><div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:D.topTier>=0?TIER_COLORS[D.topTier]:C.muted,lineHeight:1}}>{D.topTier>=0?TIER_NAMES[D.topTier]:"—"}</div><div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:5}}>TEAM TOP TIER</div></div>
+            <div style={{width:1,alignSelf:"stretch",background:C.border}}/>
+            <div style={{flex:1}}><div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>{D.avgScore.toLocaleString()}</div><div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:2}}>AVG STRENGTH SCORE</div></div>
+          </div>
+          {D.benchmarks.length===0
+            ? <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No benchmarked lifts logged across the roster yet.</div>
+            : D.benchmarks.map((b,i)=>{
+                const ti=Math.round(b.avgTier);
+                return (
+                  <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:12}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+                      <div>
+                        <div style={{color:C.text,fontWeight:700,fontSize:14}}>{b.name}</div>
+                        <div style={{color:TIER_COLORS[ti],fontSize:13,fontWeight:700,marginTop:2,letterSpacing:.5}}>{TIER_NAMES[ti]} <span style={{color:C.muted,fontWeight:400}}>team avg</span></div>
+                      </div>
+                      <div style={{textAlign:"right"}}>
+                        <div style={{fontFamily:"'Bebas Neue'",fontSize:24,color:TIER_COLORS[ti],lineHeight:1}}>{b.avgE1rm}<span style={{fontSize:11,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span></div>
+                        <div style={{color:C.muted,fontSize:10}}>avg e1RM · {b.n} athlete{b.n!==1?"s":""}</div>
+                      </div>
+                    </div>
+                    <div style={{position:"relative",height:12,borderRadius:6,display:"flex",overflow:"visible"}}>
+                      {TIER_COLORS.map((c,si)=><div key={si} style={{flex:1,background:c,opacity:si===ti?1:0.4,borderRight:si<7?"1px solid rgba(6,13,30,0.6)":""}}/>)}
+                      <div style={{position:"absolute",top:-3,left:`${b.avgTier/7*100}%`,transform:"translateX(-50%)",width:5,height:18,background:"#fff",borderRadius:3,boxShadow:"0 0 6px rgba(255,255,255,0.7)"}}/>
+                    </div>
+                    <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:10,justifyContent:"center"}}>
+                      {b.dist.map((cnt,ti2)=>cnt>0&&<span key={ti2} style={{fontSize:10,color:TIER_COLORS[ti2],background:`${TIER_COLORS[ti2]}18`,border:`1px solid ${TIER_COLORS[ti2]}44`,borderRadius:999,padding:"2px 8px",fontWeight:700}}>{TIER_NAMES[ti2]} {cnt}</span>)}
+                    </div>
+                  </div>
+                );
+              })}
+        </div>
+      )}
+
+      {tab==="strength"&&(
+        <div>
+          <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>TEAM STRENGTH — AVG EST. 1RM BY WEEK</div>
+          {D.strength.length===0
+            ? <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>Not enough weighted training logged across weeks yet.</div>
+            : D.strength.map((ex,i)=>(
+                <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+                    <div><div style={{color:C.text,fontWeight:700,fontSize:14}}>{ex.name}</div><div style={{color:C.muted,fontSize:11,marginTop:2}}>{ex.points.length} week{ex.points.length!==1?"s":""} of data</div></div>
+                    <div style={{textAlign:"right"}}><div style={{color:C.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>PEAK TEAM AVG</div><div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:C.gold,lineHeight:1}}>{ex.best}<span style={{fontSize:11,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span></div></div>
+                  </div>
+                  <LineChart data={ex.points} color={C.gold} unit=" lbs"/>
+                </div>
+              ))}
+        </div>
+      )}
+
+      {tab==="running"&&(
+        <div>
+          <div style={{color:C.blue,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>TEAM RUNNING — BY WEEK</div>
+          {D.distSeries.length>=2&&<div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:12}}>Total distance / week</div><LineChart data={D.distSeries} color={C.blue} unit=" mi"/></div>}
+          {D.paceSeries.length>=2&&<div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:4}}>Avg pace (min/mi) — lower is faster</div><LineChart data={D.paceSeries} color={C.green} unit=""/></div>}
+          {D.hrSeries.length>=2&&<div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:12}}>Avg heart rate (bpm)</div><LineChart data={D.hrSeries} color={C.red} unit=" bpm"/></div>}
+          {D.distSeries.length<2&&D.paceSeries.length<2&&D.hrSeries.length<2&&<div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:10,padding:16,color:C.muted2,fontSize:12}}>Not enough runs logged across the roster to trend yet.</div>}
+        </div>
+      )}
     </div>
   );
 }
