@@ -3,10 +3,17 @@
 // Loaded via React.lazy from WilcoRoot; shares App.jsx helpers (incl. the module-
 // level CURRENT_AUTH session inside the sb*/idApi/askClaude helpers) by import —
 // the dynamic import means the cycle App→coach→App is resolved at load time.
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import {
   C, GS, LineChart, MASTER_CODE, RunCard, SUPABASE_KEY, SUPABASE_URL, askClaude, bestE1RMForExercise, btn, cleanerName, daysBetween, displayForKey, epley1RM, fmtDate, fmtDateRelative, fmtDateShort, fmtWeight, formatSetDetails, getAuth, getExerciseSets, groupIntoSessions, haptic, idApi, inp, isRealSession, liftTier, normalizeExName, sbDelete, sbInsert, sbRead, sbUpdate, sbUpdateWhere, toLbs, track, useIsMobile
 } from "./App.jsx";
+// Shared deterministic engine (Phase 0 extraction) — per-athlete session/adherence
+// math, computed live client-side for the Overview. Aliased to avoid colliding with
+// App.jsx's multi-athlete groupIntoSessions already imported above.
+import {
+  groupIntoSessions as pcGroup, compareProgramVsActual, buildOneRMs, aggregateInjuries, totalSetVolume,
+} from "./proofcore.js";
+import { computeGritSnapshot, TIER_NAMES, getBenchKey } from "./grit.js";
 // ─── SCHOOLS LIST (master only) ───────────────────────────────────────────────
 function SchoolsList({schools,coaches,onRefresh}) {
   const [confirmDelete,setConfirmDelete] = useState(null); // school id pending delete
@@ -521,7 +528,7 @@ function CoachDashboard({coach,onLogout}) {
   const [prs,setPrs] = useState([]);
   const [allCoaches,setAllCoaches] = useState([]);
   const [loading,setLoading] = useState(true);
-  const [activeTab,setActiveTab] = useState("athletes");
+  const [activeTab,setActiveTab] = useState("overview"); // graphs-first home (coach-experience-vision §1)
   const [selected,setSelected] = useState(null);
   const [search,setSearch] = useState("");
   const [filterPain,setFilterPain] = useState(false);
@@ -529,6 +536,8 @@ function CoachDashboard({coach,onLogout}) {
   const [sortBy,setSortBy] = useState("lastActive"); // "lastActive" | "name"
   const [recalcStatus,setRecalcStatus] = useState(null); // null | "running" | "done" | "error" | "X/Y
   const [allDigests,setAllDigests] = useState([]);
+  const [manualRMs,setManualRMs] = useState([]);        // manual_one_rms — Grit + adherence-load
+  const [prescriptions,setPrescriptions] = useState([]); // program_prescriptions (parsed programs) — Overview adherence
   const [reportFilter,setReportFilter] = useState("all"); // "all" | "weekly" | "monthly"
   const [reportSearch,setReportSearch] = useState("");
   const [reportFlagFilter,setReportFlagFilter] = useState(false);
@@ -606,11 +615,18 @@ function CoachDashboard({coach,onLogout}) {
       // by digest_type — the gateway scopes both reads to this coach by coach_id).
       if(ids.length>0){
         const idList = ids.map(id=>`"${id}"`).join(",");
-        const [perAthlete, teamReports] = await Promise.all([
+        // Digests + manual 1RMs + parsed programs, all gateway-scoped to this roster.
+        // manual_one_rms feeds Grit strengths/weaknesses; program_prescriptions feeds
+        // the Overview load-adherence band (both read-only for the dashboard).
+        const [perAthlete, teamReports, manual, presc] = await Promise.all([
           sbRead("proof_digests",`?athlete_id=in.(${idList})&order=generated_at.desc&select=*`),
           sbRead("proof_digests",`?digest_type=in.(weekly_coach,monthly_coach)&order=generated_at.desc&select=*`),
+          sbRead("manual_one_rms",`?athlete_id=in.(${idList})&select=*`),
+          sbRead("program_prescriptions",`?athlete_id=in.(${idList})&select=*`),
         ]);
         setAllDigests([...(Array.isArray(perAthlete)?perAthlete:[]),...(Array.isArray(teamReports)?teamReports:[])]);
+        setManualRMs(Array.isArray(manual)?manual:[]);
+        setPrescriptions(Array.isArray(presc)?presc:[]);
       }
     } catch(e){console.error(e);}
     setLoading(false);
@@ -727,7 +743,7 @@ function CoachDashboard({coach,onLogout}) {
     return new Date(lb) - new Date(la);
   });
 
-  const tabs = ["athletes","stats","reports",...(isMaster?["coaches"]:[]),...(!isMaster&&isAdmin?["account"]:[])];
+  const tabs = ["overview","athletes","stats","reports",...(isMaster?["coaches"]:[]),...(!isMaster&&isAdmin?["account"]:[])];
 
   return (
     <div style={{minHeight:"100dvh",background:C.navy}}>
@@ -769,6 +785,11 @@ function CoachDashboard({coach,onLogout}) {
           <div style={{textAlign:"center",padding:60,color:C.muted}}>Loading...</div>
         ):(
           <>
+            {/* ── OVERVIEW TAB ── */}
+            {activeTab==="overview"&&(
+              <CoachOverview athletes={athletes} workouts={workouts} prs={prs} manualRMs={manualRMs} prescriptions={prescriptions}/>
+            )}
+
             {/* ── ATHLETES TAB ── */}
             {activeTab==="athletes"&&(
               <div style={{display:"grid",gridTemplateColumns:(!isMobile&&selected)?"300px 1fr":"1fr",gap:20,alignItems:"start"}}>
@@ -1289,6 +1310,274 @@ function CoachDashboard({coach,onLogout}) {
 }
 
 // ─── GROUP STATS ──────────────────────────────────────────────────────────────
+// ─── OVERVIEW (Coach Dashboard home) ─────────────────────────────────────────
+// Graphs-first team-health home. Every number here is computed LIVE, client-side,
+// from the shared proofcore engine (Phase 0) over the roster data already loaded —
+// zero tokens, no new round-trip. See docs/coach-experience-vision.md §1.
+const DAYMS = 86400000;
+const FEEL_ORDER = [["great","Great",C.green],["good","Good",C.blue],["average","OK",C.gold],["rough","Rough",C.red]];
+// e1RM of a PR row, best-effort (stored estimate, else Epley on weight×reps).
+const prE1RM = (p) => p.estimated_1rm || epley1RM(toLbs(p.weight,p.unit), p.reps||1) || 0;
+// A "true PR" = an improvement over the athlete's OWN prior best on that exercise —
+// never the first-ever log (baseline). Computed on the fly from the prs rows so the
+// count is honest even before the is_baseline column lands (Phase 2 persists it).
+function trueImprovementPRs(prsRows) {
+  const byKey = {};
+  const sorted = [...prsRows].sort((a,b)=>new Date(a.created_at||a.date||0)-new Date(b.created_at||b.date||0));
+  const out = [];
+  for(const p of sorted){
+    const k = `${p.athlete_id}|${String(p.exercise||"").toLowerCase().trim()}`;
+    const e = prE1RM(p);
+    if(byKey[k]==null){ byKey[k]=e; continue; }        // first-ever = baseline, skip
+    if(e > byKey[k] + 0.5){ out.push({...p, gain: e-byKey[k]}); byKey[k]=e; }
+  }
+  return out;
+}
+
+function StatBand({tone,label}){
+  const c = tone==="good"?C.green:tone==="warn"?C.gold:tone==="crit"?C.red:C.blue;
+  return <span style={{fontSize:9,fontWeight:800,letterSpacing:.5,textTransform:"uppercase",padding:"2px 8px",borderRadius:999,whiteSpace:"nowrap",color:c,background:`${c}22`,border:`1px solid ${c}55`}}>{label}</span>;
+}
+function OverviewCard({title,trend,children,readout,tone}){
+  return (
+    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
+      <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:8,marginBottom:10}}>
+        <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.muted2,fontWeight:700}}>{title}</div>
+        {trend&&<div style={{fontSize:11.5,fontWeight:700,color:trend.dir==="up"?C.green:trend.dir==="down"?C.red:C.muted,whiteSpace:"nowrap"}}>{trend.dir==="up"?"▲":trend.dir==="down"?"▼":"—"} {trend.txt}</div>}
+      </div>
+      {children}
+      {readout&&<div style={{marginTop:11,display:"flex",alignItems:"center",gap:8,fontSize:12,color:C.muted2,lineHeight:1.4}}><span style={{flex:1}}>{readout}</span>{tone&&<StatBand tone={tone.k} label={tone.t}/>}</div>}
+    </div>
+  );
+}
+
+function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions}){
+  const D = useMemo(()=>{
+    const now = Date.now();
+    const dstart = (t)=>{const x=new Date(t);x.setHours(0,0,0,0);return x.getTime();};
+    const inWin = (w,from,to=now)=>{const t=new Date(w.created_at).getTime();return t>=from&&t<to;};
+    const woByAth={}, prByAth={}, manByAth={}, prescByAth={};
+    workouts.forEach(w=>{(woByAth[w.athlete_id]=woByAth[w.athlete_id]||[]).push(w);});
+    prs.forEach(p=>{(prByAth[p.athlete_id]=prByAth[p.athlete_id]||[]).push(p);});
+    manualRMs.forEach(m=>{(manByAth[m.athlete_id]=manByAth[m.athlete_id]||[]).push(m);});
+    prescriptions.forEach(pp=>{prescByAth[pp.athlete_id]=pp;});
+    const weekAgo=now-7*DAYMS, twoWk=now-14*DAYMS;
+
+    const rows = athletes.map(a=>{
+      const wo = woByAth[a.id]||[];
+      const thisWk = pcGroup(wo.filter(w=>inWin(w,weekAgo)));
+      const lastWk = pcGroup(wo.filter(w=>inWin(w,twoWk,weekAgo)));
+      const parsed = prescByAth[a.id]?.parsed_json || null;
+      const oneRMs = buildOneRMs(prByAth[a.id]||[], manByAth[a.id]||[]);
+      const adherence = parsed ? compareProgramVsActual(parsed, thisWk, oneRMs) : null;
+      const injuries = aggregateInjuries([...lastWk,...thisWk]);
+      const hasProgram = !!(a.program_text && a.program_text.trim().length>10);
+      const presDays = a.training_days_per_week || parsed?.blocks?.[0]?.days?.length || null;
+      const showUp = presDays ? Math.min(1, thisWk.length/presDays) : (thisWk.length>0?1:0);
+      const vol = adherence ? Math.max(0, 1-adherence.rolledGapPct/100) : null;
+      const score = vol!=null ? Math.round(100*(0.5*showUp+0.5*vol)) : (hasProgram?Math.round(100*showUp):null);
+      // per-day logged flags for the heatmap (Mon..Sun of the last 7 days)
+      const days = [];
+      for(let i=6;i>=0;i--){ const ds=dstart(now-i*DAYMS), de=ds+DAYMS; days.push((wo.some(w=>{const t=new Date(w.created_at).getTime();return t>=ds&&t<de&&(w.parsed_data?.exercises?.length>0||w.parsed_data?.run_data);}))?1:0); }
+      const snap = computeGritSnapshot(wo, manByAth[a.id]||[], {bodyweightLbs:a.weight_lbs||a.weight||0, gender:a.gender, age:a.age});
+      return {a, thisWk, lastWk, adherence, injuries, hasProgram, score, days, snap};
+    });
+
+    // sessions/day last 7d (across roster)
+    const dayCounts=[], dayLabels=[];
+    for(let i=6;i>=0;i--){ const ds=dstart(now-i*DAYMS), de=ds+DAYMS;
+      dayLabels.push(new Date(ds).toLocaleDateString("en-US",{weekday:"short"}));
+      dayCounts.push(athletes.reduce((s,a)=>s+pcGroup((woByAth[a.id]||[]).filter(w=>{const t=new Date(w.created_at).getTime();return t>=ds&&t<de;})).length,0));
+    }
+    const firstHalf = dayCounts.slice(0,3).reduce((a,b)=>a+b,0)||0, lastHalf = dayCounts.slice(4).reduce((a,b)=>a+b,0)||0;
+
+    // active this week
+    const activeCount = rows.filter(r=>r.thisWk.length>0).length;
+    const activePct = athletes.length?Math.round(100*activeCount/athletes.length):0;
+
+    // team adherence (only athletes with a score)
+    const scored = rows.filter(r=>r.score!=null);
+    const teamAdh = scored.length?Math.round(scored.reduce((s,r)=>s+r.score,0)/scored.length):null;
+    const noProgram = rows.filter(r=>r.score==null).length;
+
+    // session feel this week
+    const feelCounts={great:0,good:0,average:0,rough:0}; let feelTotal=0;
+    workouts.filter(w=>inWin(w,weekAgo)).forEach(w=>{const f=w.parsed_data?.session_feel; if(f&&feelCounts[f]!=null){feelCounts[f]++;feelTotal++;}});
+
+    // volume-load: total working sets across roster, last 4 weeks
+    const volWeeks=[];
+    for(let i=3;i>=0;i--){ const from=now-(i+1)*7*DAYMS, to=now-i*7*DAYMS;
+      volWeeks.push(athletes.reduce((s,a)=>s+totalSetVolume(pcGroup((woByAth[a.id]||[]).filter(w=>inWin(w,from,to)))),0));
+    }
+
+    // true PRs — this week + last 6 weeks (weekly bars)
+    const truePRs = trueImprovementPRs(prs);
+    const prWeeks=[];
+    for(let i=5;i>=0;i--){ const from=now-(i+1)*7*DAYMS, to=now-i*7*DAYMS;
+      prWeeks.push(truePRs.filter(p=>{const t=new Date(p.created_at||p.date||0).getTime();return t>=from&&t<to;}).length);
+    }
+    const prThisWk = prWeeks[prWeeks.length-1];
+
+    // strengths & weaknesses — avg Grit tier per benchmark lift across roster
+    const byBench={};
+    rows.forEach(r=>r.snap.rankedLifts.forEach(l=>{const bk=getBenchKey(l.key)||l.benchKey; if(!bk)return; (byBench[bk]=byBench[bk]||{name:l.name,tiers:[]}).tiers.push(l.tierIdx);}));
+    const benchAgg = Object.entries(byBench).map(([bk,v])=>({bench:bk,name:v.name,avg:v.tiers.reduce((a,b)=>a+b,0)/v.tiers.length,n:v.tiers.length}))
+      .filter(x=>x.n>=1).sort((a,b)=>b.avg-a.avg);
+    const strengths = benchAgg.slice(0,3);
+    const weaknesses = benchAgg.slice(-3).reverse().filter(w=>!strengths.includes(w));
+
+    // wins — top true-PR shout-outs this week
+    const shoutouts = truePRs.filter(p=>{const t=new Date(p.created_at||p.date||0).getTime();return t>=weekAgo;})
+      .sort((a,b)=>b.gain-a.gain).slice(0,3)
+      .map(p=>({name:(athletes.find(a=>a.id===p.athlete_id)||{}).name||"Athlete", ex:p.exercise, weight:p.weight, unit:p.unit, gain:Math.round(p.gain)}));
+
+    return {rows,dayCounts,dayLabels,firstHalf,lastHalf,activeCount,activePct,teamAdh,noProgram,feelCounts,feelTotal,volWeeks,prWeeks,prThisWk,strengths,weaknesses,shoutouts};
+  },[athletes,workouts,prs,manualRMs,prescriptions]);
+
+  if(!athletes.length) return <div style={{textAlign:"center",padding:60,color:C.muted}}>No athletes on your roster yet.</div>;
+
+  const tierName = (idx)=>TIER_NAMES[Math.round(idx)]||"—";
+  const feelPct = (k)=>D.feelTotal?Math.round(100*D.feelCounts[k]/D.feelTotal):0;
+  const volMax = Math.max(1,...D.volWeeks), prMax = Math.max(1,...D.prWeeks);
+  const cell = (v)=>v?C.green:C.navy3;
+  // top rows to show in the adherence heatmap: worst adherence first (needs attention)
+  const heatRows = [...D.rows].filter(r=>r.hasProgram||r.thisWk.length>0)
+    .sort((a,b)=>((a.score??999)-(b.score??999))).slice(0,6);
+
+  const secLabel = (t)=>(
+    <div style={{display:"flex",alignItems:"center",gap:12,margin:"24px 2px 12px"}}>
+      <span style={{fontSize:10.5,letterSpacing:1.4,textTransform:"uppercase",color:C.gold,fontWeight:700}}>{t}</span>
+      <span style={{height:1,background:C.border,flex:1}}/>
+    </div>
+  );
+
+  return (
+    <div style={{maxWidth:1220}}>
+      {secLabel("Team Health")}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:14}}>
+
+        {/* Sessions/day */}
+        <OverviewCard title="Sessions / day · last 7d"
+          trend={{dir:D.lastHalf>=D.firstHalf?"up":"down",txt:`${D.dayCounts.reduce((a,b)=>a+b,0)} total`}}
+          readout={D.lastHalf>=D.firstHalf?"Holding or climbing into the week.":"Sliding off through the week — worth a nudge."}
+          tone={D.lastHalf>=D.firstHalf?{k:"good",t:"Healthy"}:{k:"warn",t:"Watch"}}>
+          <LineChart data={D.dayLabels.map((l,i)=>({label:l,y:D.dayCounts[i]}))} color={C.green} unit=""/>
+        </OverviewCard>
+
+        {/* Program adherence + heatmap */}
+        <OverviewCard title="Program adherence · this week"
+          readout={D.teamAdh==null?`No parsed programs yet — assign & lock programs to track adherence.`:`Team average. ${D.noProgram>0?`${D.noProgram} without a program (excluded).`:"Everyone has a program."}`}
+          tone={D.teamAdh==null?null:(D.teamAdh>=80?{k:"good",t:"Healthy"}:D.teamAdh>=60?{k:"warn",t:"Slipping"}:{k:"crit",t:"At risk"})}>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:34,color:C.text,lineHeight:.9}}>{D.teamAdh==null?"—":D.teamAdh}<span style={{fontSize:15,color:C.muted}}> {D.teamAdh==null?"":"% team avg"}</span></div>
+          <div style={{display:"grid",gridTemplateColumns:"78px repeat(7,1fr)",gap:4,alignItems:"center",marginTop:12}}>
+            <span/>{D.dayLabels.map((l,i)=><span key={i} style={{fontSize:9,color:C.muted,textAlign:"center"}}>{l[0]}</span>)}
+            {heatRows.flatMap((r,ri)=>[
+              <span key={`n${ri}`} style={{fontSize:10.5,color:C.muted2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.a.name}</span>,
+              ...r.days.map((d,di)=><i key={`c${ri}-${di}`} title={r.hasProgram?"":"no program"} style={{aspectRatio:"1",borderRadius:3,background:r.hasProgram?cell(d):(d?C.blue:C.navy3),opacity:r.hasProgram?1:.55,border:`1px solid #ffffff08`}}/>)
+            ])}
+          </div>
+        </OverviewCard>
+
+        {/* Active this week gauge */}
+        <OverviewCard title="Active this week"
+          readout={`${D.activeCount} of ${athletes.length} logged at least once.`}
+          tone={D.activePct>=70?{k:"good",t:"Healthy"}:D.activePct>=50?{k:"warn",t:"Watch"}:{k:"crit",t:"Low"}}>
+          <div style={{display:"flex",alignItems:"center",gap:16}}>
+            <svg viewBox="0 0 92 92" width="92" height="92" style={{width:92,flexShrink:0}}>
+              <circle cx="46" cy="46" r="38" fill="none" stroke={C.border} strokeWidth="10"/>
+              <circle cx="46" cy="46" r="38" fill="none" stroke={C.green} strokeWidth="10" strokeLinecap="round"
+                strokeDasharray={2*Math.PI*38} strokeDashoffset={2*Math.PI*38*(1-D.activePct/100)} transform="rotate(-90 46 46)"/>
+              <text x="46" y="44" textAnchor="middle" fill={C.text} fontFamily="'Bebas Neue'" fontSize="22">{D.activePct}%</text>
+              <text x="46" y="59" textAnchor="middle" fill={C.muted} fontSize="8.5">{D.activeCount} / {athletes.length}</text>
+            </svg>
+            <div style={{fontSize:12,color:C.muted2}}>Share of the roster training this week.</div>
+          </div>
+        </OverviewCard>
+
+        {/* Session feel */}
+        <OverviewCard title="Session feel · this week"
+          readout={D.feelTotal?`${feelPct("rough")}% logged "rough" — ${feelPct("rough")>=20?"watch for overreaching.":"in a healthy range."}`:"No session-feel logged yet this week."}
+          tone={D.feelTotal?(feelPct("rough")>=20?{k:"warn",t:"Watch"}:{k:"good",t:"Healthy"}):null}>
+          <div style={{display:"flex",height:20,borderRadius:6,overflow:"hidden",background:C.navy3}}>
+            {FEEL_ORDER.map(([k,,c])=>feelPct(k)>0&&<div key={k} style={{width:`${feelPct(k)}%`,background:c}}/>)}
+          </div>
+          <div style={{display:"flex",gap:12,marginTop:9,fontSize:10.5,color:C.muted2,flexWrap:"wrap"}}>
+            {FEEL_ORDER.map(([k,lbl,c])=><span key={k}><i style={{display:"inline-block",width:8,height:8,borderRadius:2,background:c,marginRight:5}}/>{lbl} {feelPct(k)}%</span>)}
+          </div>
+        </OverviewCard>
+
+        {/* Team volume-load */}
+        <OverviewCard title="Team volume · 4 wk"
+          trend={{dir:D.volWeeks[3]>=D.volWeeks[0]?"up":"down",txt:"working sets"}}
+          readout={D.volWeeks[3]>D.volWeeks[0]*1.5?"Sharp jump vs 4 weeks ago — watch load spikes.":"Gradual, inside a safe band."}
+          tone={D.volWeeks[3]>D.volWeeks[0]*1.5?{k:"warn",t:"Watch"}:{k:"good",t:"Healthy"}}>
+          <svg viewBox="0 0 260 60" preserveAspectRatio="none" style={{width:"100%"}}>
+            <polyline fill="none" stroke={C.blue} strokeWidth="2" points={D.volWeeks.map((v,i)=>`${i*(260/3)},${54-48*(v/volMax)}`).join(" ")}/>
+            {D.volWeeks.map((v,i)=><circle key={i} cx={i*(260/3)} cy={54-48*(v/volMax)} r="3" fill={C.blue}/>)}
+          </svg>
+          <div style={{fontSize:10.5,color:C.muted,marginTop:4}}>{D.volWeeks.map(v=>v).join(" → ")} sets/wk</div>
+        </OverviewCard>
+
+        {/* True PRs & tier-ups */}
+        <OverviewCard title="True PRs · 6 wk"
+          trend={{dir:"up",txt:`${D.prThisWk} this wk`}}
+          readout={D.prThisWk>0?`Real improvements over prior bests — baselines excluded.`:`No new bests logged this week yet.`}
+          tone={D.prThisWk>0?{k:"good",t:"Momentum"}:null}>
+          <svg viewBox="0 0 260 64" preserveAspectRatio="none" style={{width:"100%"}}>
+            {D.prWeeks.map((v,i)=>{const w=30,gap=(260-w*6)/6;const x=gap/2+i*(w+gap);const h=Math.max(3,54*(v/prMax));return <rect key={i} x={x} y={60-h} width={w} height={h} rx="2" fill={i===5?C.green:C.gold}/>;})}
+          </svg>
+        </OverviewCard>
+
+      </div>
+
+      {secLabel("Program & Wins")}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+        {/* Strengths & weaknesses */}
+        <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
+          <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.muted2,fontWeight:700}}>Where the program is strong &amp; weak</div>
+          <div style={{fontSize:12,color:C.muted2,margin:"8px 0 14px",lineHeight:1.4}}>Team Grit tiers by benchmark lift. Where the roster skews high, the program builds well; low tiers flag a gap.</div>
+          {D.strengths.length===0&&D.weaknesses.length===0&&<div style={{fontSize:12,color:C.muted}}>Not enough ranked lifts logged yet.</div>}
+          {D.strengths.length>0&&<div style={{fontSize:9.5,letterSpacing:1,textTransform:"uppercase",color:C.green,fontWeight:800,marginBottom:4}}>Strengths</div>}
+          {D.strengths.map((s,i)=>(
+            <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0"}}>
+              <span style={{width:120,fontSize:12.5,color:C.text,flexShrink:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.name}</span>
+              <span style={{flex:1,height:7,borderRadius:4,background:C.navy3,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${Math.round(100*(s.avg+1)/8)}%`,background:C.green}}/></span>
+              <span style={{fontSize:10,fontWeight:800,width:74,textAlign:"right",color:C.green}}>{tierName(s.avg)}</span>
+            </div>
+          ))}
+          {D.weaknesses.length>0&&<div style={{fontSize:9.5,letterSpacing:1,textTransform:"uppercase",color:C.red,fontWeight:800,margin:"14px 0 4px"}}>Weaknesses</div>}
+          {D.weaknesses.map((s,i)=>(
+            <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0"}}>
+              <span style={{width:120,fontSize:12.5,color:C.text,flexShrink:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.name}</span>
+              <span style={{flex:1,height:7,borderRadius:4,background:C.navy3,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${Math.round(100*(s.avg+1)/8)}%`,background:C.red}}/></span>
+              <span style={{fontSize:10,fontWeight:800,width:74,textAlign:"right",color:C.red}}>{tierName(s.avg)}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Win of the week */}
+        <div style={{background:`linear-gradient(180deg,${C.navy3},${C.navy2})`,border:`1px solid ${C.gold}44`,borderRadius:14,padding:16}}>
+          <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.gold,fontWeight:700}}>Wins this week</div>
+          {D.shoutouts.length===0
+            ? <div style={{fontSize:12,color:C.muted2,marginTop:12}}>No new personal bests logged yet this week — check back as sessions come in.</div>
+            : <div style={{marginTop:12}}>
+                {D.shoutouts.map((s,i)=>(
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderBottom:i<D.shoutouts.length-1?`1px solid ${C.border}80`:"none"}}>
+                    <span style={{width:30,height:30,borderRadius:8,background:`${C.gold}22`,border:`1px solid ${C.gold}55`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>🏆</span>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontWeight:700,fontSize:13,color:C.text}}>{s.name}</div>
+                      <div style={{color:C.muted2,fontSize:12}}>{s.ex} {fmtWeight(s.weight,s.unit)} — up {s.gain} lbs e1RM</div>
+                    </div>
+                  </div>
+                ))}
+              </div>}
+          <div style={{fontSize:11,color:C.muted,marginTop:12,fontStyle:"italic"}}>Shareable image export coming with the monthly recap.</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function GroupStats({athletes,workouts,prs}) {
   const now = new Date();
   const weekAgo = new Date(now-7*24*60*60*1000);

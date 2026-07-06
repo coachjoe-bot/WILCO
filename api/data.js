@@ -46,6 +46,11 @@ const READ_OWN_COL = {
   manual_one_rms: "athlete_id",
   athlete_goals: "athlete_id",
   athlete_context: "athlete_id",
+  // Parsed structured program cache (Haiku-parsed program_text, hash-keyed). Read-
+  // only for the coach dashboard's Overview adherence math (load %×1RM band). Scoped
+  // by athlete_id exactly like the raw tables, so a coach only sees their roster's
+  // prescriptions. Written server-side only (parseProgramIfNeeded, service key).
+  program_prescriptions: "athlete_id",
   // Server-side session-count rollup (SQL port of groupIntoSessions, verified to
   // match the client row-for-row). Read-only VIEW; scoped by athlete_id exactly
   // like the raw tables, so a coach only sees their own roster's counts. Lets the
