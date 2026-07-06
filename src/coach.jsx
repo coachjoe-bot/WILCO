@@ -756,7 +756,7 @@ function CoachDashboard({coach,onLogout}) {
     return new Date(lb) - new Date(la);
   });
 
-  const tabs = ["overview","athletes","stats","reports",...(isMaster?[]:["settings"]),...(isMaster?["coaches"]:[]),...(!isMaster&&isAdmin?["account"]:[])];
+  const tabs = ["overview","athletes","reports",...(isMaster?[]:["settings"]),...(isMaster?["coaches"]:[]),...(!isMaster&&isAdmin?["account"]:[])];
 
   return (
     <div style={{minHeight:"100dvh",background:C.navy}}>
@@ -989,10 +989,6 @@ function CoachDashboard({coach,onLogout}) {
             })()}
 
             {/* ── GROUP STATS TAB ── */}
-            {activeTab==="stats"&&(
-              <GroupStats athletes={athletes} workouts={workouts} prs={prs}/>
-            )}
-
             {/* ── SETTINGS TAB (notifications) ── */}
             {activeTab==="settings"&&(()=>{
               const Toggle = ({on,onClick})=>(
@@ -1387,9 +1383,9 @@ function StatBand({tone,label}){
   const c = tone==="good"?C.green:tone==="warn"?C.gold:tone==="crit"?C.red:C.blue;
   return <span style={{fontSize:9,fontWeight:800,letterSpacing:.5,textTransform:"uppercase",padding:"2px 8px",borderRadius:999,whiteSpace:"nowrap",color:c,background:`${c}22`,border:`1px solid ${c}55`}}>{label}</span>;
 }
-function OverviewCard({title,trend,children,readout,tone}){
+function OverviewCard({title,trend,children,readout,tone,style}){
   return (
-    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
+    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16,...style}}>
       <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:8,marginBottom:10}}>
         <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.muted2,fontWeight:700}}>{title}</div>
         {trend&&<div style={{fontSize:11.5,fontWeight:700,color:trend.dir==="up"?C.green:trend.dir==="down"?C.red:C.muted,whiteSpace:"nowrap"}}>{trend.dir==="up"?"▲":trend.dir==="down"?"▼":"—"} {trend.txt}</div>}
@@ -1401,7 +1397,9 @@ function OverviewCard({title,trend,children,readout,tone}){
 }
 
 function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthlete}){
+  const isMobile = useIsMobile();
   const [resolved,setResolved] = useState(()=>new Set());
+  const [tip,setTip] = useState(null);
   const D = useMemo(()=>{
     const now = Date.now();
     const dstart = (t)=>{const x=new Date(t);x.setHours(0,0,0,0);return x.getTime();};
@@ -1474,10 +1472,30 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
       .sort((a,b)=>b.avgTier-a.avgTier);
     const {strengths,weaknesses} = classifyTiers(benchAgg);
 
-    // wins — top true-PR shout-outs this week
-    const shoutouts = truePRs.filter(p=>{const t=new Date(p.created_at||p.date||0).getTime();return t>=weekAgo;})
-      .sort((a,b)=>b.gain-a.gain).slice(0,3)
-      .map(p=>({name:(athletes.find(a=>a.id===p.athlete_id)||{}).name||"Athlete", ex:p.exercise, weight:p.weight, unit:p.unit, gain:Math.round(p.gain)}));
+    // team strength movement — avg e1RM delta per lift this week (for wins + tooltips)
+    const dlt={};
+    rows.forEach(r=>r.brief.lifts.forEach(l=>{ if(l.deltaVsLastWeek!=null)(dlt[l.lift]=dlt[l.lift]||[]).push(l.deltaVsLastWeek); }));
+    const movers=Object.entries(dlt).map(([lift,ds])=>({lift,avg:+(ds.reduce((a,b)=>a+b,0)/ds.length).toFixed(1),n:ds.length})).filter(m=>m.avg>0).sort((a,b)=>b.avg-a.avg);
+
+    // wins — a MIX of notable stats + personal bests, deduped so it's never the same
+    // athlete twice and not always a person.
+    const recentTrue=truePRs.filter(p=>new Date(p.created_at||p.date||0).getTime()>=weekAgo).sort((a,b)=>b.gain-a.gain);
+    const seenAth=new Set(); const personalWins=[];
+    for(const p of recentTrue){ if(seenAth.has(p.athlete_id))continue; seenAth.add(p.athlete_id);
+      personalWins.push({icon:"🏆",title:(athletes.find(a=>a.id===p.athlete_id)||{}).name||"Athlete",detail:`${p.exercise} ${fmtWeight(p.weight,p.unit)} — +${Math.round(p.gain)} lbs e1RM`}); }
+    const statWins=[];
+    if(prThisWk>0) statWins.push({icon:"🔥",title:`${prThisWk} true PR${prThisWk!==1?"s":""}`,detail:"across the roster this week"});
+    if(movers[0]) statWins.push({icon:"📈",title:`${movers[0].lift} +${movers[0].avg} lbs`,detail:`team avg e1RM${movers[0].n>1?` · ${movers[0].n} athletes`:""}`});
+    if(teamAdh!=null&&teamAdh>=80) statWins.push({icon:"✅",title:`${teamAdh}% adherence`,detail:"team on plan this week"});
+    if(activePct>=80) statWins.push({icon:"⚡",title:`${activePct}% active`,detail:`${activeCount} of ${athletes.length} training this week`});
+    // interleave stat / personal so it reads varied
+    const wins=[]; while(wins.length<4){ if(statWins.length)wins.push(statWins.shift()); if(wins.length>=4)break; if(personalWins.length)wins.push(personalWins.shift()); if(!statWins.length&&!personalWins.length)break; }
+
+    // roster extras (folded in from the old Group Stats tab): active-by-sport,
+    // this-week pain flags, inactive athletes.
+    const bySport={}; rows.forEach(r=>{ if(r.thisWk.length>0){ const s=r.a.sport||"—"; bySport[s]=(bySport[s]||0)+1; } });
+    const weekPain=[]; workouts.filter(w=>inWin(w,weekAgo)).forEach(w=>{ const pf=w.parsed_data?.pain_flags; if(pf&&pf.length){ const a=athletes.find(x=>x.id===w.athlete_id); weekPain.push({name:a?.name||"Athlete",areas:pf.map(p=>p.area).join(", "),at:w.created_at}); } });
+    const inactive=rows.filter(r=>r.thisWk.length===0).map(r=>{ const last=(woByAth[r.a.id]||[])[0]||(woByAth[r.a.id]||[]).slice(-1)[0]; const days=last?Math.floor((now-new Date(last.created_at).getTime())/DAYMS):null; return {name:r.a.name, days}; }).sort((a,b)=>(a.days??9999)-(b.days??9999));
 
     // briefing triage — ranked "who needs you today" (injury > quiet > adherence drop)
     const triage=[];
@@ -1494,16 +1512,19 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
     });
     triage.sort((a,b)=>(a.sev==="crit"?0:1)-(b.sev==="crit"?0:1));
 
-    return {rows,dayCounts,dayLabels,firstHalf,lastHalf,activeCount,activePct,teamAdh,noProgram,feelCounts,feelTotal,volWeeks,prWeeks,prThisWk,strengths,weaknesses,shoutouts,triage};
+    return {rows,dayCounts,dayLabels,firstHalf,lastHalf,activeCount,activePct,teamAdh,noProgram,volWeeks,prWeeks,prThisWk,strengths,weaknesses,wins,movers,bySport,weekPain,inactive,triage};
   },[athletes,workouts,prs,manualRMs,prescriptions]);
 
   if(!athletes.length) return <div style={{textAlign:"center",padding:60,color:C.muted}}>No athletes on your roster yet.</div>;
 
   const triage = D.triage.filter(t=>!resolved.has(t.id));
 
-  const feelPct = (k)=>D.feelTotal?Math.round(100*D.feelCounts[k]/D.feelTotal):0;
-  const volMax = Math.max(1,...D.volWeeks), prMax = Math.max(1,...D.prWeeks);
+  const volMax = Math.max(1,...D.volWeeks), prMax = Math.max(1,...D.prWeeks), sMax = Math.max(1,...D.dayCounts);
   const cell = (v)=>v?C.green:C.navy3;
+  // Hover tooltip shared across every chart data point.
+  const tipOn = (text)=>({onMouseEnter:(e)=>setTip({x:e.clientX,y:e.clientY,text}),onMouseMove:(e)=>setTip({x:e.clientX,y:e.clientY,text}),onMouseLeave:()=>setTip(null)});
+  const wkLabel = (i)=>i===D.prWeeks.length-1?"This week":`${D.prWeeks.length-1-i} wk ago`;
+  const span = (n)=>isMobile?{}:{gridColumn:`span ${n}`};
   // top rows to show in the adherence heatmap: worst adherence first (needs attention)
   const heatRows = [...D.rows].filter(r=>r.hasProgram||r.thisWk.length>0)
     .sort((a,b)=>((a.score??999)-(b.score??999))).slice(0,6);
@@ -1545,84 +1566,76 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
       </div>
 
       {secLabel("Team Health")}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:14}}>
+      <div style={{display:"grid",gridTemplateColumns:isMobile?"1fr":"repeat(6,minmax(0,1fr))",gap:14}}>
 
-        {/* Sessions/day */}
-        <OverviewCard title="Sessions / day · last 7d"
-          trend={{dir:D.lastHalf>=D.firstHalf?"up":"down",txt:`${D.dayCounts.reduce((a,b)=>a+b,0)} total`}}
-          readout={D.lastHalf>=D.firstHalf?"Holding or climbing into the week.":"Sliding off through the week — worth a nudge."}
-          tone={D.lastHalf>=D.firstHalf?{k:"good",t:"Healthy"}:{k:"warn",t:"Watch"}}>
-          <LineChart data={D.dayLabels.map((l,i)=>({label:l,y:D.dayCounts[i]}))} color={C.green} unit=""/>
-        </OverviewCard>
-
-        {/* Program adherence + heatmap */}
-        <OverviewCard title="Program adherence · this week"
+        {/* Program adherence + heatmap — widest tile */}
+        <OverviewCard style={span(4)} title="Program adherence · this week"
           readout={D.teamAdh==null?`No parsed programs yet — assign & lock programs to track adherence.`:`Team average. ${D.noProgram>0?`${D.noProgram} without a program (excluded).`:"Everyone has a program."}`}
           tone={D.teamAdh==null?null:(D.teamAdh>=80?{k:"good",t:"Healthy"}:D.teamAdh>=60?{k:"warn",t:"Slipping"}:{k:"crit",t:"At risk"})}>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:34,color:C.text,lineHeight:.9}}>{D.teamAdh==null?"—":D.teamAdh}<span style={{fontSize:15,color:C.muted}}> {D.teamAdh==null?"":"% team avg"}</span></div>
-          <div style={{display:"grid",gridTemplateColumns:"78px repeat(7,1fr)",gap:4,alignItems:"center",marginTop:12}}>
-            <span/>{D.dayLabels.map((l,i)=><span key={i} style={{fontSize:9,color:C.muted,textAlign:"center"}}>{l[0]}</span>)}
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:46,color:C.text,lineHeight:.9}}>{D.teamAdh==null?"—":D.teamAdh}<span style={{fontSize:18,color:C.muted}}> {D.teamAdh==null?"":"% team avg"}</span></div>
+          <div style={{display:"grid",gridTemplateColumns:"92px repeat(7,1fr)",gap:5,alignItems:"center",marginTop:14}}>
+            <span/>{D.dayLabels.map((l,i)=><span key={i} style={{fontSize:10,color:C.muted,textAlign:"center"}}>{l[0]}</span>)}
             {heatRows.flatMap((r,ri)=>[
-              <span key={`n${ri}`} style={{fontSize:10.5,color:C.muted2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.a.name}</span>,
-              ...r.days.map((d,di)=><i key={`c${ri}-${di}`} title={r.hasProgram?"":"no program"} style={{aspectRatio:"1",borderRadius:3,background:r.hasProgram?cell(d):(d?C.blue:C.navy3),opacity:r.hasProgram?1:.55,border:`1px solid #ffffff08`}}/>)
+              <span key={`n${ri}`} style={{fontSize:11.5,color:C.muted2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.a.name}</span>,
+              ...r.days.map((d,di)=><i key={`c${ri}-${di}`} style={{aspectRatio:"1",borderRadius:3,background:r.hasProgram?cell(d):(d?C.blue:C.navy3),opacity:r.hasProgram?1:.55,border:`1px solid #ffffff08`,cursor:"pointer"}} {...tipOn(`${r.a.name.split(" ")[0]} · ${D.dayLabels[di]}: ${d?"logged a session":"no session"}${r.hasProgram?"":" (no program)"}`)}/>)
             ])}
           </div>
         </OverviewCard>
 
         {/* Active this week gauge */}
-        <OverviewCard title="Active this week"
+        <OverviewCard style={span(2)} title="Active this week"
           readout={`${D.activeCount} of ${athletes.length} logged at least once.`}
           tone={D.activePct>=70?{k:"good",t:"Healthy"}:D.activePct>=50?{k:"warn",t:"Watch"}:{k:"crit",t:"Low"}}>
-          <div style={{display:"flex",alignItems:"center",gap:16}}>
-            <svg viewBox="0 0 92 92" width="92" height="92" style={{width:92,flexShrink:0}}>
-              <circle cx="46" cy="46" r="38" fill="none" stroke={C.border} strokeWidth="10"/>
-              <circle cx="46" cy="46" r="38" fill="none" stroke={C.green} strokeWidth="10" strokeLinecap="round"
-                strokeDasharray={2*Math.PI*38} strokeDashoffset={2*Math.PI*38*(1-D.activePct/100)} transform="rotate(-90 46 46)"/>
-              <text x="46" y="44" textAnchor="middle" fill={C.text} fontFamily="'Bebas Neue'" fontSize="22">{D.activePct}%</text>
-              <text x="46" y="59" textAnchor="middle" fill={C.muted} fontSize="8.5">{D.activeCount} / {athletes.length}</text>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"center",paddingTop:6}}>
+            <svg viewBox="0 0 120 120" style={{width:"100%",maxWidth:150}} {...tipOn(`${D.activeCount} of ${athletes.length} active — ${D.activePct}%`)}>
+              <circle cx="60" cy="60" r="50" fill="none" stroke={C.border} strokeWidth="12"/>
+              <circle cx="60" cy="60" r="50" fill="none" stroke={C.green} strokeWidth="12" strokeLinecap="round"
+                strokeDasharray={2*Math.PI*50} strokeDashoffset={2*Math.PI*50*(1-D.activePct/100)} transform="rotate(-90 60 60)"/>
+              <text x="60" y="58" textAnchor="middle" fill={C.text} fontFamily="'Bebas Neue'" fontSize="30">{D.activePct}%</text>
+              <text x="60" y="76" textAnchor="middle" fill={C.muted} fontSize="11">{D.activeCount} / {athletes.length}</text>
             </svg>
-            <div style={{fontSize:12,color:C.muted2}}>Share of the roster training this week.</div>
           </div>
         </OverviewCard>
 
-        {/* Session feel */}
-        <OverviewCard title="Session feel · this week"
-          readout={D.feelTotal?`${feelPct("rough")}% logged "rough" — ${feelPct("rough")>=20?"watch for overreaching.":"in a healthy range."}`:"No session-feel logged yet this week."}
-          tone={D.feelTotal?(feelPct("rough")>=20?{k:"warn",t:"Watch"}:{k:"good",t:"Healthy"}):null}>
-          <div style={{display:"flex",height:20,borderRadius:6,overflow:"hidden",background:C.navy3}}>
-            {FEEL_ORDER.map(([k,,c])=>feelPct(k)>0&&<div key={k} style={{width:`${feelPct(k)}%`,background:c}}/>)}
-          </div>
-          <div style={{display:"flex",gap:12,marginTop:9,fontSize:10.5,color:C.muted2,flexWrap:"wrap"}}>
-            {FEEL_ORDER.map(([k,lbl,c])=><span key={k}><i style={{display:"inline-block",width:8,height:8,borderRadius:2,background:c,marginRight:5}}/>{lbl} {feelPct(k)}%</span>)}
-          </div>
-        </OverviewCard>
-
-        {/* Team volume-load */}
-        <OverviewCard title="Team volume · 4 wk"
-          trend={{dir:D.volWeeks[3]>=D.volWeeks[0]?"up":"down",txt:"working sets"}}
-          readout={D.volWeeks[3]>D.volWeeks[0]*1.5?"Sharp jump vs 4 weeks ago — watch load spikes.":"Gradual, inside a safe band."}
-          tone={D.volWeeks[3]>D.volWeeks[0]*1.5?{k:"warn",t:"Watch"}:{k:"good",t:"Healthy"}}>
-          <svg viewBox="0 0 260 60" preserveAspectRatio="none" style={{width:"100%"}}>
-            <polyline fill="none" stroke={C.blue} strokeWidth="2" points={D.volWeeks.map((v,i)=>`${i*(260/3)},${54-48*(v/volMax)}`).join(" ")}/>
-            {D.volWeeks.map((v,i)=><circle key={i} cx={i*(260/3)} cy={54-48*(v/volMax)} r="3" fill={C.blue}/>)}
+        {/* Sessions/day */}
+        <OverviewCard style={span(3)} title="Sessions / day · last 7d"
+          trend={{dir:D.lastHalf>=D.firstHalf?"up":"down",txt:`${D.dayCounts.reduce((a,b)=>a+b,0)} total`}}
+          readout={D.lastHalf>=D.firstHalf?"Holding or climbing into the week.":"Sliding off through the week — worth a nudge."}
+          tone={D.lastHalf>=D.firstHalf?{k:"good",t:"Healthy"}:{k:"warn",t:"Watch"}}>
+          <svg viewBox="0 0 300 96" preserveAspectRatio="none" style={{width:"100%",height:96}}>
+            <line x1="0" y1="86" x2="300" y2="86" stroke={C.border}/>
+            <polyline fill="none" stroke={C.green} strokeWidth="2.5" points={D.dayCounts.map((v,i)=>`${i*50},${84-72*(v/sMax)}`).join(" ")}/>
+            {D.dayCounts.map((v,i)=><circle key={i} cx={i*50} cy={84-72*(v/sMax)} r="6" fill={C.green} style={{cursor:"pointer"}} {...tipOn(`${D.dayLabels[i]}: ${v} session${v!==1?"s":""}`)}/>)}
           </svg>
-          <div style={{fontSize:10.5,color:C.muted,marginTop:4}}>{D.volWeeks.map(v=>v).join(" → ")} sets/wk</div>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:9.5,color:C.dim||C.muted,marginTop:2}}>{D.dayLabels.map((l,i)=><span key={i}>{l[0]}</span>)}</div>
         </OverviewCard>
 
-        {/* True PRs & tier-ups */}
-        <OverviewCard title="True PRs · 6 wk"
+        {/* True PRs bars */}
+        <OverviewCard style={span(3)} title="True PRs · 6 wk"
           trend={{dir:"up",txt:`${D.prThisWk} this wk`}}
           readout={D.prThisWk>0?`Real improvements over prior bests — baselines excluded.`:`No new bests logged this week yet.`}
           tone={D.prThisWk>0?{k:"good",t:"Momentum"}:null}>
-          <svg viewBox="0 0 260 64" preserveAspectRatio="none" style={{width:"100%"}}>
-            {D.prWeeks.map((v,i)=>{const w=30,gap=(260-w*6)/6;const x=gap/2+i*(w+gap);const h=Math.max(3,54*(v/prMax));return <rect key={i} x={x} y={60-h} width={w} height={h} rx="2" fill={i===5?C.green:C.gold}/>;})}
+          <svg viewBox="0 0 300 96" preserveAspectRatio="none" style={{width:"100%",height:96}}>
+            {D.prWeeks.map((v,i)=>{const w=36,gap=(300-w*6)/6;const x=gap/2+i*(w+gap);const h=Math.max(3,84*(v/prMax));return <rect key={i} x={x} y={88-h} width={w} height={h} rx="3" fill={i===D.prWeeks.length-1?C.green:C.gold} style={{cursor:"pointer"}} {...tipOn(`${wkLabel(i)}: ${v} PR${v!==1?"s":""}`)}/>;})}
           </svg>
+        </OverviewCard>
+
+        {/* Team volume — full-width band */}
+        <OverviewCard style={span(6)} title="Team volume · 4 wk"
+          trend={{dir:D.volWeeks[3]>=D.volWeeks[0]?"up":"down",txt:"working sets"}}
+          readout={D.volWeeks[3]>D.volWeeks[0]*1.5?"Sharp jump vs 4 weeks ago — watch load spikes.":"Gradual, inside a safe band."}
+          tone={D.volWeeks[3]>D.volWeeks[0]*1.5?{k:"warn",t:"Watch"}:{k:"good",t:"Healthy"}}>
+          <svg viewBox="0 0 300 80" preserveAspectRatio="none" style={{width:"100%",height:80}}>
+            <polyline fill="none" stroke={C.blue} strokeWidth="2.5" points={D.volWeeks.map((v,i)=>`${i*100},${70-60*(v/volMax)}`).join(" ")}/>
+            {D.volWeeks.map((v,i)=><circle key={i} cx={i*100} cy={70-60*(v/volMax)} r="6" fill={C.blue} style={{cursor:"pointer"}} {...tipOn(`${i===3?"This week":`${3-i} wk ago`}: ${v} sets`)}/>)}
+          </svg>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:C.muted,marginTop:2}}>{D.volWeeks.map((v,i)=><span key={i}>{i===3?"This wk":`${3-i}w ago`}</span>)}</div>
         </OverviewCard>
 
       </div>
 
       {secLabel("Program & Wins")}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+      <div style={{display:"grid",gridTemplateColumns:isMobile?"1fr":"1fr 1fr",gap:14}}>
         {/* Strengths & weaknesses */}
         <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
           <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.muted2,fontWeight:700}}>Where the program is strong &amp; weak</div>
@@ -1630,7 +1643,7 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
           {D.strengths.length===0&&D.weaknesses.length===0&&<div style={{fontSize:12,color:C.muted}}>Not enough ranked lifts logged yet.</div>}
           {D.strengths.length>0&&<div style={{fontSize:9.5,letterSpacing:1,textTransform:"uppercase",color:C.green,fontWeight:800,marginBottom:4}}>Strengths</div>}
           {D.strengths.map((s,i)=>(
-            <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0"}}>
+            <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",cursor:"pointer"}} {...tipOn(`${s.name}: ${s.tierName} team avg · ${s.n} athlete${s.n!==1?"s":""} ranked`)}>
               <span style={{width:120,fontSize:12.5,color:C.text,flexShrink:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.name}</span>
               <span style={{flex:1,height:7,borderRadius:4,background:C.navy3,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${Math.round(100*(s.avgTier+1)/8)}%`,background:C.green}}/></span>
               <span style={{fontSize:10,fontWeight:800,width:74,textAlign:"right",color:C.green}}>{s.tierName}</span>
@@ -1638,7 +1651,7 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
           ))}
           {D.weaknesses.length>0&&<div style={{fontSize:9.5,letterSpacing:1,textTransform:"uppercase",color:C.red,fontWeight:800,margin:"14px 0 4px"}}>Weaknesses</div>}
           {D.weaknesses.map((s,i)=>(
-            <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0"}}>
+            <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",cursor:"pointer"}} {...tipOn(`${s.name}: ${s.tierName} team avg · ${s.n} athlete${s.n!==1?"s":""} ranked`)}>
               <span style={{width:120,fontSize:12.5,color:C.text,flexShrink:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.name}</span>
               <span style={{flex:1,height:7,borderRadius:4,background:C.navy3,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${Math.round(100*(s.avgTier+1)/8)}%`,background:C.red}}/></span>
               <span style={{fontSize:10,fontWeight:800,width:74,textAlign:"right",color:C.red}}>{s.tierName}</span>
@@ -1646,25 +1659,69 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
           ))}
         </div>
 
-        {/* Win of the week */}
+        {/* Wins — mixed notable stats + deduped personal bests */}
         <div style={{background:`linear-gradient(180deg,${C.navy3},${C.navy2})`,border:`1px solid ${C.gold}44`,borderRadius:14,padding:16}}>
           <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.gold,fontWeight:700}}>Wins this week</div>
-          {D.shoutouts.length===0
-            ? <div style={{fontSize:12,color:C.muted2,marginTop:12}}>No new personal bests logged yet this week — check back as sessions come in.</div>
+          {D.wins.length===0
+            ? <div style={{fontSize:12,color:C.muted2,marginTop:12}}>No wins logged yet this week — check back as sessions come in.</div>
             : <div style={{marginTop:12}}>
-                {D.shoutouts.map((s,i)=>(
-                  <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderBottom:i<D.shoutouts.length-1?`1px solid ${C.border}80`:"none"}}>
-                    <span style={{width:30,height:30,borderRadius:8,background:`${C.gold}22`,border:`1px solid ${C.gold}55`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>🏆</span>
+                {D.wins.map((w,i)=>(
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderBottom:i<D.wins.length-1?`1px solid ${C.border}80`:"none"}}>
+                    <span style={{width:30,height:30,borderRadius:8,background:`${C.gold}22`,border:`1px solid ${C.gold}55`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{w.icon}</span>
                     <div style={{flex:1,minWidth:0}}>
-                      <div style={{fontWeight:700,fontSize:13,color:C.text}}>{s.name}</div>
-                      <div style={{color:C.muted2,fontSize:12}}>{s.ex} {fmtWeight(s.weight,s.unit)} — up {s.gain} lbs e1RM</div>
+                      <div style={{fontWeight:700,fontSize:13,color:C.text}}>{w.title}</div>
+                      <div style={{color:C.muted2,fontSize:12}}>{w.detail}</div>
                     </div>
                   </div>
                 ))}
               </div>}
-          <div style={{fontSize:11,color:C.muted,marginTop:12,fontStyle:"italic"}}>Shareable image export coming with the monthly recap.</div>
+          <div style={{fontSize:11,color:C.muted,marginTop:12,fontStyle:"italic"}}>Shareable image export lands in the weekly + monthly Coach's Edition.</div>
         </div>
       </div>
+
+      {/* Roster — folded in from the old Group Stats tab */}
+      {(Object.keys(D.bySport).length>0||D.weekPain.length>0||D.inactive.length>0)&&secLabel("Roster")}
+      <div style={{display:"grid",gridTemplateColumns:isMobile?"1fr":"repeat(auto-fit,minmax(240px,1fr))",gap:14}}>
+        {D.inactive.length>0&&(
+          <div style={{background:C.navy2,border:`1px solid ${C.gold}40`,borderRadius:14,padding:16}}>
+            <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.gold,fontWeight:700,marginBottom:10}}>No sessions this week ({D.inactive.length})</div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+              {D.inactive.map((a,i)=>(
+                <div key={i} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 11px"}}>
+                  <div style={{color:C.text,fontSize:12.5,fontWeight:600}}>{a.name}</div>
+                  <div style={{color:C.muted,fontSize:10.5}}>{a.days==null?"never logged":`${a.days}d ago`}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {D.weekPain.length>0&&(
+          <div style={{background:C.navy2,border:`1px solid ${C.red}40`,borderRadius:14,padding:16}}>
+            <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.red,fontWeight:700,marginBottom:10}}>Pain flags this week</div>
+            {D.weekPain.slice(0,8).map((p,i)=>(
+              <div key={i} style={{padding:"5px 0",borderBottom:`1px solid ${C.border}40`,fontSize:12}}>
+                <span style={{color:C.text,fontWeight:600}}>{p.name}</span><span style={{color:C.muted}}> — {p.areas}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {Object.keys(D.bySport).length>0&&(
+          <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
+            <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.muted2,fontWeight:700,marginBottom:10}}>Active by sport</div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {Object.entries(D.bySport).sort((a,b)=>b[1]-a[1]).map(([sport,count])=>(
+                <div key={sport} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 13px"}}>
+                  <div style={{color:C.text,fontWeight:600,fontSize:13}}>{sport}</div>
+                  <div style={{color:C.muted,fontSize:11}}>{count} active</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* floating hover tooltip */}
+      {tip&&<div style={{position:"fixed",left:Math.min(tip.x+14,(typeof window!=="undefined"?window.innerWidth:9999)-220),top:tip.y+14,background:C.navy,border:`1px solid ${C.gold}`,borderRadius:8,padding:"6px 10px",fontSize:12,color:C.text,pointerEvents:"none",zIndex:200,boxShadow:"0 6px 20px rgba(0,0,0,0.5)",maxWidth:220}}>{tip.text}</div>}
     </div>
   );
 }
@@ -1777,6 +1834,19 @@ function CoachCheckin({digest, team, coach, onRead}){
       return;
     }
     const na={...answers,[q.id]:t}; setAnswers(na);
+    // WILCO reacts to the answer before asking the next question — a real
+    // conversation, mirroring the athlete check-in (thin/dismissive answers get
+    // no forced reaction).
+    const thin = t.length<3 || /^(idk|no|nope|nothing|none|fine|na|n\/a|skip|dunno|meh|ok|okay|yes|yeah|yep|sure)\.?$/i.test(t);
+    if(!thin){
+      setBusy(true);
+      try{
+        const sys=`You are WILCO, a strength coach's AI assistant, mid-check-in with the coach. React to their answer in ONE short, natural sentence — acknowledge or reflect it like a real conversation. Do NOT ask a question, no lists, no emoji. ${teamCtx()}`;
+        const reply=await askClaude(sys, `You asked: "${q.text}"\nThey answered: "${t}"`, 160, [], "claude-haiku-4-5", "coach_checkin");
+        if(reply&&reply.trim()) setMsgs(m=>[...m,{role:"wilco",text:reply.trim()}]);
+      }catch{}
+      setBusy(false);
+    }
     advance(na);
   };
 
@@ -1875,131 +1945,6 @@ function CoachEdition({digest, athletes, coach, onBack, onRead}){
         )}
         <CoachCheckin digest={digest} team={team} coach={coach} onRead={onRead}/>
       </div>
-    </div>
-  );
-}
-
-function GroupStats({athletes,workouts,prs}) {
-  const now = new Date();
-  const weekAgo = new Date(now-7*24*60*60*1000);
-
-  const weekWorkouts = workouts.filter(w=>new Date(w.created_at)>=weekAgo&&isRealSession(w));
-  const weekPRs = prs.filter(p=>new Date(p.created_at||0)>=weekAgo);
-  const weekPain = weekWorkouts.filter(w=>w.parsed_data?.pain_flags?.length>0); // weekWorkouts already filtered to real sessions
-
-  const activeIds = new Set(weekWorkouts.map(w=>w.athlete_id));
-  const inactiveAthletes = athletes.filter(a=>!activeIds.has(a.id));
-  const activeAthletes = athletes.filter(a=>activeIds.has(a.id));
-
-  // Sessions per day this week for sparkline
-  const dayLabels = [];
-  const dayCounts = [];
-  for(let i=6;i>=0;i--){
-    const d = new Date(now);
-    d.setDate(d.getDate()-i);
-    d.setHours(0,0,0,0);
-    const next = new Date(d); next.setDate(next.getDate()+1);
-    dayLabels.push(d.toLocaleDateString("en-US",{weekday:"short"}));
-    dayCounts.push(groupIntoSessions(workouts.filter(w=>{const wd=new Date(w.created_at);return wd>=d&&wd<next;})).length);
-  }
-
-  // Sport breakdown
-  const bySport = {};
-  activeAthletes.forEach(a=>{bySport[a.sport]=(bySport[a.sport]||0)+1;});
-
-  return (
-    <div style={{maxWidth:900}}>
-      {/* Stat cards */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:12,marginBottom:24}}>
-        {[
-          {label:"Total Athletes",val:athletes.length,color:C.gold},
-          {label:"Active This Week",val:activeAthletes.length,color:C.green},
-          {label:"Sessions This Week",val:groupIntoSessions(weekWorkouts).length,color:C.green},
-          {label:"Pain Flags This Week",val:weekPain.length,color:C.red},
-          {label:"New PRs This Week",val:weekPRs.length,color:C.blue},
-        ].map(s=>(
-          <div key={s.label} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16}}>
-            <div style={{fontFamily:"'Bebas Neue'",fontSize:34,color:s.color}}>{s.val}</div>
-            <div style={{color:C.muted,fontSize:10,letterSpacing:1}}>{s.label}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Sessions this week sparkline */}
-      <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16,marginBottom:16}}>
-        <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>SESSIONS PER DAY — LAST 7 DAYS</div>
-        <LineChart data={dayLabels.map((l,i)=>({label:l,y:dayCounts[i]}))} color={C.green} unit=""/>
-      </div>
-
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginBottom:16}}>
-        {/* Pain flags */}
-        {weekPain.length>0&&(
-          <div style={{background:C.navy2,border:`1px solid ${C.red}40`,borderRadius:14,padding:16}}>
-            <div style={{color:C.red,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>PAIN FLAGS THIS WEEK</div>
-            {weekPain.slice(0,8).map((w,i)=>{
-              const a = athletes.find(at=>at.id===w.athlete_id);
-              return (
-                <div key={i} style={{padding:"5px 0",borderBottom:`1px solid ${C.border}20`,fontSize:12}}>
-                  <span style={{color:C.text,fontWeight:600}}>{a?.name||"Unknown"}</span>
-                  <span style={{color:C.muted}}> — {w.parsed_data.pain_flags.map(p=>p.area).join(", ")}</span>
-                  <span style={{color:C.muted,fontSize:10,marginLeft:6}}>{fmtDateShort(w.created_at)}</span>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* New PRs */}
-        {weekPRs.length>0&&(
-          <div style={{background:C.navy2,border:`1px solid ${C.blue}40`,borderRadius:14,padding:16}}>
-            <div style={{color:C.blue,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>NEW PRs THIS WEEK</div>
-            {weekPRs.slice(0,8).map((p,i)=>{
-              const a = athletes.find(at=>at.id===p.athlete_id);
-              return (
-                <div key={i} style={{padding:"5px 0",borderBottom:`1px solid ${C.border}20`,fontSize:12}}>
-                  <span style={{color:C.text,fontWeight:600}}>{a?.name||"Unknown"}</span>
-                  <span style={{color:C.muted}}> — {p.exercise} {fmtWeight(p.weight,p.unit)}</span>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* Inactive athletes */}
-      {inactiveAthletes.length>0&&(
-        <div style={{background:C.navy2,border:`1px solid ${C.gold}40`,borderRadius:14,padding:16,marginBottom:16}}>
-          <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>NO SESSIONS THIS WEEK ({inactiveAthletes.length})</div>
-          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-            {inactiveAthletes.map((a,i)=>{
-              const la = workouts.filter(w=>w.athlete_id===a.id)[0];
-              const d = la ? daysBetween(la.created_at) : null;
-              return (
-                <div key={i} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 12px"}}>
-                  <div style={{color:C.text,fontSize:12,fontWeight:600}}>{a.name}</div>
-                  <div style={{color:C.muted,fontSize:10}}>{d===null?"never logged":`Last: ${d}d ago`}</div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-
-      {/* Sport breakdown */}
-      {Object.keys(bySport).length>0&&(
-        <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
-          <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>ACTIVE ATHLETES BY SPORT</div>
-          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-            {Object.entries(bySport).map(([sport,count])=>(
-              <div key={sport} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 14px"}}>
-                <div style={{color:C.text,fontWeight:600,fontSize:13}}>{sport}</div>
-                <div style={{color:C.muted,fontSize:11}}>{count} active this week</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
