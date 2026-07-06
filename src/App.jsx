@@ -1206,14 +1206,21 @@ export const C = {navy:"#060d1e",navy2:"#0a1228",navy3:"#0d1836",border:"#1e2a4a
 // `gold` slot is the legacy primary-accent slot and now carries electric blue (new
 // code should prefer CA.accent). C itself is LEFT UNTOUCHED because src/coach.jsx
 // imports it — the coach dashboard must stay on navy/gold through its parallel rework.
+// Values lifted 1:1 from the athlete overhaul artifact (40b4a378) :root so the app
+// matches it exactly: near-black ground, a blue+cyan duotone (blue on primary
+// buttons, cyan on HUD labels/charts/borders), steel greys.
 export const CA = {
-  navy:"#04070f", navy2:"#0a1428", navy3:"#0f1d3a", border:"#1b2a4a",
-  gold:"#1e6fff",                       // legacy primary-accent slot → electric blue
+  navy:"#04060c", navy2:"#0a0f1d", navy3:"#0e1830", border:"#182543",
+  line2:"#25375d",                      // brighter hairline (panel borders, tubes)
+  gold:"#3a7bff",                       // legacy primary-accent slot → artifact blue
   green:"#10b981", red:"#ef4444",
-  text:"#e6edfb", muted:"#93a7cc", muted2:"#b4c7e3", blue:"#5e94ff",
-  accent:"#1e6fff", cyan:"#22d3ee", led:"#dce8ff", steel:"#6e7e99",
+  text:"#e6ecf6", muted:"#7c8aa3", muted2:"#aeb9cf", blue:"#6aa0ff",
+  accent:"#3a7bff", cyan:"#37e6ff", led:"#eaf3ff", steel:"#7a8798", faint:"#55637d",
   amber:"#f5a623",                      // deliberate field/away-ops accent (not blue)
 };
+// Reusable primary-button skin (blue gradient + glow) — the artifact's .abtn/.navbtn.pri.
+export const CA_BTN = "linear-gradient(180deg,#57a0ff,#2a63e6)";
+export const CA_GLOW = "rgba(58,123,255,.5)";
 // Fonts (Bebas Neue + DM Sans) load from index.html with preconnect — an @import
 // here would sit unread until the whole JS bundle parses, delaying first text paint.
 export const GS = `
@@ -1293,9 +1300,50 @@ export const GSA = `
 /* entrance door-dive crossfade+scale (one-time) */
 @keyframes aDive{0%{opacity:0;transform:scale(1.08);}12%{opacity:1;}100%{opacity:1;transform:scale(1);}}
 .a-dive{animation:aDive 1.1s cubic-bezier(.2,.7,.2,1) both;}
+/* ═══ artifact-faithful console skin — ported 1:1 from the athlete overhaul artifact
+   (40b4a378). These are the pieces that give the app its HUD look. ═══ */
+/* blue grid ground for interior app screens (the single biggest "matches the artifact" change) */
+.cyber{background:#05060c;background-image:linear-gradient(rgba(58,123,255,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(58,123,255,.045) 1px,transparent 1px);background-size:22px 22px;}
+/* amber grid ground for away / field mode */
+.cyber-away{background:#080a06;background-image:linear-gradient(rgba(245,165,36,.05) 1px,transparent 1px),linear-gradient(90deg,rgba(245,165,36,.05) 1px,transparent 1px);background-size:22px 22px;}
+/* BENCHMARK POWER CELL — a single battery tube filled to --pct in the tier colour --tc;
+   glow + brightness scale with tier via --tb (0..1). .go triggers the fill. */
+.htube{height:20px;border:1.5px solid ${CA.line2};border-radius:6px;position:relative;overflow:hidden;background:linear-gradient(180deg,#070d18,#05080f);}
+.htube::after{content:"";position:absolute;right:-4px;top:50%;transform:translateY(-50%);width:4px;height:9px;border-radius:2px;background:${CA.line2};}
+.hfill{position:absolute;left:0;top:0;bottom:0;width:100%;transform:scaleX(0);transform-origin:left;background:linear-gradient(90deg,color-mix(in srgb,var(--tc) 62%,#000),var(--tc));box-shadow:0 0 calc(8px + var(--tb,0)*22px) var(--tc);filter:brightness(calc(1 + var(--tb,0)*0.9)) saturate(calc(1 + var(--tb,0)*0.4));transition:transform 1.05s cubic-bezier(.3,.8,.3,1);}
+.hfill::after{content:"";position:absolute;inset:0;background:repeating-linear-gradient(90deg,rgba(0,0,0,.28) 0 13px,transparent 13px 16px);opacity:.45;}
+.hcell.go .hfill{transform:scaleX(var(--pct,0));}
+/* RADAR empty state ("awaiting signal") */
+.radar{width:92px;height:92px;border-radius:50%;border:1px solid ${CA.line2};position:relative;overflow:hidden;}
+.radar::before{content:"";position:absolute;inset:0;background:conic-gradient(from 0deg,transparent 0deg,rgba(55,230,255,.35) 42deg,transparent 62deg);animation:spin 2.4s linear infinite;}
+.radar::after{content:"";position:absolute;inset:16px;border-radius:50%;border:1px solid ${CA.line2};}
+@keyframes spin{to{transform:rotate(360deg);}}
+/* LOADERS — charge bar / grid scan / hex matrix */
+.ld-charge{width:150px;height:8px;border-radius:6px;background:#0d1526;overflow:hidden;position:relative;border:1px solid ${CA.line2};}
+.ld-charge i{position:absolute;left:-42%;top:0;bottom:0;width:40%;border-radius:6px;background:linear-gradient(90deg,${CA.accent},${CA.cyan});box-shadow:0 0 12px ${CA.cyan};animation:charge 1.6s cubic-bezier(.5,0,.4,1) infinite;}
+@keyframes charge{to{left:102%;}}
+.ld-scan{width:70px;height:70px;border:1px solid ${CA.line2};border-radius:10px;position:relative;overflow:hidden;background:linear-gradient(180deg,#081020,#05080f);}
+.ld-scan::before{content:"";position:absolute;left:0;right:0;height:2px;top:4%;background:${CA.cyan};box-shadow:0 0 12px ${CA.cyan};animation:scan 1.5s ease-in-out infinite;}
+.ld-scan::after{content:"";position:absolute;inset:0;background:linear-gradient(rgba(55,230,255,.08) 1px,transparent 1px),linear-gradient(90deg,rgba(55,230,255,.08) 1px,transparent 1px);background-size:10px 10px;}
+@keyframes scan{50%{top:92%;}}
+.ld-hex{display:grid;grid-template-columns:repeat(3,10px);gap:7px;}
+.ld-hex i{width:10px;height:10px;background:${CA.accent};border-radius:2px;transform:rotate(45deg);opacity:.2;animation:hp 1.3s ease-in-out infinite;}
+.ld-hex i:nth-child(2){animation-delay:.1s}.ld-hex i:nth-child(3){animation-delay:.2s}.ld-hex i:nth-child(4){animation-delay:.1s}.ld-hex i:nth-child(5){animation-delay:.2s}.ld-hex i:nth-child(6){animation-delay:.3s}.ld-hex i:nth-child(7){animation-delay:.2s}.ld-hex i:nth-child(8){animation-delay:.3s}.ld-hex i:nth-child(9){animation-delay:.4s}
+@keyframes hp{50%{opacity:1;box-shadow:0 0 10px ${CA.cyan};}}
+/* PR "NEW MAX" stamp — straight on, cyan */
+.stampstage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:700;pointer-events:none;}
+.stamp{border:3px solid ${CA.cyan};border-radius:12px;padding:16px 30px;transform:scale(2.4);opacity:0;text-align:center;background:rgba(4,10,20,.72);box-shadow:0 0 40px ${CA.cyan};}
+.stamp.hit{animation:stampIn 2.6s cubic-bezier(.2,1.3,.3,1) forwards;}
+@keyframes stampIn{0%{opacity:0;transform:scale(2.4);}14%{opacity:1;transform:scale(.94);}22%{transform:scale(1);}80%{opacity:1;transform:scale(1);}100%{opacity:0;transform:scale(1.03);}}
+/* Proof cyan scanline overlay */
+.proof-scan::after{content:"";position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,transparent 0 3px,rgba(55,230,255,.035) 3px 4px);z-index:8;}
+/* streak charge-chain — thin bars, trained days fill blue→cyan */
+.streaklnk{flex:1;height:6px;border-radius:2px;background:#0c1526;border:1px solid ${CA.line2};position:relative;overflow:hidden;}
+.streaklnk.on::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,${CA.accent},${CA.cyan});box-shadow:0 0 6px ${CA.cyan};}
 @media (prefers-reduced-motion: reduce){
-  .a-ticker,.a-rise,.a-charge,.a-flap,.a-scan,.a-pulse,.a-bar,.a-reactor,.a-diag,.a-stamp,.a-link,.a-dive,.a-draw{animation:none!important;transform:none!important;opacity:1!important;}
+  .a-ticker,.a-rise,.a-charge,.a-flap,.a-scan,.a-pulse,.a-bar,.a-reactor,.a-diag,.a-stamp,.a-link,.a-dive,.a-draw,.radar::before,.ld-charge i,.ld-scan::before,.ld-hex i,.stamp{animation:none!important;transform:none!important;opacity:1!important;}
   .a-charge{transform:scaleX(var(--fill,1))!important;}
+  .hcell.go .hfill{transform:scaleX(var(--pct,0))!important;}
   .a-draw{stroke-dasharray:none!important;}
 }
 `;
@@ -1385,15 +1433,10 @@ export function LineChart({data, color=C.gold, unit="", palette=C}) {
 // end state. `hint` is the plain-language "how to fill this" line.
 export function AwaitingSignal({hint, label="AWAITING SIGNAL"}) {
   return (
-    <div style={{textAlign:"center",padding:"40px 20px",display:"flex",flexDirection:"column",alignItems:"center",gap:12}}>
-      <div className="a-pulse" aria-hidden style={{width:34,height:34,display:"flex",alignItems:"center",justifyContent:"center"}}>
-        <svg viewBox="0 0 40 44" width="34" height="34">
-          <polygon points="20,2 37,12 37,32 20,42 3,32 3,12" fill="none" stroke={CA.accent} strokeWidth="2"/>
-          <circle cx="20" cy="22" r="4" fill={CA.accent}/>
-        </svg>
-      </div>
-      <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:11,letterSpacing:3,color:CA.accent,fontWeight:600}}>{label}</div>
-      {hint&&<div style={{color:CA.muted2,fontSize:12.5,lineHeight:1.5,maxWidth:280}}>{hint}</div>}
+    <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14,padding:"48px 24px",textAlign:"center",minHeight:280}}>
+      <div className="radar" aria-hidden/>
+      <div style={{fontFamily:"'Bebas Neue'",fontSize:20,letterSpacing:1.5,color:CA.led}}>{label}</div>
+      {hint&&<div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:10.5,color:CA.muted,maxWidth:"28ch",lineHeight:1.5}}>{hint}</div>}
     </div>
   );
 }
@@ -1643,7 +1686,7 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
   const editionLabel = who ? `${who.toUpperCase()}'S ${isMonthly?"MONTHLY":"WEEKLY"} EDITION` : (isMonthly?"MONTHLY EDITION":"WEEKLY EDITION");
 
   return (
-    <div style={{minHeight:"100%",display:"flex",flexDirection:"column"}}>
+    <div className="proof-scan" style={{minHeight:"100%",display:"flex",flexDirection:"column",position:"relative",background:"radial-gradient(120% 80% at 50% 0%,#0c1016,#06090e)"}}>
       {/* Masthead */}
       <div className="proof-drop" style={{textAlign:"center"}}>
         <div style={{display:"flex",justifyContent:"space-between",...kick()}}>
@@ -2145,7 +2188,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
               return (
                 <div key={i} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:"12px 14px"}}>
                   <div style={{color:CA.muted,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:6,textTransform:"uppercase"}}>{ch.lift} · est. 1RM</div>
-                  <LineChart data={data} unit=" lb" color={CA.gold} palette={CA}/>
+                  <LineChart data={data} unit=" lb" color={CA.cyan} palette={CA}/>
                 </div>
               );
             })}
@@ -3663,18 +3706,6 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [videoLoading,setVideoLoading] = useState(false);
   const [saved,setSaved] = useState(false);
   const [prStamp,setPrStamp] = useState(null);   // {exercise,weight,unit} → "NEW MAX" stamp overlay when a PR lands
-  // Entrance walk-through: play the door-dive clip once per session on first
-  // sign-in, then never again until a fresh session (sessionStorage flag).
-  // Reduced-motion or any playback error skips straight to the chat.
-  const [entrance,setEntrance] = useState(()=>{
-    try{
-      if(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return false;
-      return !sessionStorage.getItem("wilco_entered");
-    }catch{ return false; }
-  });
-  const dismissEntrance = () => { try{ sessionStorage.setItem("wilco_entered","1"); }catch{} setEntrance(false); };
-  // Safety net: never let a stalled clip trap the athlete outside the app.
-  useEffect(()=>{ if(!entrance) return; const t=setTimeout(dismissEntrance,6500); return ()=>clearTimeout(t); },[entrance]);   // eslint-disable-line react-hooks/exhaustive-deps
   const [workoutHistory,setWorkoutHistory] = useState([]);
   const [historyLoaded,setHistoryLoaded] = useState(false);
   const [movementPrompt,setMovementPrompt] = useState(false);
@@ -4439,23 +4470,12 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
   return (
     <div style={{height:"100dvh",display:"flex",flexDirection:"column",backgroundColor:CA.navy,backgroundImage:"linear-gradient(rgba(4,7,15,0.60), rgba(4,7,15,0.72)), url(/chat-bg.jpg)",backgroundSize:"cover",backgroundPosition:"center",maxWidth:600,margin:"0 auto"}}>
       <style>{GS}{GSA}</style>
-      {/* Entrance walk-through — the door-dive into the gym on first sign-in of a
-          session. Muted+playsInline so it autoplays; tap or clip-end or any error
-          drops straight into the chat. Phone-width frame on wider viewports. */}
-      {entrance&&(
-        <div onClick={dismissEntrance} style={{position:"fixed",inset:0,zIndex:900,background:CA.navy,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}>
-          <video src="/enter.mp4" autoPlay muted playsInline onEnded={dismissEntrance} onError={dismissEntrance}
-            style={{width:"100%",maxWidth:600,height:"100%",objectFit:"cover"}}/>
-          <div style={{position:"absolute",bottom:"calc(26px + env(safe-area-inset-bottom,0px))",left:0,right:0,textAlign:"center",color:CA.led,fontSize:11,letterSpacing:3,fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",opacity:0.65,pointerEvents:"none"}}>TAP TO ENTER</div>
-        </div>
-      )}
-      {/* PR "NEW MAX" stamp — pressed straight on when a logged lift beats the old best */}
+      {/* PR "NEW MAX" stamp — pressed straight on (cyan) when a logged lift beats the old best */}
       {prStamp&&(
-        <div style={{position:"fixed",inset:0,zIndex:700,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
-          <div className="a-stamp" style={{textAlign:"center",padding:"22px 42px",border:`3px solid ${CA.accent}`,borderRadius:14,background:"rgba(4,7,15,0.82)",boxShadow:`0 0 44px -6px ${CA.accent}, inset 0 0 26px -10px ${CA.accent}`}}>
-            <div style={{fontFamily:"'Bebas Neue'",fontSize:52,letterSpacing:4,color:CA.accent,lineHeight:0.9,textShadow:`0 0 18px ${CA.accent}88`}}>NEW MAX</div>
-            <div style={{color:CA.led,fontSize:15,fontWeight:700,letterSpacing:1,marginTop:6}}>{prStamp.exercise}</div>
-            <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:CA.led,letterSpacing:1,marginTop:2}}>{fmtWeight(prStamp.weight,prStamp.unit)}</div>
+        <div className="stampstage">
+          <div className="stamp hit">
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:34,letterSpacing:2,color:"#fff",lineHeight:0.9}}>NEW MAX</div>
+            <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:10,letterSpacing:1,color:CA.cyan,marginTop:6}}>{prStamp.exercise} · {fmtWeight(prStamp.weight,prStamp.unit)}</div>
           </div>
         </div>
       )}
@@ -4463,7 +4483,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
       <div style={{background:CA.navy2,borderBottom:`1px solid ${CA.border}`,paddingTop:"calc(10px + env(safe-area-inset-top, 0px))",paddingBottom:"10px",paddingLeft:"14px",paddingRight:"14px",display:"flex",flexDirection:"column",gap:10,flexShrink:0}}>
         {/* Row 1: identity */}
         <div style={{display:"flex",alignItems:"baseline",gap:10,minWidth:0}}>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.gold,letterSpacing:2,lineHeight:1,flexShrink:0,whiteSpace:"nowrap"}}>COACH JOE-BOT</div>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.cyan,letterSpacing:2,lineHeight:1,flexShrink:0,whiteSpace:"nowrap"}}>COACH JOE-BOT</div>
           {historyLoaded&&(
           <div style={{display:"flex",alignItems:"baseline",gap:4,flexShrink:0}} title="Workouts logged">
             <span style={{color:CA.muted,fontSize:9,letterSpacing:1,fontWeight:600}}>WORKOUTS:</span>
@@ -4485,19 +4505,11 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           const monday=new Date(now); monday.setHours(0,0,0,0); monday.setDate(now.getDate()-dow);
           const trained=new Set();
           workoutHistory.forEach(w=>{const d=new Date(w.created_at); if(d>=monday) trained.add((d.getDay()+6)%7);});
-          const L=["M","T","W","T","F","S","S"];
           return (
-            <div style={{display:"flex",alignItems:"center",gap:10,marginTop:-2}} title="Your training this week">
-              <div style={{position:"relative",display:"flex",alignItems:"flex-start",gap:13}}>
-                <div aria-hidden style={{position:"absolute",left:5,right:5,top:5,height:1.5,background:CA.border,opacity:0.5,zIndex:0}}/>
-                {L.map((ltr,i)=>{const on=trained.has(i);const today=i===dow;return(
-                  <div key={i} style={{position:"relative",zIndex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
-                    <div className={on?"a-link":undefined} style={{"--d":`${i*0.06}s`,width:on?10:8,height:on?10:8,borderRadius:"50%",background:on?CA.accent:CA.navy,border:`1.5px solid ${on?CA.accent:CA.steel}`,boxShadow:on?`0 0 8px ${CA.accent}`:"none",transition:"all .25s"}}/>
-                    <span style={{fontSize:8,letterSpacing:0.5,lineHeight:1,color:today?CA.led:on?CA.muted2:CA.steel,fontWeight:today?700:500}}>{ltr}</span>
-                  </div>
-                );})}
-              </div>
-              <span style={{fontSize:9,letterSpacing:1,color:CA.muted,fontWeight:600,whiteSpace:"nowrap"}}>{trained.size} DAY{trained.size===1?"":"S"} THIS WK</span>
+            <div style={{display:"flex",alignItems:"center",gap:3,padding:"2px 0 4px"}} title="Your training this week">
+              <span style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:8,letterSpacing:1,color:CA.faint,textTransform:"uppercase",marginRight:4}}>WK</span>
+              {[0,1,2,3,4,5,6].map(i=>{const on=trained.has(i);return <div key={i} className={`streaklnk${on?" on":""}`}/>;})}
+              <span style={{fontFamily:"'Bebas Neue'",fontSize:12,color:CA.cyan,marginLeft:5}}>{trained.size}</span>
             </div>
           );
         })()}
@@ -4506,7 +4518,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:8}}>
         {(athlete.tier||"free")!=="free"&&(
           <button onClick={()=>{track("screen_view","nav",{screen:"quick_log"});setShowQuickLog(true);}} title="Prefill today's workout log"
-            style={{flex:1,minWidth:0,marginRight:"auto",background:CA.gold,border:`1px solid ${CA.gold}`,color:"#000",borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1,display:"flex",alignItems:"center",justifyContent:"center",gap:4,whiteSpace:"nowrap"}}>
+            style={{flex:1,minWidth:0,marginRight:"auto",background:CA_BTN,boxShadow:`0 0 10px ${CA_GLOW}`,border:"none",color:"#02040c",borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1,display:"flex",alignItems:"center",justifyContent:"center",gap:4,whiteSpace:"nowrap"}}>
             ⚡ QUICK LOG
           </button>
         )}
@@ -4559,17 +4571,15 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
       {/* Messages */}
       <div style={{flex:1,overflowY:"auto",padding:"16px 16px 8px"}}>
         {!historyLoaded?(
-          <div style={{textAlign:"center",padding:"48px 20px",display:"flex",flexDirection:"column",alignItems:"center",gap:14}}>
-            <div style={{width:150,height:3,borderRadius:2,background:CA.navy3,overflow:"hidden",position:"relative"}}>
-              <div className="a-bar" style={{position:"absolute",inset:0,width:"55%",borderRadius:2,background:`linear-gradient(90deg,transparent,${CA.accent},transparent)`,boxShadow:`0 0 10px ${CA.accent}`}}/>
-            </div>
-            <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:11,letterSpacing:3,color:CA.muted2}}>LOADING</div>
+          <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12,padding:"48px 20px"}}>
+            <div className="ld-charge"><i/></div>
+            <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:10,letterSpacing:1,color:CA.muted}}>Syncing feed</div>
           </div>
         ):(
           <>
             {messages.map((m,i)=>(
               <div key={i} className="fade-up" style={{marginBottom:12,display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
-                {m.role==="assistant"&&<div style={{width:28,height:28,borderRadius:"50%",background:CA.gold,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#04070f",flexShrink:0,marginRight:8,marginTop:2}}>J</div>}
+                {m.role==="assistant"&&<div style={{width:28,height:28,borderRadius:"50%",background:"linear-gradient(135deg,#3f7bff,#123a9e)",boxShadow:`0 0 12px ${CA_GLOW}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#fff",flexShrink:0,marginRight:8,marginTop:2}}>J</div>}
                 <div style={{maxWidth:"80%",padding:"10px 14px",borderRadius:m.role==="user"?"16px 16px 4px 16px":"16px 16px 16px 4px",background:m.role==="user"?CA.gold:CA.navy2,color:m.role==="user"?"#000":CA.text,fontSize:14,lineHeight:1.7,border:m.role==="assistant"?`1px solid ${CA.border}`:"none",whiteSpace:"pre-wrap"}}>
                   {m.role==="assistant"?<StreamText text={m.content}/>:m.content}
                 </div>
@@ -4577,7 +4587,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             ))}
             {(loading||videoLoading)&&(
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
-                <div style={{width:28,height:28,borderRadius:"50%",background:CA.gold,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#04070f"}}>J</div>
+                <div style={{width:28,height:28,borderRadius:"50%",background:"linear-gradient(135deg,#3f7bff,#123a9e)",boxShadow:`0 0 12px ${CA_GLOW}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#fff"}}>J</div>
                 <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:"16px 16px 16px 4px",padding:"12px 16px",display:"flex",gap:5}}>
                   {[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:CA.muted,animation:`pulse 1.2s ease ${i*0.2}s infinite`}}/>)}
                 </div>
@@ -4666,7 +4676,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             disabled={!!sessionCheckPending}
             style={{flex:1,background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,padding:"10px 14px",color:CA.text,fontSize:14,outline:"none",resize:"none",lineHeight:1.5,opacity:sessionCheckPending?0.4:1}}/>
           <button onClick={send} disabled={loading||videoLoading||!input.trim()||!historyLoaded||!!sessionCheckPending}
-            style={{background:CA.gold,border:"none",borderRadius:12,width:44,height:44,cursor:(loading||!input.trim()||sessionCheckPending)?"not-allowed":"pointer",opacity:(loading||!input.trim()||sessionCheckPending)?0.5:1,fontSize:18,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,color:"#000",fontWeight:700}}>
+            style={{background:CA_BTN,boxShadow:`0 0 12px ${CA_GLOW}`,border:"none",borderRadius:12,width:44,height:44,cursor:(loading||!input.trim()||sessionCheckPending)?"not-allowed":"pointer",opacity:(loading||!input.trim()||sessionCheckPending)?0.5:1,fontSize:18,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,color:"#02040c",fontWeight:700}}>
             →
           </button>
         </div>
@@ -4678,11 +4688,11 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
 
       {/* Program View Modal */}
       {showProgram&&(
-        <div style={{position:"fixed",inset:0,background:CA.navy,display:"flex",flexDirection:"column",zIndex:400,maxWidth:600,margin:"0 auto"}}>
-          <style>{GS}</style>
+        <div className={athlete.temp_program_text?"cyber-away":"cyber"} style={{position:"fixed",inset:0,display:"flex",flexDirection:"column",zIndex:400,maxWidth:600,margin:"0 auto"}}>
+          <style>{GS}{GSA}</style>
           <div style={{flex:1,minHeight:0,width:"100%",display:"flex",flexDirection:"column"}}>
             <div style={{paddingTop:"calc(16px + env(safe-area-inset-top, 0px))",paddingBottom:"12px",paddingLeft:"20px",paddingRight:"20px",borderBottom:`1px solid ${CA.border}`,background:CA.navy2,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
-              <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.gold,letterSpacing:2}}>MY PROGRAM</div>
+              <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.cyan,letterSpacing:2}}>MY PROGRAM</div>
               <button onClick={()=>setShowProgram(false)} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"4px 12px",cursor:"pointer",fontSize:12}}>✕ Close</button>
             </div>
             {athlete.temp_program_text?(
@@ -4975,7 +4985,7 @@ function QuickLogSheet({athlete, workoutHistory, onClose, onAddProgram, onSend})
     <div style={{position:"fixed",inset:0,background:CA.navy,display:"flex",flexDirection:"column",zIndex:400,maxWidth:600,margin:"0 auto"}}>
       <style>{GS}</style>
       <div style={{paddingTop:"calc(16px + env(safe-area-inset-top, 0px))",paddingBottom:"12px",paddingLeft:"20px",paddingRight:"20px",borderBottom:`1px solid ${CA.border}`,background:CA.navy2,display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
-        <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.gold,letterSpacing:2,flexShrink:0}}>⚡ QUICK LOG</div>
+        <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.cyan,letterSpacing:2,flexShrink:0}}>⚡ QUICK LOG</div>
         {phase==="ready"&&dayLabel&&dayLabel.length<=36&&(
           <div style={{background:`${CA.blue}22`,border:`1px solid ${CA.blue}`,borderRadius:4,padding:"2px 8px",color:CA.blue,fontSize:10,fontWeight:700,letterSpacing:1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{dayLabel.toUpperCase()}</div>
         )}
@@ -5086,12 +5096,12 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
   const realWorkouts = workoutHistory.filter(w=>w.parsed_data?.exercises?.length>0);
 
   return (
-    <div style={{position:"fixed",inset:0,zIndex:300,background:CA.navy,display:"flex",flexDirection:"column",maxWidth:600,margin:"0 auto"}}>
+    <div className="cyber" style={{position:"fixed",inset:0,zIndex:300,display:"flex",flexDirection:"column",maxWidth:600,margin:"0 auto"}}>
       <style>{GS}</style>
       {/* Header */}
       <div style={{background:CA.navy2,borderBottom:`1px solid ${CA.border}`,paddingTop:"calc(12px + env(safe-area-inset-top, 0px))",paddingBottom:"12px",paddingLeft:"16px",paddingRight:"16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
         <div>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.gold,letterSpacing:2}}>MY WORKOUT LOG</div>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.cyan,letterSpacing:2}}>MY WORKOUT LOG</div>
           <div style={{color:CA.muted,fontSize:11}}>{athlete.name} · {athlete.sport} · {sessionCount} session{sessionCount!==1?"s":""}</div>
         </div>
       </div>
@@ -5100,7 +5110,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
       <div style={{display:"flex",borderBottom:`1px solid ${CA.border}`,flexShrink:0}}>
         {["workouts","proof"].map(t=>(
           <button key={t} onClick={()=>setTab(t)}
-            style={{padding:"10px 20px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?CA.gold:"transparent"}`,color:tab===t?CA.gold:CA.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"color 0.15s",position:"relative"}}>
+            style={{padding:"10px 20px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?CA.cyan:"transparent"}`,color:tab===t?CA.cyan:CA.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"color 0.15s",position:"relative"}}>
             {t}
             {t==="proof"&&proofDigest&&!proofDigest.is_read&&<span style={{position:"absolute",top:8,right:8,width:6,height:6,borderRadius:"50%",background:CA.gold,display:"block"}}/>}
           </button>
@@ -5342,7 +5352,7 @@ function EditWorkoutModal({session, onClose, setWorkoutHistory}) {
       <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderTopLeftRadius:20,borderTopRightRadius:20,width:"100%",maxWidth:600,maxHeight:"85dvh",display:"flex",flexDirection:"column"}}>
         <div style={{padding:"16px 20px 12px",borderBottom:`1px solid ${CA.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
           <div>
-            <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.gold,letterSpacing:2}}>EDIT WORKOUT</div>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.cyan,letterSpacing:2}}>EDIT WORKOUT</div>
             <div style={{color:CA.muted2,fontSize:12,marginTop:2}}>{fmtDateRelative(session.entries[0].created_at)}</div>
           </div>
           <button onClick={onClose} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"4px 12px",cursor:"pointer",fontSize:12}}>✕</button>
@@ -5404,6 +5414,8 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   const [showScoreInfo,setShowScoreInfo] = useState(false);
   const [showRankInfo,setShowRankInfo] = useState(false);
   const [rankedUp,setRankedUp] = useState(()=>new Set());   // lift keys whose tier rose since last open → rank-up flash
+  const [benchGo,setBenchGo] = useState(false);             // flips on shortly after the Benchmarks tab opens → power cells charge up
+  useEffect(()=>{ if(tab!=="benchmarks"){ setBenchGo(false); return; } const t=setTimeout(()=>setBenchGo(true),80); return ()=>clearTimeout(t); },[tab]);
 
   useEffect(()=>{
     sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`).then(rows=>{
@@ -5580,11 +5592,11 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   };
 
   return (
-    <div style={{position:"fixed",inset:0,zIndex:300,background:CA.navy,display:"flex",flexDirection:"column",maxWidth:600,margin:"0 auto"}}>
+    <div className="cyber" style={{position:"fixed",inset:0,zIndex:300,display:"flex",flexDirection:"column",maxWidth:600,margin:"0 auto"}}>
       <style>{GS}</style>
       <div style={{background:CA.navy2,borderBottom:`1px solid ${CA.border}`,paddingTop:"calc(12px + env(safe-area-inset-top, 0px))",paddingBottom:"12px",paddingLeft:"16px",paddingRight:"16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
         <div>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.gold,letterSpacing:2}}>PROGRESS</div>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.cyan,letterSpacing:2}}>PROGRESS</div>
           <div style={{color:CA.muted,fontSize:11}}>{athlete.name} · {athlete.sport}</div>
         </div>
       </div>
@@ -5603,7 +5615,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
       <div style={{display:"flex",borderBottom:`1px solid ${CA.border}`,flexShrink:0}}>
         {["benchmarks","strength","running","pr"].map(t=>(
           <button key={t} onClick={()=>setTab(t)}
-            style={{padding:"10px 16px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?CA.gold:"transparent"}`,color:tab===t?CA.gold:CA.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,transition:"color 0.15s"}}>
+            style={{padding:"10px 16px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?CA.cyan:"transparent"}`,color:tab===t?CA.cyan:CA.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,transition:"color 0.15s"}}>
             {t==="pr"?"PRs":t}
           </button>
         ))}
@@ -5638,7 +5650,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
               </div>
             </div>
 
-            <div style={{color:CA.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>STRENGTH BENCHMARKS</div>
+            <div style={{color:CA.cyan,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>STRENGTH BENCHMARKS</div>
 
             {!bodyweight&&(
               <div style={{background:`${CA.gold}15`,border:`1px solid ${CA.gold}40`,borderRadius:10,padding:"12px 14px",marginBottom:16,display:"flex",alignItems:"center",gap:10}}>
@@ -5670,43 +5682,28 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
             {bodyweight&&dedupedBench.map((b,i)=>{
               const ratio = b.e1rm / bodyweight;
               const tierIdx = tierForRatio(ratio, b.thresh);   // 0=Rookie .. 7=Legendary
-              // Bar spans 0 → a bit past the Legendary cut-line; 8 colored segments.
+              // Tube fills 0 → a bit past the Legendary cut-line; --pct = how far along.
               const maxRatio = b.thresh[b.thresh.length-1]*1.12;
               const markerPct = Math.min(Math.max(ratio/maxRatio*100,1),99);
-              const bounds = [0, ...b.thresh, maxRatio];       // 9 bounds → 8 segments
               const isTop = tierIdx>=TIER_NAMES.length-1;
               const toNext = isTop ? 0 : Math.max(0, Math.round(b.thresh[tierIdx]*bodyweight - b.e1rm));
               const dispName = b.name;                           // canonical (resolveLift)
               const isBW = b.bwLoaded;                            // pull-ups / dips / chin-ups / muscle-ups → bodyweight + added
               const up = rankedUp.has(b.key);                     // climbed a tier since last open → flash
+              const bwSub = isBW ? bwLoadLabel(b.e1rm, bodyweight) : `${ratio.toFixed(2)}× bw`;
               return (
-                <div key={i} style={{background:CA.navy2,border:`1px solid ${up?TIER_COLORS[tierIdx]:tierIdx>=4?`${TIER_COLORS[tierIdx]}66`:CA.border}`,borderRadius:12,padding:16,marginBottom:12,boxShadow:up?`0 0 26px -4px ${TIER_COLORS[tierIdx]}`:tierIdx>=2?`0 0 ${6+tierIdx*3}px -3px ${TIER_COLORS[tierIdx]}55`:"none",transition:"box-shadow .3s,border-color .3s"}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
-                    <div>
-                      <div style={{color:CA.text,fontWeight:700,fontSize:14,display:"flex",alignItems:"center",gap:6}}>{dispName}{b.actual&&<span title="Using your actual 1RM" style={{background:`${CA.gold}22`,border:`1px solid ${CA.gold}`,color:CA.gold,borderRadius:4,padding:"0 5px",fontSize:9,fontWeight:700,letterSpacing:1}}>PR</span>}</div>
-                      <div style={{color:TIER_COLORS[tierIdx],fontSize:13,fontWeight:700,marginTop:2,letterSpacing:0.5,display:"flex",alignItems:"center",gap:6}}>{TIER_NAMES[tierIdx]}{up&&<span className="a-stamp" style={{background:`${TIER_COLORS[tierIdx]}22`,border:`1px solid ${TIER_COLORS[tierIdx]}`,color:TIER_COLORS[tierIdx],borderRadius:4,padding:"0 6px",fontSize:9,fontWeight:700,letterSpacing:1}}>⬆ RANK UP</span>}</div>
-                    </div>
-                    <div style={{textAlign:"right"}}>
-                      <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:TIER_COLORS[tierIdx],lineHeight:1}}>{Math.round(b.e1rm)}<span style={{fontSize:11,color:CA.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span></div>
-                      <div style={{color:CA.muted,fontSize:10}}>{isBW ? bwLoadLabel(b.e1rm, bodyweight) : `${ratio.toFixed(2)}× bodyweight`}</div>
-                    </div>
+                // POWER CELL — battery tube filled to --pct in the tier colour, glow scales by --tb (artifact .hcell)
+                <div key={i} className={`hcell${benchGo?" go":""}`} style={{marginBottom:15}}>
+                  <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:6}}>
+                    <span style={{fontSize:12.5,color:CA.text,fontWeight:600}}>{dispName}</span>
+                    <span style={{fontFamily:"'Bebas Neue'",fontSize:13,letterSpacing:0.5,color:TIER_COLORS[tierIdx]}}>{TIER_NAMES[tierIdx]}</span>
+                    {b.actual&&<span title="Using your actual 1RM" style={{fontFamily:"ui-monospace,Menlo,monospace",fontSize:8,color:TIER_COLORS[tierIdx],border:`1px solid ${TIER_COLORS[tierIdx]}`,borderRadius:3,padding:"0 4px",letterSpacing:0.5}}>PR</span>}
+                    {up&&<span className="a-stamp" style={{fontFamily:"ui-monospace,Menlo,monospace",fontSize:8,color:CA.cyan,border:`1px solid ${CA.cyan}`,borderRadius:3,padding:"0 4px",letterSpacing:0.5}}>⬆ RANK UP</span>}
+                    <span style={{marginLeft:"auto",fontFamily:"'Bebas Neue'",fontSize:16,color:CA.led,fontVariantNumeric:"tabular-nums"}}>{Math.round(b.e1rm)}<small style={{fontFamily:"'DM Sans'",fontSize:9,color:CA.muted,marginLeft:2}}>lbs</small></span>
                   </div>
-                  {/* 8-segment tier bar — the "power cells" charge up from the left on open */}
-                  <div style={{position:"relative",height:14,borderRadius:7,overflow:"visible"}}>
-                    <div className="a-charge" style={{"--fill":1,position:"absolute",inset:0,display:"flex",borderRadius:7,overflow:"hidden"}}>
-                      {bounds.slice(1).map((hi,si)=>{
-                        const w=(hi-bounds[si])/maxRatio*100;
-                        return <div key={si} style={{width:`${w}%`,height:"100%",background:TIER_COLORS[si],opacity:si===tierIdx?1:0.45,
-                          borderRight:si<7?"1px solid rgba(6,13,30,0.6)":""}}/>;
-                      })}
-                    </div>
-                    <div style={{position:"absolute",top:-3,left:`${markerPct}%`,transform:"translateX(-50%)",width:5,height:20,background:"#fff",borderRadius:3,boxShadow:"0 0 6px rgba(255,255,255,0.7)"}}/>
-                  </div>
-                  {/* Next-tier target */}
-                  <div style={{marginTop:9,textAlign:"center",fontSize:11}}>
-                    {isTop
-                      ? <span style={{color:TIER_COLORS[tierIdx],fontWeight:700,letterSpacing:0.5}}>TRULY INCREDIBLE 🏆</span>
-                      : <span style={{color:CA.muted}}>{toNext} lbs to <span style={{color:TIER_COLORS[tierIdx+1],fontWeight:700,letterSpacing:0.5}}>{TIER_NAMES[tierIdx+1]}</span></span>}
+                  <div className="htube"><div className="hfill" style={{"--tc":TIER_COLORS[tierIdx],"--tb":tierIdx/(TIER_NAMES.length-1),"--pct":markerPct/100}}/></div>
+                  <div style={{fontFamily:"ui-monospace,Menlo,monospace",fontSize:8.5,color:CA.faint,marginTop:5,letterSpacing:0.3}}>
+                    {isTop ? "TRULY INCREDIBLE 🏆" : `${toNext} LBS TO ${TIER_NAMES[tierIdx+1]}`}<span style={{color:CA.steel}}>{"  ·  "+bwSub}</span>
                   </div>
                 </div>
               );
@@ -5721,7 +5718,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
         {/* ── STRENGTH TAB ── */}
         {tab==="strength"&&(
           <div>
-            <div style={{color:CA.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>STRENGTH PROGRESS</div>
+            <div style={{color:CA.cyan,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>STRENGTH PROGRESS</div>
             {exercises.filter(ex=>ex.entries.length>0).length===0?(
               <AwaitingSignal hint="Log a few weighted lifts and your strength curve builds itself — est. 1RM over time, per exercise."/>
             ):exercises.filter(ex=>ex.entries.length>0).map((ex,i)=>(
@@ -5738,7 +5735,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                   </div>
                 </div>
                 {ex.entries.length>=2?(
-                  <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={CA.gold} palette={CA} unit={ex.unit==="kg"?"kg":"lbs"}/>
+                  <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={CA.cyan} palette={CA} unit={ex.unit==="kg"?"kg":"lbs"}/>
                 ):(
                   <div style={{background:CA.navy3,borderRadius:8,padding:"8px 12px",fontSize:12,color:CA.muted2}}>Log again to see a trend.</div>
                 )}
@@ -5775,7 +5772,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
         {/* ── PR TAB ── */}
         {tab==="pr"&&(
           <div>
-            <div style={{color:CA.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:6}}>YOUR 1RMs</div>
+            <div style={{color:CA.cyan,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:6}}>YOUR 1RMs</div>
             <div style={{color:CA.muted2,fontSize:11,marginBottom:14,lineHeight:1.5}}>
               Set your actual 1RM here, or just tell Coach Joe in chat when you hit one (e.g. "hit a true 1RM of 315 on squat"). Your actual 1RM always overrides the estimate for program math — until then, programming uses your best estimated 1RM.
             </div>
@@ -5808,7 +5805,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                 {(()=>{const ex=exByKey[row.key];return ex&&ex.entries&&ex.entries.length>=2?(
                   <div style={{marginTop:14,borderTop:`1px solid ${CA.border}`,paddingTop:12}}>
                     <div style={{color:CA.muted,fontSize:9,letterSpacing:1,fontWeight:700,marginBottom:6}}>EST. 1RM OVER TIME</div>
-                    <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={CA.gold} palette={CA} unit={row.unit==="kg"?"kg":"lbs"}/>
+                    <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={CA.cyan} palette={CA} unit={row.unit==="kg"?"kg":"lbs"}/>
                   </div>
                 ):null;})()}
               </div>
@@ -5945,7 +5942,7 @@ function ProfileCompletionModal({athlete, onClose, onSave}) {
       <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderTopLeftRadius:20,borderTopRightRadius:20,width:"100%",maxWidth:600,maxHeight:"90dvh",display:"flex",flexDirection:"column"}}>
         <div style={{padding:"16px 20px 12px",borderBottom:`1px solid ${CA.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
           <div>
-            <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.gold,letterSpacing:2}}>COMPLETE YOUR PROFILE</div>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.cyan,letterSpacing:2}}>COMPLETE YOUR PROFILE</div>
             <div style={{color:CA.muted2,fontSize:12,marginTop:2}}>Personalizes your strength benchmarks and programming</div>
           </div>
           <button onClick={onClose} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"4px 12px",cursor:"pointer",fontSize:12}}>✕</button>
