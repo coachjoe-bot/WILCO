@@ -385,6 +385,26 @@ const firstNameLast = (name) => {
   return `${parts[0]} ${parts[parts.length - 1][0]}.`;
 };
 
+// e1RM of a PR row, best-effort (stored estimate, else Epley on weight×reps).
+export const prE1RM = (p) => p.estimated_1rm || epley1RM(toLbs(p.weight, p.unit), p.reps || 1) || 0;
+
+// A "true PR" = an improvement over the athlete's OWN prior best on that exercise —
+// never the first-ever log (baseline). Computed on the fly from prs rows so the
+// count is honest even before the is_baseline column lands. Shared by the server
+// team brief and the client Overview so both agree.
+export function trueImprovementPRs(prsRows) {
+  const byKey = {};
+  const sorted = [...(prsRows || [])].sort((a, b) => new Date(a.created_at || a.date || 0) - new Date(b.created_at || b.date || 0));
+  const out = [];
+  for (const p of sorted) {
+    const k = `${p.athlete_id}|${String(p.exercise || "").toLowerCase().trim()}`;
+    const e = prE1RM(p);
+    if (byKey[k] == null) { byKey[k] = e; continue; }   // first-ever on this lift = baseline, skip
+    if (e > byKey[k] + 0.5) { out.push({ ...p, gain: e - byKey[k] }); byKey[k] = e; }
+  }
+  return out;
+}
+
 // Split ranked benchmarks (each {avgTier 0-7, …}, sorted desc) into strengths &
 // weaknesses by TIER THRESHOLD, with fallbacks so a mid team still gets both.
 // Shared by the server team brief and the client Overview so they never disagree.
@@ -447,14 +467,17 @@ export function buildCoachTeamBrief(perAthlete) {
   // mislabel the roster's WEAKEST lift as a "strength." Tiers: 0 Rookie … 4 Elite.
   const { strengths, weaknesses } = classifyTiers(benchAgg);
 
-  // ── notable true PRs (already improvement-only in the brief.prs list) ──
+  // ── notable TRUE PRs (improvement over prior best; baselines excluded) ──
+  // Prefer r.truePRs (windowed, computed in the enrich step); fall back to computing
+  // from r.prs, then to the brief's recent-PR list for older callers.
   const notablePRs = [];
   let newPRs = 0;
   for (const r of rows) {
-    newPRs += (r.brief.prs || []).length;
-    (r.brief.prs || []).slice(0, 2).forEach((p) => notablePRs.push({ athlete: nm(r.athlete), exercise: p.exercise, weight: p.weight, reps: p.reps, e1rm: p.e1rm }));
+    const tps = r.truePRs || (r.prs ? trueImprovementPRs(r.prs) : (r.brief.prs || []));
+    newPRs += tps.length;
+    tps.slice(0, 2).forEach((p) => notablePRs.push({ athlete: nm(r.athlete), exercise: p.exercise, weight: p.weight, reps: p.reps, e1rm: p.e1rm ?? prE1RM(p), gain: p.gain != null ? Math.round(p.gain) : null }));
   }
-  notablePRs.sort((a, b) => (b.e1rm || 0) - (a.e1rm || 0));
+  notablePRs.sort((a, b) => (b.gain || 0) - (a.gain || 0) || (b.e1rm || 0) - (a.e1rm || 0));
 
   // ── injury clusters (team pattern) + sharpest individual (named call-out) ──
   const areaCount = {};

@@ -17,6 +17,7 @@ import {
   detectPlateaus, aggregateInjuries, computeRankMovement, compareProgramVsActual,
   buildOneRMs, totalSetVolume, painTrend, buildBrief, athleteArchetype,
   buildCoachTeamBrief, buildCoachQuestionBank, classifyTiers, blendAdherenceScore,
+  trueImprovementPRs, prE1RM,
 } from "./_proofcore.js";
 
 // Re-export the pure core so downstream importers that still do
@@ -26,6 +27,7 @@ export {
   detectPlateaus, aggregateInjuries, computeRankMovement, compareProgramVsActual,
   buildOneRMs, totalSetVolume, painTrend, buildBrief, athleteArchetype,
   buildCoachTeamBrief, buildCoachQuestionBank, classifyTiers, blendAdherenceScore,
+  trueImprovementPRs, prE1RM,
 };
 
 export const formatSessionForAI = (group) => {

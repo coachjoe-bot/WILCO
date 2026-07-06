@@ -52,7 +52,7 @@ import { sbSelect, sbInsert, sbWrite, sbDelete, authCaller, httpErr, askClaudeSe
 import {
   groupIntoSessions, aggregateInjuries, buildOneRMs, buildBrief,
   parseProgramIfNeeded, compareProgramVsActual, computeRankMovement, painTrend,
-  generateWeekly, generateMonthly, generateCoach, blendAdherenceScore,
+  generateWeekly, generateMonthly, generateCoach, blendAdherenceScore, trueImprovementPRs,
 } from "./_proof.js";
 import { computeGritSnapshot } from "./_grit.js";
 import { sendToAthlete, pushPayload } from "./_push.js";
@@ -291,7 +291,11 @@ const enrichForCoach = (a, batch) => {
   const hasProgram = !!(a.program_text && a.program_text.trim().length > 10);
   const presDays = a.training_days_per_week || parsed?.blocks?.[0]?.days?.length || null;
   const score = blendAdherenceScore(bf.thisWeekSessions.length, adherence, hasProgram, presDays);
-  return { athlete: a, brief: bf.brief, adherence, snap, score, hasProgram };
+  // True PRs (improvement over prior best) in the reporting window — honest counts,
+  // baselines excluded, ahead of the is_baseline persistence.
+  const weekCut = Date.now() - 7 * 864e5;
+  const truePRs = trueImprovementPRs(bf.prs).filter((p) => new Date(p.created_at || p.date || 0).getTime() >= weekCut);
+  return { athlete: a, brief: bf.brief, adherence, snap, score, hasProgram, prs: bf.prs, truePRs };
 };
 
 // ISO week number — used only to pick the monthly-coach cadence (every 4th week).

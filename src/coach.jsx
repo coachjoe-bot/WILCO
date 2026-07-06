@@ -12,6 +12,7 @@ import {
 // App.jsx's multi-athlete groupIntoSessions already imported above.
 import {
   groupIntoSessions as pcGroup, compareProgramVsActual, buildOneRMs, aggregateInjuries, totalSetVolume,
+  trueImprovementPRs, classifyTiers, blendAdherenceScore,
 } from "./proofcore.js";
 import { computeGritSnapshot, TIER_NAMES, getBenchKey } from "./grit.js";
 // ─── SCHOOLS LIST (master only) ───────────────────────────────────────────────
@@ -1316,23 +1317,8 @@ function CoachDashboard({coach,onLogout}) {
 // zero tokens, no new round-trip. See docs/coach-experience-vision.md §1.
 const DAYMS = 86400000;
 const FEEL_ORDER = [["great","Great",C.green],["good","Good",C.blue],["average","OK",C.gold],["rough","Rough",C.red]];
-// e1RM of a PR row, best-effort (stored estimate, else Epley on weight×reps).
-const prE1RM = (p) => p.estimated_1rm || epley1RM(toLbs(p.weight,p.unit), p.reps||1) || 0;
-// A "true PR" = an improvement over the athlete's OWN prior best on that exercise —
-// never the first-ever log (baseline). Computed on the fly from the prs rows so the
-// count is honest even before the is_baseline column lands (Phase 2 persists it).
-function trueImprovementPRs(prsRows) {
-  const byKey = {};
-  const sorted = [...prsRows].sort((a,b)=>new Date(a.created_at||a.date||0)-new Date(b.created_at||b.date||0));
-  const out = [];
-  for(const p of sorted){
-    const k = `${p.athlete_id}|${String(p.exercise||"").toLowerCase().trim()}`;
-    const e = prE1RM(p);
-    if(byKey[k]==null){ byKey[k]=e; continue; }        // first-ever = baseline, skip
-    if(e > byKey[k] + 0.5){ out.push({...p, gain: e-byKey[k]}); byKey[k]=e; }
-  }
-  return out;
-}
+// prE1RM, trueImprovementPRs, classifyTiers, blendAdherenceScore now live in
+// proofcore (shared with the server Coach's Edition so the two never disagree).
 
 function StatBand({tone,label}){
   const c = tone==="good"?C.green:tone==="warn"?C.gold:tone==="crit"?C.red:C.blue;
@@ -1373,9 +1359,7 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions}){
       const injuries = aggregateInjuries([...lastWk,...thisWk]);
       const hasProgram = !!(a.program_text && a.program_text.trim().length>10);
       const presDays = a.training_days_per_week || parsed?.blocks?.[0]?.days?.length || null;
-      const showUp = presDays ? Math.min(1, thisWk.length/presDays) : (thisWk.length>0?1:0);
-      const vol = adherence ? Math.max(0, 1-adherence.rolledGapPct/100) : null;
-      const score = vol!=null ? Math.round(100*(0.5*showUp+0.5*vol)) : (hasProgram?Math.round(100*showUp):null);
+      const score = blendAdherenceScore(thisWk.length, adherence, hasProgram, presDays);
       // per-day logged flags for the heatmap (Mon..Sun of the last 7 days)
       const days = [];
       for(let i=6;i>=0;i--){ const ds=dstart(now-i*DAYMS), de=ds+DAYMS; days.push((wo.some(w=>{const t=new Date(w.created_at).getTime();return t>=ds&&t<de&&(w.parsed_data?.exercises?.length>0||w.parsed_data?.run_data);}))?1:0); }
@@ -1418,13 +1402,13 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions}){
     }
     const prThisWk = prWeeks[prWeeks.length-1];
 
-    // strengths & weaknesses — avg Grit tier per benchmark lift across roster
+    // strengths & weaknesses — avg Grit tier per benchmark lift across roster,
+    // classified by tier threshold (shared with the server so both agree).
     const byBench={};
     rows.forEach(r=>r.snap.rankedLifts.forEach(l=>{const bk=getBenchKey(l.key)||l.benchKey; if(!bk)return; (byBench[bk]=byBench[bk]||{name:l.name,tiers:[]}).tiers.push(l.tierIdx);}));
-    const benchAgg = Object.entries(byBench).map(([bk,v])=>({bench:bk,name:v.name,avg:v.tiers.reduce((a,b)=>a+b,0)/v.tiers.length,n:v.tiers.length}))
-      .filter(x=>x.n>=1).sort((a,b)=>b.avg-a.avg);
-    const strengths = benchAgg.slice(0,3);
-    const weaknesses = benchAgg.slice(-3).reverse().filter(w=>!strengths.includes(w));
+    const benchAgg = Object.entries(byBench).map(([bk,v])=>{const avgTier=v.tiers.reduce((a,b)=>a+b,0)/v.tiers.length; return {bench:bk,name:v.name,avgTier,tierName:TIER_NAMES[Math.round(avgTier)],n:v.tiers.length};})
+      .sort((a,b)=>b.avgTier-a.avgTier);
+    const {strengths,weaknesses} = classifyTiers(benchAgg);
 
     // wins — top true-PR shout-outs this week
     const shoutouts = truePRs.filter(p=>{const t=new Date(p.created_at||p.date||0).getTime();return t>=weekAgo;})
@@ -1436,7 +1420,6 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions}){
 
   if(!athletes.length) return <div style={{textAlign:"center",padding:60,color:C.muted}}>No athletes on your roster yet.</div>;
 
-  const tierName = (idx)=>TIER_NAMES[Math.round(idx)]||"—";
   const feelPct = (k)=>D.feelTotal?Math.round(100*D.feelCounts[k]/D.feelTotal):0;
   const volMax = Math.max(1,...D.volWeeks), prMax = Math.max(1,...D.prWeeks);
   const cell = (v)=>v?C.green:C.navy3;
@@ -1541,16 +1524,16 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions}){
           {D.strengths.map((s,i)=>(
             <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0"}}>
               <span style={{width:120,fontSize:12.5,color:C.text,flexShrink:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.name}</span>
-              <span style={{flex:1,height:7,borderRadius:4,background:C.navy3,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${Math.round(100*(s.avg+1)/8)}%`,background:C.green}}/></span>
-              <span style={{fontSize:10,fontWeight:800,width:74,textAlign:"right",color:C.green}}>{tierName(s.avg)}</span>
+              <span style={{flex:1,height:7,borderRadius:4,background:C.navy3,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${Math.round(100*(s.avgTier+1)/8)}%`,background:C.green}}/></span>
+              <span style={{fontSize:10,fontWeight:800,width:74,textAlign:"right",color:C.green}}>{s.tierName}</span>
             </div>
           ))}
           {D.weaknesses.length>0&&<div style={{fontSize:9.5,letterSpacing:1,textTransform:"uppercase",color:C.red,fontWeight:800,margin:"14px 0 4px"}}>Weaknesses</div>}
           {D.weaknesses.map((s,i)=>(
             <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0"}}>
               <span style={{width:120,fontSize:12.5,color:C.text,flexShrink:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.name}</span>
-              <span style={{flex:1,height:7,borderRadius:4,background:C.navy3,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${Math.round(100*(s.avg+1)/8)}%`,background:C.red}}/></span>
-              <span style={{fontSize:10,fontWeight:800,width:74,textAlign:"right",color:C.red}}>{tierName(s.avg)}</span>
+              <span style={{flex:1,height:7,borderRadius:4,background:C.navy3,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${Math.round(100*(s.avgTier+1)/8)}%`,background:C.red}}/></span>
+              <span style={{fontSize:10,fontWeight:800,width:74,textAlign:"right",color:C.red}}>{s.tierName}</span>
             </div>
           ))}
         </div>
