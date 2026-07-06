@@ -2115,7 +2115,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
               return (
                 <div key={i} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:"12px 14px"}}>
                   <div style={{color:CA.muted,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:6,textTransform:"uppercase"}}>{ch.lift} · est. 1RM</div>
-                  <LineChart data={data} unit=" lb"/>
+                  <LineChart data={data} unit=" lb" color={CA.gold} palette={CA}/>
                 </div>
               );
             })}
@@ -4418,7 +4418,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           {saved&&<div style={{background:"#0a1e0a",border:`1px solid ${CA.green}`,borderRadius:8,padding:"4px 8px",color:CA.green,fontSize:11,fontWeight:600,flexShrink:0}}>✓</div>}
           {(athlete.tier||"free")!=="free"&&(
             <button onClick={()=>{track("screen_view","nav",{screen:"program"});setShowProgram(true);}} title="View or edit your training program"
-              style={{background:athlete.temp_program_text?`${CA.gold}15`:athlete.program_text?"#0a0e1e":CA.navy3,border:`1px solid ${athlete.temp_program_text?CA.gold:athlete.program_text?CA.blue:CA.border}`,borderRadius:8,padding:"4px 10px",color:athlete.temp_program_text?CA.gold:athlete.program_text?CA.blue:CA.muted,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+              style={{background:athlete.temp_program_text?`${CA.amber}15`:athlete.program_text?"#0a0e1e":CA.navy3,border:`1px solid ${athlete.temp_program_text?CA.amber:athlete.program_text?CA.blue:CA.border}`,borderRadius:8,padding:"4px 10px",color:athlete.temp_program_text?CA.amber:athlete.program_text?CA.blue:CA.muted,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
               {athlete.temp_program_text?"✈️ Temp Program":"📋 "+(athlete.program_text?"Program":"Add Program")}
             </button>
           )}
@@ -4581,8 +4581,8 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             </div>
             {athlete.temp_program_text?(
               <div style={{flex:1,overflowY:"auto",padding:"16px 20px",display:"flex",flexDirection:"column",gap:12}}>
-                <div style={{background:`${CA.gold}12`,border:`1px solid ${CA.gold}50`,borderRadius:12,padding:14}}>
-                  <div style={{color:CA.gold,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>✈️ TEMPORARY PROGRAM — ACTIVE NOW</div>
+                <div style={{background:`${CA.amber}12`,border:`1px solid ${CA.amber}50`,borderRadius:12,padding:14}}>
+                  <div style={{color:CA.amber,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>✈️ TEMPORARY PROGRAM — ACTIVE NOW</div>
                   <pre style={{color:CA.text,fontSize:13,lineHeight:1.7,fontFamily:"'DM Sans'",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{athlete.temp_program_text}</pre>
                 </div>
                 <div style={{color:CA.muted,fontSize:12,lineHeight:1.6,textAlign:"center"}}>
@@ -5068,7 +5068,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                         </div>
                       </div>
                       {isRunSession?(
-                        <RunCard runData={allRunData[0]} feel={feelVal}/>
+                        <RunCard runData={allRunData[0]} feel={feelVal} palette={CA}/>
                       ):(
                         <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,marginBottom:allPainFlags.length>0?8:0}}>
                           <thead>
@@ -5601,7 +5601,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                   </div>
                 </div>
                 {ex.entries.length>=2?(
-                  <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={CA.gold} unit={ex.unit==="kg"?"kg":"lbs"}/>
+                  <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={CA.gold} palette={CA} unit={ex.unit==="kg"?"kg":"lbs"}/>
                 ):(
                   <div style={{background:CA.navy3,borderRadius:8,padding:"8px 12px",fontSize:12,color:CA.muted2}}>Log again to see a trend.</div>
                 )}
@@ -5627,9 +5627,9 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
           return (
             <div>
               <div style={{color:CA.blue,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>RUNNING PROGRESS</div>
-              {distData.length>=2&&<div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:CA.text,fontWeight:700,fontSize:14,marginBottom:12}}>Distance per run</div><LineChart data={distData} color={CA.blue} unit=" mi"/></div>}
-              {paceData.length>=2&&<div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:CA.text,fontWeight:700,fontSize:14,marginBottom:4}}>Pace (min/mi) — lower is faster</div><LineChart data={paceData} color={CA.green} unit=""/></div>}
-              {hrData.length>=2&&<div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:CA.text,fontWeight:700,fontSize:14,marginBottom:12}}>Avg heart rate (bpm)</div><LineChart data={hrData} color={CA.red} unit=" bpm"/></div>}
+              {distData.length>=2&&<div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:CA.text,fontWeight:700,fontSize:14,marginBottom:12}}>Distance per run</div><LineChart data={distData} color={CA.blue} palette={CA} unit=" mi"/></div>}
+              {paceData.length>=2&&<div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:CA.text,fontWeight:700,fontSize:14,marginBottom:4}}>Pace (min/mi) — lower is faster</div><LineChart data={paceData} color={CA.green} palette={CA} unit=""/></div>}
+              {hrData.length>=2&&<div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:CA.text,fontWeight:700,fontSize:14,marginBottom:12}}>Avg heart rate (bpm)</div><LineChart data={hrData} color={CA.red} palette={CA} unit=" bpm"/></div>}
               {distData.length<2&&paceData.length<2&&<div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:10,padding:16,color:CA.muted2,fontSize:12}}>Log more runs to see trend charts.</div>}
             </div>
           );
