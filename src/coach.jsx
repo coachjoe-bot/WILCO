@@ -539,6 +539,7 @@ function CoachDashboard({coach,onLogout}) {
   const [allDigests,setAllDigests] = useState([]);
   const [manualRMs,setManualRMs] = useState([]);        // manual_one_rms — Grit + adherence-load
   const [prescriptions,setPrescriptions] = useState([]); // program_prescriptions (parsed programs) — Overview adherence
+  const [changeRequests,setChangeRequests] = useState([]); // program_change_requests — locked-program inbox
   const [reportFilter,setReportFilter] = useState("all"); // "all" | "weekly" | "monthly"
   const [reportSearch,setReportSearch] = useState("");
   const [reportFlagFilter,setReportFlagFilter] = useState(false);
@@ -628,6 +629,11 @@ function CoachDashboard({coach,onLogout}) {
         setAllDigests([...(Array.isArray(perAthlete)?perAthlete:[]),...(Array.isArray(teamReports)?teamReports:[])]);
         setManualRMs(Array.isArray(manual)?manual:[]);
         setPrescriptions(Array.isArray(presc)?presc:[]);
+        // Locked-program change requests routed to this coach (gateway scopes by coach_id).
+        try {
+          const reqs = await sbRead("program_change_requests","?status=eq.pending&order=created_at.desc&select=*");
+          setChangeRequests(Array.isArray(reqs)?reqs:[]);
+        } catch(e){ /* table/rows may be empty */ }
       }
     } catch(e){console.error(e);}
     setLoading(false);
@@ -889,6 +895,11 @@ function CoachDashboard({coach,onLogout}) {
                       athlete={selected}
                       workouts={workouts.filter(w=>w.athlete_id===selected.id)}
                       prs={prs.filter(p=>p.athlete_id===selected.id)}
+                      requests={changeRequests.filter(r=>r.athlete_id===selected.id)}
+                      onResolveRequest={async (req,status)=>{
+                        await sbUpdate("program_change_requests",req.id,{status,resolved_at:new Date().toISOString()});
+                        setChangeRequests(prev=>prev.filter(r=>r.id!==req.id));
+                      }}
                       onProgramSave={async (text)=>{
                         await sbUpdate("athletes",selected.id,{program_text:text});
                         setAthletes(prev=>prev.map(a=>a.id===selected.id?{...a,program_text:text}:a));
@@ -1948,7 +1959,7 @@ function GroupStats({athletes,workouts,prs}) {
 }
 
 // ─── ATHLETE DETAIL (Coach Dashboard) ────────────────────────────────────────
-function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
+function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProgramSave,onAthleteDelete}) {
   const [tab,setTab] = useState("overview");
   const [programText,setProgramText] = useState(athlete.program_text||"");
   const [programLocked,setProgramLocked] = useState(!!athlete.program_locked);
@@ -2053,6 +2064,28 @@ function AthleteDetail({athlete,workouts,prs,onProgramSave,onAthleteDelete}) {
       </div>
 
       <div style={{padding:20,maxHeight:"calc(100vh - 320px)",overflowY:"auto"}}>
+
+        {/* ── Program change requests (locked-program collaboration) ── */}
+        {requests.length>0&&(
+          <div style={{background:`${C.gold}0d`,border:`1px solid ${C.gold}40`,borderRadius:12,padding:14,marginBottom:16}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+              <span style={{fontFamily:"'Bebas Neue'",fontSize:15,color:C.gold,letterSpacing:1}}>PROGRAM CHANGE REQUESTS</span>
+              <span style={{fontSize:10,fontWeight:800,color:C.gold,background:`${C.gold}22`,border:`1px solid ${C.gold}55`,borderRadius:999,padding:"1px 7px"}}>{requests.length}</span>
+              <span style={{marginLeft:"auto",fontSize:10.5,color:C.muted,textTransform:"uppercase",letterSpacing:.5}}>🔒 Locked</span>
+            </div>
+            {requests.map((r)=>(
+              <div key={r.id} style={{border:`1px solid ${C.border}`,background:C.navy2,borderRadius:10,padding:"11px 12px",marginBottom:8}}>
+                <div style={{color:C.text,fontSize:13,lineHeight:1.5}}>{r.reason || (Array.isArray(r.items)&&r.items[0]?.suggested_change) || "Requested a program change"}</div>
+                <div style={{color:C.dim||C.muted,fontSize:11,margin:"5px 0 10px"}}>Filed {fmtDateRelative?fmtDateRelative(r.created_at):new Date(r.created_at).toLocaleDateString()} · {r.source}</div>
+                <div style={{display:"flex",gap:6}}>
+                  <button onClick={()=>onResolveRequest&&onResolveRequest(r,"applied")} style={{background:C.gold,color:"#000",border:"none",borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Mark applied</button>
+                  <button onClick={()=>{setTab("program");}} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Edit program</button>
+                  <button onClick={()=>onResolveRequest&&onResolveRequest(r,"skipped")} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Skip</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* ── OVERVIEW TAB ── */}
         {tab==="overview"&&(

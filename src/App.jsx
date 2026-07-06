@@ -4051,6 +4051,19 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             followUp("📋 Program saved — I'll reference this in every session.");
           }
         } catch(e){}
+      } else if(parsed.is_program_update && updatedAthlete.program_locked){
+        // Program is coach-locked: don't apply. File a change request to the coach's
+        // inbox and tell the athlete exactly what to raise (coach-experience-vision §4).
+        try {
+          await sbInsert("program_change_requests",{
+            athlete_id: athlete.id,
+            coach_id: athlete.coach_id || null,
+            items: [{suggested_change: msg.slice(0,500)}],
+            reason: msg.slice(0,1000),
+            source: "feedback",
+          });
+          followUp("🔒 Your coach has your program locked, so I didn't change it — but I've flagged this for them. Next time you talk to your coach, bring up that you'd like to adjust your program and why.");
+        } catch(e){}
       }
 
       // Temporary adapted program — conditions described, extract program from Joe-bot's reply
