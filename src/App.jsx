@@ -1385,14 +1385,14 @@ const pushApi = async (payload) => {
 
 const urlB64ToBytes = (s) => Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/")),c=>c.charCodeAt(0));
 
-const getPushSubscription = async () => {
+export const getPushSubscription = async () => {
   if(!pushSupported()) return null;
   try{ const reg = await navigator.serviceWorker.ready; return await reg.pushManager.getSubscription(); }catch{ return null; }
 };
 
 // Subscribe this browser (asks for permission if needed — call from a user
 // gesture) and register it server-side under the logged-in athlete.
-async function enablePush(){
+export async function enablePush(){
   const reg = await navigator.serviceWorker.ready;
   let sub = await reg.pushManager.getSubscription();
   if(!sub){
@@ -1408,7 +1408,7 @@ async function enablePush(){
   try{ await pushApi({action:"welcome"}); }catch(_){}
 }
 
-async function disablePush(){
+export async function disablePush(){
   const sub = await getPushSubscription();
   if(sub){
     const endpoint = sub.endpoint;

@@ -5,7 +5,7 @@
 // the dynamic import means the cycle App→coach→App is resolved at load time.
 import { useState, useEffect, useRef, useMemo } from "react";
 import {
-  C, GS, LineChart, MASTER_CODE, RunCard, SUPABASE_KEY, SUPABASE_URL, askClaude, bestE1RMForExercise, btn, cleanerName, daysBetween, displayForKey, epley1RM, fmtDate, fmtDateRelative, fmtDateShort, fmtWeight, formatSetDetails, getAuth, getExerciseSets, groupIntoSessions, haptic, idApi, inp, isRealSession, liftTier, normalizeExName, sbDelete, sbInsert, sbRead, sbUpdate, sbUpdateWhere, toLbs, track, useIsMobile
+  C, GS, LineChart, MASTER_CODE, RunCard, SUPABASE_KEY, SUPABASE_URL, askClaude, bestE1RMForExercise, btn, cleanerName, daysBetween, disablePush, displayForKey, enablePush, epley1RM, fmtDate, fmtDateRelative, fmtDateShort, fmtWeight, formatSetDetails, getAuth, getExerciseSets, getPushSubscription, groupIntoSessions, haptic, idApi, inp, isRealSession, liftTier, normalizeExName, sbDelete, sbInsert, sbRead, sbUpdate, sbUpdateWhere, toLbs, track, useIsMobile
 } from "./App.jsx";
 // Shared deterministic engine (Phase 0 extraction) — per-athlete session/adherence
 // math, computed live client-side for the Overview. Aliased to avoid colliding with
@@ -540,6 +540,12 @@ function CoachDashboard({coach,onLogout}) {
   const [manualRMs,setManualRMs] = useState([]);        // manual_one_rms — Grit + adherence-load
   const [prescriptions,setPrescriptions] = useState([]); // program_prescriptions (parsed programs) — Overview adherence
   const [changeRequests,setChangeRequests] = useState([]); // program_change_requests — locked-program inbox
+  const [notifPrefs,setNotifPrefs] = useState(coach.notification_prefs||{injury:true,big_pr:true,inactive:true,digest:true});
+  const [pushOn,setPushOn] = useState(false);
+  const [pushBusy,setPushBusy] = useState(false);
+  useEffect(()=>{ (async()=>{ try{ setPushOn(!!(await getPushSubscription())); }catch{} })(); },[]);
+  const savePref = async (key,val)=>{ const next={...notifPrefs,[key]:val}; setNotifPrefs(next); try{ await sbUpdate("coaches",coach.id,{notification_prefs:next}); }catch(e){ console.error("pref save",e); } };
+  const togglePush = async ()=>{ setPushBusy(true); try{ if(pushOn){ await disablePush(); setPushOn(false); } else { await enablePush(); setPushOn(true); } }catch(e){ console.error("push toggle",e); } setPushBusy(false); };
   const [reportFilter,setReportFilter] = useState("all"); // "all" | "weekly" | "monthly"
   const [reportSearch,setReportSearch] = useState("");
   const [reportFlagFilter,setReportFlagFilter] = useState(false);
@@ -750,7 +756,7 @@ function CoachDashboard({coach,onLogout}) {
     return new Date(lb) - new Date(la);
   });
 
-  const tabs = ["overview","athletes","stats","reports",...(isMaster?["coaches"]:[]),...(!isMaster&&isAdmin?["account"]:[])];
+  const tabs = ["overview","athletes","stats","reports",...(isMaster?[]:["settings"]),...(isMaster?["coaches"]:[]),...(!isMaster&&isAdmin?["account"]:[])];
 
   return (
     <div style={{minHeight:"100dvh",background:C.navy}}>
@@ -986,6 +992,46 @@ function CoachDashboard({coach,onLogout}) {
             {activeTab==="stats"&&(
               <GroupStats athletes={athletes} workouts={workouts} prs={prs}/>
             )}
+
+            {/* ── SETTINGS TAB (notifications) ── */}
+            {activeTab==="settings"&&(()=>{
+              const Toggle = ({on,onClick})=>(
+                <button onClick={onClick} style={{width:42,height:24,borderRadius:999,background:on?`${C.green}40`:C.navy3,border:`1px solid ${on?C.green:C.border}`,position:"relative",cursor:"pointer",flexShrink:0}}>
+                  <span style={{position:"absolute",top:2,left:on?20:2,width:18,height:18,borderRadius:"50%",background:on?C.green:C.muted,transition:"left 0.15s"}}/>
+                </button>
+              );
+              const Row = ({title,desc,pkey})=>(
+                <div style={{display:"flex",alignItems:"center",gap:14,padding:"13px 16px",borderBottom:`1px solid ${C.border}80`}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontWeight:700,fontSize:13.5,color:C.text}}>{title}</div>
+                    <div style={{color:C.muted,fontSize:12,marginTop:2}}>{desc}</div>
+                  </div>
+                  <Toggle on={notifPrefs[pkey]!==false} onClick={()=>savePref(pkey,!(notifPrefs[pkey]!==false))}/>
+                </div>
+              );
+              return (
+                <div style={{maxWidth:640}}>
+                  <div style={{display:"flex",alignItems:"center",gap:12,margin:"6px 2px 12px"}}>
+                    <span style={{fontSize:10.5,letterSpacing:1.4,textTransform:"uppercase",color:C.gold,fontWeight:700}}>Notifications</span>
+                    <span style={{height:1,background:C.border,flex:1}}/>
+                  </div>
+                  <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:"14px 16px",marginBottom:14,display:"flex",alignItems:"center",gap:14}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontWeight:700,fontSize:13.5,color:C.text}}>Push notifications on this device</div>
+                      <div style={{color:C.muted,fontSize:12,marginTop:2}}>{pushOn?"On — you'll get the alerts you've toggled below.":"Turn on to get alerts on this device."}</div>
+                    </div>
+                    <button onClick={togglePush} disabled={pushBusy} style={{background:pushOn?"transparent":C.gold,color:pushOn?C.muted:"#000",border:`1px solid ${pushOn?C.border:C.gold}`,borderRadius:9,padding:"8px 16px",fontWeight:700,fontSize:12.5,cursor:"pointer",fontFamily:"'DM Sans'",opacity:pushBusy?0.6:1}}>{pushBusy?"…":pushOn?"Turn off":"Enable"}</button>
+                  </div>
+                  <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden"}}>
+                    <Row title="Athlete injury / pain" desc="When an athlete flags pain in a session." pkey="injury"/>
+                    <Row title="Big PR" desc="Only real improvements on ranked lifts — never a first-time baseline." pkey="big_pr"/>
+                    <Row title="Athlete inactive" desc="When someone on your roster goes quiet." pkey="inactive"/>
+                    <Row title="Coach's Edition ready" desc="Your weekly + monthly team report, the moment it's generated." pkey="digest"/>
+                  </div>
+                  <div style={{color:C.muted,fontSize:11.5,marginTop:12,lineHeight:1.5}}>WILCO never messages your athletes on your behalf — these alerts go only to you.</div>
+                </div>
+              );
+            })()}
 
             {/* ── REPORTS TAB ── */}
             {activeTab==="reports"&&(()=>{

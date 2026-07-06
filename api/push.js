@@ -196,7 +196,12 @@ export default async function handler(req, res) {
         throw e;
       }
     }
-    if (caller.role !== "athlete") throw httpErr(403, "Only athletes can manage notifications");
+    if (caller.role !== "athlete" && caller.role !== "coach") throw httpErr(403, "This account can't manage notifications");
+    // Coaches subscribe their own devices to a parallel table (the athlete table's
+    // athlete_id is NOT NULL). Same actions, role-routed to the right table/column.
+    const isCoachCaller = caller.role === "coach";
+    const subTable = isCoachCaller ? "coach_push_subscriptions" : "push_subscriptions";
+    const ownCol = isCoachCaller ? "coach_id" : "athlete_id";
 
     if (body.action === "subscribe") {
       const sub = body.subscription;
@@ -207,10 +212,10 @@ export default async function handler(req, res) {
       const p256dh = str(keys.p256dh, { max: 300, name: "p256dh" });
       const auth = str(keys.auth, { max: 300, name: "auth" });
       await sbWrite({
-        method: "POST", table: "push_subscriptions",
+        method: "POST", table: subTable,
         query: "?on_conflict=endpoint",
         body: {
-          athlete_id: caller.id, endpoint, p256dh, auth,
+          [ownCol]: caller.id, endpoint, p256dh, auth,
           user_agent: String(req.headers["user-agent"] || "").slice(0, 200) || null,
         },
         prefer: "resolution=merge-duplicates,return=minimal",
@@ -222,20 +227,24 @@ export default async function handler(req, res) {
       const endpoint = str(body.endpoint, { max: 1000, name: "endpoint" });
       // Scoped to the caller: you can only ever delete your own subscription row.
       await sbWrite({
-        method: "DELETE", table: "push_subscriptions",
-        query: `?endpoint=eq.${enc(endpoint)}&athlete_id=eq.${enc(caller.id)}`,
+        method: "DELETE", table: subTable,
+        query: `?endpoint=eq.${enc(endpoint)}&${ownCol}=eq.${enc(caller.id)}`,
         prefer: "return=minimal",
       });
       return res.status(200).json({ ok: true });
     }
 
-    // "welcome" fires automatically the moment an athlete turns notifications on
-    // (client enablePush); "test" is the legacy manual variant. Same payload.
+    // "welcome" fires automatically the moment notifications are turned on (client
+    // enablePush); "test" is the legacy manual variant. Same payload.
     if (body.action === "test" || body.action === "welcome") {
       ensureVapid();
-      const rows = await sbSelect("push_subscriptions", `?athlete_id=eq.${enc(caller.id)}&select=*`);
+      const rows = await sbSelect(subTable, `?${ownCol}=eq.${enc(caller.id)}&select=*`);
       if (rows.length === 0) return res.status(200).json({ sent: 0, pruned: 0 });
-      const payload = pushPayload({ title: "Coach Joe", body: "Notifications are on. I'll keep you posted.", url: "/", type: body.action });
+      const payload = pushPayload({
+        title: isCoachCaller ? "WILCO" : "Coach Joe",
+        body: isCoachCaller ? "Notifications are on. I'll flag what needs you." : "Notifications are on. I'll keep you posted.",
+        url: "/", type: body.action,
+      });
       let sent = 0;
       let pruned = 0;
       for (const sub of rows) {

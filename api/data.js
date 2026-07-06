@@ -287,10 +287,20 @@ export default async function handler(req, res) {
           // School records (tier, limits, codes) are master-only.
           throw httpErr(403, "This account can't write that data");
         } else if (table === "coaches") {
-          // Managing coaches is admin-only, and only within the admin's own school.
-          if (!isAdmin) throw httpErr(403, "This account can't write that data");
-          ownFilter = `&school_id=eq.${enc(sid)}`;
-          assertRows((r) => String(r.school_id) === String(sid));
+          if (!isAdmin) {
+            // Managing coaches is admin-only — EXCEPT a coach may update their OWN
+            // notification_prefs (self-service settings). Only that column, only their row.
+            const keys = Object.keys(body.data || {});
+            if (body.op === "update" && keys.length && keys.every((k) => k === "notification_prefs")) {
+              ownFilter = `&id=eq.${enc(caller.id)}`;
+            } else {
+              throw httpErr(403, "This account can't write that data");
+            }
+          } else {
+            // admin → coaches within their own school.
+            ownFilter = `&school_id=eq.${enc(sid)}`;
+            assertRows((r) => String(r.school_id) === String(sid));
+          }
         } else if (table === "athletes") {
           // admin → any athlete in their school; coach → only their own roster.
           ownFilter = isAdmin ? `&school_id=eq.${enc(sid)}` : `&coach_id=eq.${enc(caller.id)}`;

@@ -55,7 +55,7 @@ import {
   generateWeekly, generateMonthly, generateCoach, blendAdherenceScore, trueImprovementPRs,
 } from "./_proof.js";
 import { computeGritSnapshot } from "./_grit.js";
-import { sendToAthlete, pushPayload } from "./_push.js";
+import { sendToAthlete, pushPayload, ensureVapid, sendTo } from "./_push.js";
 
 const RESEND_KEY = process.env.RESEND_API_KEY;
 const FROM_EMAIL = process.env.FROM_EMAIL || "WILCO <noreply@trainwilco.com>";
@@ -341,6 +341,18 @@ async function runCoachReports(allAthletes, batch, coaches) {
         has_plateau: false, has_pain: report.has_pain, has_missed: report.has_missed,
       });
       if (coach.email) await sendEmail(coach.email, `WILCO Coach's Edition — Week of ${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric" })}`, buildDigestEmail(coach.name || "Coach", report.contentJson, report.label));
+      // Digest-ready push (respects the coach's notification_prefs.digest toggle).
+      try {
+        const prefs = coach.notification_prefs || {};
+        if (prefs.digest !== false) {
+          const subs = await sbSelect("coach_push_subscriptions", `?coach_id=eq.${enc(coach.id)}&select=*`);
+          if (subs.length) {
+            ensureVapid();
+            const payload = pushPayload({ title: "WILCO", body: `Your ${type === "monthly_coach" ? "monthly recap" : "Coach's Edition"} is ready.`, url: "/", type: "coach_digest" });
+            for (const s of subs) { try { await sendTo(s, payload); } catch { /* per-device best-effort */ } }
+          }
+        }
+      } catch (e) { /* push best-effort — never fail the report on it */ }
       results.push({ coach: coach.name, athletes: roster.length, type });
     } catch (e) { console.error(`[proof-feed] coach report failed for ${coachId}:`, e.message); results.push({ coach: coachId, ok: false, error: e.message }); }
   }
@@ -452,7 +464,7 @@ export default async function handler(req, res) {
     if (body.coach_id) {
       const roster = await sbSelect("athletes", `?coach_id=eq.${encodeURIComponent(body.coach_id)}&select=*`);
       const rosterBatch = await fetchBatch(roster.map((a) => a.id));
-      const coaches = await sbSelect("coaches", `?id=eq.${encodeURIComponent(body.coach_id)}&select=id,name,email,school_id`);
+      const coaches = await sbSelect("coaches", `?id=eq.${encodeURIComponent(body.coach_id)}&select=id,name,email,school_id,notification_prefs`);
       const coaches2 = await runCoachReports(roster, rosterBatch, coaches);
       return res.status(200).json({ ok: true, coaches: coaches2 });
     }
@@ -495,7 +507,7 @@ export default async function handler(req, res) {
       const rosterIdList = coachIds.map((id) => `"${id}"`).join(",");
       const roster = await sbSelect("athletes", `?coach_id=in.(${rosterIdList})&select=*`);
       const rosterBatch = await fetchBatch(roster.map((a) => a.id));
-      const coaches = await sbSelect("coaches", `?select=id,name,email,school_id`);
+      const coaches = await sbSelect("coaches", `?select=id,name,email,school_id,notification_prefs`);
       results.coaches = await runCoachReports(roster, rosterBatch, coaches);
     }
 
