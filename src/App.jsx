@@ -1251,6 +1251,9 @@ export const GSA = `
 /* electric-blue accent surfaces */
 .a-card{background:${CA.navy2};border:1px solid ${CA.border};border-radius:14px;}
 .a-glow{box-shadow:0 0 0 1px ${CA.accent}22, 0 8px 30px -12px ${CA.accent}55;}
+/* hide the horizontal scrollbar on swipe rows (kills the dead scrollbar band) */
+.no-sb{scrollbar-width:none;-ms-overflow-style:none;}
+.no-sb::-webkit-scrollbar{display:none;width:0;height:0;}
 /* scrolling suggestion line — one continuous track, phrases split by a glowing
    divider; translateX loop, paused when off-screen or reduced-motion */
 @keyframes aTicker{from{transform:translateX(0);}to{transform:translateX(-50%);}}
@@ -2168,7 +2171,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
         {phase==="report"&&!loading&&activeQuestions.length>0&&(
           <div className="proof-drop" style={{background:`linear-gradient(180deg,${CA.navy3},${CA.navy2})`,border:`1px solid ${CA.gold}73`,borderRadius:14,padding:15,marginTop:6}}>
             <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:8}}>
-              <div style={{width:30,height:30,borderRadius:"50%",background:`linear-gradient(135deg,${CA.gold},#8a5a12)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:15,color:"#1a1200",flexShrink:0}}>J</div>
+              <div style={{width:30,height:30,borderRadius:"50%",background:CA.gold,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:15,color:"#04070f",flexShrink:0}}>J</div>
               <div>
                 <div style={{fontSize:12,fontWeight:700,color:CA.text}}>Coach Joe has {topQuestions.length} question{topQuestions.length===1?"":"s"}</div>
                 <div style={{fontSize:10,color:CA.muted}}>{isMonthly?"Monthly":"Weekly"} check-in · ~2 min</div>
@@ -4388,7 +4391,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
   const quick = ["What's my programmed workout for today?","Review my program and tell me what you think.","No squat rack today","My knee is sore","I'm at the hotel gym","I can't do pull-ups","Bench alternative?"];
 
   return (
-    <div style={{height:"100dvh",display:"flex",flexDirection:"column",backgroundColor:CA.navy,backgroundImage:"linear-gradient(rgba(4,7,15,0.93), rgba(4,7,15,0.975)), url(/chat-bg.jpg)",backgroundSize:"cover",backgroundPosition:"center",maxWidth:600,margin:"0 auto"}}>
+    <div style={{height:"100dvh",display:"flex",flexDirection:"column",backgroundColor:CA.navy,backgroundImage:"linear-gradient(rgba(4,7,15,0.60), rgba(4,7,15,0.72)), url(/chat-bg.jpg)",backgroundSize:"cover",backgroundPosition:"center",maxWidth:600,margin:"0 auto"}}>
       <style>{GS}{GSA}</style>
       {/* Header */}
       <div style={{background:CA.navy2,borderBottom:`1px solid ${CA.border}`,paddingTop:"calc(10px + env(safe-area-inset-top, 0px))",paddingBottom:"10px",paddingLeft:"14px",paddingRight:"14px",display:"flex",flexDirection:"column",gap:10,flexShrink:0}}>
@@ -4468,7 +4471,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           <>
             {messages.map((m,i)=>(
               <div key={i} className="fade-up" style={{marginBottom:12,display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
-                {m.role==="assistant"&&<div style={{width:28,height:28,borderRadius:"50%",background:`linear-gradient(135deg,${CA.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#000",flexShrink:0,marginRight:8,marginTop:2}}>J</div>}
+                {m.role==="assistant"&&<div style={{width:28,height:28,borderRadius:"50%",background:CA.gold,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#04070f",flexShrink:0,marginRight:8,marginTop:2}}>J</div>}
                 <div style={{maxWidth:"80%",padding:"10px 14px",borderRadius:m.role==="user"?"16px 16px 4px 16px":"16px 16px 16px 4px",background:m.role==="user"?CA.gold:CA.navy2,color:m.role==="user"?"#000":CA.text,fontSize:14,lineHeight:1.7,border:m.role==="assistant"?`1px solid ${CA.border}`:"none",whiteSpace:"pre-wrap"}}>
                   {m.role==="assistant"?<StreamText text={m.content}/>:m.content}
                 </div>
@@ -4476,7 +4479,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             ))}
             {(loading||videoLoading)&&(
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
-                <div style={{width:28,height:28,borderRadius:"50%",background:`linear-gradient(135deg,${CA.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#000"}}>J</div>
+                <div style={{width:28,height:28,borderRadius:"50%",background:CA.gold,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#04070f"}}>J</div>
                 <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:"16px 16px 16px 4px",padding:"12px 16px",display:"flex",gap:5}}>
                   {[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:CA.muted,animation:`pulse 1.2s ease ${i*0.2}s infinite`}}/>)}
                 </div>
@@ -4490,7 +4493,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
       {/* Quick replies / Session check prompt.
           Both are ONE row that scrolls HORIZONTALLY — no wrapping, no vertical
           scroll. (Will: keep it a single row, swipe sideways for the rest.) */}
-      <div style={{padding:"0 16px 8px",display:"flex",gap:6,overflowX:"auto",flexShrink:0,alignItems:"center",flexWrap:"nowrap"}}>
+      <div className="no-sb" style={{padding:"0 14px 4px",display:"flex",gap:6,overflowX:"auto",flexShrink:0,alignItems:"center",flexWrap:"nowrap"}}>
         {sessionCheckPending?(
           <>
             <span style={{color:CA.muted,fontSize:12,flexShrink:0}}>↑</span>
@@ -4517,7 +4520,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           the "safety space" Will has had removed 3× now (47941e6). The textbook
           iOS pattern is wrong for this app; leave it flat. Same rule for every
           bottom bar / modal footer below. */}
-      <div style={{padding:"8px 14px",paddingBottom:"8px",flexShrink:0,borderTop:`1px solid ${CA.border}`,background:CA.navy2}}>
+      <div style={{padding:"6px 14px 8px",flexShrink:0,borderTop:`1px solid ${CA.border}`,background:CA.navy2}}>
         <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
           {/* Video upload button */}
           <input ref={videoInputRef} type="file" accept="video/*" style={{display:"none"}} onChange={handleVideoUpload}/>
