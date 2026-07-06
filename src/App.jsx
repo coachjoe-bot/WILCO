@@ -1637,7 +1637,7 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
       {/* Lead — strength ranking */}
       <div className="proof-drop" style={{textAlign:"center"}}>
         <div style={{...kick(CA.gold),textAlign:"center"}}>Strength Ranking</div>
-        <div style={{fontFamily:NEWS.serif,fontWeight:800,fontSize:32,lineHeight:1.0,color:NEWS.ink,margin:"2px 0 5px"}}>{headline}</div>
+        <div style={{fontFamily:NEWS.serif,fontWeight:800,fontSize:32,lineHeight:1.0,color:NEWS.ink,margin:"2px 0 5px"}}>{String(headline||"").split(" ").map((w,i)=>(<span key={i} className="a-flap" style={{animationDelay:`${i*0.06}s`,marginRight:"0.26em"}}>{w}</span>))}</div>
         {rankSec&&<div style={{fontFamily:NEWS.body,fontStyle:"italic",fontSize:13,lineHeight:1.35,color:NEWS.ink2,padding:"0 6px 6px"}}>{truncate(firstSentence(rankSec.body),120)}</div>}
         {hero&&hero.score!=null&&(
           <div style={{display:"flex",justifyContent:"center",alignItems:"baseline",gap:10,padding:"2px 0 4px"}}>
@@ -5552,7 +5552,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
               const dispName = b.name;                           // canonical (resolveLift)
               const isBW = b.bwLoaded;                            // pull-ups / dips / chin-ups / muscle-ups → bodyweight + added
               return (
-                <div key={i} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:12}}>
+                <div key={i} style={{background:CA.navy2,border:`1px solid ${tierIdx>=4?`${TIER_COLORS[tierIdx]}66`:CA.border}`,borderRadius:12,padding:16,marginBottom:12,boxShadow:tierIdx>=2?`0 0 ${6+tierIdx*3}px -3px ${TIER_COLORS[tierIdx]}55`:"none",transition:"box-shadow .3s,border-color .3s"}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
                     <div>
                       <div style={{color:CA.text,fontWeight:700,fontSize:14,display:"flex",alignItems:"center",gap:6}}>{dispName}{b.actual&&<span title="Using your actual 1RM" style={{background:`${CA.gold}22`,border:`1px solid ${CA.gold}`,color:CA.gold,borderRadius:4,padding:"0 5px",fontSize:9,fontWeight:700,letterSpacing:1}}>PR</span>}</div>
