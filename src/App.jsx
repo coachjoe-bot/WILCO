@@ -4388,7 +4388,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
   const quick = ["What's my programmed workout for today?","Review my program and tell me what you think.","No squat rack today","My knee is sore","I'm at the hotel gym","I can't do pull-ups","Bench alternative?"];
 
   return (
-    <div style={{height:"100dvh",display:"flex",flexDirection:"column",background:CA.navy,maxWidth:600,margin:"0 auto"}}>
+    <div style={{height:"100dvh",display:"flex",flexDirection:"column",backgroundColor:CA.navy,backgroundImage:"linear-gradient(rgba(4,7,15,0.93), rgba(4,7,15,0.975)), url(/chat-bg.jpg)",backgroundSize:"cover",backgroundPosition:"center",maxWidth:600,margin:"0 auto"}}>
       <style>{GS}{GSA}</style>
       {/* Header */}
       <div style={{background:CA.navy2,borderBottom:`1px solid ${CA.border}`,paddingTop:"calc(10px + env(safe-area-inset-top, 0px))",paddingBottom:"10px",paddingLeft:"14px",paddingRight:"14px",display:"flex",flexDirection:"column",gap:10,flexShrink:0}}>
