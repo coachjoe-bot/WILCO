@@ -16,6 +16,7 @@ import {
   getPD, isRealSession, groupIntoSessions, epley1RM, buildLiftHistory,
   detectPlateaus, aggregateInjuries, computeRankMovement, compareProgramVsActual,
   buildOneRMs, totalSetVolume, painTrend, buildBrief, athleteArchetype,
+  buildCoachTeamBrief, buildCoachQuestionBank, classifyTiers, blendAdherenceScore,
 } from "./_proofcore.js";
 
 // Re-export the pure core so downstream importers that still do
@@ -24,6 +25,7 @@ export {
   getPD, isRealSession, groupIntoSessions, epley1RM, buildLiftHistory,
   detectPlateaus, aggregateInjuries, computeRankMovement, compareProgramVsActual,
   buildOneRMs, totalSetVolume, painTrend, buildBrief, athleteArchetype,
+  buildCoachTeamBrief, buildCoachQuestionBank, classifyTiers, blendAdherenceScore,
 };
 
 export const formatSessionForAI = (group) => {
@@ -308,74 +310,87 @@ Keep each to 1-3 punchy sentences. New information only.`;
 // COACH (§10). A report, not a chat. Aggregates the coach's athletes; outliers and
 // the snapshot are computed in CODE, Coach Joe writes only the actions narrative.
 export async function generateCoach(coach, perAthlete, deps, type = "weekly_coach") {
-  // perAthlete: [{ athlete, brief }]
-  const n = perAthlete.length;
-  const totalSessions = perAthlete.reduce((s, a) => s + a.brief.sessions.thisWeek, 0);
-  const avgSessions = n ? +(totalSessions / n).toFixed(1) : 0;
+  // perAthlete (enriched): [{ athlete, brief, adherence, snap, score, hasProgram }].
+  // Older callers passing just { athlete, brief } still work — buildCoachTeamBrief
+  // degrades gracefully (empty strengths/adherence rather than throwing).
+  const isMonthly = type === "monthly_coach";
+  const team = buildCoachTeamBrief(perAthlete);
 
-  // strength movement: average est-1RM delta across athletes per lift
-  const deltaByLift = {};
-  let newPRcount = 0;
-  const notablePRs = [];
-  const injuryGroup = {};
-  const atRisk = [], mostImproved = [], volumeCratered = [];
-  for (const { athlete, brief } of perAthlete) {
-    newPRcount += brief.prs.length;
-    brief.prs.slice(0, 2).forEach((p) => notablePRs.push({ athlete: athlete.name, ...p }));
-    let bestDelta = 0;
-    for (const l of brief.lifts) {
-      if (l.deltaVsLastWeek != null) {
-        deltaByLift[l.lift] = deltaByLift[l.lift] || [];
-        deltaByLift[l.lift].push(l.deltaVsLastWeek);
-        if (l.deltaVsLastWeek > bestDelta) bestDelta = l.deltaVsLastWeek;
-      }
-    }
-    for (const r of brief.injuries.recurring || []) injuryGroup[r.area] = (injuryGroup[r.area] || 0) + 1;
-    if (brief.sessions.thisWeek === 0) atRisk.push(athlete.name);
-    if (bestDelta >= 10) mostImproved.push({ name: athlete.name, delta: bestDelta });
-    if (brief.volume?.material && brief.volume.rolledGapPct >= 25) volumeCratered.push({ name: athlete.name, gap: brief.volume.rolledGapPct });
-  }
-  const strengthMovement = Object.entries(deltaByLift).map(([lift, ds]) => ({ lift, avgDelta: +(ds.reduce((a, b) => a + b, 0) / ds.length).toFixed(1) }))
-    .sort((a, b) => Math.abs(b.avgDelta) - Math.abs(a.avgDelta)).slice(0, 5);
-
-  const snapshot = {
-    athletes: n, totalSessions, avgSessions,
-    newPRs: newPRcount,
-    strengthMovement,
-    notablePRs: notablePRs.slice(0, 6),
-    injuryGroup: Object.entries(injuryGroup).map(([area, count]) => ({ area, count })).sort((a, b) => b.count - a.count),
-    outliers: {
-      mostImproved: mostImproved.sort((a, b) => b.delta - a.delta).slice(0, 3),
-      atRisk: atRisk.slice(0, 8),
-      volumeCratered: volumeCratered.sort((a, b) => b.gap - a.gap).slice(0, 5),
-    },
+  // Compact team read handed to the model — grouped signals + the specific names
+  // that matter. The MODEL never sees raw workout JSON (same rule as the athlete
+  // digest); it turns these numbers into Coach Joe's voice and never invents any.
+  const modelTeam = {
+    roster: team.n, active: team.active, activePct: team.activePct,
+    sessionsThisWeek: team.totalSessions, avgPerAthlete: team.avgSessions,
+    adherenceAvgPct: team.adherenceAvg, athletesWithNoProgram: team.noProgram,
+    strengthMovement: team.strengthMovement,
+    programStrengths: team.strengths.map((s) => ({ lift: s.name, teamTier: s.tierName })),
+    programWeaknesses: team.weaknesses.map((s) => ({ lift: s.name, teamTier: s.tierName })),
+    newPRs: team.newPRs, notablePRs: team.notablePRs,
+    injuryClusters: team.injuryClusters, sharpestInjuries: team.sharpInjuries,
+    quietAthletes: team.quiet, adherenceStrugglers: team.strugglers,
+    rawSetVolume: team.volumeTrend,
   };
 
-  const system = `${COACH_VOICE}
-You are writing the COACH actions for a team report (not the athlete). The numbers are pre-computed and shown to the coach separately — do NOT restate them. Return ONLY JSON: {"actions":[".. 2-4 concrete actions .."],"summary":".. one-line team read .."}.
-Each action turns the aggregate into something to DO: cluster injuries -> a team warm-up emphasis; disengaging athletes -> outreach; a lagging lift category -> a programming nudge. Specific, not generic.`;
+  // Prior context the coach gave us in past editions (season phase, block goal,
+  // fatigue read, per-athlete notes) — written to coach_context. Lets the edition
+  // advise against the real situation instead of guessing.
+  const ctx = (deps.coachContext || "").trim();
 
-  const user = `TEAM SNAPSHOT (JSON):\n${JSON.stringify(snapshot, null, 1)}`;
-  const raw = await deps.askClaudeServer({ system, user, maxTokens: 700, feature: "proof_coach", attribution: deps.attribution });
+  const system = `${COACH_VOICE}
+You are writing THE COACH'S EDITION — a ${isMonthly ? "monthly" : "weekly"} team report for the coach (not an athlete). The subject is the TEAM's direction; individuals appear only as named CALL-OUTS (evidence for a trend, or an exception that needs a decision). Grouped read first, names where they matter — never a roster dump.
+
+The numbers are pre-computed and shown to the coach in the layout — do NOT restate raw stats; turn them into a read. Cite specific lifts/areas/names from the data, invent nothing. Lean and direct.
+
+Return ONLY JSON with these keys (string or null — null when there's nothing real to say):
+{"week_on_floor":..,"program_read":..,"winning":..,"people_to_watch":..,"the_drift":..,${isMonthly ? `"month_read":..,` : ``}"team_focus":..}
+- week_on_floor: the team's ${isMonthly ? "month" : "week"} — attendance, momentum (are sessions holding/rising or sliding), how the room feels. One tight paragraph.
+- program_read: what the PROGRAM is building well vs where it's light, from the team's benchmark tiers. Name the lagging lift(s) and, if the data shows it, the 1-2 athletes stuck there. This is about the programming, not individuals.
+- winning: where the team is genuinely progressing — team est-1RM movement + the standout PRs by name. null if nothing real.
+- people_to_watch: injuries as a TEAM pattern first (a shared area worth a warm-up emphasis), then the sharpest individual by name. null if no injuries.
+- the_drift: athletes slipping — quiet (no session) or adherence dropping — by name. Frame as who to keep an eye on. Do NOT tell the coach to message them (the app has no messaging); a reach-out is the coach's own call. null if none.${isMonthly ? `
+- month_read: the multi-week arc the weekly can't see — is the block working, are they pacing toward the goal. null if not enough data.` : ``}
+- team_focus: REQUIRED. End on ONE clear directive for the team this ${isMonthly ? "block" : "week"} (a programming move tied to the weak spot or the momentum), plus the handful of named individual actions worth taking. Aspire forward — an injury or a quiet athlete shapes HOW, but the headline is where the team goes next.
+${ctx ? `\nWHAT THE COACH TOLD YOU (weigh this heavily — season, goals, how they're holding up):\n${ctx}` : ``}`;
+
+  const user = `TEAM READ (JSON):\n${JSON.stringify(modelTeam, null, 1)}`;
+  const raw = await deps.askClaudeServer({ system, user, maxTokens: isMonthly ? 1500 : 1200, feature: "proof_coach", attribution: deps.attribution });
   const obj = parseJsonLoose(raw) || {};
 
-  const sections = [];
-  sections.push({ label: "TEAM SNAPSHOT", body: `${n} athletes · ${totalSessions} sessions this week · ${avgSessions} avg/athlete · ${newPRcount} new PRs.` });
-  if (strengthMovement.length) sections.push({ label: "STRENGTH MOVEMENT", body: strengthMovement.map((s) => `${s.lift}: ${s.avgDelta > 0 ? "+" : ""}${s.avgDelta} lbs avg est-1RM`).join("\n") });
-  if (snapshot.notablePRs.length) sections.push({ label: "NOTABLE PRS", body: snapshot.notablePRs.map((p) => `${p.athlete} — ${p.exercise} ${p.weight}×${p.reps || 1}`).join("\n") });
-  if (snapshot.injuryGroup.length) sections.push({ label: "INJURY REPORT", body: snapshot.injuryGroup.map((i) => `${i.area}: ${i.count} athlete${i.count !== 1 ? "s" : ""}`).join("\n"), flag: "warn" });
+  const sections = sectionsFrom(obj, [
+    { key: "week_on_floor", label: "THE WEEK ON THE FLOOR" },
+    { key: "program_read", label: "PROGRAM READ-THROUGH", flag: team.weaknesses.length ? "warn" : null },
+    { key: "winning", label: "WHERE YOU'RE WINNING" },
+    { key: "people_to_watch", label: "PEOPLE TO WATCH", flag: "warn" },
+    { key: "the_drift", label: "THE DRIFT" },
+    ...(isMonthly ? [{ key: "month_read", label: "THE MONTH IN REVIEW" }] : []),
+    { key: "team_focus", label: "THIS WEEK'S TEAM FOCUS" },
+  ]);
+  if (!sections.length) {
+    sections.push({ label: "THE WEEK ON THE FLOOR", body: `${team.n} athletes, ${team.totalSessions} sessions logged. ${team.active} training this week.` });
+  }
+
+  const intro = `${(coach.name || "Coach").split(" ")[0]} — here's the team's ${isMonthly ? "month" : "week"}.`;
 
   return {
-    label: `${type === "monthly_coach" ? "MONTHLY" : "WEEKLY"} COACH REPORT — ${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}`,
+    label: `${isMonthly ? "THE COACH'S EDITION · MONTHLY" : "THE COACH'S EDITION"} — ${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}`,
     contentJson: {
-      intro: obj.summary || `Team report — ${n} athletes.`,
+      intro,
       sections,
-      outliers: snapshot.outliers,
-      actions: Array.isArray(obj.actions) ? obj.actions : [],
-      flags: { has_pain: snapshot.injuryGroup.length > 0, has_missed: atRisk.length > 0 },
+      team,                                          // full precomputed aggregates → client renders the rail/bars/PR list
+      questions: buildCoachQuestionBank(team),       // the "calls & context" loop
+      // Back-compat: the current Reports renderer still reads outliers/actions until
+      // the CoachLetter UI lands. Map the new team read onto the old shape.
+      outliers: {
+        mostImproved: team.strengthMovement.filter((s) => s.avgDelta > 0).slice(0, 3).map((s) => ({ name: s.lift, delta: s.avgDelta })),
+        atRisk: team.quiet.map((q) => q.athlete),
+        volumeCratered: team.strugglers.map((s) => ({ name: s.athlete, gap: 100 - s.score })),
+      },
+      actions: [],
+      flags: { has_pain: team.injuryClusters.length > 0 || team.sharpInjuries.length > 0, has_missed: team.quiet.length > 0 },
     },
     has_plateau: false,
-    has_pain: snapshot.injuryGroup.length > 0,
-    has_missed: atRisk.length > 0,
+    has_pain: team.injuryClusters.length > 0 || team.sharpInjuries.length > 0,
+    has_missed: team.quiet.length > 0,
   };
 }

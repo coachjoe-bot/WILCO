@@ -18,7 +18,7 @@
 // — they are intentionally distinct helpers. Use this one for per-athlete brief
 // math; do not conflate the two.
 
-import { epley1RM, computeGritSnapshot, TIER_NAMES } from "./grit.js";
+import { epley1RM, computeGritSnapshot, TIER_NAMES, getBenchKey } from "./grit.js";
 
 // ── parsed_data access ────────────────────────────────────────────────────────
 export const getPD = (w) => {
@@ -364,4 +364,186 @@ export function athleteArchetype(a) {
   if (a.afsc || a.pt_scores || a.waist_inches || a.rank) return "military";
   if (a.graduation_year || a.recruiting_intent || a.position_or_event) return "highschool";
   return "strength";
+}
+
+// ─── THE COACH'S EDITION — team brief (§ coach-experience-vision Reports) ──────
+// The team-level analogue of buildBrief: takes the coach's roster (each athlete's
+// per-athlete brief + adherence + Grit snapshot, already computed) and rolls it up
+// into ONE team read — grouped signals with the specific names that matter as
+// call-outs. Feeds the enriched generateCoach prose AND the coach question bank.
+// Pure/deterministic (zero tokens); the AI only turns these numbers into voice.
+//
+// `perAthlete`: [{ athlete, brief, adherence, snap, score, hasProgram }]
+//   • brief      = buildBrief(...) output (sessions, lifts w/ deltaVsLastWeek, prs,
+//                  injuries{active,recurring}, volumeTrend)
+//   • adherence  = compareProgramVsActual(...) | null
+//   • snap       = computeGritSnapshot(...) { rankedLifts:[{name,benchKey,tierIdx}], … }
+//   • score      = blended adherence 0-100 | null (no program)
+const firstNameLast = (name) => {
+  const parts = String(name || "").trim().split(/\s+/);
+  if (parts.length < 2) return parts[0] || "Athlete";
+  return `${parts[0]} ${parts[parts.length - 1][0]}.`;
+};
+
+// Split ranked benchmarks (each {avgTier 0-7, …}, sorted desc) into strengths &
+// weaknesses by TIER THRESHOLD, with fallbacks so a mid team still gets both.
+// Shared by the server team brief and the client Overview so they never disagree.
+export function classifyTiers(benchAgg) {
+  let strengths = benchAgg.filter((x) => x.avgTier >= 4).slice(0, 3);              // Elite+
+  let weaknesses = benchAgg.filter((x) => x.avgTier <= 2).sort((a, b) => a.avgTier - b.avgTier).slice(0, 3); // Sharp or below
+  if (!strengths.length) strengths = benchAgg.slice(0, Math.min(2, benchAgg.length));
+  if (!weaknesses.length) weaknesses = benchAgg.slice().reverse().filter((w) => !strengths.includes(w)).slice(0, 2);
+  return { strengths, weaknesses };
+}
+
+// Blended adherence score (0-100) or null when there's no program to grade against.
+// Half "did they show up" (sessions vs prescribed days), half the proofcore volume
+// gap. Shared by the server team brief and the client Overview so both agree.
+export function blendAdherenceScore(thisWeekCount, adherence, hasProgram, presDays) {
+  const showUp = presDays ? Math.min(1, thisWeekCount / presDays) : (thisWeekCount > 0 ? 1 : 0);
+  const vol = adherence ? Math.max(0, 1 - adherence.rolledGapPct / 100) : null;
+  if (vol != null) return Math.round(100 * (0.5 * showUp + 0.5 * vol));
+  return hasProgram ? Math.round(100 * showUp) : null;
+}
+
+export function buildCoachTeamBrief(perAthlete) {
+  const rows = perAthlete.filter((r) => r && r.athlete && r.brief);
+  const n = rows.length;
+  const nm = (a) => firstNameLast(a.name);
+
+  // ── attendance & adherence ──
+  const active = rows.filter((r) => r.brief.sessions.thisWeek > 0);
+  const totalSessions = rows.reduce((s, r) => s + r.brief.sessions.thisWeek, 0);
+  const scored = rows.filter((r) => r.score != null);
+  const adherenceAvg = scored.length ? Math.round(scored.reduce((s, r) => s + r.score, 0) / scored.length) : null;
+  const noProgram = rows.filter((r) => r.score == null).length;
+
+  // ── strength movement: avg est-1RM delta per lift across the roster ──
+  const deltaByLift = {};
+  for (const r of rows) {
+    for (const l of r.brief.lifts || []) {
+      if (l.deltaVsLastWeek != null) (deltaByLift[l.lift] = deltaByLift[l.lift] || []).push(l.deltaVsLastWeek);
+    }
+  }
+  const strengthMovement = Object.entries(deltaByLift)
+    .map(([lift, ds]) => ({ lift, avgDelta: +(ds.reduce((a, b) => a + b, 0) / ds.length).toFixed(1), n: ds.length }))
+    .sort((a, b) => Math.abs(b.avgDelta) - Math.abs(a.avgDelta)).slice(0, 5);
+
+  // ── program strengths & weaknesses: avg Grit tier per benchmark lift ──
+  const byBench = {};
+  for (const r of rows) {
+    for (const l of (r.snap?.rankedLifts || [])) {
+      const bk = getBenchKey(l.key) || l.benchKey;
+      if (!bk) continue;
+      (byBench[bk] = byBench[bk] || { name: l.name, tiers: [] }).tiers.push(l.tierIdx);
+    }
+  }
+  const benchAgg = Object.entries(byBench)
+    .map(([bench, v]) => ({ bench, name: v.name, avgTier: v.tiers.reduce((a, b) => a + b, 0) / v.tiers.length, tierName: TIER_NAMES[Math.round(v.tiers.reduce((a, b) => a + b, 0) / v.tiers.length)], n: v.tiers.length }))
+    .filter((x) => x.n >= 2)   // only benchmarks the TEAM has (not a lone athlete)
+    .sort((a, b) => b.avgTier - a.avgTier);
+  // Threshold, not blind top/bottom split: an ELITE-avg lift is a strength, a
+  // SHARP-or-below lift is a weakness. With few ranked lifts, a naive top-3 would
+  // mislabel the roster's WEAKEST lift as a "strength." Tiers: 0 Rookie … 4 Elite.
+  const { strengths, weaknesses } = classifyTiers(benchAgg);
+
+  // ── notable true PRs (already improvement-only in the brief.prs list) ──
+  const notablePRs = [];
+  let newPRs = 0;
+  for (const r of rows) {
+    newPRs += (r.brief.prs || []).length;
+    (r.brief.prs || []).slice(0, 2).forEach((p) => notablePRs.push({ athlete: nm(r.athlete), exercise: p.exercise, weight: p.weight, reps: p.reps, e1rm: p.e1rm }));
+  }
+  notablePRs.sort((a, b) => (b.e1rm || 0) - (a.e1rm || 0));
+
+  // ── injury clusters (team pattern) + sharpest individual (named call-out) ──
+  const areaCount = {};
+  const sharp = []; // athletes with a recurring (2+) active area this window
+  for (const r of rows) {
+    const rec = r.brief.injuries?.recurring || [];
+    for (const area of (r.brief.injuries?.active || [])) areaCount[area] = (areaCount[area] || 0) + 1;
+    if (rec.length) sharp.push({ athlete: nm(r.athlete), area: rec[0].area, count: rec[0].count });
+  }
+  const injuryClusters = Object.entries(areaCount).map(([area, count]) => ({ area, count })).filter((x) => x.count >= 2).sort((a, b) => b.count - a.count);
+  sharp.sort((a, b) => b.count - a.count);
+
+  // ── the drift: quiet (no session this week) + adherence strugglers ──
+  const quiet = rows.filter((r) => r.brief.sessions.thisWeek === 0)
+    .map((r) => ({ athlete: nm(r.athlete), lastWeek: r.brief.sessions.lastWeek }));
+  const strugglers = rows.filter((r) => r.score != null && r.score < 55)
+    .map((r) => ({ athlete: nm(r.athlete), score: r.score }))
+    .sort((a, b) => a.score - b.score);
+
+  // ── team volume trend (raw working-set totals, this week vs last) ──
+  const volThis = rows.reduce((s, r) => s + (r.brief.volumeTrend?.thisWeekSets || 0), 0);
+  const volLast = rows.reduce((s, r) => s + (r.brief.volumeTrend?.lastWeekSets || 0), 0);
+
+  return {
+    n, active: active.length, activePct: n ? Math.round(100 * active.length / n) : 0,
+    totalSessions, avgSessions: n ? +(totalSessions / n).toFixed(1) : 0,
+    adherenceAvg, noProgram,
+    strengthMovement, strengths, weaknesses,
+    newPRs, notablePRs: notablePRs.slice(0, 6),
+    injuryClusters, sharpInjuries: sharp.slice(0, 4),
+    quiet, strugglers: strugglers.slice(0, 5),
+    volumeTrend: { thisWeekSets: volThis, lastWeekSets: volLast, deltaSets: volThis - volLast },
+  };
+}
+
+// ─── COACH QUESTION BANK — the "calls & context" loop (mirror of the athlete's) ─
+// Two kinds, in order:
+//   • CALLS — decisions the coach taps Apply/Skip/Edit on (or a soft suggestion
+//     when there's nothing to send, since the app has no messaging).
+//   • CONTEXT — questions that gather the team read the logs can't show (season
+//     phase, block goal, fatigue, per-athlete notes) → persisted to coach_context
+//     so next week's edition is written against it.
+// Deterministic, ranked, hard stop. `kind` tells the client how to act/persist.
+export function buildCoachQuestionBank(team) {
+  const q = [];
+
+  // 1. Program weakness → offer to draft an emphasis (a "call")
+  const weak = (team.weaknesses || []).filter((w) => w.avgTier <= 2); // Rookie/Gritty/Sharp-ish
+  if (weak.length) {
+    const names = weak.map((w) => w.name);
+    q.push({
+      id: "program_focus", kind: "program_focus", deeper: false, action: true,
+      meta: { lifts: names, benches: weak.map((w) => w.bench) },
+      text: `${names.length > 1 ? `${names.slice(0, 2).join(" and ")} are` : `${names[0]} is`} the roster's weak spot (${weak[0].tierName.toLowerCase()} team average). Want to prioritize ${names.length > 1 ? "that work" : names[0].toLowerCase()} in the next block?`,
+    });
+  }
+
+  // 2. Sharpest injury → offer a protective change for that named athlete (a "call")
+  const inj = (team.sharpInjuries || [])[0];
+  if (inj) {
+    q.push({
+      id: "injury_apply", kind: "injury_apply", deeper: false, action: true,
+      meta: { athlete: inj.athlete, area: inj.area },
+      text: `${inj.athlete}'s ${inj.area} flagged ${inj.count} sessions running. Deload or adjust their work this week?`,
+    });
+  }
+
+  // 3. The drift → a SUGGESTION to reach out (no messaging; coach's own time)
+  const drifting = [...(team.quiet || []).map((x) => x.athlete), ...(team.strugglers || []).map((x) => x.athlete)];
+  const uniqDrift = [...new Set(drifting)].slice(0, 3);
+  if (uniqDrift.length) {
+    q.push({
+      id: "reach_out", kind: "reach_out", deeper: false, action: false, // suggestion, not an action
+      meta: { names: uniqDrift },
+      text: `${uniqDrift.length > 1 ? `${uniqDrift.slice(0, -1).join(", ")} and ${uniqDrift.slice(-1)} are` : `${uniqDrift[0]} is`} slipping off the plan. Might be worth a word when you get the chance — no messages get sent, just a nudge for you.`,
+    });
+  }
+
+  // ── CONTEXT: help the AI read the room (→ coach_context) ──
+  q.push({ id: "season", kind: "season", deeper: false, context: true,
+    options: ["Off-season", "Pre-season", "In-season", "Post-season"],
+    text: `Where are you in the season right now?` });
+  q.push({ id: "block_goal", kind: "context_text", deeper: false, context: true,
+    text: `What's the main goal for this block?` });
+  q.push({ id: "team_response", kind: "team_response", deeper: false, context: true,
+    options: ["Fresh, ready for more", "Holding up well", "Getting tired", "Beat up"],
+    text: `How are they responding to the current program — fresh, holding up, or running down?` });
+  q.push({ id: "athlete_notes", kind: "context_text", deeper: true, context: true,
+    text: `Anything about specific athletes I should keep in mind next week?` });
+
+  return q;
 }
