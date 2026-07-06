@@ -1569,12 +1569,15 @@ const injuryTrend = (body) => {
 // weekly broadsheet ("The Proof"), so it gets its own warm newsprint ink + serif type
 // (Playfair for the masthead/headlines, system Georgia for body columns — no heavy
 // dependency). Palette stays deliberately separate from C.
+// "The Proof" reads as a HIGH-TECH broadsheet: serif masthead for editorial
+// authority, but cool LED-white ink + blue-tinted hairline rules so it's crisp on
+// the near-black app (the old warm cream ink washed out to a faded-newspaper look).
 const NEWS = {
   serif: "'Playfair Display', Georgia, 'Times New Roman', serif",
   body: "Georgia, 'Times New Roman', serif",
   label: "'DM Sans', system-ui, sans-serif",
-  ink: "#e9e3d4", ink2: "#b7b0a0", ink3: "#8b8474",
-  rule: "rgba(233,227,212,.22)", rule2: "rgba(233,227,212,.42)",
+  ink: "#eaf1ff", ink2: "#aebfd8", ink3: "#7f90ad",
+  rule: "rgba(120,160,255,.24)", rule2: "rgba(120,160,255,.46)",
 };
 const titleCase = (s) => String(s||"").toLowerCase().replace(/\b([a-z])/g,(m,ch)=>ch.toUpperCase());
 const truncate = (s, n) => {
@@ -4494,28 +4497,33 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         <div ref={bottomRef}/>
       </div>
 
-      {/* Quick replies / Session check prompt.
-          Both are ONE row that scrolls HORIZONTALLY — no wrapping, no vertical
-          scroll. (Will: keep it a single row, swipe sideways for the rest.) */}
-      <div className="no-sb" style={{padding:"0 14px 4px",display:"flex",gap:6,overflowX:"auto",flexShrink:0,alignItems:"center",flexWrap:"nowrap"}}>
-        {sessionCheckPending?(
-          <>
-            <span style={{color:CA.muted,fontSize:12,flexShrink:0}}>↑</span>
-            <button onClick={()=>confirmSession(false)}
-              style={{background:`${CA.green}20`,border:`1px solid ${CA.green}`,color:CA.green,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
-              Same workout
-            </button>
-            <button onClick={()=>confirmSession(true)}
-              style={{background:`${CA.gold}20`,border:`1px solid ${CA.gold}`,color:CA.gold,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
-              New session
-            </button>
-          </>
-        ):(
-          quick.map(p=>(
-            <button key={p} onClick={()=>setInput(p)} style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:20,padding:"6px 12px",cursor:"pointer",fontSize:12,whiteSpace:"nowrap",flexShrink:0}}>{p}</button>
-          ))
-        )}
-      </div>
+      {/* Quick replies scroll as a continuous "recommendations" ticker — phrases
+          split by a glowing blue divider, auto-scrolling, tap a phrase to load it
+          (pauses on hover). The session-check prompt stays a static two-button row. */}
+      {sessionCheckPending?(
+        <div className="no-sb" style={{padding:"0 14px 4px",display:"flex",gap:6,overflowX:"auto",flexShrink:0,alignItems:"center",flexWrap:"nowrap"}}>
+          <span style={{color:CA.muted,fontSize:12,flexShrink:0}}>↑</span>
+          <button onClick={()=>confirmSession(false)}
+            style={{background:`${CA.green}20`,border:`1px solid ${CA.green}`,color:CA.green,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+            Same workout
+          </button>
+          <button onClick={()=>confirmSession(true)}
+            style={{background:`${CA.gold}20`,border:`1px solid ${CA.gold}`,color:CA.gold,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+            New session
+          </button>
+        </div>
+      ):(
+        <div style={{padding:"0 0 5px",overflow:"hidden",flexShrink:0,WebkitMaskImage:"linear-gradient(90deg,transparent,#000 5%,#000 95%,transparent)",maskImage:"linear-gradient(90deg,transparent,#000 5%,#000 95%,transparent)"}}>
+          <div className="a-ticker" style={{alignItems:"center"}}>
+            {[...quick,...quick].map((p,idx)=>(
+              <span key={idx} onClick={()=>setInput(p)} title="Tap to use" style={{display:"inline-flex",alignItems:"center",cursor:"pointer",whiteSpace:"nowrap"}}>
+                <span style={{color:CA.muted2,fontSize:12.5,padding:"0 14px",fontWeight:500}}>{p}</span>
+                <span aria-hidden style={{width:1,height:13,background:CA.accent,boxShadow:`0 0 7px ${CA.accent}`,flexShrink:0}}/>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Input area */}
       {/* ⚠️ paddingBottom is a FLAT "8px" ON PURPOSE. Do NOT change it to
@@ -4590,7 +4598,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
               <div style={{flex:1,overflowY:"auto",padding:"16px 20px",display:"flex",flexDirection:"column",gap:12}}>
                 <div style={{background:`${CA.amber}12`,border:`1px solid ${CA.amber}50`,borderRadius:12,padding:14}}>
                   <div style={{color:CA.amber,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>✈️ TEMPORARY PROGRAM — ACTIVE NOW</div>
-                  <pre style={{color:CA.text,fontSize:13,lineHeight:1.7,fontFamily:"'DM Sans'",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{athlete.temp_program_text}</pre>
+                  <pre style={{color:CA.text,fontSize:12.5,lineHeight:1.8,fontFamily:"ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{athlete.temp_program_text}</pre>
                 </div>
                 <div style={{color:CA.muted,fontSize:12,lineHeight:1.6,textAlign:"center"}}>
                   Tell Joe-bot you're back home when you return and your regular program will resume automatically.
@@ -4608,7 +4616,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
                   🔒 Program locked by coach — contact your coach to make changes.
                 </div>
                 <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
-                  <pre style={{color:CA.text,fontSize:13,lineHeight:1.7,fontFamily:"'DM Sans'",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>
+                  <pre style={{color:CA.text,fontSize:12.5,lineHeight:1.8,fontFamily:"ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>
                     {athlete.program_text}
                   </pre>
                 </div>
@@ -4625,7 +4633,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
                   onChange={e=>setAthleteProgramText(e.target.value)}
                   placeholder="Paste or type your program here, or use the photo upload above..."
                   rows={10}
-                  style={{flex:1,minHeight:180,background:CA.navy3,border:`1px solid ${athleteProgramText!==(athlete.program_text||"")?CA.gold:CA.border}`,borderRadius:12,padding:"12px 14px",color:CA.text,fontSize:13,outline:"none",resize:"none",lineHeight:1.6,fontFamily:"'DM Sans'",transition:"border-color 0.15s"}}
+                  style={{flex:1,minHeight:180,background:CA.navy3,border:`1px solid ${athleteProgramText!==(athlete.program_text||"")?CA.gold:CA.border}`,borderRadius:12,padding:"12px 14px",color:CA.text,fontSize:12.5,outline:"none",resize:"none",lineHeight:1.75,fontFamily:"ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",transition:"border-color 0.15s"}}
                 />
                 {athleteProgramMsg&&(
                   <div style={{color:athleteProgramMsg==="Saved."?CA.green:CA.red,fontSize:12,fontWeight:600,textAlign:"center"}}>
