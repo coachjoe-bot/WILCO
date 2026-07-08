@@ -1436,6 +1436,7 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
   const [mounted,setMounted] = useState(false);
   useEffect(()=>{ const r=requestAnimationFrame(()=>requestAnimationFrame(()=>setMounted(true))); return ()=>cancelAnimationFrame(r); },[]);
   const [showAllHeat,setShowAllHeat] = useState(false);
+  const [dayPick,setDayPick] = useState(null); // {athleteId, di} — heatmap cell → day inspector
   const D = useMemo(()=>{
     const now = Date.now();
     const dstart = (t)=>{const x=new Date(t);x.setHours(0,0,0,0);return x.getTime();};
@@ -1629,7 +1630,13 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
             <span style={{fontSize:9,color:CA.muted,textAlign:"right",letterSpacing:.5}}>ADH</span>
             {heatRows.flatMap((r,ri)=>[
               <span key={`n${ri}`} style={{fontSize:11.5,color:CA.muted2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.a.name}</span>,
-              ...r.days.map((d,di)=><i key={`c${ri}-${di}`} className="c-fade" style={{aspectRatio:"1",borderRadius:3,background:d==null?"transparent":r.hasProgram?cell(d):(d?CA.accent:CA.navy3),opacity:d==null?1:r.hasProgram?1:.55,border:d==null?`1px dashed ${CA.border}`:`1px solid ${CA.line2}22`,cursor:"pointer",["--d"]:`${Math.min(780,(ri*7+di)*16)}ms`}} {...tipOn(`${r.a.name.split(" ")[0]} · ${D.dayLabels[di].full} ${D.dayLabels[di].d}: ${d==null?"upcoming":d?"logged a session":"no session"}${r.hasProgram?"":" (no program)"}`)}/>),
+              ...r.days.map((d,di)=>{
+                const picked = dayPick&&dayPick.athleteId===r.a.id&&dayPick.di===di;
+                return <i key={`c${ri}-${di}`} className="c-fade"
+                  onClick={()=>{ if(d===1) setDayPick(picked?null:{athleteId:r.a.id,di}); }}
+                  style={{aspectRatio:"1",borderRadius:3,background:d==null?"transparent":r.hasProgram?cell(d):(d?CA.accent:CA.navy3),opacity:d==null?1:r.hasProgram?1:.55,border:picked?`2px solid ${CA.cyan}`:d==null?`1px dashed ${CA.border}`:`1px solid ${CA.line2}22`,boxShadow:picked?`0 0 8px ${CA.cyan}66`:"none",cursor:d===1?"pointer":"default",["--d"]:`${Math.min(780,(ri*7+di)*16)}ms`}}
+                  {...tipOn(`${r.a.name.split(" ")[0]} · ${D.dayLabels[di].full} ${D.dayLabels[di].d}: ${d==null?"upcoming":d?"logged a session — tap to inspect":"no session"}${r.hasProgram?"":" (no program)"}`)}/>;
+              }),
               <span key={`s${ri}`} style={{fontSize:11,fontWeight:800,textAlign:"right",color:adhColor(r.score),cursor:"pointer"}} {...tipOn(adhTip(r))}>{r.score==null?"—":`${r.score}`}</span>
             ])}
           </div>
@@ -1656,6 +1663,73 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
               <text x="60" y="76" textAnchor="middle" fill={CA.muted} fontSize="11">{D.activeCount} / {athletes.length}</text>
             </svg>
           </div>
+          {/* Day inspector — tap a logged heatmap cell and this space fills with the
+              session that was logged + why the athlete's week scores what it does */}
+          {(()=>{
+            if(!dayPick) return <div style={{marginTop:10,fontSize:11,color:CA.faint,textAlign:"center"}}>Tap a green day on the heatmap to see what was logged.</div>;
+            const r = D.rows.find(x=>x.a.id===dayPick.athleteId);
+            const day = D.dayLabels[dayPick.di];
+            if(!r||!day) return null;
+            const first = r.a.name.split(" ")[0];
+            // entries logged inside that calendar day, across the week's sessions
+            const entries = r.thisWk.flat().filter(w=>{const t=new Date(w.created_at).getTime();return t>=day.t&&t<day.t+DAYMS;});
+            const exs = entries.flatMap(w=>w.parsed_data?.exercises||[]);
+            const runs = entries.map(w=>w.parsed_data?.run_data).filter(Boolean);
+            const feel = entries.map(w=>w.parsed_data?.session_feel).find(Boolean);
+            const pains = entries.flatMap(w=>w.parsed_data?.pain_flags||[]);
+            const exLine = (ex)=>{
+              const sets = getExerciseSets(ex); const working = sets.some(s=>!s.warmup)?sets.filter(s=>!s.warmup):sets;
+              const reps = working.reduce((m,s)=>Math.max(m,s.reps||0),0)||ex.reps||0;
+              const top = working.reduce((m,s)=>Math.max(m,toLbs(s.weight||0,ex.unit||"lbs")),0)||toLbs(ex.weight||0,ex.unit||"lbs");
+              return `${working.length||ex.sets||1}×${reps||"?"}${top?` @ ${Math.round(top)}lbs`:""}`;
+            };
+            const b = r.adhB;
+            const byLift = (r.adherence?.byLift||[]).slice(0,5);
+            return (
+              <div className="proof-drop" style={{marginTop:10,borderTop:`1px solid ${CA.border}`,paddingTop:10}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:6}}>
+                  <span style={{fontSize:11,fontWeight:800,letterSpacing:.8,textTransform:"uppercase",color:CA.cyan}}>{first} · {day.full} {day.d}</span>
+                  <button onClick={()=>setDayPick(null)} style={{border:"none",background:"transparent",color:CA.muted,fontSize:14,cursor:"pointer",lineHeight:1}}>✕</button>
+                </div>
+                {exs.length===0&&runs.length===0&&<div style={{fontSize:12,color:CA.muted}}>Logged, but no parsed exercises on this one.</div>}
+                {exs.slice(0,7).map((ex,i)=>(
+                  <div key={i} style={{display:"flex",justifyContent:"space-between",gap:8,fontSize:12,padding:"3px 0"}}>
+                    <span style={{color:CA.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ex.name}</span>
+                    <span style={{color:CA.muted2,flexShrink:0,fontVariantNumeric:"tabular-nums"}}>{exLine(ex)}</span>
+                  </div>
+                ))}
+                {exs.length>7&&<div style={{fontSize:11,color:CA.faint}}>+{exs.length-7} more</div>}
+                {runs.length>0&&<div style={{fontSize:12,color:CA.muted2,padding:"3px 0"}}>🏃 Run logged</div>}
+                {(feel||pains.length>0)&&(
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:6}}>
+                    {feel&&<span style={{fontSize:10,fontWeight:700,color:CA.muted2,background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:999,padding:"2px 8px"}}>felt: {feel}</span>}
+                    {pains.slice(0,3).map((p,i)=><span key={i} style={{fontSize:10,fontWeight:700,color:CA.red,background:`${CA.red}18`,border:`1px solid ${CA.red}55`,borderRadius:999,padding:"2px 8px"}}>⚠ {p.area}</span>)}
+                  </div>
+                )}
+                <div style={{fontSize:10.5,fontWeight:800,letterSpacing:.8,textTransform:"uppercase",color:CA.muted,margin:"12px 0 6px"}}>Why {first}'s week = <span style={{color:adhColor(r.score)}}>{r.score==null?"—":`${r.score}%`}</span></div>
+                {!b&&<div style={{fontSize:11.5,color:CA.muted}}>{r.hasProgram?"Program not parsed yet — score is sessions vs prescribed days.":"No program assigned — nothing to grade against."}</div>}
+                {b&&[["Exercise choice",b.E,.5],["Volume (sets×reps)",b.V,.3],["Working weight",b.W,.2]].map(([lab,v,wt],i)=>v==null?null:(
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"2px 0"}}>
+                    <span style={{width:118,fontSize:11,color:CA.muted2,flexShrink:0}}>{lab}</span>
+                    <span style={{flex:1,height:5,borderRadius:3,background:CA.navy3,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${v}%`,background:adhColor(v)}}/></span>
+                    <span style={{width:32,fontSize:11,fontWeight:800,textAlign:"right",color:adhColor(v),fontVariantNumeric:"tabular-nums"}}>{v}</span>
+                  </div>
+                ))}
+                {b&&byLift.length>0&&(
+                  <div style={{marginTop:8}}>
+                    {byLift.map((l,i)=>(
+                      <div key={i} style={{display:"flex",justifyContent:"space-between",gap:8,fontSize:11,padding:"2px 0"}}>
+                        <span style={{color:l.matched?CA.muted2:CA.red,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.matched?"✓":"✗"} {l.lift}</span>
+                        <span style={{color:CA.faint,flexShrink:0,fontVariantNumeric:"tabular-nums"}}>
+                          {l.matched?`${l.actualSets||0}×${l.actualReps||0} of ${l.prescribedSets}×${l.prescribedReps}${l.prescribedLoad?` · ${l.actualLoad??"?"} vs ${l.prescribedLoad}lbs`:""}`:"skipped this week"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </OverviewCard>
 
         {/* Sessions/day — fixed Mon–Sun; today plotted hollow, excluded from line + slope */}
