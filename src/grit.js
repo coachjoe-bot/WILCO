@@ -182,7 +182,10 @@ export const liftTier = (key) => (BIG_LIFT_RE.test(key || "") ? 0 : 1);
 // ─── BENCHMARK TIERS ("Grit" ladder) ──────────────────────────────────────────
 // 8 tiers, ranking the LIFT not the lifter. Below the first cut-line = Rookie.
 export const TIER_NAMES = ["ROOKIE", "GRITTY", "SHARP", "STRONG", "ELITE", "DOMINANT", "UNTOUCHABLE", "LEGENDARY"];
-export const TIER_COLORS = ["#64748b", "#3b82f6", "#22d3ee", "#10b981", "#d4a017", "#f97316", "#ef4444", "#a855f7"];
+// LED-lit neon ramp (night-gym re-skin). Keeps the low->high heat logic and roughly
+// the same hue per rung; ELITE stays warm/gold-family but drops the literal old brand
+// hex. PROPOSAL — pending Will's approval; this also retunes athlete Benchmarks.
+export const TIER_COLORS = ["#7a8798", "#3a7bff", "#37e6ff", "#2ee6a8", "#ffd34d", "#ff8a3d", "#ff4d5e", "#b46dff"];
 // Strength Score points per tier — each level worth more than the last.
 export const TIER_POINTS = [10, 25, 50, 100, 175, 275, 400, 600];
 // Flavor line per tier (shown in the Top Rank classification popover).

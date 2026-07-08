@@ -2372,7 +2372,9 @@ function WilcoRoot() {
   // Coach entry stays on the legacy look (fence); athlete entry gets the night-gym brand
   // world: the electric-blue WILCO storefront as a full-bleed backdrop behind a dark scrim.
   const coachEntry = view==="coachLogin" || view==="coachSetup";
-  const PW = coachEntry ? C : CA;
+  // Coach entry now shares the night-gym palette (flat Blue Steel: CA.navy ground,
+  // no photo — the coach hero image is Will's call), CTAs on CA_BTN inside the forms.
+  const PW = CA;
   return (
     <div style={{minHeight:"100vh",position:"relative",background:PW.navy,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:coachEntry?"center":"flex-end",paddingTop:"calc(24px + env(safe-area-inset-top, 0px))",paddingBottom:40,paddingLeft:24,paddingRight:24}}>
       <style>{GS}{GSA}</style>
@@ -3561,48 +3563,48 @@ function CoachLoginScreen({setView,setCoach,setErr,err}) {
   // Post-login offer to turn on Face ID for next time (shown once per app open).
   if(enrollFor){
     return (
-      <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24,textAlign:"center"}}>
+      <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:24,textAlign:"center"}}>
         <div style={{fontSize:34,marginBottom:12}}>⚡️</div>
-        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:22,letterSpacing:2,marginBottom:8}}>FASTER SIGN-IN</div>
-        <div style={{color:C.muted2,fontSize:13,lineHeight:1.6,marginBottom:20}}>
+        <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:22,letterSpacing:2,marginBottom:8}}>FASTER SIGN-IN</div>
+        <div style={{color:CA.muted2,fontSize:13,lineHeight:1.6,marginBottom:20}}>
           Use Face ID to sign in next time — no PIN to type. You can still use your PIN anytime.
         </div>
-        {err&&<div style={{color:C.red,fontSize:12,marginBottom:12}}>{err}</div>}
-        <button onClick={enableBio} disabled={bioBusy} style={btn(C.gold,"#000",{opacity:bioBusy?0.7:1,cursor:bioBusy?"not-allowed":"pointer"})}>
+        {err&&<div style={{color:CA.red,fontSize:12,marginBottom:12}}>{err}</div>}
+        <button onClick={enableBio} disabled={bioBusy} style={btn(CA_BTN,"#fff",{opacity:bioBusy?0.7:1,cursor:bioBusy?"not-allowed":"pointer"})}>
           {bioBusy?"Setting up…":"Enable Face ID"}
         </button>
         <div style={{marginTop:10}}>
-          <button onClick={skipBio} disabled={bioBusy} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>Not now</button>
+          <button onClick={skipBio} disabled={bioBusy} style={{background:"none",border:"none",color:CA.muted,fontSize:12,cursor:"pointer"}}>Not now</button>
         </div>
       </div>
     );
   }
 
   return (
-    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24}}>
+    <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:24}}>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
-        <button onClick={mode==="forgot"?backToLogin:()=>setView("home")} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:18}}>←</button>
-        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>
+        <button onClick={mode==="forgot"?backToLogin:()=>setView("home")} style={{background:"none",border:"none",color:CA.muted,cursor:"pointer",fontSize:18}}>←</button>
+        <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>
           {mode==="forgot"?"FORGOT PIN":"COACH LOGIN"}
         </div>
       </div>
 
       {mode==="login"&&<>
         <div style={{marginBottom:20}}>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH PIN</label>
+          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH PIN</label>
           <input type="password" inputMode="numeric" maxLength={4} value={pin}
             onChange={e=>setPin(e.target.value.replace(/\D/g,"").slice(0,4))}
             onKeyDown={e=>e.key==="Enter"&&login()}
-            placeholder="----" style={inp({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
+            placeholder="----" style={inpA({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
         </div>
-        {err&&<div style={{color:C.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
-        <button onClick={login} disabled={loading} style={btn(C.gold,"#000",{opacity:loading?0.7:1})}>
+        {err&&<div style={{color:CA.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
+        <button onClick={login} disabled={loading} style={btn(CA_BTN,"#fff",{opacity:loading?0.7:1})}>
           {loading?"Checking...":"Access Dashboard ->"}
         </button>
         <div style={{textAlign:"center",marginTop:12,display:"flex",flexDirection:"column",gap:6}}>
-          {bioReady&&<button onClick={faceLogin} disabled={bioBusy} style={{background:"none",border:"none",color:C.gold,fontSize:12,cursor:bioBusy?"default":"pointer"}}>{bioBusy?"Verifying…":"Use Face ID instead"}</button>}
-          <button onClick={enterForgot} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>Forgot your PIN?</button>
-          <button onClick={()=>setView("coachSetup")} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>First time? Enter access code</button>
+          {bioReady&&<button onClick={faceLogin} disabled={bioBusy} style={{background:"none",border:"none",color:CA.accent,fontSize:12,cursor:bioBusy?"default":"pointer"}}>{bioBusy?"Verifying…":"Use Face ID instead"}</button>}
+          <button onClick={enterForgot} style={{background:"none",border:"none",color:CA.muted,fontSize:12,cursor:"pointer"}}>Forgot your PIN?</button>
+          <button onClick={()=>setView("coachSetup")} style={{background:"none",border:"none",color:CA.muted,fontSize:12,cursor:"pointer"}}>First time? Enter access code</button>
         </div>
       </>}
 
@@ -3610,28 +3612,28 @@ function CoachLoginScreen({setView,setCoach,setErr,err}) {
         {recoverySent
           ? <div style={{textAlign:"center",padding:"16px 0"}}>
               <div style={{fontSize:32,marginBottom:12}}>📬</div>
-              <div style={{color:C.text,fontWeight:600,fontSize:15,marginBottom:8}}>Check your inbox</div>
-              <div style={{color:C.muted2,fontSize:13,lineHeight:1.6,marginBottom:20}}>
+              <div style={{color:CA.text,fontWeight:600,fontSize:15,marginBottom:8}}>Check your inbox</div>
+              <div style={{color:CA.muted2,fontSize:13,lineHeight:1.6,marginBottom:20}}>
                 If we found a coach account linked to that email, your PIN has been sent. Check your spam folder too.
               </div>
-              <button onClick={backToLogin} style={btn(C.gold,"#000")}>Back to Login</button>
+              <button onClick={backToLogin} style={btn(CA_BTN,"#fff")}>Back to Login</button>
             </div>
           : <>
-              <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>
+              <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>
                 Enter the email address on your coach account and we'll send you your PIN.
               </div>
               <div style={{marginBottom:20}}>
-                <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH EMAIL</label>
+                <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH EMAIL</label>
                 <input type="email" inputMode="email" value={recoveryEmail} onChange={e=>setRecoveryEmail(e.target.value)}
                   onKeyDown={e=>e.key==="Enter"&&sendRecovery()}
-                  placeholder="coach@school.edu" style={inp()}/>
+                  placeholder="coach@school.edu" style={inpA()}/>
               </div>
-              {err&&<div style={{color:C.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
-              <button onClick={sendRecovery} disabled={loading} style={btn(C.gold,"#000",{opacity:loading?0.7:1,cursor:loading?"not-allowed":"pointer"})}>
+              {err&&<div style={{color:CA.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
+              <button onClick={sendRecovery} disabled={loading} style={btn(CA_BTN,"#fff",{opacity:loading?0.7:1,cursor:loading?"not-allowed":"pointer"})}>
                 {loading?"Sending...":"Email My PIN →"}
               </button>
               <div style={{textAlign:"center",marginTop:10}}>
-                <button onClick={backToLogin} style={{background:"none",border:"none",color:C.muted,fontSize:12,cursor:"pointer"}}>Back to login</button>
+                <button onClick={backToLogin} style={{background:"none",border:"none",color:CA.muted,fontSize:12,cursor:"pointer"}}>Back to login</button>
               </div>
             </>
         }
@@ -3674,39 +3676,39 @@ function CoachSetupScreen({setView,setCoach,setErr,err}) {
   };
 
   return (
-    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24}}>
+    <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:24}}>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
-        <button onClick={()=>step>1?setStep(1):setView("home")} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:18}}>←</button>
-        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>COACH SETUP — STEP {step} OF 2</div>
+        <button onClick={()=>step>1?setStep(1):setView("home")} style={{background:"none",border:"none",color:CA.muted,cursor:"pointer",fontSize:18}}>←</button>
+        <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>COACH SETUP — STEP {step} OF 2</div>
       </div>
       {step===1&&<>
-        <div style={{color:C.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Enter the access code provided by your athletic director.</div>
+        <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Enter the access code provided by your athletic director.</div>
         <div style={{marginBottom:20}}>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>ACCESS CODE</label>
-          <input value={code} onChange={e=>setCode(e.target.value)} placeholder="e.g. FORTIS-FOOTBALL" style={inp({textTransform:"uppercase",letterSpacing:2})}/>
+          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>ACCESS CODE</label>
+          <input value={code} onChange={e=>setCode(e.target.value)} placeholder="e.g. FORTIS-FOOTBALL" style={inpA({textTransform:"uppercase",letterSpacing:2})}/>
         </div>
-        {err&&<div style={{color:C.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
-        <button onClick={verifyCode} disabled={loading} style={btn(C.gold,"#000",{opacity:loading?0.7:1})}>
+        {err&&<div style={{color:CA.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
+        <button onClick={verifyCode} disabled={loading} style={btn(CA_BTN,"#fff",{opacity:loading?0.7:1})}>
           {loading?"Verifying...":"Verify Code ->"}
         </button>
       </>}
       {step===2&&<>
-        <div style={{color:C.muted2,fontSize:13,marginBottom:4,lineHeight:1.6}}>Welcome, {coachRecord?.name}. Set your 4-digit PIN.</div>
-        <div style={{color:C.muted,fontSize:12,marginBottom:16}}>You'll use this every time you log in.</div>
+        <div style={{color:CA.muted2,fontSize:13,marginBottom:4,lineHeight:1.6}}>Welcome, {coachRecord?.name}. Set your 4-digit PIN.</div>
+        <div style={{color:CA.muted,fontSize:12,marginBottom:16}}>You'll use this every time you log in.</div>
         <div style={{marginBottom:16}}>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CREATE PIN</label>
+          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CREATE PIN</label>
           <input type="password" inputMode="numeric" maxLength={4} value={pin}
             onChange={e=>setPin(e.target.value.replace(/\D/g,"").slice(0,4))}
-            placeholder="----" style={inp({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
+            placeholder="----" style={inpA({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
         </div>
         <div style={{marginBottom:20}}>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CONFIRM PIN</label>
+          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CONFIRM PIN</label>
           <input type="password" inputMode="numeric" maxLength={4} value={confirmPin}
             onChange={e=>setConfirmPin(e.target.value.replace(/\D/g,"").slice(0,4))}
-            placeholder="----" style={inp({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
+            placeholder="----" style={inpA({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
         </div>
-        {err&&<div style={{color:C.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
-        <button onClick={setCoachPin} disabled={loading} style={btn(C.gold,"#000",{opacity:loading?0.7:1})}>
+        {err&&<div style={{color:CA.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
+        <button onClick={setCoachPin} disabled={loading} style={btn(CA_BTN,"#fff",{opacity:loading?0.7:1})}>
           {loading?"Saving...":"Set PIN & Enter Dashboard ->"}
         </button>
       </>}

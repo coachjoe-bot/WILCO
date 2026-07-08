@@ -5,7 +5,7 @@
 // the dynamic import means the cycle App→coach→App is resolved at load time.
 import { useState, useEffect, useRef, useMemo } from "react";
 import {
-  C, GS, LineChart, MASTER_CODE, RunCard, SUPABASE_KEY, SUPABASE_URL, askClaude, bestE1RMForExercise, btn, cleanerName, daysBetween, disablePush, displayForKey, enablePush, epley1RM, fmtDate, fmtDateRelative, fmtDateShort, fmtWeight, formatSetDetails, getAuth, getExerciseSets, getPushSubscription, groupIntoSessions, haptic, idApi, inp, isRealSession, liftTier, normalizeExName, sbDelete, sbInsert, sbRead, sbUpdate, sbUpdateWhere, toLbs, track, useIsMobile
+  CA, CA_BTN, CA_GLOW, GS, LineChart, MASTER_CODE, RunCard, SUPABASE_KEY, SUPABASE_URL, askClaude, bestE1RMForExercise, btn, cleanerName, daysBetween, disablePush, displayForKey, enablePush, epley1RM, fmtDate, fmtDateRelative, fmtDateShort, fmtWeight, formatSetDetails, getAuth, getExerciseSets, getPushSubscription, groupIntoSessions, haptic, idApi, inpA, isRealSession, liftTier, normalizeExName, sbDelete, sbInsert, sbRead, sbUpdate, sbUpdateWhere, toLbs, track, useIsMobile
 } from "./App.jsx";
 // Shared deterministic engine (Phase 0 extraction) — per-athlete session/adherence
 // math, computed live client-side for the Overview. Aliased to avoid colliding with
@@ -15,6 +15,60 @@ import {
   trueImprovementPRs, classifyTiers, blendAdherenceScore, buildLiftHistory,
 } from "./proofcore.js";
 import { computeGritSnapshot, TIER_NAMES, TIER_COLORS, getBenchKey, resolveLift } from "./grit.js";
+
+// ─── GSC — coach "control room" motion skin ──────────────────────────────────
+// The coach dashboard is the CONTROL ROOM to the athlete's gym floor: denser,
+// calmer, more mono, LESS motion. All keyframe names are NEW (c-prefixed) so they
+// never collide with GS (mounted alongside). Every effect runs on transform/opacity
+// only; elements are styled to their FINAL state, so reduced-motion (and any
+// stutter) degrades to the static end state. Entrance animations ONLY — no loops
+// except a single small pulsing LIVE dot.
+const GSC = `
+body{background:${CA.navy};}
+/* calmer grid than the athlete .cyber (.04 @ 28px vs .07 @ 22px) */
+.cyber-coach{background:#05060c;background-image:linear-gradient(rgba(58,123,255,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(58,123,255,.04) 1px,transparent 1px);background-size:28px 28px;}
+/* card / chart entrance rise */
+@keyframes cUp{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:translateY(0);}}
+.c-up{animation:cUp .5s cubic-bezier(.2,.7,.2,1) both;}
+/* bar rise from baseline (staggered via --d inline) */
+@keyframes cRise{from{transform:scaleY(0);}to{transform:scaleY(1);}}
+.c-rise{transform-origin:bottom;animation:cRise .7s cubic-bezier(.2,.7,.2,1) both;animation-delay:var(--d,0s);}
+/* line-chart draw-in (stroke reveals left-to-right) */
+@keyframes cDraw{from{stroke-dashoffset:1000;}to{stroke-dashoffset:0;}}
+.c-draw,.a-draw{stroke-dasharray:1000;animation:cDraw 1.05s ease-out forwards;}
+/* dot / cell fade after the line (staggered via --d inline) */
+@keyframes cFade{from{opacity:0;}to{opacity:1;}}
+.c-fade{opacity:0;animation:cFade .4s ease forwards;animation-delay:var(--d,0s);}
+/* split-flap headline flip-in (copy of athlete aFlap) */
+@keyframes cFlap{0%{transform:rotateX(-90deg);opacity:0;}60%{transform:rotateX(8deg);opacity:1;}100%{transform:rotateX(0);opacity:1;}}
+.c-flap{display:inline-block;transform-origin:top;backface-visibility:hidden;animation:cFlap .5s ease both;}
+/* faint cyan scanline overlay (edition page) */
+.coach-scan::after{content:"";position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,transparent 0 3px,rgba(55,230,255,.028) 3px 4px);z-index:8;}
+/* the one allowed loop: a small pulsing LIVE dot */
+@keyframes cLive{0%,100%{opacity:1;box-shadow:0 0 6px ${CA.cyan};}50%{opacity:.35;box-shadow:0 0 2px ${CA.cyan};}}
+.c-live{animation:cLive 1.8s ease-in-out infinite;}
+@media (prefers-reduced-motion: reduce){
+  .c-up,.c-rise,.c-draw,.a-draw,.c-fade,.c-flap,.c-live{animation:none!important;transform:none!important;opacity:1!important;}
+  .c-draw,.a-draw{stroke-dasharray:none!important;}
+}
+`;
+
+// Count a KPI figure up from 0 on mount (~700ms), respecting reduced-motion by
+// jumping straight to the final value. Self-contained (rAF, no deps). Returns the
+// current display value; pass the resolved numeric target.
+function useCountUp(target, ms=700){
+  const [v,setV] = useState(0);
+  useEffect(()=>{
+    const end = Number(target)||0;
+    if(typeof window!=="undefined" && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches){ setV(end); return; }
+    let raf, start;
+    const step = (t)=>{ if(start==null) start=t; const p=Math.min(1,(t-start)/ms); setV(end*(1-Math.pow(1-p,3))); if(p<1) raf=requestAnimationFrame(step); else setV(end); };
+    raf=requestAnimationFrame(step);
+    return ()=>cancelAnimationFrame(raf);
+  },[target,ms]);
+  return v;
+}
+
 // ─── SCHOOLS LIST (master only) ───────────────────────────────────────────────
 function SchoolsList({schools,coaches,onRefresh}) {
   const [confirmDelete,setConfirmDelete] = useState(null); // school id pending delete
@@ -84,48 +138,48 @@ function SchoolsList({schools,coaches,onRefresh}) {
   if(schools.length===0) return null;
 
   return (
-    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden",marginBottom:16}}>
-      <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>SCHOOLS / TEAMS</div>
+    <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,overflow:"hidden",marginBottom:16}}>
+      <div style={{padding:"12px 16px",borderBottom:`1px solid ${CA.border}`,color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>SCHOOLS / TEAMS</div>
       {schools.map((s,i)=>{
         const coachCount = coachCountFor(s.id);
         const hasOpenSlot = coachCount < (s.max_coaches||3);
         const isAddingHere = addingCoachFor===s.id;
         return (
           <div key={i}>
-            <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:12}}>
+            <div style={{padding:"12px 16px",borderBottom:`1px solid ${CA.border}`,display:"flex",alignItems:"center",gap:12}}>
               {s.logo_url
-                ? <img src={s.logo_url} alt={s.name} style={{width:36,height:36,borderRadius:6,objectFit:"contain",background:"#fff",padding:2,flexShrink:0}}/>
-                : <div style={{width:36,height:36,borderRadius:6,background:C.navy3,border:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:16,color:C.gold,flexShrink:0}}>{s.code}</div>
+                ? <img src={s.logo_url} alt={s.name} style={{width:36,height:36,borderRadius:6,objectFit:"contain",background:"rgba(220,232,255,.92)",padding:2,flexShrink:0}}/>
+                : <div style={{width:36,height:36,borderRadius:6,background:CA.navy3,border:`1px solid ${CA.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:16,color:CA.accent,flexShrink:0}}>{s.code}</div>
               }
               <div style={{flex:1}}>
-                <div style={{color:C.text,fontWeight:600,fontSize:14}}>{s.name}</div>
-                <div style={{color:C.muted,fontSize:11}}>
-                  Code: <span style={{color:C.gold,fontWeight:700}}>{s.code}</span> · {coachCount}/{s.max_coaches||3} coach{coachCount!==1?"es":""} · {s.tier} tier
-                  {hasOpenSlot&&<span style={{color:C.green,marginLeft:6}}>· {(s.max_coaches||3)-coachCount} slot{(s.max_coaches||3)-coachCount!==1?"s":""} open</span>}
+                <div style={{color:CA.text,fontWeight:600,fontSize:14}}>{s.name}</div>
+                <div style={{color:CA.muted,fontSize:11}}>
+                  Code: <span style={{color:CA.accent,fontWeight:700}}>{s.code}</span> · {coachCount}/{s.max_coaches||3} coach{coachCount!==1?"es":""} · {s.tier} tier
+                  {hasOpenSlot&&<span style={{color:CA.green,marginLeft:6}}>· {(s.max_coaches||3)-coachCount} slot{(s.max_coaches||3)-coachCount!==1?"s":""} open</span>}
                 </div>
               </div>
               <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
                 {hasOpenSlot&&!isAddingHere&&confirmDelete!==s.id&&(
                   <button onClick={()=>openAddCoach(s.id)}
-                    style={{background:"none",border:`1px solid ${C.gold}66`,color:C.gold,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:11}}>
+                    style={{background:"none",border:`1px solid ${CA.accent}66`,color:CA.accent,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:11}}>
                     + Add Coach
                   </button>
                 )}
                 {confirmDelete===s.id ? (
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
-                    <span style={{color:C.muted,fontSize:11}}>Remove school + coaches?</span>
+                    <span style={{color:CA.muted,fontSize:11}}>Remove school + coaches?</span>
                     <button onClick={()=>handleDelete(s)} disabled={deleting}
-                      style={{background:C.red,border:"none",color:"#fff",borderRadius:6,padding:"5px 12px",cursor:"pointer",fontSize:11,fontWeight:700}}>
+                      style={{background:CA.red,border:"none",color:"#fff",borderRadius:6,padding:"5px 12px",cursor:"pointer",fontSize:11,fontWeight:700}}>
                       {deleting?"...":"Yes, delete"}
                     </button>
                     <button onClick={()=>setConfirmDelete(null)}
-                      style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:11}}>
+                      style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:11}}>
                       Cancel
                     </button>
                   </div>
                 ) : (
                   <button onClick={()=>setConfirmDelete(s.id)}
-                    style={{background:"none",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:11,flexShrink:0}}>
+                    style={{background:"none",border:`1px solid ${CA.red}44`,color:CA.red,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:11,flexShrink:0}}>
                     Remove
                   </button>
                 )}
@@ -133,23 +187,23 @@ function SchoolsList({schools,coaches,onRefresh}) {
             </div>
             {/* Add Coach inline form */}
             {isAddingHere&&(
-              <div style={{padding:"14px 16px",background:C.navy3,borderBottom:`1px solid ${C.border}`}}>
-                <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:10}}>
-                  ADD COACH TO {s.name.toUpperCase()} — code will be <span style={{color:C.gold,fontWeight:700}}>{s.code}{String((coaches.filter(c=>c.school_id===s.id).reduce((m,c)=>Math.max(m,c.coach_number||0),0))+1).padStart(2,"0")}</span>
+              <div style={{padding:"14px 16px",background:CA.navy3,borderBottom:`1px solid ${CA.border}`}}>
+                <div style={{color:CA.muted,fontSize:11,letterSpacing:1,marginBottom:10}}>
+                  ADD COACH TO {s.name.toUpperCase()} — code will be <span style={{color:CA.accent,fontWeight:700}}>{s.code}{String((coaches.filter(c=>c.school_id===s.id).reduce((m,c)=>Math.max(m,c.coach_number||0),0))+1).padStart(2,"0")}</span>
                 </div>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
-                  <input value={newCoachName} onChange={e=>setNewCoachName(e.target.value)} placeholder="Coach name" style={inp()}/>
-                  <input type="email" value={newCoachEmail} onChange={e=>setNewCoachEmail(e.target.value)} placeholder="coach@school.edu" style={inp()}/>
+                  <input value={newCoachName} onChange={e=>setNewCoachName(e.target.value)} placeholder="Coach name" style={inpA()}/>
+                  <input type="email" value={newCoachEmail} onChange={e=>setNewCoachEmail(e.target.value)} placeholder="coach@school.edu" style={inpA()}/>
                 </div>
-                {addCoachErr&&<div style={{color:C.red,fontSize:12,marginBottom:8}}>{addCoachErr}</div>}
-                {addCoachSuccess&&<div style={{color:C.green,fontSize:12,marginBottom:8,fontWeight:600}}>{addCoachSuccess}</div>}
+                {addCoachErr&&<div style={{color:CA.red,fontSize:12,marginBottom:8}}>{addCoachErr}</div>}
+                {addCoachSuccess&&<div style={{color:CA.green,fontSize:12,marginBottom:8,fontWeight:600}}>{addCoachSuccess}</div>}
                 <div style={{display:"flex",gap:8}}>
                   <button onClick={()=>handleAddCoach(s)} disabled={addingCoach}
-                    style={{background:C.gold,border:"none",color:"#000",borderRadius:6,padding:"7px 16px",cursor:"pointer",fontSize:12,fontWeight:700}}>
+                    style={{background:CA_BTN,boxShadow:"0 4px 16px "+CA_GLOW,border:"none",color:"#fff",borderRadius:6,padding:"7px 16px",cursor:"pointer",fontSize:12,fontWeight:700}}>
                     {addingCoach?"Adding...":"Add & Send Invite →"}
                   </button>
                   <button onClick={cancelAddCoach}
-                    style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"7px 12px",cursor:"pointer",fontSize:12}}>
+                    style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:6,padding:"7px 12px",cursor:"pointer",fontSize:12}}>
                     Cancel
                   </button>
                 </div>
@@ -217,53 +271,53 @@ function CoachesList({coaches,schools,onRefresh}) {
   if(nonMasterCoaches.length===0) return null;
 
   return (
-    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden",marginBottom:16}}>
-      <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`,color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>ALL COACHES</div>
+    <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,overflow:"hidden",marginBottom:16}}>
+      <div style={{padding:"12px 16px",borderBottom:`1px solid ${CA.border}`,color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>ALL COACHES</div>
       {nonMasterCoaches.map((c,i)=>{
         const school = schoolFor(c.school_id);
         const isEditing = editingId===c.id;
         const rs = resendStatus[c.id];
         return (
-          <div key={i} style={{borderBottom:`1px solid ${C.border}`}}>
+          <div key={i} style={{borderBottom:`1px solid ${CA.border}`}}>
             {isEditing ? (
-              <div style={{padding:"12px 16px",background:C.navy3}}>
-                <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>EDIT COACH — <span style={{color:C.gold}}>{c.access_code}</span></div>
+              <div style={{padding:"12px 16px",background:CA.navy3}}>
+                <div style={{color:CA.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>EDIT COACH — <span style={{color:CA.accent}}>{c.access_code}</span></div>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
-                  <input value={editName} onChange={e=>setEditName(e.target.value)} placeholder="Coach name" style={inp()}/>
-                  <input type="email" value={editEmail} onChange={e=>setEditEmail(e.target.value)} placeholder="Email" style={inp()}/>
+                  <input value={editName} onChange={e=>setEditName(e.target.value)} placeholder="Coach name" style={inpA()}/>
+                  <input type="email" value={editEmail} onChange={e=>setEditEmail(e.target.value)} placeholder="Email" style={inpA()}/>
                 </div>
-                <div style={{color:C.muted,fontSize:11,marginBottom:10}}>Saving will reset their PIN so the new coach can register fresh.</div>
+                <div style={{color:CA.muted,fontSize:11,marginBottom:10}}>Saving will reset their PIN so the new coach can register fresh.</div>
                 <div style={{display:"flex",gap:8}}>
-                  <button onClick={()=>saveEdit(c)} disabled={saving} style={{background:C.gold,border:"none",color:"#000",borderRadius:6,padding:"7px 16px",cursor:"pointer",fontSize:12,fontWeight:700}}>
+                  <button onClick={()=>saveEdit(c)} disabled={saving} style={{background:CA_BTN,boxShadow:"0 4px 16px "+CA_GLOW,border:"none",color:"#fff",borderRadius:6,padding:"7px 16px",cursor:"pointer",fontSize:12,fontWeight:700}}>
                     {saving?"Saving...":"Save"}
                   </button>
-                  <button onClick={cancelEdit} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"7px 12px",cursor:"pointer",fontSize:12}}>Cancel</button>
+                  <button onClick={cancelEdit} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:6,padding:"7px 12px",cursor:"pointer",fontSize:12}}>Cancel</button>
                 </div>
               </div>
             ) : (
               <div style={{padding:"12px 16px",display:"flex",alignItems:"center",gap:12}}>
-                <div style={{width:36,height:36,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:16,color:"#000",flexShrink:0}}>{c.name?.[0]?.toUpperCase()||"?"}</div>
+                <div style={{width:36,height:36,borderRadius:"50%",background:`linear-gradient(135deg,#57a0ff,#2a63e6)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:16,color:"#fff",flexShrink:0}}>{c.name?.[0]?.toUpperCase()||"?"}</div>
                 <div style={{flex:1,minWidth:0}}>
-                  <div style={{color:C.text,fontWeight:600,fontSize:14}}>{c.name}</div>
-                  <div style={{color:C.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                    <span style={{color:C.gold,fontWeight:700}}>{c.access_code}</span>
+                  <div style={{color:CA.text,fontWeight:600,fontSize:14}}>{c.name}</div>
+                  <div style={{color:CA.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                    <span style={{color:CA.accent,fontWeight:700}}>{c.access_code}</span>
                     {school?` · ${school.name}`:""}
                     {c.email?` · ${c.email}`:""}
                   </div>
                 </div>
                 <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
-                  <div style={{color:c.pin?C.green:C.red,fontSize:10,marginRight:4}}>{c.pin?"✓ Active":"Not set up"}</div>
+                  <div style={{color:c.pin?CA.green:CA.red,fontSize:10,marginRight:4}}>{c.pin?"✓ Active":"Not set up"}</div>
                   {/* Resend invite */}
                   {c.email&&c.role!=="master"&&(
                     <button onClick={()=>resendInvite(c)} disabled={!!rs}
-                      style={{background:"none",border:`1px solid ${C.border}`,color:rs==="sent"?C.green:C.muted2,borderRadius:6,padding:"4px 8px",cursor:rs?"default":"pointer",fontSize:10}}>
+                      style={{background:"none",border:`1px solid ${CA.border}`,color:rs==="sent"?CA.green:CA.muted2,borderRadius:6,padding:"4px 8px",cursor:rs?"default":"pointer",fontSize:10}}>
                       {rs==="sending"?"...":rs==="sent"?"✓ Sent":rs==="error"?"Error":"Resend"}
                     </button>
                   )}
                   {/* Edit */}
                   {confirmDelete!==c.id&&(
                     <button onClick={()=>startEdit(c)}
-                      style={{background:"none",border:`1px solid ${C.border}`,color:C.muted2,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:10}}>
+                      style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:10}}>
                       Replace
                     </button>
                   )}
@@ -271,17 +325,17 @@ function CoachesList({coaches,schools,onRefresh}) {
                   {confirmDelete===c.id ? (
                     <>
                       <button onClick={()=>handleDelete(c)} disabled={deleting}
-                        style={{background:C.red,border:"none",color:"#fff",borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:10,fontWeight:700}}>
+                        style={{background:CA.red,border:"none",color:"#fff",borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:10,fontWeight:700}}>
                         {deleting?"...":"Confirm"}
                       </button>
                       <button onClick={()=>setConfirmDelete(null)}
-                        style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:10}}>
+                        style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:10}}>
                         Cancel
                       </button>
                     </>
                   ) : (
                     <button onClick={()=>setConfirmDelete(c.id)}
-                      style={{background:"none",border:`1px solid ${C.red}44`,color:C.red,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:10}}>
+                      style={{background:"none",border:`1px solid ${CA.red}44`,color:CA.red,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:10}}>
                       Remove
                     </button>
                   )}
@@ -412,31 +466,31 @@ function SchoolOnboardingForm({onCreated}) {
   };
 
   return (
-    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:20,marginBottom:16}}>
-      <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:16}}>ONBOARD NEW SCHOOL / TEAM</div>
+    <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,padding:20,marginBottom:16}}>
+      <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:16}}>ONBOARD NEW SCHOOL / TEAM</div>
 
       {/* Row 1: name + code */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 90px",gap:12,marginBottom:14}}>
         <div>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>SCHOOL / TEAM NAME</label>
-          <input value={schoolName} onChange={e=>setSchoolName(e.target.value)} placeholder="Lincoln High School" style={inp()}/>
+          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>SCHOOL / TEAM NAME</label>
+          <input value={schoolName} onChange={e=>setSchoolName(e.target.value)} placeholder="Lincoln High School" style={inpA()}/>
         </div>
         <div>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CODE</label>
+          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CODE</label>
           <input value={schoolCode} onChange={e=>setSchoolCode(e.target.value.toUpperCase().replace(/[^A-Z]/g,"").slice(0,3))}
-            placeholder="LHS" style={inp({textAlign:"center",letterSpacing:4,fontWeight:700,textTransform:"uppercase"})}/>
+            placeholder="LHS" style={inpA({textAlign:"center",letterSpacing:4,fontWeight:700,textTransform:"uppercase"})}/>
         </div>
       </div>
 
       {/* Row 2: contact email + tier */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
         <div>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CONTACT EMAIL</label>
-          <input type="email" value={contactEmail} onChange={e=>setContactEmail(e.target.value)} placeholder="ad@school.edu" style={inp()}/>
+          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CONTACT EMAIL</label>
+          <input type="email" value={contactEmail} onChange={e=>setContactEmail(e.target.value)} placeholder="ad@school.edu" style={inpA()}/>
         </div>
         <div>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>TIER</label>
-          <select value={tier} onChange={e=>setTier(e.target.value)} style={{...inp(),cursor:"pointer"}}>
+          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>TIER</label>
+          <select value={tier} onChange={e=>setTier(e.target.value)} style={{...inpA(),cursor:"pointer"}}>
             <option value="group">Group</option>
             <option value="school">School</option>
             <option value="district">District</option>
@@ -447,23 +501,23 @@ function SchoolOnboardingForm({onCreated}) {
       {/* Row 3: max coaches + max athletes */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
         <div>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>MAX COACHES</label>
-          <select value={maxCoaches} onChange={e=>updateMaxCoaches(Number(e.target.value))} style={{...inp(),cursor:"pointer"}}>
+          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>MAX COACHES</label>
+          <select value={maxCoaches} onChange={e=>updateMaxCoaches(Number(e.target.value))} style={{...inpA(),cursor:"pointer"}}>
             {[1,2,3,4,5,6,7,8,9,10].map(n=><option key={n} value={n}>{n}</option>)}
           </select>
         </div>
         <div>
-          <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>MAX ATHLETES</label>
-          <input type="number" value={maxAthletes} min={1} onChange={e=>setMaxAthletes(Number(e.target.value))} style={inp()}/>
+          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>MAX ATHLETES</label>
+          <input type="number" value={maxAthletes} min={1} onChange={e=>setMaxAthletes(Number(e.target.value))} style={inpA()}/>
         </div>
       </div>
 
       {/* Logo upload */}
       <div style={{marginBottom:16}}>
-        <label style={{color:C.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>SCHOOL LOGO <span style={{color:C.muted,fontWeight:400,letterSpacing:0}}>(optional — PNG, SVG, or JPG)</span></label>
+        <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>SCHOOL LOGO <span style={{color:CA.muted,fontWeight:400,letterSpacing:0}}>(optional — PNG, SVG, or JPG)</span></label>
         <div style={{display:"flex",alignItems:"center",gap:12}}>
-          {logoPreview&&<img src={logoPreview} alt="Preview" style={{width:40,height:40,borderRadius:8,objectFit:"contain",background:"#fff",padding:3}}/>}
-          <label style={{background:C.navy3,border:`1px dashed ${C.border}`,borderRadius:8,padding:"8px 14px",cursor:"pointer",color:C.muted2,fontSize:12,display:"inline-block"}}>
+          {logoPreview&&<img src={logoPreview} alt="Preview" style={{width:40,height:40,borderRadius:8,objectFit:"contain",background:"rgba(220,232,255,.92)",padding:3}}/>}
+          <label style={{background:CA.navy3,border:`1px dashed ${CA.border}`,borderRadius:8,padding:"8px 14px",cursor:"pointer",color:CA.muted2,fontSize:12,display:"inline-block"}}>
             {logoFile?logoFile.name:"Upload logo"}
             <input type="file" accept="image/png,image/svg+xml,image/jpeg" onChange={handleLogoChange} style={{display:"none"}}/>
           </label>
@@ -472,23 +526,23 @@ function SchoolOnboardingForm({onCreated}) {
 
       {/* Coach slots */}
       <div style={{marginBottom:16}}>
-        <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:10}}>
-          COACHES — codes: <span style={{color:C.gold,fontWeight:700}}>{schoolCode||"???"}01</span>, <span style={{color:C.gold,fontWeight:700}}>{schoolCode||"???"}02</span>…
+        <div style={{color:CA.muted,fontSize:11,letterSpacing:1,marginBottom:10}}>
+          COACHES — codes: <span style={{color:CA.accent,fontWeight:700}}>{schoolCode||"???"}01</span>, <span style={{color:CA.accent,fontWeight:700}}>{schoolCode||"???"}02</span>…
         </div>
         {coaches.slice(0,maxCoaches).map((c,i)=>(
           <div key={i} style={{display:"grid",gridTemplateColumns:"56px 1fr 1fr",gap:8,marginBottom:8,alignItems:"center"}}>
-            <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:6,padding:"7px 4px",fontSize:11,fontWeight:700,color:C.gold,letterSpacing:1,fontFamily:"'Bebas Neue'",textAlign:"center"}}>
+            <div style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:6,padding:"7px 4px",fontSize:11,fontWeight:700,color:CA.accent,letterSpacing:1,fontFamily:"'Bebas Neue'",textAlign:"center"}}>
               {(schoolCode||"???")+String(i+1).padStart(2,"0")}
             </div>
-            <input value={c.name} onChange={e=>updateCoach(i,"name",e.target.value)} placeholder={`Coach ${i+1} name`} style={inp()}/>
-            <input type="email" value={c.email} onChange={e=>updateCoach(i,"email",e.target.value)} placeholder="email@school.edu" style={inp()}/>
+            <input value={c.name} onChange={e=>updateCoach(i,"name",e.target.value)} placeholder={`Coach ${i+1} name`} style={inpA()}/>
+            <input type="email" value={c.email} onChange={e=>updateCoach(i,"email",e.target.value)} placeholder="email@school.edu" style={inpA()}/>
           </div>
         ))}
       </div>
 
-      {err&&<div style={{color:C.red,fontSize:12,marginBottom:12}}>{err}</div>}
-      {success&&<div style={{color:C.green,fontSize:13,marginBottom:12,fontWeight:600}}>{success}</div>}
-      <button onClick={handleSubmit} disabled={saving} style={btn(C.gold,"#000",{opacity:saving?0.7:1})}>
+      {err&&<div style={{color:CA.red,fontSize:12,marginBottom:12}}>{err}</div>}
+      {success&&<div style={{color:CA.green,fontSize:13,marginBottom:12,fontWeight:600}}>{success}</div>}
+      <button onClick={handleSubmit} disabled={saving} style={btn(CA_BTN,"#fff",{opacity:saving?0.7:1,boxShadow:`0 6px 18px ${CA_GLOW}`})}>
         {saving?"Creating school...":"Create School & Send Coach Invites →"}
       </button>
     </div>
@@ -759,35 +813,35 @@ function CoachDashboard({coach,onLogout}) {
   const tabs = ["overview","athletes","progress","reports",...(isMaster?[]:["settings"]),...(isMaster?["coaches"]:[]),...(!isMaster&&isAdmin?["account"]:[])];
 
   return (
-    <div style={{minHeight:"100dvh",background:C.navy}}>
-      <style>{GS}</style>
+    <div className="cyber-coach" style={{minHeight:"100dvh",background:CA.navy}}>
+      <style>{GS}{GSC}</style>
       {/* Header */}
-      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,paddingTop:isMobile?"calc(10px + env(safe-area-inset-top, 0px))":"14px",paddingBottom:isMobile?"10px":"14px",paddingLeft:isMobile?"14px":"20px",paddingRight:isMobile?"14px":"20px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:50,gap:8}}>
+      <div style={{background:CA.navy2,borderBottom:`1px solid ${CA.border}`,paddingTop:isMobile?"calc(10px + env(safe-area-inset-top, 0px))":"14px",paddingBottom:isMobile?"10px":"14px",paddingLeft:isMobile?"14px":"20px",paddingRight:isMobile?"14px":"20px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:50,gap:8}}>
         <div style={{display:"flex",alignItems:"center",gap:10,minWidth:0,flex:1}}>
           {/* School logo — shown for team coaches who have a logo set */}
           {!isMaster&&school?.logo_url&&(
-            <img src={school.logo_url} alt={school.name} style={{width:isMobile?32:40,height:isMobile?32:40,borderRadius:8,objectFit:"contain",background:"#fff",padding:3,flexShrink:0}}/>
+            <img src={school.logo_url} alt={school.name} style={{width:isMobile?32:40,height:isMobile?32:40,borderRadius:8,objectFit:"contain",background:"rgba(220,232,255,.92)",padding:3,flexShrink:0}}/>
           )}
           <div style={{minWidth:0}}>
-            <div style={{fontFamily:"'Bebas Neue'",fontSize:isMobile?17:22,color:C.gold,letterSpacing:2,lineHeight:1.1,whiteSpace:isMobile?"nowrap":"normal",overflow:"hidden",textOverflow:"ellipsis"}}>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:isMobile?17:22,color:CA.accent,letterSpacing:2,lineHeight:1.1,whiteSpace:isMobile?"nowrap":"normal",overflow:"hidden",textOverflow:"ellipsis"}}>
               {isMaster ? "WILCO MASTER" : (school?.name ? school.name.toUpperCase() : "WILCO COACH")}
             </div>
-            <div style={{color:C.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+            <div style={{color:CA.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
               {coach.name}{!isMaster&&school?" · "+school.name:""}
             </div>
           </div>
         </div>
         <div style={{display:"flex",gap:6,flexShrink:0}}>
-          <button onClick={loadAll} style={{background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:isMobile?16:12}}>↻</button>
-          <button onClick={onLogout} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12}}>Log Out</button>
+          <button onClick={loadAll} style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:isMobile?16:12}}>↻</button>
+          <button onClick={onLogout} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12}}>Log Out</button>
         </div>
       </div>
 
       {/* Tabs */}
-      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,display:"flex",padding:"0 20px"}}>
+      <div style={{background:CA.navy2,borderBottom:`1px solid ${CA.border}`,display:"flex",padding:"0 20px"}}>
         {tabs.map(t=>(
           <button key={t} onClick={()=>{setActiveTab(t);if(t!=="athletes")setSelected(null);}}
-            style={{padding:"12px 18px",background:"none",border:"none",borderBottom:`2px solid ${activeTab===t?C.gold:"transparent"}`,color:activeTab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"color 0.15s"}}>
+            style={{padding:"12px 18px",background:"none",border:"none",borderBottom:`2px solid ${activeTab===t?CA.accent:"transparent"}`,color:activeTab===t?CA.accent:CA.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"color 0.15s"}}>
             {t==="stats"?"Group Stats":t}
           </button>
         ))}
@@ -795,7 +849,7 @@ function CoachDashboard({coach,onLogout}) {
 
       <div style={{padding:isMobile?12:20,maxWidth:1400,margin:"0 auto"}}>
         {loading?(
-          <div style={{textAlign:"center",padding:60,color:C.muted}}>Loading...</div>
+          <div style={{textAlign:"center",padding:60,color:CA.muted}}>Loading...</div>
         ):(
           <>
             {/* ── OVERVIEW TAB ── */}
@@ -809,40 +863,40 @@ function CoachDashboard({coach,onLogout}) {
               <div style={{display:"grid",gridTemplateColumns:(!isMobile&&selected)?"300px 1fr":"1fr",gap:20,alignItems:"start"}}>
                 {/* Left: Athlete List — hidden on mobile when detail is open */}
                 {(!isMobile||!selected)&&(
-                <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden",position:isMobile?"static":"sticky",top:90}}>
-                  <div style={{padding:"12px 14px",borderBottom:`1px solid ${C.border}`}}>
+                <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,overflow:"hidden",position:isMobile?"static":"sticky",top:90}}>
+                  <div style={{padding:"12px 14px",borderBottom:`1px solid ${CA.border}`}}>
                     <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search athletes..."
-                      style={{width:"100%",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 12px",color:C.text,fontSize:13,outline:"none",marginBottom:8}}/>
+                      style={{width:"100%",background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:8,padding:"8px 12px",color:CA.text,fontSize:13,outline:"none",marginBottom:8}}/>
                     <div style={{display:"flex",gap:6}}>
                       <button onClick={()=>setFilterPain(p=>!p)}
-                        style={{flex:1,background:filterPain?`${C.red}20`:"transparent",border:`1px solid ${filterPain?C.red:C.border}`,color:filterPain?C.red:C.muted,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11,fontFamily:"'DM Sans'"}}>
+                        style={{flex:1,background:filterPain?`${CA.red}20`:"transparent",border:`1px solid ${filterPain?CA.red:CA.border}`,color:filterPain?CA.red:CA.muted,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11,fontFamily:"'DM Sans'"}}>
                         Pain flags
                       </button>
                       <button onClick={()=>setFilterInactive(p=>!p)}
-                        style={{flex:1,background:filterInactive?`${C.gold}20`:"transparent",border:`1px solid ${filterInactive?C.gold:C.border}`,color:filterInactive?C.gold:C.muted,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11,fontFamily:"'DM Sans'"}}>
+                        style={{flex:1,background:filterInactive?`${CA.accent}20`:"transparent",border:`1px solid ${filterInactive?CA.accent:CA.border}`,color:filterInactive?CA.accent:CA.muted,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11,fontFamily:"'DM Sans'"}}>
                         Inactive 7d+
                       </button>
                       <button onClick={()=>setSortBy(s=>s==="lastActive"?"name":"lastActive")}
-                        style={{flex:1,background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11,fontFamily:"'DM Sans'",display:"flex",alignItems:"center",justifyContent:"center",gap:4}}>
+                        style={{flex:1,background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11,fontFamily:"'DM Sans'",display:"flex",alignItems:"center",justifyContent:"center",gap:4}}>
                         <span>{sortBy==="lastActive"?"⏱":"A–Z"}</span>
                         <span>{sortBy==="lastActive"?"Active":"Name"}</span>
                       </button>
                     </div>
                   </div>
-                  <div style={{padding:"6px 14px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+                  <div style={{padding:"6px 14px",borderBottom:`1px solid ${CA.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
                     <button onClick={()=>{setSelectMode(p=>!p);setSelectedIds(new Set());}}
-                      style={{background:selectMode?`${C.gold}20`:"transparent",border:`1px solid ${selectMode?C.gold:C.border}`,color:selectMode?C.gold:C.muted,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:11,fontFamily:"'DM Sans'"}}>
+                      style={{background:selectMode?`${CA.accent}20`:"transparent",border:`1px solid ${selectMode?CA.accent:CA.border}`,color:selectMode?CA.accent:CA.muted,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:11,fontFamily:"'DM Sans'"}}>
                       {selectMode?"✕ Cancel":"☑ Bulk Assign"}
                     </button>
                     {selectMode&&selectedIds.size>0&&(
                       <div style={{display:"flex",gap:6}}>
                         <button onClick={()=>setShowBulkModal(true)}
-                          style={{background:C.gold,border:"none",color:"#000",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,whiteSpace:"nowrap"}}>
+                          style={{background:CA_BTN,boxShadow:"0 4px 16px "+CA_GLOW,border:"none",color:"#fff",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,whiteSpace:"nowrap"}}>
                           Program ({selectedIds.size})
                         </button>
                         {isMaster&&(
                           <button onClick={()=>setShowAssignCoachModal(true)}
-                            style={{background:C.blue,border:"none",color:"#000",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,whiteSpace:"nowrap"}}>
+                            style={{background:CA.blue,border:"none",color:"#fff",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,whiteSpace:"nowrap"}}>
                             Coach ({selectedIds.size})
                           </button>
                         )}
@@ -851,34 +905,34 @@ function CoachDashboard({coach,onLogout}) {
                   </div>
                   <div style={{maxHeight:isMobile?"none":"calc(100dvh - 240px)",overflowY:"auto"}}>
                     {filtered.length===0?(
-                      <div style={{padding:24,textAlign:"center",color:C.muted,fontSize:13}}>No athletes found</div>
+                      <div style={{padding:24,textAlign:"center",color:CA.muted,fontSize:13}}>No athletes found</div>
                     ):filtered.map(a=>{
                       const la = lastActive(a.id);
                       const d = daysBetween(la);
                       const aResolvedPain = (a.resolved_pain||[]).map(x=>x.toLowerCase());
                       const hasPain = workouts.filter(w=>w.athlete_id===a.id).some(w=>w.parsed_data?.pain_flags?.some(p=>!aResolvedPain.includes(p.area.toLowerCase())));
                       const isSel = selected?.id===a.id;
-                      const dot = d===null?C.muted:d===0?C.green:d<=3?C.green:d<=7?C.gold:C.red;
+                      const dot = d===null?CA.muted:d===0?CA.green:d<=3?CA.green:d<=7?CA.amber:CA.red;
                       return (
                         <div key={a.id}
                           onClick={()=>selectMode?setSelectedIds(prev=>{const s=new Set(prev);s.has(a.id)?s.delete(a.id):s.add(a.id);return s;}):setSelected(isSel?null:a)}
-                          style={{padding:"11px 14px",borderBottom:`1px solid ${C.border}`,cursor:"pointer",background:selectedIds.has(a.id)?`${C.gold}15`:isSel?C.navy3:"transparent",transition:"background 0.15s",display:"flex",alignItems:"center",gap:10}}>
+                          style={{padding:"11px 14px",borderBottom:`1px solid ${CA.border}`,cursor:"pointer",background:selectedIds.has(a.id)?`${CA.accent}15`:isSel?CA.navy3:"transparent",transition:"background 0.15s",display:"flex",alignItems:"center",gap:10}}>
                           {selectMode?(
-                            <div style={{width:20,height:20,borderRadius:4,border:`2px solid ${selectedIds.has(a.id)?C.gold:C.muted}`,background:selectedIds.has(a.id)?C.gold:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontSize:11,color:"#000"}}>
+                            <div style={{width:20,height:20,borderRadius:4,border:`2px solid ${selectedIds.has(a.id)?CA.accent:CA.muted}`,background:selectedIds.has(a.id)?CA.accent:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontSize:11,color:"#fff"}}>
                               {selectedIds.has(a.id)&&"✓"}
                             </div>
                           ):(
-                          <div style={{width:34,height:34,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:15,color:"#000",flexShrink:0}}>{a.name[0].toUpperCase()}</div>
+                          <div style={{width:34,height:34,borderRadius:"50%",background:`linear-gradient(135deg,#57a0ff,#2a63e6)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:15,color:"#fff",flexShrink:0}}>{a.name[0].toUpperCase()}</div>
                           )}
                           <div style={{flex:1,minWidth:0}}>
-                            <div style={{color:C.text,fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:5}}>{a.name}{a.certified_badge_earned_at&&<span title="WILCO Certified" style={{color:C.gold,fontSize:10,flexShrink:0}}>✦</span>}</div>
-                            <div style={{color:C.muted,fontSize:11}}>{a.sport} · {groupIntoSessions(workouts.filter(w=>w.athlete_id===a.id)).length} sessions</div>
+                            <div style={{color:CA.text,fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:5}}>{a.name}{a.certified_badge_earned_at&&<span title="WILCO Certified" style={{color:CA.accent,fontSize:10,flexShrink:0}}>✦</span>}</div>
+                            <div style={{color:CA.muted,fontSize:11}}>{a.sport} · {groupIntoSessions(workouts.filter(w=>w.athlete_id===a.id)).length} sessions</div>
                           </div>
                           <div style={{textAlign:"right",flexShrink:0}}>
-                            {hasPain&&<div style={{color:C.red,fontSize:9,marginBottom:2}}>⚠ pain</div>}
+                            {hasPain&&<div style={{color:CA.red,fontSize:9,marginBottom:2}}>⚠ pain</div>}
                             <div style={{display:"flex",alignItems:"center",gap:4,justifyContent:"flex-end"}}>
                               <div style={{width:7,height:7,borderRadius:"50%",background:dot}}/>
-                              <div style={{color:C.muted,fontSize:10}}>{d===null?"never":d===0?"today":`${d}d ago`}</div>
+                              <div style={{color:CA.muted,fontSize:10}}>{d===null?"never":d===0?"today":`${d}d ago`}</div>
                             </div>
                           </div>
                         </div>
@@ -893,7 +947,7 @@ function CoachDashboard({coach,onLogout}) {
                   <div>
                     {isMobile&&(
                       <button onClick={()=>setSelected(null)}
-                        style={{display:"flex",alignItems:"center",gap:6,background:C.navy2,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13,marginBottom:12,fontFamily:"'DM Sans'"}}>
+                        style={{display:"flex",alignItems:"center",gap:6,background:CA.navy2,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13,marginBottom:12,fontFamily:"'DM Sans'"}}>
                         ← Athletes
                       </button>
                     )}
@@ -919,7 +973,7 @@ function CoachDashboard({coach,onLogout}) {
                   </div>
                 )}
                 {!selected&&!isMobile&&(
-                  <div style={{display:"flex",alignItems:"center",justifyContent:"center",padding:60,color:C.muted,fontSize:13,border:`1px dashed ${C.border}`,borderRadius:14}}>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"center",padding:60,color:CA.muted,fontSize:13,border:`1px dashed ${CA.border}`,borderRadius:14}}>
                     Select an athlete to view details
                   </div>
                 )}
@@ -929,15 +983,15 @@ function CoachDashboard({coach,onLogout}) {
             {/* Bulk Program Modal */}
             {showBulkModal&&(
               <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.8)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:500,padding:24}}>
-                <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:500}}>
-                  <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2,marginBottom:4}}>BULK ASSIGN PROGRAM</div>
-                  <div style={{color:C.muted,fontSize:12,marginBottom:14}}>Assigning to {selectedIds.size} athlete{selectedIds.size!==1?"s":""} — overwrites any existing program.</div>
+                <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:500}}>
+                  <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.accent,letterSpacing:2,marginBottom:4}}>BULK ASSIGN PROGRAM</div>
+                  <div style={{color:CA.muted,fontSize:12,marginBottom:14}}>Assigning to {selectedIds.size} athlete{selectedIds.size!==1?"s":""} — overwrites any existing program.</div>
                   <textarea value={bulkProgram} onChange={e=>setBulkProgram(e.target.value)} placeholder={"Paste the program here...\n\nExample:\nWeek 1:\n  Mon: Squat 3×5, Bench 3×5\n  Wed: Deadlift 1×5, OHP 3×5"} rows={10}
-                    style={{width:"100%",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",color:C.text,fontSize:13,outline:"none",resize:"vertical",lineHeight:1.6,fontFamily:"'DM Sans'",marginBottom:14}}/>
+                    style={{width:"100%",background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:10,padding:"12px 14px",color:CA.text,fontSize:13,outline:"none",resize:"vertical",lineHeight:1.6,fontFamily:"'DM Sans'",marginBottom:14}}/>
                   <div style={{display:"flex",gap:8}}>
-                    <button onClick={()=>setShowBulkModal(false)} style={{flex:1,background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14}}>Cancel</button>
+                    <button onClick={()=>setShowBulkModal(false)} style={{flex:1,background:"transparent",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14}}>Cancel</button>
                     <button onClick={handleBulkAssign} disabled={bulkSaving||!bulkProgram.trim()}
-                      style={{flex:2,background:C.gold,border:"none",color:"#000",borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,opacity:bulkSaving||!bulkProgram.trim()?0.6:1}}>
+                      style={{flex:2,background:CA_BTN,boxShadow:"0 4px 16px "+CA_GLOW,border:"none",color:"#fff",borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,opacity:bulkSaving||!bulkProgram.trim()?0.6:1}}>
                       {bulkSaving?"Saving...":"Assign to "+selectedIds.size+" Athletes →"}
                     </button>
                   </div>
@@ -956,14 +1010,14 @@ function CoachDashboard({coach,onLogout}) {
               return (
                 <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.8)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:500,padding:24}}
                   onClick={()=>!assignSaving&&setShowAssignCoachModal(false)}>
-                  <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:460}}
+                  <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:460}}
                     onClick={e=>e.stopPropagation()}>
-                    <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.gold,letterSpacing:2,marginBottom:4}}>ASSIGN TO COACH</div>
-                    <div style={{color:C.muted,fontSize:12,marginBottom:14}}>
+                    <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.accent,letterSpacing:2,marginBottom:4}}>ASSIGN TO COACH</div>
+                    <div style={{color:CA.muted,fontSize:12,marginBottom:14}}>
                       Moving {selectedIds.size} athlete{selectedIds.size!==1?"s":""} to a coach/school. This overwrites their current assignment.
                     </div>
                     <select value={assignCoachId} onChange={e=>setAssignCoachId(e.target.value)}
-                      style={{width:"100%",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"11px 12px",color:C.text,fontSize:13,outline:"none",marginBottom:14}}>
+                      style={{width:"100%",background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:10,padding:"11px 12px",color:CA.text,fontSize:13,outline:"none",marginBottom:14}}>
                       <option value="">— Unassigned (remove from any school) —</option>
                       {sortedCoaches.map(c=>{
                         const s = schoolsById[c.school_id];
@@ -974,12 +1028,12 @@ function CoachDashboard({coach,onLogout}) {
                         );
                       })}
                     </select>
-                    {assignError&&<div style={{color:C.red,fontSize:12,marginBottom:10}}>{assignError}</div>}
+                    {assignError&&<div style={{color:CA.red,fontSize:12,marginBottom:10}}>{assignError}</div>}
                     <div style={{display:"flex",gap:8}}>
                       <button onClick={()=>{setShowAssignCoachModal(false);setAssignCoachId("");setAssignError("");}}
-                        style={{flex:1,background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14}}>Cancel</button>
+                        style={{flex:1,background:"transparent",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14}}>Cancel</button>
                       <button onClick={handleBulkAssignCoach} disabled={assignSaving}
-                        style={{flex:2,background:C.blue,border:"none",color:"#000",borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,opacity:assignSaving?0.6:1}}>
+                        style={{flex:2,background:CA.blue,border:"none",color:"#fff",borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,opacity:assignSaving?0.6:1}}>
                         {assignSaving?"Saving...":(assignCoachId?`Assign ${selectedIds.size} Athlete${selectedIds.size!==1?"s":""} →`:`Unassign ${selectedIds.size} Athlete${selectedIds.size!==1?"s":""} →`)}
                       </button>
                     </div>
@@ -997,15 +1051,15 @@ function CoachDashboard({coach,onLogout}) {
             {/* ── SETTINGS TAB (notifications) ── */}
             {activeTab==="settings"&&(()=>{
               const Toggle = ({on,onClick})=>(
-                <button onClick={onClick} style={{width:42,height:24,borderRadius:999,background:on?`${C.green}40`:C.navy3,border:`1px solid ${on?C.green:C.border}`,position:"relative",cursor:"pointer",flexShrink:0}}>
-                  <span style={{position:"absolute",top:2,left:on?20:2,width:18,height:18,borderRadius:"50%",background:on?C.green:C.muted,transition:"left 0.15s"}}/>
+                <button onClick={onClick} style={{width:42,height:24,borderRadius:999,background:on?`${CA.green}40`:CA.navy3,border:`1px solid ${on?CA.green:CA.border}`,position:"relative",cursor:"pointer",flexShrink:0}}>
+                  <span style={{position:"absolute",top:2,left:on?20:2,width:18,height:18,borderRadius:"50%",background:on?CA.green:CA.muted,transition:"left 0.15s"}}/>
                 </button>
               );
               const Row = ({title,desc,pkey})=>(
-                <div style={{display:"flex",alignItems:"center",gap:14,padding:"13px 16px",borderBottom:`1px solid ${C.border}80`}}>
+                <div style={{display:"flex",alignItems:"center",gap:14,padding:"13px 16px",borderBottom:`1px solid ${CA.border}80`}}>
                   <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontWeight:700,fontSize:13.5,color:C.text}}>{title}</div>
-                    <div style={{color:C.muted,fontSize:12,marginTop:2}}>{desc}</div>
+                    <div style={{fontWeight:700,fontSize:13.5,color:CA.text}}>{title}</div>
+                    <div style={{color:CA.muted,fontSize:12,marginTop:2}}>{desc}</div>
                   </div>
                   <Toggle on={notifPrefs[pkey]!==false} onClick={()=>savePref(pkey,!(notifPrefs[pkey]!==false))}/>
                 </div>
@@ -1013,23 +1067,23 @@ function CoachDashboard({coach,onLogout}) {
               return (
                 <div style={{maxWidth:640}}>
                   <div style={{display:"flex",alignItems:"center",gap:12,margin:"6px 2px 12px"}}>
-                    <span style={{fontSize:10.5,letterSpacing:1.4,textTransform:"uppercase",color:C.gold,fontWeight:700}}>Notifications</span>
-                    <span style={{height:1,background:C.border,flex:1}}/>
+                    <span style={{fontSize:10.5,letterSpacing:1.4,textTransform:"uppercase",color:CA.accent,fontWeight:700}}>Notifications</span>
+                    <span style={{height:1,background:CA.border,flex:1}}/>
                   </div>
-                  <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:"14px 16px",marginBottom:14,display:"flex",alignItems:"center",gap:14}}>
+                  <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,padding:"14px 16px",marginBottom:14,display:"flex",alignItems:"center",gap:14}}>
                     <div style={{flex:1}}>
-                      <div style={{fontWeight:700,fontSize:13.5,color:C.text}}>Push notifications on this device</div>
-                      <div style={{color:C.muted,fontSize:12,marginTop:2}}>{pushOn?"On — you'll get the alerts you've toggled below.":"Turn on to get alerts on this device."}</div>
+                      <div style={{fontWeight:700,fontSize:13.5,color:CA.text}}>Push notifications on this device</div>
+                      <div style={{color:CA.muted,fontSize:12,marginTop:2}}>{pushOn?"On — you'll get the alerts you've toggled below.":"Turn on to get alerts on this device."}</div>
                     </div>
-                    <button onClick={togglePush} disabled={pushBusy} style={{background:pushOn?"transparent":C.gold,color:pushOn?C.muted:"#000",border:`1px solid ${pushOn?C.border:C.gold}`,borderRadius:9,padding:"8px 16px",fontWeight:700,fontSize:12.5,cursor:"pointer",fontFamily:"'DM Sans'",opacity:pushBusy?0.6:1}}>{pushBusy?"…":pushOn?"Turn off":"Enable"}</button>
+                    <button onClick={togglePush} disabled={pushBusy} style={{background:pushOn?"transparent":CA_BTN,color:pushOn?CA.muted:"#fff",border:`1px solid ${pushOn?CA.border:CA.accent}`,boxShadow:pushOn?"none":`0 4px 16px ${CA_GLOW}`,borderRadius:9,padding:"8px 16px",fontWeight:700,fontSize:12.5,cursor:"pointer",fontFamily:"'DM Sans'",opacity:pushBusy?0.6:1}}>{pushBusy?"…":pushOn?"Turn off":"Enable"}</button>
                   </div>
-                  <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden"}}>
+                  <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,overflow:"hidden"}}>
                     <Row title="Athlete injury / pain" desc="When an athlete flags pain in a session." pkey="injury"/>
                     <Row title="Big PR" desc="Only real improvements on ranked lifts — never a first-time baseline." pkey="big_pr"/>
                     <Row title="Athlete inactive" desc="When someone on your roster goes quiet." pkey="inactive"/>
                     <Row title="Coach's Edition ready" desc="Your weekly + monthly team report, the moment it's generated." pkey="digest"/>
                   </div>
-                  <div style={{color:C.muted,fontSize:11.5,marginTop:12,lineHeight:1.5}}>WILCO never messages your athletes on your behalf — these alerts go only to you.</div>
+                  <div style={{color:CA.muted,fontSize:11.5,marginTop:12,lineHeight:1.5}}>WILCO never messages your athletes on your behalf — these alerts go only to you.</div>
                 </div>
               );
             })()}
@@ -1072,39 +1126,39 @@ function CoachDashboard({coach,onLogout}) {
                 const ol = c.outliers||{};
                 return (
                   <div style={{maxWidth:700}}>
-                    <button onClick={()=>setSelectedDigest(null)} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:12,marginBottom:14}}>← Back to Reports</button>
-                    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
+                    <button onClick={()=>setSelectedDigest(null)} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:12,marginBottom:14}}>← Back to Reports</button>
+                    <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,padding:18}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
                         <div>
-                          <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>{selectedDigest.label}</div>
-                          <div style={{color:C.muted,fontSize:12}}>{isTeam?"Team report":`${a?.name||"Unknown"} · ${a?.sport||""}`}</div>
+                          <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>{selectedDigest.label}</div>
+                          <div style={{color:CA.muted,fontSize:12}}>{isTeam?"Team report":`${a?.name||"Unknown"} · ${a?.sport||""}`}</div>
                         </div>
                         <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"flex-end"}}>
-                          {selectedDigest.has_plateau&&<div style={{background:"rgba(239,68,68,0.15)",border:"1px solid rgba(239,68,68,0.4)",borderRadius:4,padding:"2px 7px",color:"#ef4444",fontSize:10,fontWeight:700}}>PLATEAU</div>}
-                          {selectedDigest.has_pain&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:4,padding:"2px 7px",color:"#ef4444",fontSize:10}}>{isTeam?"INJURIES":"PAIN FLAG"}</div>}
-                          {selectedDigest.has_missed&&<div style={{background:"rgba(100,116,139,0.2)",border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 7px",color:C.muted,fontSize:10}}>{isTeam?"AT-RISK":"MISSED SESSIONS"}</div>}
+                          {selectedDigest.has_plateau&&<div style={{background:CA.red+"26",border:"1px solid "+CA.red+"66",borderRadius:4,padding:"2px 7px",color:CA.red,fontSize:10,fontWeight:700}}>PLATEAU</div>}
+                          {selectedDigest.has_pain&&<div style={{background:CA.red+"1A",border:"1px solid "+CA.red+"4D",borderRadius:4,padding:"2px 7px",color:CA.red,fontSize:10}}>{isTeam?"INJURIES":"PAIN FLAG"}</div>}
+                          {selectedDigest.has_missed&&<div style={{background:"rgba(100,116,139,0.2)",border:`1px solid ${CA.border}`,borderRadius:4,padding:"2px 7px",color:CA.muted,fontSize:10}}>{isTeam?"AT-RISK":"MISSED SESSIONS"}</div>}
                         </div>
                       </div>
-                      {c.intro&&<div style={{color:C.text,fontSize:13,lineHeight:1.65,marginBottom:12,fontStyle:"italic"}}>{c.intro}</div>}
+                      {c.intro&&<div style={{color:CA.text,fontSize:13,lineHeight:1.65,marginBottom:12,fontStyle:"italic"}}>{c.intro}</div>}
                       {sections.map((s,i)=>(
-                        <div key={i} style={{background:C.navy3,border:`1px solid ${s.flag==="warn"?"rgba(239,68,68,0.3)":C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
-                          <div style={{color:s.flag==="warn"?"#ef4444":C.muted,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:6}}>{s.label}</div>
-                          <div style={{color:C.text,fontSize:13,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{s.body}</div>
+                        <div key={i} style={{background:CA.navy3,border:`1px solid ${s.flag==="warn"?CA.red+"4D":CA.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
+                          <div style={{color:s.flag==="warn"?CA.red:CA.muted,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:6}}>{s.label}</div>
+                          <div style={{color:CA.text,fontSize:13,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{s.body}</div>
                         </div>
                       ))}
                       {/* Team report: outliers + coach actions */}
                       {isTeam&&(ol.mostImproved?.length>0||ol.atRisk?.length>0||ol.volumeCratered?.length>0)&&(
-                        <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
-                          <div style={{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:8}}>FLAGGED OUTLIERS</div>
-                          {ol.mostImproved?.length>0&&<div style={{color:C.text,fontSize:13,marginBottom:4}}><span style={{color:C.green}}>↑ Most improved:</span> {ol.mostImproved.map(o=>`${o.name} (+${o.delta})`).join(", ")}</div>}
-                          {ol.atRisk?.length>0&&<div style={{color:C.text,fontSize:13,marginBottom:4}}><span style={{color:"#ef4444"}}>⚠ At risk:</span> {ol.atRisk.join(", ")}</div>}
-                          {ol.volumeCratered?.length>0&&<div style={{color:C.text,fontSize:13}}><span style={{color:C.gold}}>↓ Volume cratered:</span> {ol.volumeCratered.map(o=>`${o.name} (${o.gap}%)`).join(", ")}</div>}
+                        <div style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
+                          <div style={{color:CA.muted,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:8}}>FLAGGED OUTLIERS</div>
+                          {ol.mostImproved?.length>0&&<div style={{color:CA.text,fontSize:13,marginBottom:4}}><span style={{color:CA.green}}>↑ Most improved:</span> {ol.mostImproved.map(o=>`${o.name} (+${o.delta})`).join(", ")}</div>}
+                          {ol.atRisk?.length>0&&<div style={{color:CA.text,fontSize:13,marginBottom:4}}><span style={{color:CA.red}}>⚠ At risk:</span> {ol.atRisk.join(", ")}</div>}
+                          {ol.volumeCratered?.length>0&&<div style={{color:CA.text,fontSize:13}}><span style={{color:CA.accent}}>↓ Volume cratered:</span> {ol.volumeCratered.map(o=>`${o.name} (${o.gap}%)`).join(", ")}</div>}
                         </div>
                       )}
                       {isTeam&&Array.isArray(c.actions)&&c.actions.length>0&&(
                         <div style={{background:"rgba(16,185,129,0.1)",border:"1px solid rgba(16,185,129,0.3)",borderRadius:10,padding:"12px 14px"}}>
-                          <div style={{color:C.green,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:6}}>COACH ACTIONS</div>
-                          <ul style={{margin:0,paddingLeft:16,color:C.text,fontSize:13,lineHeight:1.7}}>{c.actions.map((act,i)=><li key={i}>{act}</li>)}</ul>
+                          <div style={{color:CA.green,fontSize:10,fontWeight:700,letterSpacing:1.5,marginBottom:6}}>COACH ACTIONS</div>
+                          <ul style={{margin:0,paddingLeft:16,color:CA.text,fontSize:13,lineHeight:1.7}}>{c.actions.map((act,i)=><li key={i}>{act}</li>)}</ul>
                         </div>
                       )}
                     </div>
@@ -1146,21 +1200,21 @@ function CoachDashboard({coach,onLogout}) {
                 <div style={{maxWidth:700}}>
                   {/* ── Leaderboard Section ── */}
                   {leaderboard&&(
-                    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16,marginBottom:20}}>
+                    <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,padding:16,marginBottom:20}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-                        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>TEAM LEADERBOARD</div>
-                        <div style={{color:C.muted,fontSize:10}}>As of {leaderboard.asOf}</div>
+                        <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>TEAM LEADERBOARD</div>
+                        <div style={{color:CA.muted,fontSize:10}}>As of {leaderboard.asOf}</div>
                       </div>
                       <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
                         {[{label:"Most Improved",data:leaderboard.improved},{label:"Most Impressive Lift",data:leaderboard.impressive},{label:"Most Consistent",data:leaderboard.consistent}].map(({label,data})=>(
                           <div key={label}>
-                            <div style={{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:1,marginBottom:8,textTransform:"uppercase"}}>{label}</div>
-                            {data.length===0?<div style={{color:C.muted,fontSize:11,fontStyle:"italic"}}>Not enough data</div>:data.map((entry,i)=>(
+                            <div style={{color:CA.muted,fontSize:10,fontWeight:700,letterSpacing:1,marginBottom:8,textTransform:"uppercase"}}>{label}</div>
+                            {data.length===0?<div style={{color:CA.muted,fontSize:11,fontStyle:"italic"}}>Not enough data</div>:data.map((entry,i)=>(
                               <div key={i} style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
-                                <span style={{color:i===0?C.gold:C.muted,fontSize:i===0?14:11,flexShrink:0}}>{i===0?"🥇":i===1?"2.":"3."}</span>
+                                <span style={{color:i===0?CA.accent:CA.muted,fontSize:i===0?14:11,flexShrink:0}}>{i===0?"🥇":i===1?"2.":"3."}</span>
                                 <div style={{minWidth:0}}>
-                                  <div style={{color:C.text,fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{entry.athlete.name}</div>
-                                  <div style={{color:C.muted,fontSize:10,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{entry.metric}</div>
+                                  <div style={{color:CA.text,fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{entry.athlete.name}</div>
+                                  <div style={{color:CA.muted,fontSize:10,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{entry.metric}</div>
                                 </div>
                               </div>
                             ))}
@@ -1171,36 +1225,36 @@ function CoachDashboard({coach,onLogout}) {
                   )}
                   {/* Team aggregate report (Coach Joe's read on the whole roster) */}
                   {latestTeamReport&&(
-                    <button onClick={()=>setSelectedDigest(latestTeamReport)} style={{width:"100%",background:C.navy2,border:`1px solid ${C.gold}40`,borderRadius:14,padding:16,textAlign:"left",cursor:"pointer",display:"block",marginBottom:16}}>
+                    <button onClick={()=>setSelectedDigest(latestTeamReport)} style={{width:"100%",background:CA.navy2,border:`1px solid ${CA.accent}40`,borderRadius:14,padding:16,textAlign:"left",cursor:"pointer",display:"block",marginBottom:16}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                        <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>TEAM REPORT</div>
+                        <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>TEAM REPORT</div>
                         <div style={{display:"flex",gap:6}}>
-                          {latestTeamReport.has_pain&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:4,padding:"2px 6px",color:"#ef4444",fontSize:10}}>INJURIES</div>}
-                          {latestTeamReport.has_missed&&<div style={{background:`${C.navy3}`,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 6px",color:C.muted,fontSize:10}}>AT-RISK</div>}
+                          {latestTeamReport.has_pain&&<div style={{background:CA.red+"1A",border:"1px solid "+CA.red+"4D",borderRadius:4,padding:"2px 6px",color:CA.red,fontSize:10}}>INJURIES</div>}
+                          {latestTeamReport.has_missed&&<div style={{background:`${CA.navy3}`,border:`1px solid ${CA.border}`,borderRadius:4,padding:"2px 6px",color:CA.muted,fontSize:10}}>AT-RISK</div>}
                         </div>
                       </div>
-                      {latestTeamReport.content_json?.intro&&<div style={{color:C.text,fontSize:13,lineHeight:1.6,marginBottom:8}}>{latestTeamReport.content_json.intro}</div>}
-                      <div style={{color:C.gold,fontSize:12,fontWeight:700,letterSpacing:1}}>OPEN REPORT →</div>
+                      {latestTeamReport.content_json?.intro&&<div style={{color:CA.text,fontSize:13,lineHeight:1.6,marginBottom:8}}>{latestTeamReport.content_json.intro}</div>}
+                      <div style={{color:CA.accent,fontSize:12,fontWeight:700,letterSpacing:1}}>OPEN REPORT →</div>
                     </button>
                   )}
                   {/* Filters */}
                   <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:14}}>
                     <input value={reportSearch} onChange={e=>setReportSearch(e.target.value)} placeholder="Search athlete..."
-                      style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"7px 12px",color:C.text,fontSize:13,outline:"none",flex:1,minWidth:120}}/>
+                      style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:8,padding:"7px 12px",color:CA.text,fontSize:13,outline:"none",flex:1,minWidth:120}}/>
                     {["all","weekly","monthly"].map(f=>(
                       <button key={f} onClick={()=>setReportFilter(f)}
-                        style={{background:reportFilter===f?`${C.gold}20`:"transparent",border:`1px solid ${reportFilter===f?C.gold:C.border}`,color:reportFilter===f?C.gold:C.muted,borderRadius:6,padding:"6px 12px",cursor:"pointer",fontSize:12,fontFamily:"'DM Sans'",fontWeight:reportFilter===f?700:400}}>
+                        style={{background:reportFilter===f?`${CA.accent}20`:"transparent",border:`1px solid ${reportFilter===f?CA.accent:CA.border}`,color:reportFilter===f?CA.accent:CA.muted,borderRadius:6,padding:"6px 12px",cursor:"pointer",fontSize:12,fontFamily:"'DM Sans'",fontWeight:reportFilter===f?700:400}}>
                         {f.charAt(0).toUpperCase()+f.slice(1)}
                       </button>
                     ))}
                     <button onClick={()=>setReportFlagFilter(p=>!p)}
-                      style={{background:reportFlagFilter?`${C.red}20`:"transparent",border:`1px solid ${reportFlagFilter?"#ef4444":C.border}`,color:reportFlagFilter?"#ef4444":C.muted,borderRadius:6,padding:"6px 12px",cursor:"pointer",fontSize:12}}>
+                      style={{background:reportFlagFilter?`${CA.red}20`:"transparent",border:`1px solid ${reportFlagFilter?CA.red:CA.border}`,color:reportFlagFilter?CA.red:CA.muted,borderRadius:6,padding:"6px 12px",cursor:"pointer",fontSize:12}}>
                       Flags only
                     </button>
                   </div>
 
                   {filtered.length===0?(
-                    <div style={{textAlign:"center",padding:40,color:C.muted,fontSize:13}}>No reports found.</div>
+                    <div style={{textAlign:"center",padding:40,color:CA.muted,fontSize:13}}>No reports found.</div>
                   ):(
                     <div style={{display:"flex",flexDirection:"column",gap:8}}>
                       {filtered.map((d,i)=>{
@@ -1208,21 +1262,21 @@ function CoachDashboard({coach,onLogout}) {
                         const isMonthly = d.digest_type==="monthly";
                         return (
                           <button key={i} onClick={()=>setSelectedDigest(d)}
-                            style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:"12px 16px",cursor:"pointer",textAlign:"left",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,transition:"border-color 0.15s"}}>
+                            style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:"12px 16px",cursor:"pointer",textAlign:"left",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,transition:"border-color 0.15s"}}>
                             <div style={{minWidth:0}}>
                               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-                                <div style={{color:isMonthly?C.blue:C.gold,fontSize:10,fontWeight:700,letterSpacing:1.5}}>
+                                <div style={{color:isMonthly?CA.blue:CA.accent,fontSize:10,fontWeight:700,letterSpacing:1.5}}>
                                   {isMonthly?"MONTHLY":"WEEKLY"}
                                 </div>
-                                <div style={{color:C.text,fontSize:13,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a?.name||"Unknown"}</div>
+                                <div style={{color:CA.text,fontSize:13,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a?.name||"Unknown"}</div>
                               </div>
-                              <div style={{color:C.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.label}</div>
+                              <div style={{color:CA.muted,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.label}</div>
                             </div>
                             <div style={{display:"flex",gap:5,flexShrink:0,alignItems:"center"}}>
-                              {d.has_plateau&&<div style={{background:"rgba(239,68,68,0.15)",border:"1px solid rgba(239,68,68,0.4)",borderRadius:4,padding:"2px 6px",color:"#ef4444",fontSize:9,fontWeight:700}}>PLT</div>}
-                              {d.has_pain&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:4,padding:"2px 6px",color:"#ef4444",fontSize:9}}>PAIN</div>}
-                              {d.has_missed&&<div style={{background:`${C.navy3}`,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 6px",color:C.muted,fontSize:9}}>MISSED</div>}
-                              <div style={{color:C.muted,fontSize:18}}>›</div>
+                              {d.has_plateau&&<div style={{background:CA.red+"26",border:"1px solid "+CA.red+"66",borderRadius:4,padding:"2px 6px",color:CA.red,fontSize:9,fontWeight:700}}>PLT</div>}
+                              {d.has_pain&&<div style={{background:CA.red+"1A",border:"1px solid "+CA.red+"4D",borderRadius:4,padding:"2px 6px",color:CA.red,fontSize:9}}>PAIN</div>}
+                              {d.has_missed&&<div style={{background:`${CA.navy3}`,border:`1px solid ${CA.border}`,borderRadius:4,padding:"2px 6px",color:CA.muted,fontSize:9}}>MISSED</div>}
+                              <div style={{color:CA.muted,fontSize:18}}>›</div>
                             </div>
                           </button>
                         );
@@ -1254,7 +1308,7 @@ function CoachDashboard({coach,onLogout}) {
               };
               const codeBtn = (code) => {
                 const done = codeCopied===code;
-                return <button onClick={()=>copyCoachCode(code)} style={{background:done?C.gold:"none",border:`1px solid ${done?C.gold:C.border}`,color:done?"#000":C.muted2,borderRadius:6,padding:"2px 9px",cursor:done?"default":"pointer",fontSize:10,fontWeight:700,marginLeft:8,verticalAlign:"middle"}}>{done?"Copied!":"Copy"}</button>;
+                return <button onClick={()=>copyCoachCode(code)} style={{background:done?CA.accent:"none",border:`1px solid ${done?CA.accent:CA.border}`,color:done?"#fff":CA.muted2,borderRadius:6,padding:"2px 9px",cursor:done?"default":"pointer",fontSize:10,fontWeight:700,marginLeft:8,verticalAlign:"middle"}}>{done?"Copied!":"Copy"}</button>;
               };
 
               const doAddCoach = async () => {
@@ -1286,44 +1340,44 @@ function CoachDashboard({coach,onLogout}) {
 
               return (
                 <div style={{maxWidth:600}}>
-                  <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:20,marginBottom:16}}>
-                    <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:14}}>SCHOOL ACCOUNT</div>
+                  <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,padding:20,marginBottom:16}}>
+                    <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:14}}>SCHOOL ACCOUNT</div>
                     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:4}}>
-                      <div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>SCHOOL</div><div style={{color:C.text,fontWeight:600,fontSize:14,marginTop:2}}>{school?.name||"—"}</div></div>
-                      <div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>CODE</div><div style={{display:"flex",alignItems:"center",marginTop:2}}><span style={{color:C.gold,fontWeight:700,fontSize:18,fontFamily:"'Bebas Neue'",letterSpacing:2}}>{school?.code||"—"}</span>{school?.code&&codeBtn(school.code)}</div></div>
-                      <div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>TIER</div><div style={{color:C.text,fontSize:13,marginTop:2}}>{school?.tier||"—"}</div></div>
-                      <div><div style={{color:C.muted,fontSize:10,letterSpacing:1}}>COACHES</div><div style={{color:C.text,fontSize:13,marginTop:2}}>{schoolCoachesList.length} / {school?.max_coaches||3}</div></div>
+                      <div><div style={{color:CA.muted,fontSize:10,letterSpacing:1}}>SCHOOL</div><div style={{color:CA.text,fontWeight:600,fontSize:14,marginTop:2}}>{school?.name||"—"}</div></div>
+                      <div><div style={{color:CA.muted,fontSize:10,letterSpacing:1}}>CODE</div><div style={{display:"flex",alignItems:"center",marginTop:2}}><span style={{color:CA.accent,fontWeight:700,fontSize:18,fontFamily:"'Bebas Neue'",letterSpacing:2}}>{school?.code||"—"}</span>{school?.code&&codeBtn(school.code)}</div></div>
+                      <div><div style={{color:CA.muted,fontSize:10,letterSpacing:1}}>TIER</div><div style={{color:CA.text,fontSize:13,marginTop:2}}>{school?.tier||"—"}</div></div>
+                      <div><div style={{color:CA.muted,fontSize:10,letterSpacing:1}}>COACHES</div><div style={{color:CA.text,fontSize:13,marginTop:2}}>{schoolCoachesList.length} / {school?.max_coaches||3}</div></div>
                     </div>
                   </div>
 
-                  <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:20,marginBottom:16}}>
-                    <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:14}}>COACHES</div>
-                    {schoolCoachesList.length===0?<div style={{color:C.muted,fontSize:13,marginBottom:12}}>No coaches added yet.</div>:schoolCoachesList.map(c=>{
+                  <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,padding:20,marginBottom:16}}>
+                    <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:14}}>COACHES</div>
+                    {schoolCoachesList.length===0?<div style={{color:CA.muted,fontSize:13,marginBottom:12}}>No coaches added yet.</div>:schoolCoachesList.map(c=>{
                       const athCount=athletes.filter(a=>a.coach_id===c.id).length;
                       return(
-                        <div key={c.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:`1px solid ${C.border}`}}>
+                        <div key={c.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:`1px solid ${CA.border}`}}>
                           <div>
-                            <div style={{color:C.text,fontWeight:600,fontSize:13}}>{c.name}</div>
-                            <div style={{color:C.muted,fontSize:11}}>{c.email} · Code: {c.access_code} · {athCount} athlete{athCount!==1?"s":""}</div>
+                            <div style={{color:CA.text,fontWeight:600,fontSize:13}}>{c.name}</div>
+                            <div style={{color:CA.muted,fontSize:11}}>{c.email} · Code: {c.access_code} · {athCount} athlete{athCount!==1?"s":""}</div>
                           </div>
-                          <button onClick={()=>doRemoveCoach(c)} style={{background:"none",border:`1px solid ${C.border}`,color:C.red,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:11}}>Remove</button>
+                          <button onClick={()=>doRemoveCoach(c)} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.red,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:11}}>Remove</button>
                         </div>
                       );
                     })}
 
                     <div style={{marginTop:16}}>
-                      <div style={{color:C.muted,fontSize:11,letterSpacing:1,marginBottom:10}}>ADD COACH</div>
-                      {atLimit?<div style={{color:C.muted,fontSize:12,fontStyle:"italic"}}>Coach limit reached for your plan ({school?.max_coaches||3} max).</div>:(
+                      <div style={{color:CA.muted,fontSize:11,letterSpacing:1,marginBottom:10}}>ADD COACH</div>
+                      {atLimit?<div style={{color:CA.muted,fontSize:12,fontStyle:"italic"}}>Coach limit reached for your plan ({school?.max_coaches||3} max).</div>:(
                         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:8,alignItems:"center"}}>
-                          <input value={acName} onChange={e=>setAcName(e.target.value)} placeholder="Coach name" style={inp({padding:"9px 12px",fontSize:13})}/>
-                          <input type="email" value={acEmail} onChange={e=>setAcEmail(e.target.value)} placeholder="email@school.edu" style={inp({padding:"9px 12px",fontSize:13})}/>
-                          <button onClick={doAddCoach} disabled={acSaving} style={{background:C.gold,border:"none",color:"#000",borderRadius:8,padding:"9px 14px",cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"'Bebas Neue'",letterSpacing:1,whiteSpace:"nowrap",opacity:acSaving?0.7:1}}>
+                          <input value={acName} onChange={e=>setAcName(e.target.value)} placeholder="Coach name" style={inpA({padding:"9px 12px",fontSize:13})}/>
+                          <input type="email" value={acEmail} onChange={e=>setAcEmail(e.target.value)} placeholder="email@school.edu" style={inpA({padding:"9px 12px",fontSize:13})}/>
+                          <button onClick={doAddCoach} disabled={acSaving} style={{background:CA_BTN,boxShadow:"0 4px 16px "+CA_GLOW,border:"none",color:"#fff",borderRadius:8,padding:"9px 14px",cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"'Bebas Neue'",letterSpacing:1,whiteSpace:"nowrap",opacity:acSaving?0.7:1}}>
                             {acSaving?"Adding...":"Add Coach →"}
                           </button>
                         </div>
                       )}
-                      {acErr&&<div style={{color:C.red,fontSize:12,marginTop:8}}>{acErr}</div>}
-                      {acOk&&<div style={{color:C.green,fontSize:12,marginTop:8,fontWeight:600}}>{acOk}{acCode&&<> Code: <span style={{fontFamily:"'Bebas Neue'",letterSpacing:1,color:C.gold,fontSize:14}}>{acCode}</span>{codeBtn(acCode)}</>}</div>}
+                      {acErr&&<div style={{color:CA.red,fontSize:12,marginTop:8}}>{acErr}</div>}
+                      {acOk&&<div style={{color:CA.green,fontSize:12,marginTop:8,fontWeight:600}}>{acOk}{acCode&&<> Code: <span style={{fontFamily:"'Bebas Neue'",letterSpacing:1,color:CA.accent,fontSize:14}}>{acCode}</span>{codeBtn(acCode)}</>}</div>}
                     </div>
                   </div>
                 </div>
@@ -1338,9 +1392,9 @@ function CoachDashboard({coach,onLogout}) {
 
 
                 {/* ── PR Recalculation ── */}
-                <div style={{marginBottom:16,background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16}}>
-                  <div style={{color:C.gold,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:6}}>DATA MAINTENANCE</div>
-                  <div style={{color:C.muted2,fontSize:13,lineHeight:1.6,marginBottom:14}}>
+                <div style={{marginBottom:16,background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16}}>
+                  <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:6}}>DATA MAINTENANCE</div>
+                  <div style={{color:CA.muted2,fontSize:13,lineHeight:1.6,marginBottom:14}}>
                     Recalculates every athlete's PRs from their full workout history using the Epley estimated 1RM formula.
                     Run this once to correct records that were saved before the 1RM update. Takes a few seconds per athlete.
                   </div>
@@ -1348,11 +1402,11 @@ function CoachDashboard({coach,onLogout}) {
                     <button
                       onClick={recalcAllPRs}
                       disabled={!!recalcStatus}
-                      style={{background:recalcStatus?C.navy3:C.gold,color:recalcStatus?C.muted:"#000",border:`1px solid ${recalcStatus?C.border:C.gold}`,borderRadius:10,padding:"10px 22px",cursor:recalcStatus?"not-allowed":"pointer",fontSize:13,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,transition:"all 0.2s"}}>
+                      style={{background:recalcStatus?CA.navy3:CA_BTN,color:recalcStatus?CA.muted:"#fff",border:`1px solid ${recalcStatus?CA.border:CA.accent}`,boxShadow:recalcStatus?"none":`0 4px 16px ${CA_GLOW}`,borderRadius:10,padding:"10px 22px",cursor:recalcStatus?"not-allowed":"pointer",fontSize:13,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,transition:"all 0.2s"}}>
                       {recalcStatus&&recalcStatus!=="done"&&recalcStatus!=="error"?"Recalculating...":"Recalculate All PRs"}
                     </button>
                     {recalcStatus&&(
-                      <div style={{fontSize:13,color:recalcStatus==="done"?C.green:recalcStatus==="error"?C.red:C.muted2,fontWeight:recalcStatus==="done"||recalcStatus==="error"?600:400}}>
+                      <div style={{fontSize:13,color:recalcStatus==="done"?CA.green:recalcStatus==="error"?CA.red:CA.muted2,fontWeight:recalcStatus==="done"||recalcStatus==="error"?600:400}}>
                         {recalcStatus==="done"?"✓ Done — all PRs updated"
                           :recalcStatus==="error"?"✗ Something went wrong — check console"
                           :recalcStatus}
@@ -1380,23 +1434,23 @@ function CoachDashboard({coach,onLogout}) {
 // from the shared proofcore engine (Phase 0) over the roster data already loaded —
 // zero tokens, no new round-trip. See docs/coach-experience-vision.md §1.
 const DAYMS = 86400000;
-const FEEL_ORDER = [["great","Great",C.green],["good","Good",C.blue],["average","OK",C.gold],["rough","Rough",C.red]];
+const FEEL_ORDER = [["great","Great",CA.green],["good","Good",CA.blue],["average","OK",CA.amber],["rough","Rough",CA.red]];
 // prE1RM, trueImprovementPRs, classifyTiers, blendAdherenceScore now live in
 // proofcore (shared with the server Coach's Edition so the two never disagree).
 
 function StatBand({tone,label}){
-  const c = tone==="good"?C.green:tone==="warn"?C.gold:tone==="crit"?C.red:C.blue;
+  const c = tone==="good"?CA.green:tone==="warn"?CA.amber:tone==="crit"?CA.red:CA.blue;
   return <span style={{fontSize:9,fontWeight:800,letterSpacing:.5,textTransform:"uppercase",padding:"2px 8px",borderRadius:999,whiteSpace:"nowrap",color:c,background:`${c}22`,border:`1px solid ${c}55`}}>{label}</span>;
 }
 function OverviewCard({title,trend,children,readout,tone,style}){
   return (
-    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16,...style}}>
+    <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,padding:16,...style}}>
       <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:8,marginBottom:10}}>
-        <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.muted2,fontWeight:700}}>{title}</div>
-        {trend&&<div style={{fontSize:11.5,fontWeight:700,color:trend.dir==="up"?C.green:trend.dir==="down"?C.red:C.muted,whiteSpace:"nowrap"}}>{trend.dir==="up"?"▲":trend.dir==="down"?"▼":"—"} {trend.txt}</div>}
+        <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:10,letterSpacing:1.5,textTransform:"uppercase",color:CA.faint}}>{title}</div>
+        {trend&&<div style={{fontSize:11.5,fontWeight:700,color:trend.dir==="up"?CA.green:trend.dir==="down"?CA.red:CA.muted,whiteSpace:"nowrap"}}>{trend.dir==="up"?"▲":trend.dir==="down"?"▼":"—"} {trend.txt}</div>}
       </div>
       {children}
-      {readout&&<div style={{marginTop:11,display:"flex",alignItems:"center",gap:8,fontSize:12,color:C.muted2,lineHeight:1.4}}><span style={{flex:1}}>{readout}</span>{tone&&<StatBand tone={tone.k} label={tone.t}/>}</div>}
+      {readout&&<div style={{marginTop:11,display:"flex",alignItems:"center",gap:8,fontSize:12,color:CA.muted2,lineHeight:1.4}}><span style={{flex:1}}>{readout}</span>{tone&&<StatBand tone={tone.k} label={tone.t}/>}</div>}
     </div>
   );
 }
@@ -1405,6 +1459,10 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
   const isMobile = useIsMobile();
   const [resolved,setResolved] = useState(()=>new Set());
   const [tip,setTip] = useState(null);
+  // one-shot entrance flag: charts render at their empty state on first paint,
+  // then sweep/draw to their real values once this flips (next frame).
+  const [mounted,setMounted] = useState(false);
+  useEffect(()=>{ const r=requestAnimationFrame(()=>requestAnimationFrame(()=>setMounted(true))); return ()=>cancelAnimationFrame(r); },[]);
   const D = useMemo(()=>{
     const now = Date.now();
     const dstart = (t)=>{const x=new Date(t);x.setHours(0,0,0,0);return x.getTime();};
@@ -1523,12 +1581,17 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
     return {rows,dayCounts,dayLabels,firstHalf,lastHalf,activeCount,activePct,teamAdh,noProgram,volWeeks,prWeeks,prThisWk,strengths,weaknesses,wins,movers,bySport,weekPain,inactive,triage};
   },[athletes,workouts,prs,manualRMs,prescriptions]);
 
-  if(!athletes.length) return <div style={{textAlign:"center",padding:60,color:C.muted}}>No athletes on your roster yet.</div>;
+  // count-up KPI figures (jump to final under reduced-motion) — declared before the
+  // early return so hook order stays stable across renders.
+  const adhCU = useCountUp(D.teamAdh==null?0:D.teamAdh);
+  const activeCU = useCountUp(D.activePct||0);
+
+  if(!athletes.length) return <div style={{textAlign:"center",padding:60,color:CA.muted}}>No athletes on your roster yet.</div>;
 
   const triage = D.triage.filter(t=>!resolved.has(t.id));
 
   const volMax = Math.max(1,...D.volWeeks), prMax = Math.max(1,...D.prWeeks), sMax = Math.max(1,...D.dayCounts);
-  const cell = (v)=>v?C.green:C.navy3;
+  const cell = (v)=>v?CA.green:CA.navy3;
   // Hover tooltip shared across every chart data point.
   const tipOn = (text)=>({onMouseEnter:(e)=>setTip({x:e.clientX,y:e.clientY,text}),onMouseMove:(e)=>setTip({x:e.clientX,y:e.clientY,text}),onMouseLeave:()=>setTip(null)});
   const wkLabel = (i)=>i===D.prWeeks.length-1?"This week":`${D.prWeeks.length-1-i} wk ago`;
@@ -1539,38 +1602,38 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
 
   const secLabel = (t)=>(
     <div style={{display:"flex",alignItems:"center",gap:12,margin:"24px 2px 12px"}}>
-      <span style={{fontSize:10.5,letterSpacing:1.4,textTransform:"uppercase",color:C.gold,fontWeight:700}}>{t}</span>
-      <span style={{height:1,background:C.border,flex:1}}/>
+      <span style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:10,letterSpacing:1.5,textTransform:"uppercase",color:CA.faint}}>{t}</span>
+      <span style={{height:1,background:CA.line2,flex:1}}/>
     </div>
   );
 
   return (
     <div style={{maxWidth:1220}}>
       {/* ── Briefing triage — who needs you today ── */}
-      <div style={{background:`linear-gradient(180deg,${C.navy3},${C.navy2})`,border:`1px solid ${C.border}`,borderRadius:16,overflow:"hidden",marginTop:4}}>
-        <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:12,padding:"15px 18px",borderBottom:`1px solid ${C.border}`,flexWrap:"wrap"}}>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:C.text,letterSpacing:1}}>{triage.length>0?`${triage.length} athlete${triage.length!==1?"s":""} need you today`:"You're all caught up"}</div>
-          <div style={{color:C.muted,fontSize:12}}>Today's briefing · auto-updated from this week's logs</div>
+      <div style={{background:`linear-gradient(180deg,${CA.navy3},${CA.navy2})`,border:`1px solid ${CA.border}`,borderRadius:16,overflow:"hidden",marginTop:4}}>
+        <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:12,padding:"15px 18px",borderBottom:`1px solid ${CA.border}`,flexWrap:"wrap"}}>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:CA.text,letterSpacing:1}}>{triage.length>0?`${triage.length} athlete${triage.length!==1?"s":""} need you today`:"You're all caught up"}</div>
+          <div style={{color:CA.muted,fontSize:12}}>Today's briefing · auto-updated from this week's logs</div>
         </div>
         {triage.length===0
-          ? <div style={{padding:"26px 18px",textAlign:"center"}}><div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:C.green,letterSpacing:1}}>✓ Everything looks healthy</div><div style={{color:C.muted,fontSize:13,marginTop:4}}>Nothing needs you right now. The briefing refreshes as sessions come in.</div></div>
+          ? <div style={{padding:"26px 18px",textAlign:"center"}}><div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:CA.green,letterSpacing:1}}>✓ Everything looks healthy</div><div style={{color:CA.muted,fontSize:13,marginTop:4}}>Nothing needs you right now. The briefing refreshes as sessions come in.</div></div>
           : triage.slice(0,6).map((t)=>(
-              <div key={t.id} style={{display:"flex",gap:12,padding:"12px 18px",borderBottom:`1px solid ${C.border}80`,alignItems:"center"}}>
-                <span style={{width:3,alignSelf:"stretch",borderRadius:3,background:t.sev==="crit"?C.red:C.gold,flexShrink:0}}/>
+              <div key={t.id} style={{display:"flex",gap:12,padding:"12px 18px",borderBottom:`1px solid ${CA.border}80`,alignItems:"center"}}>
+                <span style={{width:3,alignSelf:"stretch",borderRadius:3,background:t.sev==="crit"?CA.red:CA.amber,flexShrink:0}}/>
                 <div style={{flex:1,minWidth:0}}>
                   <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-                    <span style={{fontSize:9.5,fontWeight:800,letterSpacing:1,textTransform:"uppercase",padding:"2px 7px",borderRadius:5,color:t.sev==="crit"?C.red:C.gold,background:t.sev==="crit"?`${C.red}22`:`${C.gold}22`,border:`1px solid ${t.sev==="crit"?C.red:C.gold}55`}}>{t.kind}</span>
-                    <span style={{fontWeight:700,color:C.text,fontSize:14}}>{t.name}</span>
-                    <span style={{color:C.muted,fontSize:13}}>— {t.what}</span>
+                    <span style={{fontSize:9.5,fontWeight:800,letterSpacing:1,textTransform:"uppercase",padding:"2px 7px",borderRadius:5,color:t.sev==="crit"?CA.red:CA.amber,background:t.sev==="crit"?`${CA.red}22`:`${CA.amber}22`,border:`1px solid ${t.sev==="crit"?CA.red:CA.amber}55`}}>{t.kind}</span>
+                    <span style={{fontWeight:700,color:CA.text,fontSize:14}}>{t.name}</span>
+                    <span style={{color:CA.muted,fontSize:13}}>— {t.what}</span>
                   </div>
                 </div>
                 <div style={{display:"flex",gap:6,flexShrink:0}}>
-                  {onOpenAthlete&&<button onClick={()=>onOpenAthlete(t.id)} style={{border:`1px solid ${C.border}`,background:"transparent",color:C.muted,borderRadius:8,padding:"5px 11px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Open</button>}
-                  <button onClick={()=>setResolved(s=>new Set(s).add(t.id))} style={{border:`1px solid ${C.border}`,background:"transparent",color:C.muted,borderRadius:8,padding:"5px 11px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Clear</button>
+                  {onOpenAthlete&&<button onClick={()=>onOpenAthlete(t.id)} style={{border:`1px solid ${CA.border}`,background:"transparent",color:CA.muted,borderRadius:8,padding:"5px 11px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Open</button>}
+                  <button onClick={()=>setResolved(s=>new Set(s).add(t.id))} style={{border:`1px solid ${CA.border}`,background:"transparent",color:CA.muted,borderRadius:8,padding:"5px 11px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Clear</button>
                 </div>
               </div>
             ))}
-        {triage.length>0&&<div style={{padding:"10px 18px",color:C.muted,fontSize:12,background:`${C.green}0d`}}>✓ {D.rows.length-triage.length} of {D.rows.length} on track · {D.prThisWk} true PR{D.prThisWk!==1?"s":""} this week</div>}
+        {triage.length>0&&<div style={{padding:"10px 18px",color:CA.muted,fontSize:12,background:`${CA.green}0d`}}>✓ {D.rows.length-triage.length} of {D.rows.length} on track · {D.prThisWk} true PR{D.prThisWk!==1?"s":""} this week</div>}
       </div>
 
       {secLabel("Team Health")}
@@ -1580,12 +1643,12 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
         <OverviewCard style={span(4)} title="Program adherence · this week"
           readout={D.teamAdh==null?`No parsed programs yet — assign & lock programs to track adherence.`:`Team average. ${D.noProgram>0?`${D.noProgram} without a program (excluded).`:"Everyone has a program."}`}
           tone={D.teamAdh==null?null:(D.teamAdh>=80?{k:"good",t:"Healthy"}:D.teamAdh>=60?{k:"warn",t:"Slipping"}:{k:"crit",t:"At risk"})}>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:46,color:C.text,lineHeight:.9}}>{D.teamAdh==null?"—":D.teamAdh}<span style={{fontSize:18,color:C.muted}}> {D.teamAdh==null?"":"% team avg"}</span></div>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:46,color:CA.led,lineHeight:.9,textShadow:`0 0 18px ${CA.cyan}22`}}>{D.teamAdh==null?"—":Math.round(adhCU)}<span style={{fontSize:18,color:CA.muted,textShadow:"none"}}> {D.teamAdh==null?"":"% team avg"}</span></div>
           <div style={{display:"grid",gridTemplateColumns:"92px repeat(7,1fr)",gap:5,alignItems:"center",marginTop:14}}>
-            <span/>{D.dayLabels.map((l,i)=><span key={i} style={{fontSize:10,color:C.muted,textAlign:"center"}}>{l[0]}</span>)}
+            <span/>{D.dayLabels.map((l,i)=><span key={i} style={{fontSize:10,color:CA.muted,textAlign:"center"}}>{l[0]}</span>)}
             {heatRows.flatMap((r,ri)=>[
-              <span key={`n${ri}`} style={{fontSize:11.5,color:C.muted2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.a.name}</span>,
-              ...r.days.map((d,di)=><i key={`c${ri}-${di}`} style={{aspectRatio:"1",borderRadius:3,background:r.hasProgram?cell(d):(d?C.blue:C.navy3),opacity:r.hasProgram?1:.55,border:`1px solid #ffffff08`,cursor:"pointer"}} {...tipOn(`${r.a.name.split(" ")[0]} · ${D.dayLabels[di]}: ${d?"logged a session":"no session"}${r.hasProgram?"":" (no program)"}`)}/>)
+              <span key={`n${ri}`} style={{fontSize:11.5,color:CA.muted2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.a.name}</span>,
+              ...r.days.map((d,di)=><i key={`c${ri}-${di}`} className="c-fade" style={{aspectRatio:"1",borderRadius:3,background:r.hasProgram?cell(d):(d?`${CA.accent}66`:CA.navy3),border:`1px solid ${CA.line2}22`,cursor:"pointer",["--d"]:`${Math.min(780,(ri*7+di)*16)}ms`}} {...tipOn(`${r.a.name.split(" ")[0]} · ${D.dayLabels[di]}: ${d?"logged a session":"no session"}${r.hasProgram?"":" (no program)"}`)}/>)
             ])}
           </div>
         </OverviewCard>
@@ -1596,11 +1659,12 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
           tone={D.activePct>=70?{k:"good",t:"Healthy"}:D.activePct>=50?{k:"warn",t:"Watch"}:{k:"crit",t:"Low"}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"center",paddingTop:6}}>
             <svg viewBox="0 0 120 120" style={{width:"100%",maxWidth:150}} {...tipOn(`${D.activeCount} of ${athletes.length} active — ${D.activePct}%`)}>
-              <circle cx="60" cy="60" r="50" fill="none" stroke={C.border} strokeWidth="12"/>
-              <circle cx="60" cy="60" r="50" fill="none" stroke={C.green} strokeWidth="12" strokeLinecap="round"
-                strokeDasharray={2*Math.PI*50} strokeDashoffset={2*Math.PI*50*(1-D.activePct/100)} transform="rotate(-90 60 60)"/>
-              <text x="60" y="58" textAnchor="middle" fill={C.text} fontFamily="'Bebas Neue'" fontSize="30">{D.activePct}%</text>
-              <text x="60" y="76" textAnchor="middle" fill={C.muted} fontSize="11">{D.activeCount} / {athletes.length}</text>
+              <circle cx="60" cy="60" r="50" fill="none" stroke={CA.navy3} strokeWidth="12"/>
+              <circle cx="60" cy="60" r="50" fill="none" stroke={CA.cyan} strokeWidth="12" strokeLinecap="round"
+                strokeDasharray={2*Math.PI*50} strokeDashoffset={2*Math.PI*50*(1-(mounted?D.activePct:0)/100)} transform="rotate(-90 60 60)"
+                style={{transition:"stroke-dashoffset 900ms cubic-bezier(.2,.7,.2,1)",filter:`drop-shadow(0 0 6px ${CA.cyan}80)`}}/>
+              <text x="60" y="58" textAnchor="middle" fill={CA.led} fontFamily="'Bebas Neue'" fontSize="30">{Math.round(activeCU)}%</text>
+              <text x="60" y="76" textAnchor="middle" fill={CA.muted} fontSize="11">{D.activeCount} / {athletes.length}</text>
             </svg>
           </div>
         </OverviewCard>
@@ -1610,12 +1674,13 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
           trend={{dir:D.lastHalf>=D.firstHalf?"up":"down",txt:`${D.dayCounts.reduce((a,b)=>a+b,0)} total`}}
           readout={D.lastHalf>=D.firstHalf?"Holding or climbing into the week.":"Sliding off through the week — worth a nudge."}
           tone={D.lastHalf>=D.firstHalf?{k:"good",t:"Healthy"}:{k:"warn",t:"Watch"}}>
-          <svg viewBox="0 0 300 96" preserveAspectRatio="none" style={{width:"100%",height:96}}>
-            <line x1="0" y1="86" x2="300" y2="86" stroke={C.border}/>
-            <polyline fill="none" stroke={C.green} strokeWidth="2.5" points={D.dayCounts.map((v,i)=>`${i*50},${84-72*(v/sMax)}`).join(" ")}/>
-            {D.dayCounts.map((v,i)=><circle key={i} cx={i*50} cy={84-72*(v/sMax)} r="6" fill={C.green} style={{cursor:"pointer"}} {...tipOn(`${D.dayLabels[i]}: ${v} session${v!==1?"s":""}`)}/>)}
+          <svg viewBox="0 0 300 96" preserveAspectRatio="none" style={{width:"100%",height:96,overflow:"visible"}}>
+            <line x1="0" y1="86" x2="300" y2="86" stroke={CA.border}/>
+            <polygon className="c-fade" style={{["--d"]:"280ms"}} fill={`${CA.cyan}14`} stroke="none" points={`0,86 ${D.dayCounts.map((v,i)=>`${i*50},${84-72*(v/sMax)}`).join(" ")} 300,86`}/>
+            <polyline className="c-draw" fill="none" stroke={CA.cyan} strokeWidth="2.5" points={D.dayCounts.map((v,i)=>`${i*50},${84-72*(v/sMax)}`).join(" ")} style={{filter:`drop-shadow(0 0 5px ${CA.cyan}99)`}}/>
+            {D.dayCounts.map((v,i)=><circle key={i} className="c-fade" style={{cursor:"pointer",["--d"]:`${1000+i*60}ms`}} cx={i*50} cy={84-72*(v/sMax)} r="6" fill={CA.cyan} {...tipOn(`${D.dayLabels[i]}: ${v} session${v!==1?"s":""}`)}/>)}
           </svg>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:9.5,color:C.dim||C.muted,marginTop:2}}>{D.dayLabels.map((l,i)=><span key={i}>{l[0]}</span>)}</div>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:9.5,color:CA.dim||CA.muted,marginTop:2}}>{D.dayLabels.map((l,i)=><span key={i}>{l[0]}</span>)}</div>
         </OverviewCard>
 
         {/* True PRs bars */}
@@ -1624,7 +1689,8 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
           readout={D.prThisWk>0?`Real improvements over prior bests — baselines excluded.`:`No new bests logged this week yet.`}
           tone={D.prThisWk>0?{k:"good",t:"Momentum"}:null}>
           <svg viewBox="0 0 300 96" preserveAspectRatio="none" style={{width:"100%",height:96}}>
-            {D.prWeeks.map((v,i)=>{const w=36,gap=(300-w*6)/6;const x=gap/2+i*(w+gap);const h=Math.max(3,84*(v/prMax));return <rect key={i} x={x} y={88-h} width={w} height={h} rx="3" fill={i===D.prWeeks.length-1?C.green:C.gold} style={{cursor:"pointer"}} {...tipOn(`${wkLabel(i)}: ${v} PR${v!==1?"s":""}`)}/>;})}
+            <defs><linearGradient id="prBar" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stopColor={CA.accent}/><stop offset="0.8" stopColor={CA.accent}/><stop offset="1" stopColor={CA.cyan}/></linearGradient></defs>
+            {D.prWeeks.map((v,i)=>{const w=36,gap=(300-w*6)/6;const x=gap/2+i*(w+gap);const h=Math.max(3,84*(v/prMax));const last=i===D.prWeeks.length-1;return <rect key={i} className="c-rise" x={x} y={88-h} width={w} height={h} rx="3" fill={last?CA.cyan:"url(#prBar)"} style={{transformBox:"fill-box",transformOrigin:"bottom",["--d"]:`${i*40}ms`,cursor:"pointer",filter:last?`drop-shadow(0 0 5px ${CA.cyan}88)`:"none"}} {...tipOn(`${wkLabel(i)}: ${v} PR${v!==1?"s":""}`)}/>;})}
           </svg>
         </OverviewCard>
 
@@ -1633,11 +1699,12 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
           trend={{dir:D.volWeeks[3]>=D.volWeeks[0]?"up":"down",txt:"working sets"}}
           readout={D.volWeeks[3]>D.volWeeks[0]*1.5?"Sharp jump vs 4 weeks ago — watch load spikes.":"Gradual, inside a safe band."}
           tone={D.volWeeks[3]>D.volWeeks[0]*1.5?{k:"warn",t:"Watch"}:{k:"good",t:"Healthy"}}>
-          <svg viewBox="0 0 300 80" preserveAspectRatio="none" style={{width:"100%",height:80}}>
-            <polyline fill="none" stroke={C.blue} strokeWidth="2.5" points={D.volWeeks.map((v,i)=>`${i*100},${70-60*(v/volMax)}`).join(" ")}/>
-            {D.volWeeks.map((v,i)=><circle key={i} cx={i*100} cy={70-60*(v/volMax)} r="6" fill={C.blue} style={{cursor:"pointer"}} {...tipOn(`${i===3?"This week":`${3-i} wk ago`}: ${v} sets`)}/>)}
+          <svg viewBox="0 0 300 80" preserveAspectRatio="none" style={{width:"100%",height:80,overflow:"visible"}}>
+            <polygon className="c-fade" style={{["--d"]:"280ms"}} fill={`${CA.cyan}12`} stroke="none" points={`0,78 ${D.volWeeks.map((v,i)=>`${i*100},${70-60*(v/volMax)}`).join(" ")} 300,78`}/>
+            <polyline className="c-draw" fill="none" stroke={CA.cyan} strokeWidth="2.5" points={D.volWeeks.map((v,i)=>`${i*100},${70-60*(v/volMax)}`).join(" ")} style={{filter:`drop-shadow(0 0 5px ${CA.cyan}99)`}}/>
+            {D.volWeeks.map((v,i)=><circle key={i} className="c-fade" style={{cursor:"pointer",["--d"]:`${1000+i*80}ms`}} cx={i*100} cy={70-60*(v/volMax)} r="6" fill={CA.cyan} {...tipOn(`${i===3?"This week":`${3-i} wk ago`}: ${v} sets`)}/>)}
           </svg>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:C.muted,marginTop:2}}>{D.volWeeks.map((v,i)=><span key={i}>{i===3?"This wk":`${3-i}w ago`}</span>)}</div>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:CA.muted,marginTop:2}}>{D.volWeeks.map((v,i)=><span key={i}>{i===3?"This wk":`${3-i}w ago`}</span>)}</div>
         </OverviewCard>
 
       </div>
@@ -1645,45 +1712,45 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
       {secLabel("Program & Wins")}
       <div style={{display:"grid",gridTemplateColumns:isMobile?"1fr":"1fr 1fr",gap:14}}>
         {/* Strengths & weaknesses */}
-        <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
-          <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.muted2,fontWeight:700}}>Where the program is strong &amp; weak</div>
-          <div style={{fontSize:12,color:C.muted2,margin:"8px 0 14px",lineHeight:1.4}}>Team Grit tiers by benchmark lift. Where the roster skews high, the program builds well; low tiers flag a gap.</div>
-          {D.strengths.length===0&&D.weaknesses.length===0&&<div style={{fontSize:12,color:C.muted}}>Not enough ranked lifts logged yet.</div>}
-          {D.strengths.length>0&&<div style={{fontSize:9.5,letterSpacing:1,textTransform:"uppercase",color:C.green,fontWeight:800,marginBottom:4}}>Strengths</div>}
+        <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,padding:16}}>
+          <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:CA.muted2,fontWeight:700}}>Where the program is strong &amp; weak</div>
+          <div style={{fontSize:12,color:CA.muted2,margin:"8px 0 14px",lineHeight:1.4}}>Team Grit tiers by benchmark lift. Where the roster skews high, the program builds well; low tiers flag a gap.</div>
+          {D.strengths.length===0&&D.weaknesses.length===0&&<div style={{fontSize:12,color:CA.muted}}>Not enough ranked lifts logged yet.</div>}
+          {D.strengths.length>0&&<div style={{fontSize:9.5,letterSpacing:1,textTransform:"uppercase",color:CA.green,fontWeight:800,marginBottom:4}}>Strengths</div>}
           {D.strengths.map((s,i)=>(
             <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",cursor:"pointer"}} {...tipOn(`${s.name}: ${s.tierName} team avg · ${s.n} athlete${s.n!==1?"s":""} ranked`)}>
-              <span style={{width:120,fontSize:12.5,color:C.text,flexShrink:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.name}</span>
-              <span style={{flex:1,height:7,borderRadius:4,background:C.navy3,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${Math.round(100*(s.avgTier+1)/8)}%`,background:C.green}}/></span>
-              <span style={{fontSize:10,fontWeight:800,width:74,textAlign:"right",color:C.green}}>{s.tierName}</span>
+              <span style={{width:120,fontSize:12.5,color:CA.text,flexShrink:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.name}</span>
+              <span style={{flex:1,height:7,borderRadius:4,background:CA.navy3,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${Math.round(100*(s.avgTier+1)/8)}%`,background:CA.green}}/></span>
+              <span style={{fontSize:10,fontWeight:800,width:74,textAlign:"right",color:CA.green}}>{s.tierName}</span>
             </div>
           ))}
-          {D.weaknesses.length>0&&<div style={{fontSize:9.5,letterSpacing:1,textTransform:"uppercase",color:C.red,fontWeight:800,margin:"14px 0 4px"}}>Weaknesses</div>}
+          {D.weaknesses.length>0&&<div style={{fontSize:9.5,letterSpacing:1,textTransform:"uppercase",color:CA.red,fontWeight:800,margin:"14px 0 4px"}}>Weaknesses</div>}
           {D.weaknesses.map((s,i)=>(
             <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",cursor:"pointer"}} {...tipOn(`${s.name}: ${s.tierName} team avg · ${s.n} athlete${s.n!==1?"s":""} ranked`)}>
-              <span style={{width:120,fontSize:12.5,color:C.text,flexShrink:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.name}</span>
-              <span style={{flex:1,height:7,borderRadius:4,background:C.navy3,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${Math.round(100*(s.avgTier+1)/8)}%`,background:C.red}}/></span>
-              <span style={{fontSize:10,fontWeight:800,width:74,textAlign:"right",color:C.red}}>{s.tierName}</span>
+              <span style={{width:120,fontSize:12.5,color:CA.text,flexShrink:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.name}</span>
+              <span style={{flex:1,height:7,borderRadius:4,background:CA.navy3,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${Math.round(100*(s.avgTier+1)/8)}%`,background:CA.red}}/></span>
+              <span style={{fontSize:10,fontWeight:800,width:74,textAlign:"right",color:CA.red}}>{s.tierName}</span>
             </div>
           ))}
         </div>
 
         {/* Wins — mixed notable stats + deduped personal bests */}
-        <div style={{background:`linear-gradient(180deg,${C.navy3},${C.navy2})`,border:`1px solid ${C.gold}44`,borderRadius:14,padding:16}}>
-          <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.gold,fontWeight:700}}>Wins this week</div>
+        <div style={{background:`linear-gradient(180deg,${CA.navy3},${CA.navy2})`,border:`1px solid ${CA.accent}44`,borderRadius:14,padding:16}}>
+          <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:CA.accent,fontWeight:700}}>Wins this week</div>
           {D.wins.length===0
-            ? <div style={{fontSize:12,color:C.muted2,marginTop:12}}>No wins logged yet this week — check back as sessions come in.</div>
+            ? <div style={{fontSize:12,color:CA.muted2,marginTop:12}}>No wins logged yet this week — check back as sessions come in.</div>
             : <div style={{marginTop:12}}>
                 {D.wins.map((w,i)=>(
-                  <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderBottom:i<D.wins.length-1?`1px solid ${C.border}80`:"none"}}>
-                    <span style={{width:30,height:30,borderRadius:8,background:`${C.gold}22`,border:`1px solid ${C.gold}55`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{w.icon}</span>
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderBottom:i<D.wins.length-1?`1px solid ${CA.border}80`:"none"}}>
+                    <span style={{width:30,height:30,borderRadius:8,background:`${CA.accent}22`,border:`1px solid ${CA.accent}55`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{w.icon}</span>
                     <div style={{flex:1,minWidth:0}}>
-                      <div style={{fontWeight:700,fontSize:13,color:C.text}}>{w.title}</div>
-                      <div style={{color:C.muted2,fontSize:12}}>{w.detail}</div>
+                      <div style={{fontWeight:700,fontSize:13,color:CA.text}}>{w.title}</div>
+                      <div style={{color:CA.muted2,fontSize:12}}>{w.detail}</div>
                     </div>
                   </div>
                 ))}
               </div>}
-          <div style={{fontSize:11,color:C.muted,marginTop:12,fontStyle:"italic"}}>Shareable image export lands in the weekly + monthly Coach's Edition.</div>
+          <div style={{fontSize:11,color:CA.muted,marginTop:12,fontStyle:"italic"}}>Shareable image export lands in the weekly + monthly Coach's Edition.</div>
         </div>
       </div>
 
@@ -1691,36 +1758,36 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
       {(Object.keys(D.bySport).length>0||D.weekPain.length>0||D.inactive.length>0)&&secLabel("Roster")}
       <div style={{display:"grid",gridTemplateColumns:isMobile?"1fr":"repeat(auto-fit,minmax(240px,1fr))",gap:14}}>
         {D.inactive.length>0&&(
-          <div style={{background:C.navy2,border:`1px solid ${C.gold}40`,borderRadius:14,padding:16}}>
-            <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.gold,fontWeight:700,marginBottom:10}}>No sessions this week ({D.inactive.length})</div>
+          <div style={{background:CA.navy2,border:`1px solid ${CA.amber}40`,borderRadius:14,padding:16}}>
+            <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:CA.amber,fontWeight:700,marginBottom:10}}>No sessions this week ({D.inactive.length})</div>
             <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
               {D.inactive.map((a,i)=>(
-                <div key={i} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 11px"}}>
-                  <div style={{color:C.text,fontSize:12.5,fontWeight:600}}>{a.name}</div>
-                  <div style={{color:C.muted,fontSize:10.5}}>{a.days==null?"never logged":`${a.days}d ago`}</div>
+                <div key={i} style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:8,padding:"6px 11px"}}>
+                  <div style={{color:CA.text,fontSize:12.5,fontWeight:600}}>{a.name}</div>
+                  <div style={{color:CA.muted,fontSize:10.5}}>{a.days==null?"never logged":`${a.days}d ago`}</div>
                 </div>
               ))}
             </div>
           </div>
         )}
         {D.weekPain.length>0&&(
-          <div style={{background:C.navy2,border:`1px solid ${C.red}40`,borderRadius:14,padding:16}}>
-            <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.red,fontWeight:700,marginBottom:10}}>Pain flags this week</div>
+          <div style={{background:CA.navy2,border:`1px solid ${CA.red}40`,borderRadius:14,padding:16}}>
+            <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:CA.red,fontWeight:700,marginBottom:10}}>Pain flags this week</div>
             {D.weekPain.slice(0,8).map((p,i)=>(
-              <div key={i} style={{padding:"5px 0",borderBottom:`1px solid ${C.border}40`,fontSize:12}}>
-                <span style={{color:C.text,fontWeight:600}}>{p.name}</span><span style={{color:C.muted}}> — {p.areas}</span>
+              <div key={i} style={{padding:"5px 0",borderBottom:`1px solid ${CA.border}40`,fontSize:12}}>
+                <span style={{color:CA.text,fontWeight:600}}>{p.name}</span><span style={{color:CA.muted}}> — {p.areas}</span>
               </div>
             ))}
           </div>
         )}
         {Object.keys(D.bySport).length>0&&(
-          <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
-            <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:C.muted2,fontWeight:700,marginBottom:10}}>Active by sport</div>
+          <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,padding:16}}>
+            <div style={{fontSize:11,letterSpacing:1.1,textTransform:"uppercase",color:CA.muted2,fontWeight:700,marginBottom:10}}>Active by sport</div>
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               {Object.entries(D.bySport).sort((a,b)=>b[1]-a[1]).map(([sport,count])=>(
-                <div key={sport} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 13px"}}>
-                  <div style={{color:C.text,fontWeight:600,fontSize:13}}>{sport}</div>
-                  <div style={{color:C.muted,fontSize:11}}>{count} active</div>
+                <div key={sport} style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:8,padding:"8px 13px"}}>
+                  <div style={{color:CA.text,fontWeight:600,fontSize:13}}>{sport}</div>
+                  <div style={{color:CA.muted,fontSize:11}}>{count} active</div>
                 </div>
               ))}
             </div>
@@ -1729,7 +1796,7 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
       </div>
 
       {/* floating hover tooltip */}
-      {tip&&<div style={{position:"fixed",left:Math.min(tip.x+14,(typeof window!=="undefined"?window.innerWidth:9999)-220),top:tip.y+14,background:C.navy,border:`1px solid ${C.gold}`,borderRadius:8,padding:"6px 10px",fontSize:12,color:C.text,pointerEvents:"none",zIndex:200,boxShadow:"0 6px 20px rgba(0,0,0,0.5)",maxWidth:220}}>{tip.text}</div>}
+      {tip&&<div style={{position:"fixed",left:Math.min(tip.x+14,(typeof window!=="undefined"?window.innerWidth:9999)-220),top:tip.y+14,background:CA.navy,border:`1px solid ${CA.accent}`,borderRadius:8,padding:"6px 10px",fontSize:12,color:CA.text,pointerEvents:"none",zIndex:200,boxShadow:"0 6px 20px rgba(0,0,0,0.5)",maxWidth:220}}>{tip.text}</div>}
     </div>
   );
 }
@@ -1739,6 +1806,11 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
 // then a real back-and-forth check-in that gathers their calls + team context and
 // remembers it (coach_context) for next week's edition. See coach-experience-vision.
 const EDITION_SERIF = "Georgia,'Times New Roman',serif";
+// Masthead register — Playfair Display (loaded in index.html), mirroring the athlete
+// "The Proof" newspaper so the two editions read as one franchise.
+const EDITION_MAST = "'Playfair Display',Georgia,serif";
+// Cool LED ink for the edition (replaces navy-era text colors).
+const EDITION_HEAD = "#eaf1ff", EDITION_BODY = "#aebfd8";
 
 // Did the coach ask a question back (vs. answer)? Mirrors the athlete check-in's
 // clarifying-question detection so WILCO answers once, then re-asks.
@@ -1758,29 +1830,88 @@ const chipsFor = (q)=>{
 function TierBar({name,tier,avgTier,color}){
   return (
     <div style={{display:"flex",alignItems:"center",gap:9,padding:"4px 0"}}>
-      <span style={{width:120,fontSize:12.5,color:C.text,flexShrink:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{name}</span>
-      <span style={{flex:1,height:6,borderRadius:4,background:C.navy2,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${Math.round(100*((avgTier||0)+1)/8)}%`,background:color}}/></span>
+      <span style={{width:120,fontSize:12.5,color:CA.text,flexShrink:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{name}</span>
+      <span style={{flex:1,height:6,borderRadius:4,background:CA.navy2,overflow:"hidden"}}><span style={{display:"block",height:"100%",width:`${Math.round(100*((avgTier||0)+1)/8)}%`,background:color}}/></span>
       <span style={{fontFamily:"'Bebas Neue'",fontSize:11,color,width:78,textAlign:"right"}}>{tier}</span>
     </div>
   );
 }
 
 // Client-side canvas export of the Wins block — no dependency, no server function.
-function exportWins(team, coach){
+// A standalone "night gym" report card (1080x1350, 4:5): near-black ground, blue-to-
+// cyan LED strips, huge Bebas figures with plain-English labels so a parent/AD reading
+// it on a white phone background gets it instantly. ASCII only, no emoji.
+async function exportWins(team, coach){
   try{
-    const W=1080,H=1350, cv=document.createElement("canvas"); cv.width=W; cv.height=H;
+    const W=1080,H=1350,M=84;
+    const MONO="600 24px ui-monospace,Menlo,monospace";
+    // fonts must be resident before we paint to the bitmap
+    try{ await Promise.all([
+      document.fonts.load('700 120px "Bebas Neue"'),
+      document.fonts.load('700 46px "DM Sans"'),
+      document.fonts.load('400 28px "DM Sans"'),
+    ]); }catch(_){}
+    const cv=document.createElement("canvas"); cv.width=W; cv.height=H;
     const x=cv.getContext("2d");
-    x.fillStyle="#060d1e"; x.fillRect(0,0,W,H);
-    x.fillStyle="#d4a017"; x.font="700 40px Georgia"; x.fillText("THE COACH'S EDITION",70,110);
-    x.fillStyle="#94a3b8"; x.font="26px Georgia"; x.fillText(`${coach?.name||"Team"} · Wins of the week`,70,152);
-    x.fillStyle="#10b981"; x.font="700 130px Arial"; x.fillText(String(team.newPRs||0),70,320);
-    x.fillStyle="#e2e8f0"; x.font="34px Arial"; x.fillText("true PRs across the roster this week",70,372);
-    let y=490; x.fillStyle="#d4a017"; x.font="700 30px Arial"; x.fillText("STANDOUTS",70,y); y+=58;
-    (team.notablePRs||[]).slice(0,6).forEach(p=>{
-      x.fillStyle="#e2e8f0"; x.font="700 34px Arial"; x.fillText(String(p.athlete||""),70,y);
-      x.fillStyle="#94a3b8"; x.font="30px Arial"; x.fillText(`${p.exercise||""} ${p.weight||""}${p.gain?`   +${p.gain} lbs e1RM`:""}`,70,y+40); y+=104;
+    const setLS=(v)=>{ try{ x.letterSpacing=v; }catch(_){} };
+    // ground
+    x.fillStyle=CA.navy; x.fillRect(0,0,W,H);
+    // radial blue glow, top-center
+    const glow=x.createRadialGradient(W/2,-120,60,W/2,-120,780);
+    glow.addColorStop(0,"rgba(58,123,255,0.22)"); glow.addColorStop(1,"rgba(58,123,255,0)");
+    x.fillStyle=glow; x.fillRect(0,0,W,560);
+    // faint grid
+    x.strokeStyle="rgba(58,123,255,0.05)"; x.lineWidth=1;
+    for(let gx=0;gx<=W;gx+=44){ x.beginPath(); x.moveTo(gx+0.5,0); x.lineTo(gx+0.5,H); x.stroke(); }
+    for(let gy=0;gy<=H;gy+=44){ x.beginPath(); x.moveTo(0,gy+0.5); x.lineTo(W,gy+0.5); x.stroke(); }
+    // signature LED strip (blue -> cyan, soft glow)
+    const led=(yy,h=3)=>{ const g=x.createLinearGradient(M,0,W-M,0); g.addColorStop(0,CA.accent); g.addColorStop(1,CA.cyan); x.save(); x.shadowColor=CA.cyan; x.shadowBlur=18; x.fillStyle=g; x.fillRect(M,yy,W-2*M,h); x.restore(); };
+    led(176);
+    // wordmark + mono kicker
+    x.textBaseline="alphabetic";
+    x.fillStyle=CA.led; x.font='700 90px "Bebas Neue"'; setLS("4px"); x.fillText("WILCO",M,270); setLS("0px");
+    x.fillStyle=CA.cyan; x.font=MONO; setLS("3px"); x.fillText("WEEKLY TEAM REPORT",M+4,306); setLS("0px");
+    // plain-English title + date range
+    const teamName=String(coach?.name||"THE TEAM").toUpperCase();
+    const title=`${teamName} - WINS THIS WEEK`;
+    let ts=46; x.font=`700 ${ts}px "DM Sans"`; while(x.measureText(title).width>W-2*M && ts>26){ ts-=2; x.font=`700 ${ts}px "DM Sans"`; }
+    x.fillStyle=CA.led; x.fillText(title,M,398);
+    const now=new Date(), start=new Date(now); start.setDate(now.getDate()-6);
+    const md=(d)=>d.toLocaleDateString("en-US",{month:"short",day:"numeric"}).toUpperCase();
+    x.fillStyle=CA.muted; x.font='400 28px "DM Sans"'; x.fillText(`${md(start)} - ${md(now)}, ${now.getFullYear()}`,M,440);
+    // hero stats (whatever the export already receives; no new plumbing)
+    const stats=[{n:String(team.newPRs||0),l:"PERSONAL RECORDS SET"}];
+    if(team.activePct!=null) stats.push({n:`${team.activePct}%`,l:"OF THE SQUAD TRAINED"});
+    if(team.adherenceAvg!=null) stats.push({n:`${team.adherenceAvg}%`,l:"PROGRAM ADHERENCE"});
+    const hero=stats.slice(0,3);
+    let y=572;
+    hero.forEach(s=>{
+      x.save(); x.shadowColor=CA.cyan; x.shadowBlur=22; x.fillStyle=CA.led; x.font='700 112px "Bebas Neue"'; x.fillText(s.n,M,y); x.restore();
+      x.fillStyle=CA.cyan; x.font=MONO; setLS("2px"); x.fillText(s.l,M+6,y+40); setLS("0px");
+      y+=150;
     });
-    x.fillStyle="#64748b"; x.font="700 26px Arial"; x.fillText("WILCO",70,H-56);
+    // shout-outs (Bebas name + DM Sans line) — only as many as fit above the footer
+    const foot=1244;
+    const shoutTop=y+18;
+    const maxLines=Math.max(0,Math.floor((foot-60-(shoutTop+30))/56));
+    const shouts=(team.notablePRs||[]).slice(0,Math.min(3,maxLines));
+    if(shouts.length){
+      x.fillStyle=CA.faint; x.font=MONO; setLS("2px"); x.fillText("SHOUT-OUTS",M,shoutTop); setLS("0px");
+      const shortName=(full)=>{ const p=String(full||"").trim().split(/\s+/); return (p.length<2?(p[0]||""):`${p[0]} ${p[p.length-1][0]}.`).toUpperCase(); };
+      let sy=shoutTop+52;
+      shouts.forEach(p=>{
+        const nm=shortName(p.athlete);
+        x.fillStyle=CA.led; x.font='700 40px "Bebas Neue"'; x.fillText(nm,M,sy);
+        const nw=x.measureText(nm).width;
+        const detail=` - ${String(p.exercise||"").toUpperCase()} PR${p.gain?`  +${p.gain} LB`:(p.weight?`  ${p.weight}`:"")}`;
+        x.fillStyle=CA.muted2; x.font='400 28px "DM Sans"'; x.fillText(detail,M+nw+2,sy);
+        sy+=56;
+      });
+    }
+    // footer
+    led(foot,2);
+    x.fillStyle=CA.steel; x.font='400 28px "DM Sans"'; x.fillText("trainwilco.com",M,foot+52);
+    x.fillStyle=CA.faint; x.font=MONO; setLS("2px"); x.textAlign="right"; x.fillText("POWERED BY WILCO",W-M,foot+50); x.textAlign="left"; setLS("0px");
     const a=document.createElement("a"); a.href=cv.toDataURL("image/png"); a.download="wilco-wins.png"; a.click();
   }catch(e){ console.error("wins export failed",e); }
 }
@@ -1862,14 +1993,14 @@ function CoachCheckin({digest, team, coach, onRead}){
   const chips = q?chipsFor(q):null;
 
   return (
-    <div style={{marginTop:18,background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,padding:16}}>
-      <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:C.gold,letterSpacing:1.5}}>YOUR CALLS &amp; CONTEXT</div>
-      <div style={{color:C.muted,fontSize:12.5,margin:"3px 0 14px"}}>Talk it through — tap an option or type your own, ask me anything, push back. I'll remember it for next week.</div>
+    <div style={{marginTop:18,background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,padding:16}}>
+      <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:CA.accent,letterSpacing:1.5}}>YOUR CALLS &amp; CONTEXT</div>
+      <div style={{color:CA.muted,fontSize:12.5,margin:"3px 0 14px"}}>Talk it through — tap an option or type your own, ask me anything, push back. I'll remember it for next week.</div>
       <div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:400,overflowY:"auto",paddingRight:4}}>
         {msgs.map((m,i)=>(
           m.role==="sys"
-            ? <div key={i} style={{alignSelf:"center",color:C.green,fontSize:12,fontFamily:"'Bebas Neue'",letterSpacing:0.5}}>{m.text}</div>
-            : <div key={i} style={{alignSelf:m.role==="coach"?"flex-end":"flex-start",maxWidth:"85%",background:m.role==="coach"?C.gold:C.navy3,color:m.role==="coach"?"#0a0a0a":C.text,padding:"9px 12px",borderRadius:12,fontSize:13.5,lineHeight:1.5,fontWeight:m.role==="coach"?500:400}}>{m.text}</div>
+            ? <div key={i} style={{alignSelf:"center",color:CA.green,fontSize:12,fontFamily:"'Bebas Neue'",letterSpacing:0.5}}>{m.text}</div>
+            : <div key={i} style={{alignSelf:m.role==="coach"?"flex-end":"flex-start",maxWidth:"85%",background:m.role==="coach"?"linear-gradient(135deg,#3f7bff,#2258e0)":CA.navy3,border:m.role==="coach"?"none":`1px solid ${CA.border}`,color:m.role==="coach"?"#fff":CA.text,padding:"9px 12px",borderRadius:12,fontSize:13.5,lineHeight:1.5,fontWeight:m.role==="coach"?500:400}}>{m.text}</div>
         ))}
         <div ref={endRef}/>
       </div>
@@ -1878,17 +2009,17 @@ function CoachCheckin({digest, team, coach, onRead}){
           {chips&&(
             <div style={{display:"flex",flexWrap:"wrap",gap:7,marginBottom:9}}>
               {chips.map((opt,i)=>(
-                <button key={i} disabled={busy} onClick={()=>submit(opt)} style={{fontSize:12.5,color:C.muted,background:C.navy3,border:`1px solid ${C.border}`,borderRadius:999,padding:"6px 13px",cursor:"pointer",fontFamily:"'DM Sans'"}}>{opt}</button>
+                <button key={i} disabled={busy} onClick={()=>submit(opt)} style={{fontSize:12.5,color:CA.muted,background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:999,padding:"6px 13px",cursor:"pointer",fontFamily:"'DM Sans'"}}>{opt}</button>
               ))}
             </div>
           )}
-          <div style={{display:"flex",gap:8,alignItems:"center",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:"6px 6px 6px 13px"}}>
-            <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")submit(input);}} placeholder="Answer, or ask me anything…" disabled={busy} style={{flex:1,background:"none",border:"none",color:C.text,fontSize:13.5,outline:"none",fontFamily:"'DM Sans'"}}/>
-            <button onClick={()=>submit(input)} disabled={busy||!input.trim()} style={{background:C.gold,color:"#0a0a0a",border:"none",borderRadius:9,padding:"8px 16px",fontWeight:700,fontSize:12,cursor:"pointer",opacity:busy||!input.trim()?0.5:1,fontFamily:"'DM Sans'"}}>{busy?"…":"Send"}</button>
+          <div style={{display:"flex",gap:8,alignItems:"center",background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,padding:"6px 6px 6px 13px"}}>
+            <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")submit(input);}} placeholder="Answer, or ask me anything…" disabled={busy} style={{flex:1,background:"none",border:"none",color:CA.text,fontSize:13.5,outline:"none",fontFamily:"'DM Sans'"}}/>
+            <button onClick={()=>submit(input)} disabled={busy||!input.trim()} style={{background:CA_BTN,color:"#fff",border:"none",borderRadius:9,padding:"8px 16px",fontWeight:700,fontSize:12,cursor:"pointer",opacity:busy||!input.trim()?0.5:1,boxShadow:`0 0 12px ${CA_GLOW}`,fontFamily:"'DM Sans'"}}>{busy?"…":"Send"}</button>
           </div>
         </div>
       )}
-      {done&&<div style={{marginTop:12,color:C.muted,fontSize:13,fontStyle:"italic",fontFamily:EDITION_SERIF}}>That's the edition. I've got the context now — I'll build next week around it.</div>}
+      {done&&<div style={{marginTop:12,color:CA.muted,fontSize:13,fontStyle:"italic",fontFamily:EDITION_SERIF}}>That's the edition. I've got the context now — I'll build next week around it.</div>}
     </div>
   );
 }
@@ -1902,53 +2033,62 @@ function CoachEdition({digest, athletes, coach, onBack, onRead}){
   const toneOf = (s)=> /FOCUS/i.test(s.label)?"focus": s.flag==="warn"?"warn":"plain";
   return (
     <div style={{maxWidth:720}}>
-      <button onClick={onBack} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:12,marginBottom:14}}>← Back to Reports</button>
-      <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:16,padding:"18px 20px"}}>
-        <div style={{borderBottom:`2px solid ${C.border}`,paddingBottom:12,marginBottom:14,textAlign:"center"}}>
-          <div style={{fontFamily:EDITION_SERIF,fontWeight:700,fontSize:30,color:C.text,letterSpacing:-0.5,lineHeight:1}}>The Coach's Edition{isMonthly?" · Monthly":""}</div>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:12,letterSpacing:2,color:C.muted,marginTop:6}}>{coach?.name||"Coach"} · {new Date(digest.generated_at||Date.now()).toLocaleDateString("en-US",{month:"long",day:"numeric"})}{team?` · ${team.n} Athletes`:""}</div>
+      <button onClick={onBack} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:12,marginBottom:14}}>← Back to Reports</button>
+      <div className="coach-scan" style={{position:"relative",overflow:"hidden",background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:"18px 20px"}}>
+        <div style={{borderBottom:`2px solid ${CA.line2}`,paddingBottom:12,marginBottom:14,textAlign:"center"}}>
+          <div style={{fontFamily:EDITION_MAST,fontWeight:700,fontSize:30,color:EDITION_HEAD,letterSpacing:-0.5,lineHeight:1}}>
+            {`The Coach's Edition${isMonthly?" · Monthly":""}`.split(" ").map((w,i)=><span key={i} className="c-flap" style={{animationDelay:`${i*60}ms`,marginRight:7}}>{w}</span>)}
+          </div>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:12,letterSpacing:2,color:CA.muted,marginTop:6,display:"flex",alignItems:"center",justifyContent:"center",gap:7}}>
+            <span className="c-live" style={{width:6,height:6,borderRadius:"50%",background:CA.cyan,display:"inline-block",flexShrink:0}}/>
+            <span>{coach?.name||"Coach"} · {new Date(digest.generated_at||Date.now()).toLocaleDateString("en-US",{month:"long",day:"numeric"})}{team?` · ${team.n} Athletes`:""}</span>
+          </div>
         </div>
-        {c.intro&&<div style={{fontFamily:EDITION_SERIF,fontSize:16,color:C.text,fontStyle:"italic",marginBottom:14,textAlign:"center"}}>{c.intro}</div>}
+        {c.intro&&<div style={{fontFamily:EDITION_SERIF,fontSize:16,color:EDITION_BODY,fontStyle:"italic",marginBottom:14,textAlign:"center"}}>{c.intro}</div>}
         {team&&(
-          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:1,background:C.border,border:`1px solid ${C.border}`,borderRadius:10,overflow:"hidden",marginBottom:16}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:1,background:CA.line2,border:`1px solid ${CA.line2}`,borderRadius:10,overflow:"hidden",marginBottom:16}}>
             {railCells.map(([k,v],i)=>(
-              <div key={i} style={{background:C.navy3,padding:"10px 12px"}}>
-                <div style={{fontSize:9.5,letterSpacing:1,textTransform:"uppercase",color:C.muted}}>{k}</div>
-                <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:C.text,fontVariantNumeric:"tabular-nums"}}>{v}</div>
+              <div key={i} style={{background:CA.navy3,padding:"10px 12px"}}>
+                <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:9.5,letterSpacing:1.5,textTransform:"uppercase",color:CA.faint}}>{k}</div>
+                <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:CA.led,fontVariantNumeric:"tabular-nums"}}>{v}</div>
               </div>
             ))}
           </div>
         )}
         {sections.map((s,i)=>{
           const tone=toneOf(s);
-          const labelColor = tone==="warn"?C.red: tone==="focus"?C.gold:C.muted;
-          const box = tone==="focus"
-            ? {background:`${C.gold}0e`,borderLeft:`3px solid ${C.gold}`,borderRadius:"0 10px 10px 0"}
-            : {background:C.navy3,border:`1px solid ${tone==="warn"?`${C.red}40`:C.border}`,borderRadius:10};
+          const isFocus=tone==="focus";
+          const labelColor = tone==="warn"?CA.red: isFocus?CA.cyan:CA.faint;
+          const box = isFocus
+            ? {background:`${CA.accent}0e`,borderLeft:`2px solid ${CA.accent}`,borderRadius:"0 10px 10px 0"}
+            : {background:CA.navy3,border:`1px solid ${tone==="warn"?`${CA.red}40`:CA.line2}`,borderRadius:10};
+          const labelStyle = isFocus
+            ? {fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:10,letterSpacing:1.5,textTransform:"uppercase",color:labelColor,marginBottom:6}
+            : {fontFamily:"'Bebas Neue'",fontSize:13,letterSpacing:1.5,color:labelColor,marginBottom:6};
           return (
             <div key={i} style={{...box,padding:"12px 14px",marginBottom:9}}>
-              <div style={{fontFamily:"'Bebas Neue'",fontSize:13,letterSpacing:1.5,color:labelColor,marginBottom:6}}>{s.label}</div>
-              <div style={{color:C.text,fontSize:13.5,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{s.body}</div>
+              <div style={labelStyle}>{s.label}</div>
+              <div style={{color:EDITION_BODY,fontSize:13.5,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{s.body}</div>
             </div>
           );
         })}
         {team&&((team.strengths&&team.strengths.length)||(team.weaknesses&&team.weaknesses.length))&&(
-          <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:14,marginTop:6}}>
-            <div style={{fontFamily:"'Bebas Neue'",fontSize:13,letterSpacing:1.5,color:C.muted,marginBottom:8}}>PROGRAM STRENGTHS &amp; WEAKNESSES</div>
-            {(team.strengths||[]).map((s,i)=><TierBar key={"s"+i} name={s.name} tier={s.tierName} avgTier={s.avgTier} color={C.green}/>)}
-            {(team.weaknesses||[]).map((s,i)=><TierBar key={"w"+i} name={s.name} tier={s.tierName} avgTier={s.avgTier} color={C.red}/>)}
+          <div style={{background:CA.navy3,border:`1px solid ${CA.line2}`,borderRadius:10,padding:14,marginTop:6}}>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:13,letterSpacing:1.5,color:CA.muted2,marginBottom:8}}>PROGRAM STRENGTHS &amp; WEAKNESSES</div>
+            {(team.strengths||[]).map((s,i)=><TierBar key={"s"+i} name={s.name} tier={s.tierName} avgTier={s.avgTier} color={CA.green}/>)}
+            {(team.weaknesses||[]).map((s,i)=><TierBar key={"w"+i} name={s.name} tier={s.tierName} avgTier={s.avgTier} color={CA.red}/>)}
           </div>
         )}
         {team&&team.notablePRs&&team.notablePRs.length>0&&(
-          <div style={{background:`linear-gradient(180deg,${C.navy3},${C.navy2})`,border:`1px solid ${C.gold}44`,borderRadius:10,padding:14,marginTop:12}}>
-            <div style={{fontFamily:"'Bebas Neue'",fontSize:13,letterSpacing:1.5,color:C.gold,marginBottom:8}}>WINS TO SHARE</div>
+          <div style={{background:`${CA.accent}14`,border:`1px solid ${CA.accent}44`,borderRadius:10,padding:14,marginTop:12}}>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:13,letterSpacing:1.5,color:CA.accent,marginBottom:8}}>WINS TO SHARE</div>
             {team.notablePRs.slice(0,5).map((p,i,arr)=>(
-              <div key={i} style={{display:"flex",alignItems:"center",gap:9,padding:"6px 0",borderBottom:i<arr.length-1?`1px solid ${C.border}80`:"none"}}>
-                <span style={{width:24,height:24,borderRadius:6,background:`${C.gold}22`,border:`1px solid ${C.gold}55`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,flexShrink:0}}>🏆</span>
-                <div style={{flex:1,minWidth:0}}><span style={{color:C.text,fontWeight:650,fontSize:13}}>{p.athlete}</span> <span style={{color:C.muted,fontSize:12.5}}>{p.exercise} {fmtWeight(p.weight,p.unit)}{p.gain?` — +${p.gain} lbs e1RM`:""}</span></div>
+              <div key={i} style={{display:"flex",alignItems:"center",gap:9,padding:"6px 0",borderBottom:i<arr.length-1?`1px solid ${CA.border}80`:"none"}}>
+                <span style={{width:24,height:24,borderRadius:6,background:`${CA.accent}22`,border:`1px solid ${CA.accent}55`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,flexShrink:0}}>🏆</span>
+                <div style={{flex:1,minWidth:0}}><span style={{color:CA.text,fontWeight:650,fontSize:13}}>{p.athlete}</span> <span style={{color:CA.muted,fontSize:12.5}}>{p.exercise} {fmtWeight(p.weight,p.unit)}{p.gain?` — +${p.gain} lbs e1RM`:""}</span></div>
               </div>
             ))}
-            <button onClick={()=>exportWins(team,coach)} style={{marginTop:12,width:"100%",background:C.gold,color:"#0a0a0a",border:"none",borderRadius:9,padding:10,fontWeight:800,letterSpacing:1,textTransform:"uppercase",fontSize:12,cursor:"pointer",fontFamily:"'DM Sans'"}}>⤓ Share as image</button>
+            <button onClick={()=>exportWins(team,coach)} style={{marginTop:12,width:"100%",background:CA_BTN,color:"#fff",border:"none",borderRadius:9,padding:10,fontWeight:800,letterSpacing:1,textTransform:"uppercase",fontSize:12,cursor:"pointer",boxShadow:`0 0 14px ${CA_GLOW}`,fontFamily:"'DM Sans'"}}>⤓ Share as image</button>
           </div>
         )}
         <CoachCheckin digest={digest} team={team} coach={coach} onRead={onRead}/>
@@ -2010,44 +2150,44 @@ function GroupProgress({athletes,workouts,manualRMs}){
   },[athletes,workouts,manualRMs]);
 
   const subTab=(t,label)=>(
-    <button key={t} onClick={()=>setTab(t)} style={{padding:"10px 16px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?C.gold:"transparent"}`,color:tab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'"}}>{label}</button>
+    <button key={t} onClick={()=>setTab(t)} style={{padding:"10px 16px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?CA.accent:"transparent"}`,color:tab===t?CA.accent:CA.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'"}}>{label}</button>
   );
 
   return (
     <div style={{maxWidth:760}}>
-      <div style={{color:C.muted2,fontSize:12.5,marginBottom:12}}>Every athlete's dated data, combined into team trends.</div>
-      <div style={{display:"flex",borderBottom:`1px solid ${C.border}`,marginBottom:16}}>
+      <div style={{color:CA.muted2,fontSize:12.5,marginBottom:12}}>Every athlete's dated data, combined into team trends.</div>
+      <div style={{display:"flex",borderBottom:`1px solid ${CA.border}`,marginBottom:16}}>
         {subTab("benchmarks","Benchmarks")}{subTab("strength","Strength")}{subTab("running","Running")}
       </div>
 
       {tab==="benchmarks"&&(
         <div>
-          <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:16,display:"flex",justifyContent:"space-around",textAlign:"center",alignItems:"center"}}>
-            <div style={{flex:1}}><div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>{D.rankedAthletes}</div><div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:2}}>ATHLETES RANKED</div></div>
-            <div style={{width:1,alignSelf:"stretch",background:C.border}}/>
-            <div style={{flex:1}}><div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:D.topTier>=0?TIER_COLORS[D.topTier]:C.muted,lineHeight:1}}>{D.topTier>=0?TIER_NAMES[D.topTier]:"—"}</div><div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:5}}>TEAM TOP TIER</div></div>
-            <div style={{width:1,alignSelf:"stretch",background:C.border}}/>
-            <div style={{flex:1}}><div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>{D.avgScore.toLocaleString()}</div><div style={{color:C.muted,fontSize:10,letterSpacing:1,marginTop:2}}>AVG STRENGTH SCORE</div></div>
+          <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:16,display:"flex",justifyContent:"space-around",textAlign:"center",alignItems:"center"}}>
+            <div style={{flex:1}}><div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:CA.accent,lineHeight:1}}>{D.rankedAthletes}</div><div style={{color:CA.muted,fontSize:10,letterSpacing:1,marginTop:2}}>ATHLETES RANKED</div></div>
+            <div style={{width:1,alignSelf:"stretch",background:CA.border}}/>
+            <div style={{flex:1}}><div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:D.topTier>=0?TIER_COLORS[D.topTier]:CA.muted,lineHeight:1}}>{D.topTier>=0?TIER_NAMES[D.topTier]:"—"}</div><div style={{color:CA.muted,fontSize:10,letterSpacing:1,marginTop:5}}>TEAM TOP TIER</div></div>
+            <div style={{width:1,alignSelf:"stretch",background:CA.border}}/>
+            <div style={{flex:1}}><div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:CA.accent,lineHeight:1}}>{D.avgScore.toLocaleString()}</div><div style={{color:CA.muted,fontSize:10,letterSpacing:1,marginTop:2}}>AVG STRENGTH SCORE</div></div>
           </div>
           {D.benchmarks.length===0
-            ? <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No benchmarked lifts logged across the roster yet.</div>
+            ? <div style={{color:CA.muted,textAlign:"center",padding:40,fontSize:13}}>No benchmarked lifts logged across the roster yet.</div>
             : D.benchmarks.map((b,i)=>{
                 const ti=Math.round(b.avgTier);
                 return (
-                  <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:12}}>
+                  <div key={i} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:12}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
                       <div>
-                        <div style={{color:C.text,fontWeight:700,fontSize:14}}>{b.name}</div>
-                        <div style={{color:TIER_COLORS[ti],fontSize:13,fontWeight:700,marginTop:2,letterSpacing:.5}}>{TIER_NAMES[ti]} <span style={{color:C.muted,fontWeight:400}}>team avg</span></div>
+                        <div style={{color:CA.text,fontWeight:700,fontSize:14}}>{b.name}</div>
+                        <div style={{color:TIER_COLORS[ti],fontSize:13,fontWeight:700,marginTop:2,letterSpacing:.5}}>{TIER_NAMES[ti]} <span style={{color:CA.muted,fontWeight:400}}>team avg</span></div>
                       </div>
                       <div style={{textAlign:"right"}}>
-                        <div style={{fontFamily:"'Bebas Neue'",fontSize:24,color:TIER_COLORS[ti],lineHeight:1}}>{b.avgE1rm}<span style={{fontSize:11,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span></div>
-                        <div style={{color:C.muted,fontSize:10}}>avg e1RM · {b.n} athlete{b.n!==1?"s":""}</div>
+                        <div style={{fontFamily:"'Bebas Neue'",fontSize:24,color:TIER_COLORS[ti],lineHeight:1}}>{b.avgE1rm}<span style={{fontSize:11,color:CA.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span></div>
+                        <div style={{color:CA.muted,fontSize:10}}>avg e1RM · {b.n} athlete{b.n!==1?"s":""}</div>
                       </div>
                     </div>
                     <div style={{position:"relative",height:12,borderRadius:6,display:"flex",overflow:"visible"}}>
                       {TIER_COLORS.map((c,si)=><div key={si} style={{flex:1,background:c,opacity:si===ti?1:0.4,borderRight:si<7?"1px solid rgba(6,13,30,0.6)":""}}/>)}
-                      <div style={{position:"absolute",top:-3,left:`${b.avgTier/7*100}%`,transform:"translateX(-50%)",width:5,height:18,background:"#fff",borderRadius:3,boxShadow:"0 0 6px rgba(255,255,255,0.7)"}}/>
+                      <div style={{position:"absolute",top:-3,left:`${b.avgTier/7*100}%`,transform:"translateX(-50%)",width:5,height:18,background:CA.led,borderRadius:3,boxShadow:`0 0 7px ${CA.cyan}aa`}}/>
                     </div>
                     <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:10,justifyContent:"center"}}>
                       {b.dist.map((cnt,ti2)=>cnt>0&&<span key={ti2} style={{fontSize:10,color:TIER_COLORS[ti2],background:`${TIER_COLORS[ti2]}18`,border:`1px solid ${TIER_COLORS[ti2]}44`,borderRadius:999,padding:"2px 8px",fontWeight:700}}>{TIER_NAMES[ti2]} {cnt}</span>)}
@@ -2060,16 +2200,16 @@ function GroupProgress({athletes,workouts,manualRMs}){
 
       {tab==="strength"&&(
         <div>
-          <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>TEAM STRENGTH — AVG EST. 1RM BY WEEK</div>
+          <div style={{color:CA.accent,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>TEAM STRENGTH — AVG EST. 1RM BY WEEK</div>
           {D.strength.length===0
-            ? <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>Not enough weighted training logged across weeks yet.</div>
+            ? <div style={{color:CA.muted,textAlign:"center",padding:40,fontSize:13}}>Not enough weighted training logged across weeks yet.</div>
             : D.strength.map((ex,i)=>(
-                <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}>
+                <div key={i} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:14}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
-                    <div><div style={{color:C.text,fontWeight:700,fontSize:14}}>{ex.name}</div><div style={{color:C.muted,fontSize:11,marginTop:2}}>{ex.points.length} week{ex.points.length!==1?"s":""} of data</div></div>
-                    <div style={{textAlign:"right"}}><div style={{color:C.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>PEAK TEAM AVG</div><div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:C.gold,lineHeight:1}}>{ex.best}<span style={{fontSize:11,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span></div></div>
+                    <div><div style={{color:CA.text,fontWeight:700,fontSize:14}}>{ex.name}</div><div style={{color:CA.muted,fontSize:11,marginTop:2}}>{ex.points.length} week{ex.points.length!==1?"s":""} of data</div></div>
+                    <div style={{textAlign:"right"}}><div style={{color:CA.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>PEAK TEAM AVG</div><div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:CA.accent,lineHeight:1}}>{ex.best}<span style={{fontSize:11,color:CA.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span></div></div>
                   </div>
-                  <LineChart data={ex.points} color={C.gold} unit=" lbs"/>
+                  <LineChart data={ex.points} color={CA.cyan} unit=" lbs" palette={CA}/>
                 </div>
               ))}
         </div>
@@ -2077,11 +2217,11 @@ function GroupProgress({athletes,workouts,manualRMs}){
 
       {tab==="running"&&(
         <div>
-          <div style={{color:C.blue,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>TEAM RUNNING — BY WEEK</div>
-          {D.distSeries.length>=2&&<div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:12}}>Total distance / week</div><LineChart data={D.distSeries} color={C.blue} unit=" mi"/></div>}
-          {D.paceSeries.length>=2&&<div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:4}}>Avg pace (min/mi) — lower is faster</div><LineChart data={D.paceSeries} color={C.green} unit=""/></div>}
-          {D.hrSeries.length>=2&&<div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:C.text,fontWeight:700,fontSize:14,marginBottom:12}}>Avg heart rate (bpm)</div><LineChart data={D.hrSeries} color={C.red} unit=" bpm"/></div>}
-          {D.distSeries.length<2&&D.paceSeries.length<2&&D.hrSeries.length<2&&<div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:10,padding:16,color:C.muted2,fontSize:12}}>Not enough runs logged across the roster to trend yet.</div>}
+          <div style={{color:CA.blue,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>TEAM RUNNING — BY WEEK</div>
+          {D.distSeries.length>=2&&<div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:CA.text,fontWeight:700,fontSize:14,marginBottom:12}}>Total distance / week</div><LineChart data={D.distSeries} color={CA.blue} unit=" mi" palette={CA}/></div>}
+          {D.paceSeries.length>=2&&<div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:CA.text,fontWeight:700,fontSize:14,marginBottom:4}}>Avg pace (min/mi) — lower is faster</div><LineChart data={D.paceSeries} color={CA.cyan} unit="" palette={CA}/></div>}
+          {D.hrSeries.length>=2&&<div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:CA.text,fontWeight:700,fontSize:14,marginBottom:12}}>Avg heart rate (bpm)</div><LineChart data={D.hrSeries} color={CA.blue} unit=" bpm" palette={CA}/></div>}
+          {D.distSeries.length<2&&D.paceSeries.length<2&&D.hrSeries.length<2&&<div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:10,padding:16,color:CA.muted2,fontSize:12}}>Not enough runs logged across the roster to trend yet.</div>}
         </div>
       )}
     </div>
@@ -2156,38 +2296,38 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
   const tabs = ["overview","workouts","progress","program"];
 
   return (
-    <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden"}}>
+    <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,overflow:"hidden"}}>
       {/* Athlete header */}
-      <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,background:C.navy3,display:"flex",alignItems:"center",gap:14}}>
-        <div style={{width:48,height:48,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:22,color:"#000",flexShrink:0}}>
+      <div style={{padding:"16px 20px",borderBottom:`1px solid ${CA.border}`,background:CA.navy3,display:"flex",alignItems:"center",gap:14}}>
+        <div style={{width:48,height:48,borderRadius:"50%",background:`linear-gradient(135deg,#57a0ff,#2a63e6)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:22,color:"#fff",flexShrink:0}}>
           {athlete.name[0].toUpperCase()}
         </div>
         <div style={{flex:1,minWidth:0}}>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:C.text,letterSpacing:1}}>{athlete.name}</div>
-          <div style={{color:C.muted,fontSize:12}}>{athlete.sport} · {groupIntoSessions(workouts).length} sessions</div>
-          {athlete.season_date&&<div style={{color:C.gold,fontSize:11}}>Season: {fmtDate(athlete.season_date)}</div>}
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.text,letterSpacing:1}}>{athlete.name}</div>
+          <div style={{color:CA.muted,fontSize:12}}>{athlete.sport} · {groupIntoSessions(workouts).length} sessions</div>
+          {athlete.season_date&&<div style={{color:CA.accent,fontSize:11}}>Season: {fmtDate(athlete.season_date)}</div>}
         </div>
         <div style={{display:"flex",gap:8,flexShrink:0,alignItems:"center"}}>
-          {hasPain&&<div style={{background:`${C.red}20`,border:`1px solid ${C.red}`,borderRadius:8,padding:"4px 10px",color:C.red,fontSize:11}}>⚠ Pain</div>}
-          {athlete.temp_program_text&&<div style={{background:`${C.gold}15`,border:`1px solid ${C.gold}`,borderRadius:8,padding:"4px 10px",color:C.gold,fontSize:11}}>✈️ Temp program</div>}
-          {!athlete.temp_program_text&&athlete.program_text&&<div style={{background:"#0a0e1e",border:`1px solid ${C.blue}`,borderRadius:8,padding:"4px 10px",color:C.blue,fontSize:11}}>Program set</div>}
+          {hasPain&&<div style={{background:`${CA.red}20`,border:`1px solid ${CA.red}`,borderRadius:8,padding:"4px 10px",color:CA.red,fontSize:11}}>⚠ Pain</div>}
+          {athlete.temp_program_text&&<div style={{background:`${CA.amber}15`,border:`1px solid ${CA.amber}`,borderRadius:8,padding:"4px 10px",color:CA.amber,fontSize:11}}>✈️ Temp program</div>}
+          {!athlete.temp_program_text&&athlete.program_text&&<div style={{background:CA.navy3,border:`1px solid ${CA.blue}`,borderRadius:8,padding:"4px 10px",color:CA.blue,fontSize:11}}>Program set</div>}
           {confirmDelete?(
-            <div style={{display:"flex",gap:6,alignItems:"center",background:`${C.red}15`,border:`1px solid ${C.red}40`,borderRadius:10,padding:"4px 10px"}}>
-              <span style={{color:C.muted2,fontSize:11}}>Delete athlete?</span>
-              <button onClick={handleDelete} style={{background:C.red,border:"none",color:"#fff",borderRadius:6,padding:"3px 10px",cursor:"pointer",fontSize:11,fontWeight:700}}>Delete</button>
-              <button onClick={()=>setConfirmDelete(false)} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"3px 8px",cursor:"pointer",fontSize:11}}>Cancel</button>
+            <div style={{display:"flex",gap:6,alignItems:"center",background:`${CA.red}15`,border:`1px solid ${CA.red}40`,borderRadius:10,padding:"4px 10px"}}>
+              <span style={{color:CA.muted2,fontSize:11}}>Delete athlete?</span>
+              <button onClick={handleDelete} style={{background:CA.red,border:"none",color:"#fff",borderRadius:6,padding:"3px 10px",cursor:"pointer",fontSize:11,fontWeight:700}}>Delete</button>
+              <button onClick={()=>setConfirmDelete(false)} style={{background:"transparent",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:6,padding:"3px 8px",cursor:"pointer",fontSize:11}}>Cancel</button>
             </div>
           ):(
-            <button onClick={()=>setConfirmDelete(true)} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"4px 10px",cursor:"pointer",fontSize:11}}>Delete</button>
+            <button onClick={()=>setConfirmDelete(true)} style={{background:"transparent",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"4px 10px",cursor:"pointer",fontSize:11}}>Delete</button>
           )}
         </div>
       </div>
 
       {/* Tabs */}
-      <div style={{display:"flex",borderBottom:`1px solid ${C.border}`}}>
+      <div style={{display:"flex",borderBottom:`1px solid ${CA.border}`}}>
         {tabs.map(t=>(
           <button key={t} onClick={()=>setTab(t)}
-            style={{padding:"10px 16px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?C.gold:"transparent"}`,color:tab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"color 0.15s"}}>
+            style={{padding:"10px 16px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?CA.accent:"transparent"}`,color:tab===t?CA.accent:CA.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"color 0.15s"}}>
             {t==="progress"?"Progress":t}
           </button>
         ))}
@@ -2197,20 +2337,20 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
 
         {/* ── Program change requests (locked-program collaboration) ── */}
         {requests.length>0&&(
-          <div style={{background:`${C.gold}0d`,border:`1px solid ${C.gold}40`,borderRadius:12,padding:14,marginBottom:16}}>
+          <div style={{background:`${CA.accent}0d`,border:`1px solid ${CA.accent}40`,borderRadius:12,padding:14,marginBottom:16}}>
             <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-              <span style={{fontFamily:"'Bebas Neue'",fontSize:15,color:C.gold,letterSpacing:1}}>PROGRAM CHANGE REQUESTS</span>
-              <span style={{fontSize:10,fontWeight:800,color:C.gold,background:`${C.gold}22`,border:`1px solid ${C.gold}55`,borderRadius:999,padding:"1px 7px"}}>{requests.length}</span>
-              <span style={{marginLeft:"auto",fontSize:10.5,color:C.muted,textTransform:"uppercase",letterSpacing:.5}}>🔒 Locked</span>
+              <span style={{fontFamily:"'Bebas Neue'",fontSize:15,color:CA.accent,letterSpacing:1}}>PROGRAM CHANGE REQUESTS</span>
+              <span style={{fontSize:10,fontWeight:800,color:CA.accent,background:`${CA.accent}22`,border:`1px solid ${CA.accent}55`,borderRadius:999,padding:"1px 7px"}}>{requests.length}</span>
+              <span style={{marginLeft:"auto",fontSize:10.5,color:CA.muted,textTransform:"uppercase",letterSpacing:.5}}>🔒 Locked</span>
             </div>
             {requests.map((r)=>(
-              <div key={r.id} style={{border:`1px solid ${C.border}`,background:C.navy2,borderRadius:10,padding:"11px 12px",marginBottom:8}}>
-                <div style={{color:C.text,fontSize:13,lineHeight:1.5}}>{r.reason || (Array.isArray(r.items)&&r.items[0]?.suggested_change) || "Requested a program change"}</div>
-                <div style={{color:C.dim||C.muted,fontSize:11,margin:"5px 0 10px"}}>Filed {fmtDateRelative?fmtDateRelative(r.created_at):new Date(r.created_at).toLocaleDateString()} · {r.source}</div>
+              <div key={r.id} style={{border:`1px solid ${CA.border}`,background:CA.navy2,borderRadius:10,padding:"11px 12px",marginBottom:8}}>
+                <div style={{color:CA.text,fontSize:13,lineHeight:1.5}}>{r.reason || (Array.isArray(r.items)&&r.items[0]?.suggested_change) || "Requested a program change"}</div>
+                <div style={{color:CA.dim||CA.muted,fontSize:11,margin:"5px 0 10px"}}>Filed {fmtDateRelative?fmtDateRelative(r.created_at):new Date(r.created_at).toLocaleDateString()} · {r.source}</div>
                 <div style={{display:"flex",gap:6}}>
-                  <button onClick={()=>onResolveRequest&&onResolveRequest(r,"applied")} style={{background:C.gold,color:"#000",border:"none",borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Mark applied</button>
-                  <button onClick={()=>{setTab("program");}} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Edit program</button>
-                  <button onClick={()=>onResolveRequest&&onResolveRequest(r,"skipped")} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Skip</button>
+                  <button onClick={()=>onResolveRequest&&onResolveRequest(r,"applied")} style={{background:CA.accent,color:"#fff",border:"none",borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Mark applied</button>
+                  <button onClick={()=>{setTab("program");}} style={{background:"transparent",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Edit program</button>
+                  <button onClick={()=>onResolveRequest&&onResolveRequest(r,"skipped")} style={{background:"transparent",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Skip</button>
                 </div>
               </div>
             ))}
@@ -2221,34 +2361,34 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
         {tab==="overview"&&(
           <div>
             {lastWorkout?(
-              <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:16}}>
-                <div style={{color:C.gold,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:8}}>LAST SESSION — {fmtDateShort(lastWorkout.created_at)}</div>
+              <div style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:16}}>
+                <div style={{color:CA.accent,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:8}}>LAST SESSION — {fmtDateShort(lastWorkout.created_at)}</div>
                 {lastWorkout.parsed_data?.run_data?(
                   <RunCard runData={lastWorkout.parsed_data.run_data} feel={lastWorkout.parsed_data.session_feel}/>
                 ):lastWorkout.parsed_data?.exercises?.length>0?(
                   <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
                     {lastWorkout.parsed_data.exercises.map((e,i)=>(
-                      <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:8,padding:"6px 10px"}}>
-                        <div style={{color:C.text,fontSize:12,fontWeight:600}}>{e.name}</div>
-                        <div style={{color:C.muted,fontSize:11}}>
+                      <div key={i} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:8,padding:"6px 10px"}}>
+                        <div style={{color:CA.text,fontSize:12,fontWeight:600}}>{e.name}</div>
+                        <div style={{color:CA.muted,fontSize:11}}>
                           {formatSetDetails(e)}
                         </div>
                       </div>
                     ))}
                   </div>
                 ):(
-                  <div style={{color:C.muted2,fontSize:13}}>{lastWorkout.raw_message?.slice(0,200)}</div>
+                  <div style={{color:CA.muted2,fontSize:13}}>{lastWorkout.raw_message?.slice(0,200)}</div>
                 )}
                 {lastWorkout.parsed_data?.session_feel&&(
-                  <div style={{marginTop:8,color:C.muted,fontSize:11}}>
-                    Feel: <span style={{color:lastWorkout.parsed_data.session_feel==="great"||lastWorkout.parsed_data.session_feel==="good"?C.green:lastWorkout.parsed_data.session_feel==="rough"?C.red:C.gold}}>
+                  <div style={{marginTop:8,color:CA.muted,fontSize:11}}>
+                    Feel: <span style={{color:lastWorkout.parsed_data.session_feel==="great"||lastWorkout.parsed_data.session_feel==="good"?CA.green:lastWorkout.parsed_data.session_feel==="rough"?CA.red:CA.accent}}>
                       {lastWorkout.parsed_data.session_feel}
                     </span>
                   </div>
                 )}
               </div>
             ):(
-              <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:16,color:C.muted,fontSize:13}}>No sessions logged yet.</div>
+              <div style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:16,color:CA.muted,fontSize:13}}>No sessions logged yet.</div>
             )}
 
             {(()=>{
@@ -2257,11 +2397,11 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
               const areaCounts = {};
               painLogs.flatMap(w=>w.parsed_data.pain_flags.filter(p=>!resolvedPainAreas.includes(p.area.toLowerCase())).map(p=>p.area)).forEach(a=>areaCounts[a]=(areaCounts[a]||0)+1);
               return (
-                <div style={{background:`${C.red}10`,border:`1px solid ${C.red}40`,borderRadius:12,padding:16,marginBottom:16}}>
-                  <div style={{color:C.red,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:8}}>ACTIVE PAIN FLAGS ({painLogs.length} sessions flagged)</div>
+                <div style={{background:`${CA.red}10`,border:`1px solid ${CA.red}40`,borderRadius:12,padding:16,marginBottom:16}}>
+                  <div style={{color:CA.red,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:8}}>ACTIVE PAIN FLAGS ({painLogs.length} sessions flagged)</div>
                   <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
                     {Object.entries(areaCounts).map(([area,count])=>(
-                      <div key={area} style={{background:`${C.red}20`,border:`1px solid ${C.red}40`,borderRadius:8,padding:"4px 10px",fontSize:12,color:C.red}}>
+                      <div key={area} style={{background:`${CA.red}20`,border:`1px solid ${CA.red}40`,borderRadius:8,padding:"4px 10px",fontSize:12,color:CA.red}}>
                         {area} ×{count}
                       </div>
                     ))}
@@ -2271,13 +2411,13 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
             })()}
 
             {prs.length>0&&(
-              <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:16}}>
-                <div style={{color:C.blue,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>TOP PRs</div>
+              <div style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,padding:16}}>
+                <div style={{color:CA.blue,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>TOP PRs</div>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
                   {[...prs].sort((a,b)=>liftTier(normalizeExName(a.exercise))-liftTier(normalizeExName(b.exercise)) || (b.estimated_1rm||b.weight||0)-(a.estimated_1rm||a.weight||0)).slice(0,6).map((p,i)=>(
-                    <div key={i} style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 12px"}}>
-                      <div style={{color:C.text,fontSize:12,fontWeight:600}}>{p.exercise}</div>
-                      <div style={{color:C.blue,fontSize:13,fontWeight:700}}>{fmtWeight(p.weight,p.unit)}</div>
+                    <div key={i} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:8,padding:"8px 12px"}}>
+                      <div style={{color:CA.text,fontSize:12,fontWeight:600}}>{p.exercise}</div>
+                      <div style={{color:CA.blue,fontSize:13,fontWeight:700}}>{fmtWeight(p.weight,p.unit)}</div>
                     </div>
                   ))}
                 </div>
@@ -2301,7 +2441,7 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
           ].sort((a,b)=>b.date-a.date);
 
           if(timeline.length===0) return (
-            <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No activity logged yet.</div>
+            <div style={{color:CA.muted,textAlign:"center",padding:40,fontSize:13}}>No activity logged yet.</div>
           );
 
           return (
@@ -2331,16 +2471,16 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
                     return pd.run_data;
                   }).filter(Boolean);
                   const isRunSession = allRunData.length>0 && allExercises.length===0;
-                  const runDotColor = isRunSession ? C.blue : C.green;
+                  const runDotColor = isRunSession ? CA.blue : CA.green;
 
                   return (
-                    <div key={i} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:14,marginBottom:10}}>
+                    <div key={i} style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,padding:14,marginBottom:10}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
                           <div style={{width:6,height:6,borderRadius:"50%",background:runDotColor,flexShrink:0}}/>
-                          <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1}}>{isRunSession?"RUN":"WORKOUT"} — {fmtDateRelative(sessionDate)}</div>
+                          <div style={{color:CA.accent,fontSize:11,fontWeight:700,letterSpacing:1}}>{isRunSession?"RUN":"WORKOUT"} — {fmtDateRelative(sessionDate)}</div>
                         </div>
-                        {!isRunSession&&feelVal&&<div style={{fontSize:11,color:feelVal==="great"||feelVal==="good"?C.green:feelVal==="rough"?C.red:C.gold,fontWeight:600}}>{feelVal}</div>}
+                        {!isRunSession&&feelVal&&<div style={{fontSize:11,color:feelVal==="great"||feelVal==="good"?CA.green:feelVal==="rough"?CA.red:CA.accent,fontWeight:600}}>{feelVal}</div>}
                       </div>
                       {isRunSession?(
                         <RunCard runData={allRunData[0]} feel={feelVal}/>
@@ -2349,23 +2489,23 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
                           <thead>
                             <tr>
                               {["Exercise","Sets","Feel"].map(h=>(
-                                <th key={h} style={{color:C.muted,fontWeight:600,fontSize:10,letterSpacing:1,textAlign:"left",paddingBottom:4,borderBottom:`1px solid ${C.border}`}}>{h}</th>
+                                <th key={h} style={{color:CA.muted,fontWeight:600,fontSize:10,letterSpacing:1,textAlign:"left",paddingBottom:4,borderBottom:`1px solid ${CA.border}`}}>{h}</th>
                               ))}
                             </tr>
                           </thead>
                           <tbody>
                             {allExercises.map((e,j)=>(
                               <tr key={j}>
-                                <td style={{color:C.text,fontWeight:600,padding:"5px 8px 5px 0",verticalAlign:"top"}}>{e.name}</td>
-                                <td style={{color:C.muted2,padding:"5px 8px 5px 0",verticalAlign:"top"}}>{formatSetDetails(e)}</td>
-                                <td style={{color:e.feel==="easy"?C.blue:e.feel==="hard"?C.red:C.muted,padding:"5px 0",verticalAlign:"top"}}>{e.feel||"—"}</td>
+                                <td style={{color:CA.text,fontWeight:600,padding:"5px 8px 5px 0",verticalAlign:"top"}}>{e.name}</td>
+                                <td style={{color:CA.muted2,padding:"5px 8px 5px 0",verticalAlign:"top"}}>{formatSetDetails(e)}</td>
+                                <td style={{color:e.feel==="easy"?CA.blue:e.feel==="hard"?CA.red:CA.muted,padding:"5px 0",verticalAlign:"top"}}>{e.feel||"—"}</td>
                               </tr>
                             ))}
                           </tbody>
                         </table>
                       )}
-                      {allPainFlags.length>0&&<div style={{color:C.red,fontSize:11,marginTop:4}}>⚠ {allPainFlags.map(p=>p.area).join(", ")}</div>}
-                      {lastReply&&<div style={{marginTop:8,borderTop:`1px solid ${C.border}`,paddingTop:8,color:C.muted2,fontSize:12,fontStyle:"italic"}}>Coach Joe: "{lastReply.slice(0,200)}{lastReply.length>200?"...":""}"</div>}
+                      {allPainFlags.length>0&&<div style={{color:CA.red,fontSize:11,marginTop:4}}>⚠ {allPainFlags.map(p=>p.area).join(", ")}</div>}
+                      {lastReply&&<div style={{marginTop:8,borderTop:`1px solid ${CA.border}`,paddingTop:8,color:CA.muted2,fontSize:12,fontStyle:"italic"}}>Coach Joe: "{lastReply.slice(0,200)}{lastReply.length>200?"...":""}"</div>}
                     </div>
                   );
                 }
@@ -2373,13 +2513,13 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
                 if(item.type==="formcheck"){
                   const w = item.data;
                   return (
-                    <div key={i} style={{background:C.navy3,border:`1px solid ${C.blue}30`,borderRadius:12,padding:14,marginBottom:10}}>
+                    <div key={i} style={{background:CA.navy3,border:`1px solid ${CA.blue}30`,borderRadius:12,padding:14,marginBottom:10}}>
                       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
-                        <div style={{width:6,height:6,borderRadius:"50%",background:C.blue,flexShrink:0}}/>
-                        <div style={{color:C.blue,fontSize:11,fontWeight:700,letterSpacing:1}}>FORM CHECK — {fmtDateRelative(w.created_at)}</div>
+                        <div style={{width:6,height:6,borderRadius:"50%",background:CA.blue,flexShrink:0}}/>
+                        <div style={{color:CA.blue,fontSize:11,fontWeight:700,letterSpacing:1}}>FORM CHECK — {fmtDateRelative(w.created_at)}</div>
                       </div>
-                      <div style={{color:C.muted2,fontSize:12,marginBottom:6}}>{w.raw_message}</div>
-                      {w.bot_reply&&<div style={{color:C.text,fontSize:12,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{w.bot_reply}</div>}
+                      <div style={{color:CA.muted2,fontSize:12,marginBottom:6}}>{w.raw_message}</div>
+                      {w.bot_reply&&<div style={{color:CA.text,fontSize:12,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{w.bot_reply}</div>}
                     </div>
                   );
                 }
@@ -2388,16 +2528,16 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
                 return (
                   <div key={i} style={{marginBottom:10}}>
                     <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-                      <div style={{width:6,height:6,borderRadius:"50%",background:C.muted,flexShrink:0}}/>
-                      <div style={{color:C.muted,fontSize:10,letterSpacing:1}}>Q&A — {fmtDate(w.created_at)}</div>
+                      <div style={{width:6,height:6,borderRadius:"50%",background:CA.muted,flexShrink:0}}/>
+                      <div style={{color:CA.muted,fontSize:10,letterSpacing:1}}>Q&A — {fmtDate(w.created_at)}</div>
                     </div>
                     <div style={{display:"flex",justifyContent:"flex-end",marginBottom:4}}>
-                      <div style={{background:C.gold,color:"#000",borderRadius:"14px 14px 4px 14px",padding:"8px 12px",fontSize:12,maxWidth:"85%"}}>{w.raw_message}</div>
+                      <div style={{background:"linear-gradient(135deg,#3f7bff,#2258e0)",color:"#fff",borderRadius:"14px 14px 4px 14px",padding:"8px 12px",fontSize:12,maxWidth:"85%"}}>{w.raw_message}</div>
                     </div>
                     {w.bot_reply&&(
                       <div style={{display:"flex",gap:6,alignItems:"flex-start"}}>
-                        <div style={{width:22,height:22,borderRadius:"50%",background:`linear-gradient(135deg,${C.gold},#8a6000)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#000",flexShrink:0,marginTop:2}}>J</div>
-                        <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:"14px 14px 14px 4px",padding:"8px 12px",fontSize:12,color:C.text,maxWidth:"85%",lineHeight:1.5}}>{w.bot_reply}</div>
+                        <div style={{width:22,height:22,borderRadius:"50%",background:`linear-gradient(135deg,#57a0ff,#2a63e6)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#fff",flexShrink:0,marginTop:2}}>J</div>
+                        <div style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:"14px 14px 14px 4px",padding:"8px 12px",fontSize:12,color:CA.text,maxWidth:"85%",lineHeight:1.5}}>{w.bot_reply}</div>
                       </div>
                     )}
                   </div>
@@ -2450,30 +2590,30 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
                 .sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.best-a.best);
 
               if(exercises.length===0) return (
-                <div style={{color:C.muted,textAlign:"center",padding:40,fontSize:13}}>No weighted exercises logged yet.</div>
+                <div style={{color:CA.muted,textAlign:"center",padding:40,fontSize:13}}>No weighted exercises logged yet.</div>
               );
 
               return exercises.map((ex,i)=>(
-                <div key={i} style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}>
+                <div key={i} style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:14}}>
                   {/* Header row */}
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
                     <div>
-                      <div style={{color:C.text,fontWeight:700,fontSize:14}}>{ex.name}</div>
-                      <div style={{color:C.muted,fontSize:11,marginTop:2}}>{ex.entries.length} logged set{ex.entries.length!==1?"s":""}</div>
+                      <div style={{color:CA.text,fontWeight:700,fontSize:14}}>{ex.name}</div>
+                      <div style={{color:CA.muted,fontSize:11,marginTop:2}}>{ex.entries.length} logged set{ex.entries.length!==1?"s":""}</div>
                     </div>
                     <div style={{textAlign:"right"}}>
-                      <div style={{color:C.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>LIFETIME BEST EST. 1RM</div>
-                      <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:C.gold,lineHeight:1}}>
-                        {ex.best}<span style={{fontSize:13,color:C.muted,fontFamily:"'DM Sans'",marginLeft:2}}>{ex.unit==="kg"?"kg":"lbs"}</span>
+                      <div style={{color:CA.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>LIFETIME BEST EST. 1RM</div>
+                      <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:CA.accent,lineHeight:1}}>
+                        {ex.best}<span style={{fontSize:13,color:CA.muted,fontFamily:"'DM Sans'",marginLeft:2}}>{ex.unit==="kg"?"kg":"lbs"}</span>
                       </div>
-                      <div style={{color:C.muted,fontSize:10,marginTop:2}}>{fmtWeight(ex.bestEntry.weight,ex.unit)} × {ex.bestEntry.reps} rep{ex.bestEntry.reps!==1?"s":""}</div>
+                      <div style={{color:CA.muted,fontSize:10,marginTop:2}}>{fmtWeight(ex.bestEntry.weight,ex.unit)} × {ex.bestEntry.reps} rep{ex.bestEntry.reps!==1?"s":""}</div>
                     </div>
                   </div>
                   {/* Chart or single-entry note */}
                   {ex.entries.length>=2?(
-                    <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={C.gold} unit={ex.unit==="kg"?"kg":"lbs"}/>
+                    <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={CA.cyan} unit={ex.unit==="kg"?"kg":"lbs"} palette={CA}/>
                   ):(
-                    <div style={{background:C.navy2,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.muted2}}>
+                    <div style={{background:CA.navy2,borderRadius:8,padding:"8px 12px",fontSize:12,color:CA.muted2}}>
                       Logged once — log again to see a trend line.
                     </div>
                   )}
@@ -2488,27 +2628,27 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
           <div>
             {/* Temp program banner */}
             {athlete.temp_program_text&&(
-              <div style={{background:`${C.gold}12`,border:`1px solid ${C.gold}50`,borderRadius:12,padding:14,marginBottom:16}}>
-                <div style={{color:C.gold,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:6}}>✈️ TEMPORARY PROGRAM ACTIVE</div>
-                <div style={{color:C.muted2,fontSize:12,lineHeight:1.6,marginBottom:10,whiteSpace:"pre-wrap"}}>{athlete.temp_program_text}</div>
-                <div style={{color:C.muted,fontSize:11}}>Joe-bot is using this instead of the regular program. It will revert automatically when {athlete.name} tells Joe-bot they're back to normal.</div>
+              <div style={{background:`${CA.accent}12`,border:`1px solid ${CA.accent}50`,borderRadius:12,padding:14,marginBottom:16}}>
+                <div style={{color:CA.accent,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:6}}>✈️ TEMPORARY PROGRAM ACTIVE</div>
+                <div style={{color:CA.muted2,fontSize:12,lineHeight:1.6,marginBottom:10,whiteSpace:"pre-wrap"}}>{athlete.temp_program_text}</div>
+                <div style={{color:CA.muted,fontSize:11}}>Joe-bot is using this instead of the regular program. It will revert automatically when {athlete.name} tells Joe-bot they're back to normal.</div>
               </div>
             )}
 
-            <div style={{background:C.navy3,border:`1px solid ${C.border}`,borderRadius:12,padding:14,marginBottom:16,color:C.muted2,fontSize:13,lineHeight:1.65}}>
+            <div style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,padding:14,marginBottom:16,color:CA.muted2,fontSize:13,lineHeight:1.65}}>
               {athlete.temp_program_text
-                ? <><span style={{color:C.muted,fontWeight:600}}>Regular program (on hold).</span> Joe-bot is currently using the temporary program above. This will resume when the athlete returns to normal training.</>
+                ? <><span style={{color:CA.muted,fontWeight:600}}>Regular program (on hold).</span> Joe-bot is currently using the temporary program above. This will resume when the athlete returns to normal training.</>
                 : athlete.program_text
-                  ? <><span style={{color:C.blue,fontWeight:600}}>Program active.</span> This was set via the Joe-bot conversation or submitted by a coach. Joe-bot references it whenever making recommendations or logging workouts. You can edit or replace it below.</>
+                  ? <><span style={{color:CA.blue,fontWeight:600}}>Program active.</span> This was set via the Joe-bot conversation or submitted by a coach. Joe-bot references it whenever making recommendations or logging workouts. You can edit or replace it below.</>
                   : <>No program set yet. You can paste or write a program here and Joe-bot will reference it going forward. Alternatively, the athlete can describe their program to Joe-bot ("my program is...") and it will be saved automatically.</>
               }
             </div>
 
             {athlete.program_text&&(
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14,flexWrap:"wrap"}}>
-                <div style={{width:8,height:8,borderRadius:"50%",background:athlete.temp_program_text?C.muted:C.blue,flexShrink:0}}/>
-                <div style={{color:athlete.temp_program_text?C.muted:C.blue,fontSize:12}}>{athlete.temp_program_text?"On hold — resumes when temporary program clears":"Joe-bot references this in every conversation with "+athlete.name}</div>
-                {!athlete.program_locked&&!athlete.temp_program_text&&<div style={{background:`${C.blue}15`,border:`1px solid ${C.blue}30`,borderRadius:6,padding:"2px 8px",color:C.blue,fontSize:11}}>🔄 Live — updates when {athlete.name} describes their program to Joe-bot</div>}
+                <div style={{width:8,height:8,borderRadius:"50%",background:athlete.temp_program_text?CA.muted:CA.blue,flexShrink:0}}/>
+                <div style={{color:athlete.temp_program_text?CA.muted:CA.blue,fontSize:12}}>{athlete.temp_program_text?"On hold — resumes when temporary program clears":"Joe-bot references this in every conversation with "+athlete.name}</div>
+                {!athlete.program_locked&&!athlete.temp_program_text&&<div style={{background:`${CA.blue}15`,border:`1px solid ${CA.blue}30`,borderRadius:6,padding:"2px 8px",color:CA.blue,fontSize:11}}>🔄 Live — updates when {athlete.name} describes their program to Joe-bot</div>}
               </div>
             )}
 
@@ -2517,26 +2657,26 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
               onChange={e=>setProgramText(e.target.value)}
               placeholder={"Paste or write the athlete's training program here...\n\nExamples:\n  Week 1: Squat 3×5, Bench 3×5, Deadlift 1×5\n  Week 2: Squat 3×5 +5lbs, Bench 3×5 +5lbs\n\nOr paste a full multi-week periodization plan — Joe-bot will read the whole thing."}
               rows={14}
-              style={{width:"100%",background:C.navy3,border:`1px solid ${programText!==(athlete.program_text||"")?C.gold:C.border}`,borderRadius:12,padding:"12px 14px",color:C.text,fontSize:13,outline:"none",resize:"vertical",lineHeight:1.6,fontFamily:"'DM Sans'",transition:"border-color 0.15s"}}
+              style={{width:"100%",background:CA.navy3,border:`1px solid ${programText!==(athlete.program_text||"")?CA.accent:CA.border}`,borderRadius:12,padding:"12px 14px",color:CA.text,fontSize:13,outline:"none",resize:"vertical",lineHeight:1.6,fontFamily:"'DM Sans'",transition:"border-color 0.15s"}}
             />
 
             <input ref={programPhotoRef} type="file" accept="image/*" style={{display:"none"}} onChange={handlePhotoProgram}/>
             <div style={{display:"flex",gap:8,marginTop:12,alignItems:"center",flexWrap:"wrap"}}>
               <button onClick={handleProgramSave} disabled={programSaving||programText===(athlete.program_text||"")}
-                style={{background:programSaving||programText===(athlete.program_text||"")?C.navy3:C.gold,color:programSaving||programText===(athlete.program_text||"")?C.muted:"#000",border:`1px solid ${programSaving||programText===(athlete.program_text||"")?C.border:C.gold}`,borderRadius:10,padding:"10px 20px",cursor:programSaving||programText===(athlete.program_text||"")?"not-allowed":"pointer",fontSize:13,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>
+                style={{background:programSaving||programText===(athlete.program_text||"")?CA.navy3:CA_BTN,color:programSaving||programText===(athlete.program_text||"")?CA.muted:"#fff",border:`1px solid ${programSaving||programText===(athlete.program_text||"")?CA.border:CA.accent}`,boxShadow:programSaving||programText===(athlete.program_text||"")?"none":`0 4px 16px ${CA_GLOW}`,borderRadius:10,padding:"10px 20px",cursor:programSaving||programText===(athlete.program_text||"")?"not-allowed":"pointer",fontSize:13,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>
                 {programSaving?"Saving...":"Save Program"}
               </button>
               <button onClick={()=>programPhotoRef.current?.click()} disabled={photoProcessing}
-                style={{background:C.navy3,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:10,padding:"10px 14px",cursor:"pointer",fontSize:13,display:"flex",alignItems:"center",gap:6,opacity:photoProcessing?0.6:1}}>
+                style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:10,padding:"10px 14px",cursor:"pointer",fontSize:13,display:"flex",alignItems:"center",gap:6,opacity:photoProcessing?0.6:1}}>
                 {photoProcessing?"Reading photo...":"📷 Photo upload"}
               </button>
               <button onClick={toggleLock}
-                style={{background:programLocked?`${C.gold}20`:"transparent",border:`1px solid ${programLocked?C.gold:C.border}`,color:programLocked?C.gold:C.muted,borderRadius:10,padding:"10px 14px",cursor:"pointer",fontSize:13}}>
+                style={{background:programLocked?`${CA.accent}20`:"transparent",border:`1px solid ${programLocked?CA.accent:CA.border}`,color:programLocked?CA.accent:CA.muted,borderRadius:10,padding:"10px 14px",cursor:"pointer",fontSize:13}}>
                 {programLocked?"🔒 Program locked":"🔓 Unlocked"}
               </button>
-              {programSaved&&<div style={{color:C.green,fontSize:13,fontWeight:600}}>✓ Saved</div>}
-              {!programSaved&&programText!==(athlete.program_text||"")&&!programSaving&&!programError&&<div style={{color:C.muted,fontSize:12}}>Unsaved changes</div>}
-              {programError&&<div style={{color:C.red,fontSize:12,fontWeight:600}}>⚠ {programError}</div>}
+              {programSaved&&<div style={{color:CA.green,fontSize:13,fontWeight:600}}>✓ Saved</div>}
+              {!programSaved&&programText!==(athlete.program_text||"")&&!programSaving&&!programError&&<div style={{color:CA.muted,fontSize:12}}>Unsaved changes</div>}
+              {programError&&<div style={{color:CA.red,fontSize:12,fontWeight:600}}>⚠ {programError}</div>}
             </div>
           </div>
         )}
