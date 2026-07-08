@@ -213,3 +213,27 @@ Every action writes a **`coach_context`** row — no new tables:
   which covers 90% of the UX.
 - After Will approves + merge: resync `~/dev/WILCO-demo` (exact-copy rule) and add a
   demo fixture beat script so the sales demo shows the brief.
+
+---
+
+## Part D — Adherence v2 (added mid-build, 2026-07-08)
+
+Will: adherence should blend **exercise choice (most important), then volume
+(sets×reps), then working weights**, shown as a red→green gradient.
+
+Implemented in proofcore (shared client+server via api/_proofcore.js):
+- `compareProgramVsActual` now emits `components` (matched prescribed sets,
+  matched volume capped at prescription, actual/prescribed load ratios).
+- New `adherenceBreakdown(adherence, elapsedFrac)` → `{score, E, V, W}`:
+  **E** = prescribed-set-weighted share of lifts actually performed;
+  **V** = sets×reps completed on matched lifts (capped — overshoot ≠ credit);
+  **W** = load band: full credit ≥95% of prescribed (heavier fine), zero ≤60%.
+  Blend **50/30/20**; no-load programs renormalize E/V to 62.5/37.5.
+- `elapsedFrac` pro-rates weekly targets for the fixed Mon–Sun window mid-week
+  (server's rolling 7-day window passes 1 → unchanged cadence there).
+- Attendance is implicit: a skipped day's lifts go unmatched and drag E.
+- UI: team avg + new per-athlete ADH column on the heatmap in a continuous
+  red→green gradient (hue 0→120), tooltip shows the E/V/W split.
+- Triage: quiet is now days-since-last-session (≥5d, ≤21d) so Monday doesn't
+  flag weekend trainers; adherence flags wait until Thursday (pro-rated scores
+  are too noisy earlier); adherence `what` names the weakest component.

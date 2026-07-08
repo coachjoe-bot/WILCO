@@ -12,7 +12,7 @@ import {
 // App.jsx's multi-athlete groupIntoSessions already imported above.
 import {
   groupIntoSessions as pcGroup, compareProgramVsActual, buildOneRMs, aggregateInjuries, totalSetVolume,
-  trueImprovementPRs, classifyTiers, blendAdherenceScore, buildLiftHistory,
+  trueImprovementPRs, classifyTiers, blendAdherenceScore, adherenceBreakdown, buildLiftHistory,
 } from "./proofcore.js";
 import { computeGritSnapshot, TIER_NAMES, TIER_COLORS, getBenchKey, resolveLift } from "./grit.js";
 // The Morning Brief — deterministic conversational beats (zero tokens to build;
@@ -1467,7 +1467,13 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
       const injuries = aggregateInjuries([...lastWk,...thisWk]);
       const hasProgram = !!(a.program_text && a.program_text.trim().length>10);
       const presDays = a.training_days_per_week || parsed?.blocks?.[0]?.days?.length || null;
-      const score = blendAdherenceScore(thisWk.length, adherence, hasProgram, presDays);
+      // adherence v2: exercise choice (50) > volume (30) > load (20), targets
+      // pro-rated for how much of the fixed Mon–Sun week has elapsed
+      const elapsedFrac = (todayIdx+1)/7;
+      const score = blendAdherenceScore(thisWk.length, adherence, hasProgram, presDays, elapsedFrac);
+      const adhB = adherenceBreakdown(adherence, elapsedFrac);
+      const lastAt = (wo[0]&&new Date(wo[0].created_at).getTime())||null;
+      const daysSince = lastAt?Math.floor((now-lastAt)/DAYMS):null;
       // per-day logged flags for the heatmap — fixed Mon..Sun; days after today = null (future)
       const days = wk.days.map((day,i)=> i>todayIdx ? null :
         (wo.some(w=>{const t=new Date(w.created_at).getTime();return t>=day.t&&t<day.t+DAYMS&&(w.parsed_data?.exercises?.length>0||w.parsed_data?.run_data);})?1:0));
@@ -1475,7 +1481,7 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
       // per-lift e1RM delta this week vs last (for the team strength-movement win)
       const twL=buildLiftHistory(thisWk), lwL=buildLiftHistory(lastWk);
       const lifts=Object.entries(twL).map(([lift,entries])=>{ const best=entries.reduce((x,y)=>y.e1rm>x.e1rm?y:x); const lw=lwL[lift]; let delta=null; if(lw){const lb=lw.reduce((x,y)=>y.e1rm>x.e1rm?y:x); delta=best.e1rm-lb.e1rm;} return {lift,deltaVsLastWeek:delta}; });
-      return {a, thisWk, lastWk, adherence, injuries, hasProgram, score, days, snap, lifts};
+      return {a, thisWk, lastWk, adherence, injuries, hasProgram, score, adhB, daysSince, days, snap, lifts};
     });
 
     // sessions/day — fixed Mon–Sun; today renders but is EXCLUDED from line + slope
@@ -1549,17 +1555,23 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
     const weekPain=[]; workouts.filter(w=>inWin(w,weekAgo)).forEach(w=>{ const pf=w.parsed_data?.pain_flags; if(pf&&pf.length){ const a=athletes.find(x=>x.id===w.athlete_id); weekPain.push({name:a?.name||"Athlete",areas:pf.map(p=>p.area).join(", "),at:w.created_at}); } });
     const inactive=rows.filter(r=>r.thisWk.length===0).map(r=>{ const last=(woByAth[r.a.id]||[])[0]||(woByAth[r.a.id]||[]).slice(-1)[0]; const days=last?Math.floor((now-new Date(last.created_at).getTime())/DAYMS):null; return {name:r.a.name, days}; }).sort((a,b)=>(a.days??9999)-(b.days??9999));
 
-    // briefing triage — ranked "who needs you today" (injury > quiet > adherence drop)
+    // briefing triage — ranked "who needs you today" (injury > quiet > adherence drop).
+    // Quiet is days-since-last-session (window-independent — a fixed Mon–Sun week
+    // would flag every weekend trainer on Monday morning otherwise); adherence
+    // waits until Thursday so pro-rated early-week scores don't cry wolf.
     const triage=[];
     rows.forEach(r=>{
       const inj=r.injuries;
       if(inj&&((inj.recurring&&inj.recurring.length)||(inj.active&&inj.active.length))){
         const rec=inj.recurring&&inj.recurring[0]; const area=rec?rec.area:inj.active[0];
         triage.push({id:r.a.id,sev:"crit",kind:"Injury",name:r.a.name,what:`${area} flagged${rec?` ${rec.count} sessions running`:" this week"}`});
-      } else if(r.thisWk.length===0 && r.lastWk.length>0){
-        triage.push({id:r.a.id,sev:"warn",kind:"Quiet",name:r.a.name,what:`no session this week — trained last week`});
-      } else if(r.score!=null && r.score<55){
-        triage.push({id:r.a.id,sev:"warn",kind:"Adherence",name:r.a.name,what:`adherence slipping (${r.score}%)`});
+      } else if(r.daysSince!=null && r.daysSince>=5 && r.daysSince<=21){
+        triage.push({id:r.a.id,sev:"warn",kind:"Quiet",name:r.a.name,what:`no session in ${r.daysSince} days`});
+      } else if(todayIdx>=3 && r.score!=null && r.score<55){
+        const b=r.adhB;
+        let why="";
+        if(b){ const parts=[["skipping prescribed lifts",b.E],["cutting sets short",b.V],...(b.W!=null?[["working lighter than prescribed",b.W]]:[])].sort((x,y)=>x[1]-y[1]); why=` — ${parts[0][0]}`; }
+        triage.push({id:r.a.id,sev:"warn",kind:"Adherence",name:r.a.name,what:`adherence slipping (${r.score}%)${why}`});
       }
     });
     triage.sort((a,b)=>(a.sev==="crit"?0:1)-(b.sev==="crit"?0:1));
@@ -1571,6 +1583,14 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
 
   const volMax = Math.max(1,...D.volWeeks), prMax = Math.max(1,...D.prWeeks), sMax = Math.max(1,...D.dayCounts.slice(0,D.todayIdx+1));
   const cell = (v)=>v?C.green:C.navy3;
+  // red → green gradient across the 0–100 adherence blend (hue 0 → 120)
+  const adhColor = (s)=>s==null?C.muted:`hsl(${Math.round(1.2*Math.max(0,Math.min(100,s)))},62%,48%)`;
+  const adhTip = (r)=>{
+    if(r.score==null) return "No program to grade against";
+    const b=r.adhB;
+    if(!b) return `${r.score}% — sessions vs prescribed days (program not parsed yet)`;
+    return `${r.score}% · Exercises ${b.E}% · Volume ${b.V}%${b.W!=null?` · Weights ${b.W}%`:""} — weighted 50/30/20, pro-rated for mid-week`;
+  };
   // Hover tooltip shared across every chart data point.
   const tipOn = (text)=>({onMouseEnter:(e)=>setTip({x:e.clientX,y:e.clientY,text}),onMouseMove:(e)=>setTip({x:e.clientX,y:e.clientY,text}),onMouseLeave:()=>setTip(null)});
   const wkLabel = (i)=>i===D.prWeeks.length-1?"This week":`${D.prWeeks.length-1-i} wk ago`;
@@ -1601,13 +1621,16 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
         <OverviewCard style={span(4)} title="Program adherence · this week"
           readout={D.teamAdh==null?`No parsed programs yet — assign & lock programs to track adherence.`:`Team average. ${D.noProgram>0?`${D.noProgram} without a program (excluded).`:"Everyone has a program."}`}
           tone={D.teamAdh==null?null:(D.teamAdh>=80?{k:"good",t:"Healthy"}:D.teamAdh>=60?{k:"warn",t:"Slipping"}:{k:"crit",t:"At risk"})}>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:46,color:C.text,lineHeight:.9}}>{D.teamAdh==null?"—":D.teamAdh}<span style={{fontSize:18,color:C.muted}}> {D.teamAdh==null?"":"% team avg"}</span></div>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:46,color:adhColor(D.teamAdh),lineHeight:.9}}>{D.teamAdh==null?"—":D.teamAdh}<span style={{fontSize:18,color:C.muted}}> {D.teamAdh==null?"":"% team avg"}</span></div>
+          <div style={{fontSize:10.5,color:C.muted,marginTop:4}}>Exercise choice 50 · volume 30 · weight 20 — graded red → green</div>
           <div style={{maxHeight:showAllHeat?340:"none",overflowY:showAllHeat?"auto":"visible"}}>
-          <div style={{display:"grid",gridTemplateColumns:"92px repeat(7,minmax(0,1fr))",gap:5,alignItems:"center",marginTop:14}}>
+          <div style={{display:"grid",gridTemplateColumns:"92px repeat(7,minmax(0,1fr)) 42px",gap:5,alignItems:"center",marginTop:14}}>
             <span/>{D.dayLabels.map((l,i)=><span key={i} style={{fontSize:10,color:i===D.todayIdx?C.gold:C.muted,textAlign:"center",fontWeight:i===D.todayIdx?800:400}}>{l.l}<div style={{fontSize:8,opacity:.75}}>{l.d}</div></span>)}
+            <span style={{fontSize:9,color:C.muted,textAlign:"right",letterSpacing:.5}}>ADH</span>
             {heatRows.flatMap((r,ri)=>[
               <span key={`n${ri}`} style={{fontSize:11.5,color:C.muted2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.a.name}</span>,
-              ...r.days.map((d,di)=><i key={`c${ri}-${di}`} style={{aspectRatio:"1",borderRadius:3,background:d==null?"transparent":r.hasProgram?cell(d):(d?C.blue:C.navy3),opacity:d==null?1:r.hasProgram?1:.55,border:d==null?`1px dashed ${C.border}`:`1px solid #ffffff08`,cursor:"pointer"}} {...tipOn(`${r.a.name.split(" ")[0]} · ${D.dayLabels[di].full} ${D.dayLabels[di].d}: ${d==null?"upcoming":d?"logged a session":"no session"}${r.hasProgram?"":" (no program)"}`)}/>)
+              ...r.days.map((d,di)=><i key={`c${ri}-${di}`} style={{aspectRatio:"1",borderRadius:3,background:d==null?"transparent":r.hasProgram?cell(d):(d?C.blue:C.navy3),opacity:d==null?1:r.hasProgram?1:.55,border:d==null?`1px dashed ${C.border}`:`1px solid #ffffff08`,cursor:"pointer"}} {...tipOn(`${r.a.name.split(" ")[0]} · ${D.dayLabels[di].full} ${D.dayLabels[di].d}: ${d==null?"upcoming":d?"logged a session":"no session"}${r.hasProgram?"":" (no program)"}`)}/>),
+              <span key={`s${ri}`} style={{fontSize:11,fontWeight:800,textAlign:"right",color:adhColor(r.score),cursor:"pointer"}} {...tipOn(adhTip(r))}>{r.score==null?"—":`${r.score}`}</span>
             ])}
           </div>
           </div>

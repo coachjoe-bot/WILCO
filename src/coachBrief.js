@@ -151,8 +151,10 @@ function buildConcernBeat({ t, row, req, dateKey, beatIndex }) {
 
   if (baseFlag === "quiet") {
     let days = null;
-    // D.inactive carries {name, days} — cross-reference by name for a concrete count.
-    if (row && row.__inactive) {
+    // rows carry daysSince directly (adherence-v2); fall back to the D.inactive
+    // cross-reference for older callers that don't.
+    if (row && row.daysSince != null) days = row.daysSince;
+    else if (row && row.__inactive) {
       const hit = row.__inactive.find((x) => x.name === name);
       if (hit && hit.days != null) days = hit.days;
     }

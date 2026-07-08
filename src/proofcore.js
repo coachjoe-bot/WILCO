@@ -221,6 +221,9 @@ export function compareProgramVsActual(parsed, thisWeekSessions, oneRMs = {}) {
 
   const byLift = [];
   let presVol = 0, actVol = 0;
+  // adherence-v2 aggregates: exercise choice / volume-on-matched / load ratios
+  let presSetsAll = 0, presSetsMatched = 0, matchedPresVol = 0, matchedActVolCapped = 0;
+  const loadRatios = [];
   for (const p of Object.values(prescribed)) {
     if (!p.sets) continue;
     const match = Object.entries(actual).find(([name]) => liftsMatch(name, p.name));
@@ -228,10 +231,17 @@ export function compareProgramVsActual(parsed, thisWeekSessions, oneRMs = {}) {
     const pVol = p.sets * (p.reps || 1);
     const aVol = a.sets * (a.reps || (p.reps || 1));
     presVol += pVol; actVol += aVol;
+    presSetsAll += p.sets;
+    if (match) {
+      presSetsMatched += p.sets;
+      matchedPresVol += pVol;
+      matchedActVolCapped += Math.min(aVol, pVol); // overshoot isn't extra credit
+    }
     const ref1rm = oneRMs[p.refLift?.toLowerCase()?.trim()] || oneRMs[p.name.toLowerCase().trim()] || null;
     const prescribedLoad = ref1rm && p.pct ? Math.round(ref1rm * p.pct / 100) : null;
+    if (match && prescribedLoad && a.topLoad) loadRatios.push(a.topLoad / prescribedLoad);
     byLift.push({
-      lift: p.name,
+      lift: p.name, matched: !!match,
       prescribedSets: p.sets, prescribedReps: p.reps,
       actualSets: a.sets, actualReps: a.reps,
       prescribedLoad, actualLoad: a.topLoad || null,
@@ -245,7 +255,27 @@ export function compareProgramVsActual(parsed, thisWeekSessions, oneRMs = {}) {
     byLift: byLift.sort((a, b) => b.volumeGapPct - a.volumeGapPct),
     rolledGapPct,
     material: rolledGapPct >= 15,   // spec: "material" volume gap → headline section
+    components: { presSetsAll, presSetsMatched, matchedPresVol, matchedActVolCapped, loadRatios },
   };
+}
+
+// ── adherence v2 breakdown ────────────────────────────────────────────────────
+// Exercise choice is the most important thing to adhere to, then volume
+// (sets×reps), then working weight — weighted 50/30/20 (E/V re-weight to
+// 62.5/37.5 when the program prescribes no loads). `elapsedFrac` pro-rates the
+// weekly targets for partial windows (fixed Mon–Sun weeks mid-week); rolling
+// 7-day windows (the server) pass 1.
+export function adherenceBreakdown(adherence, elapsedFrac = 1) {
+  const c = adherence && adherence.components;
+  if (!c || !c.presSetsAll) return null;
+  const ef = Math.min(1, Math.max(0.1, elapsedFrac));
+  const E = Math.min(1, (c.presSetsMatched / c.presSetsAll) / ef);
+  const V = c.matchedPresVol ? Math.min(1, (c.matchedActVolCapped / c.matchedPresVol) / ef) : 0;
+  // Load band: full credit within 5% of prescribed (or heavier); zero at 40% under.
+  const bandScore = (r) => r >= 0.95 ? 1 : r <= 0.6 ? 0 : (r - 0.6) / 0.35;
+  const W = c.loadRatios.length ? c.loadRatios.reduce((s, r) => s + bandScore(r), 0) / c.loadRatios.length : null;
+  const score = Math.round(100 * (W != null ? 0.5 * E + 0.3 * V + 0.2 * W : 0.625 * E + 0.375 * V));
+  return { score, E: Math.round(100 * E), V: Math.round(100 * V), W: W == null ? null : Math.round(100 * W) };
 }
 
 // ── known 1RMs from prs + manual_one_rms (lbs) ────────────────────────────────
@@ -417,13 +447,18 @@ export function classifyTiers(benchAgg) {
 }
 
 // Blended adherence score (0-100) or null when there's no program to grade against.
-// Half "did they show up" (sessions vs prescribed days), half the proofcore volume
-// gap. Shared by the server team brief and the client Overview so both agree.
-export function blendAdherenceScore(thisWeekCount, adherence, hasProgram, presDays) {
-  const showUp = presDays ? Math.min(1, thisWeekCount / presDays) : (thisWeekCount > 0 ? 1 : 0);
-  const vol = adherence ? Math.max(0, 1 - adherence.rolledGapPct / 100) : null;
-  if (vol != null) return Math.round(100 * (0.5 * showUp + 0.5 * vol));
-  return hasProgram ? Math.round(100 * showUp) : null;
+// v2: exercise choice (50) > volume (30) > working weight (20), via
+// adherenceBreakdown above — attendance is implicit (a skipped day's lifts go
+// unmatched). Falls back to "did they show up" when the program isn't parsed yet.
+// Shared by the server team brief and the client Overview so both agree;
+// elapsedFrac pro-rates for partial fixed weeks (server's rolling window → 1).
+export function blendAdherenceScore(thisWeekCount, adherence, hasProgram, presDays, elapsedFrac = 1) {
+  const b = adherenceBreakdown(adherence, elapsedFrac);
+  if (b) return b.score;
+  if (!hasProgram) return null;
+  const expected = presDays ? Math.max(0.5, presDays * Math.min(1, Math.max(0.1, elapsedFrac))) : null;
+  const showUp = expected ? Math.min(1, thisWeekCount / expected) : (thisWeekCount > 0 ? 1 : 0);
+  return Math.round(100 * showUp);
 }
 
 export function buildCoachTeamBrief(perAthlete) {
