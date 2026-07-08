@@ -522,6 +522,8 @@ async function sbReadPaged(table, order = "created_at.desc") {
 
 // ─── COACH DASHBOARD ──────────────────────────────────────────────────────────
 function CoachDashboard({coach,onLogout}) {
+  // isMobile (<640) = phone layout; isNarrow (<900) = too tight for list+detail side-by-side
+
   const isMaster = coach.role==="master"||coach.access_code===MASTER_CODE;
   const isAdmin = coach.role==="admin";
   const [athletes,setAthletes] = useState([]);
@@ -552,6 +554,7 @@ function CoachDashboard({coach,onLogout}) {
   const [selectedDigest,setSelectedDigest] = useState(null);
   useEffect(()=>{ track("coach_dashboard_view","coach_dashboard"); },[]);
   const isMobile = useIsMobile();
+  const isNarrow = useIsMobile(900);
   const [selectMode,setSelectMode] = useState(false);
   const [selectedIds,setSelectedIds] = useState(new Set());
   const [bulkProgram,setBulkProgram] = useState("");
@@ -783,11 +786,11 @@ function CoachDashboard({coach,onLogout}) {
         </div>
       </div>
 
-      {/* Tabs */}
-      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,display:"flex",padding:"0 20px"}}>
+      {/* Tabs — horizontally scrollable on narrow screens */}
+      <div style={{background:C.navy2,borderBottom:`1px solid ${C.border}`,display:"flex",padding:isMobile?"0 8px":"0 20px",overflowX:"auto",WebkitOverflowScrolling:"touch",scrollbarWidth:"none"}}>
         {tabs.map(t=>(
           <button key={t} onClick={()=>{setActiveTab(t);if(t!=="athletes")setSelected(null);}}
-            style={{padding:"12px 18px",background:"none",border:"none",borderBottom:`2px solid ${activeTab===t?C.gold:"transparent"}`,color:activeTab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"color 0.15s"}}>
+            style={{padding:isMobile?"12px 13px":"12px 18px",background:"none",border:"none",borderBottom:`2px solid ${activeTab===t?C.gold:"transparent"}`,color:activeTab===t?C.gold:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"color 0.15s",whiteSpace:"nowrap",flexShrink:0}}>
             {t==="stats"?"Group Stats":t}
           </button>
         ))}
@@ -800,16 +803,16 @@ function CoachDashboard({coach,onLogout}) {
           <>
             {/* ── OVERVIEW TAB ── */}
             {activeTab==="overview"&&(
-              <CoachOverview athletes={athletes} workouts={workouts} prs={prs} manualRMs={manualRMs} prescriptions={prescriptions}
+              <CoachOverview athletes={athletes} workouts={workouts} prs={prs} manualRMs={manualRMs} prescriptions={prescriptions} coach={coach}
                 onOpenAthlete={(id)=>{const at=athletes.find(a=>a.id===id); if(at){setSelected(at);setActiveTab("athletes");}}}/>
             )}
 
             {/* ── ATHLETES TAB ── */}
             {activeTab==="athletes"&&(
-              <div style={{display:"grid",gridTemplateColumns:(!isMobile&&selected)?"300px 1fr":"1fr",gap:20,alignItems:"start"}}>
-                {/* Left: Athlete List — hidden on mobile when detail is open */}
-                {(!isMobile||!selected)&&(
-                <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden",position:isMobile?"static":"sticky",top:90}}>
+              <div style={{display:"grid",gridTemplateColumns:(!isNarrow&&selected)?"300px minmax(0,1fr)":"1fr",gap:20,alignItems:"start"}}>
+                {/* Left: Athlete List — hidden on narrow screens when detail is open */}
+                {(!isNarrow||!selected)&&(
+                <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden",position:isNarrow?"static":"sticky",top:90}}>
                   <div style={{padding:"12px 14px",borderBottom:`1px solid ${C.border}`}}>
                     <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search athletes..."
                       style={{width:"100%",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 12px",color:C.text,fontSize:13,outline:"none",marginBottom:8}}/>
@@ -888,10 +891,12 @@ function CoachDashboard({coach,onLogout}) {
                 </div>
                 )}
 
-                {/* Right: Athlete Detail — full-screen on mobile when selected */}
+                {/* Right: Athlete Detail — full-width on narrow screens when selected.
+                    minWidth:0 lets the pane shrink inside the grid (grid children
+                    default to min-width:auto → horizontal page overflow otherwise) */}
                 {selected&&(
-                  <div>
-                    {isMobile&&(
+                  <div style={{minWidth:0}}>
+                    {isNarrow&&(
                       <button onClick={()=>setSelected(null)}
                         style={{display:"flex",alignItems:"center",gap:6,background:C.navy2,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13,marginBottom:12,fontFamily:"'DM Sans'"}}>
                         ← Athletes
@@ -918,7 +923,7 @@ function CoachDashboard({coach,onLogout}) {
                     />
                   </div>
                 )}
-                {!selected&&!isMobile&&(
+                {!selected&&!isNarrow&&(
                   <div style={{display:"flex",alignItems:"center",justifyContent:"center",padding:60,color:C.muted,fontSize:13,border:`1px dashed ${C.border}`,borderRadius:14}}>
                     Select an athlete to view details
                   </div>
@@ -1380,6 +1385,18 @@ function CoachDashboard({coach,onLogout}) {
 // from the shared proofcore engine (Phase 0) over the roster data already loaded —
 // zero tokens, no new round-trip. See docs/coach-experience-vision.md §1.
 const DAYMS = 86400000;
+// Fixed Mon–Sun calendar week. Single source of the "this week" window for the
+// whole Overview — every stat card and the briefing share it (no rolling 7d).
+const weekBounds = (ref=Date.now())=>{
+  const d=new Date(ref); d.setHours(0,0,0,0);
+  const todayIdx=(d.getDay()+6)%7;                    // Mon=0 … Sun=6
+  const start=d.getTime()-todayIdx*DAYMS;
+  const days=Array.from({length:7},(_,i)=>{
+    const dd=new Date(start+i*DAYMS);
+    return {t:start+i*DAYMS, l:"MTWTFSS"[i], full:dd.toLocaleDateString("en-US",{weekday:"short"}), d:dd.getDate()};
+  });
+  return {start, end:start+7*DAYMS, days, todayIdx};
+};
 const FEEL_ORDER = [["great","Great",C.green],["good","Good",C.blue],["average","OK",C.gold],["rough","Rough",C.red]];
 // prE1RM, trueImprovementPRs, classifyTiers, blendAdherenceScore now live in
 // proofcore (shared with the server Coach's Edition so the two never disagree).
@@ -1401,10 +1418,11 @@ function OverviewCard({title,trend,children,readout,tone,style}){
   );
 }
 
-function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthlete}){
+function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthlete,coach}){
   const isMobile = useIsMobile();
   const [resolved,setResolved] = useState(()=>new Set());
   const [tip,setTip] = useState(null);
+  const [showAllHeat,setShowAllHeat] = useState(false);
   const D = useMemo(()=>{
     const now = Date.now();
     const dstart = (t)=>{const x=new Date(t);x.setHours(0,0,0,0);return x.getTime();};
@@ -1414,11 +1432,15 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
     prs.forEach(p=>{(prByAth[p.athlete_id]=prByAth[p.athlete_id]||[]).push(p);});
     manualRMs.forEach(m=>{(manByAth[m.athlete_id]=manByAth[m.athlete_id]||[]).push(m);});
     prescriptions.forEach(pp=>{prescByAth[pp.athlete_id]=pp;});
-    const weekAgo=now-7*DAYMS, twoWk=now-14*DAYMS;
+    // Fixed Mon–Sun calendar week — the ONE week window every "this week" stat on
+    // this screen shares (heatmap, donut, wins, pain, by-sport, triage).
+    const wk = weekBounds(now);
+    const weekAgo=wk.start, twoWk=wk.start-7*DAYMS;
+    const todayIdx = wk.todayIdx;
 
     const rows = athletes.map(a=>{
       const wo = woByAth[a.id]||[];
-      const thisWk = pcGroup(wo.filter(w=>inWin(w,weekAgo)));
+      const thisWk = pcGroup(wo.filter(w=>inWin(w,weekAgo,wk.end)));
       const lastWk = pcGroup(wo.filter(w=>inWin(w,twoWk,weekAgo)));
       const parsed = prescByAth[a.id]?.parsed_json || null;
       const oneRMs = buildOneRMs(prByAth[a.id]||[], manByAth[a.id]||[]);
@@ -1427,9 +1449,9 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
       const hasProgram = !!(a.program_text && a.program_text.trim().length>10);
       const presDays = a.training_days_per_week || parsed?.blocks?.[0]?.days?.length || null;
       const score = blendAdherenceScore(thisWk.length, adherence, hasProgram, presDays);
-      // per-day logged flags for the heatmap (Mon..Sun of the last 7 days)
-      const days = [];
-      for(let i=6;i>=0;i--){ const ds=dstart(now-i*DAYMS), de=ds+DAYMS; days.push((wo.some(w=>{const t=new Date(w.created_at).getTime();return t>=ds&&t<de&&(w.parsed_data?.exercises?.length>0||w.parsed_data?.run_data);}))?1:0); }
+      // per-day logged flags for the heatmap — fixed Mon..Sun; days after today = null (future)
+      const days = wk.days.map((day,i)=> i>todayIdx ? null :
+        (wo.some(w=>{const t=new Date(w.created_at).getTime();return t>=day.t&&t<day.t+DAYMS&&(w.parsed_data?.exercises?.length>0||w.parsed_data?.run_data);})?1:0));
       const snap = computeGritSnapshot(wo, manByAth[a.id]||[], {bodyweightLbs:a.weight_lbs||a.weight||0, gender:a.gender, age:a.age});
       // per-lift e1RM delta this week vs last (for the team strength-movement win)
       const twL=buildLiftHistory(thisWk), lwL=buildLiftHistory(lastWk);
@@ -1437,13 +1459,14 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
       return {a, thisWk, lastWk, adherence, injuries, hasProgram, score, days, snap, lifts};
     });
 
-    // sessions/day last 7d (across roster)
-    const dayCounts=[], dayLabels=[];
-    for(let i=6;i>=0;i--){ const ds=dstart(now-i*DAYMS), de=ds+DAYMS;
-      dayLabels.push(new Date(ds).toLocaleDateString("en-US",{weekday:"short"}));
-      dayCounts.push(athletes.reduce((s,a)=>s+pcGroup((woByAth[a.id]||[]).filter(w=>{const t=new Date(w.created_at).getTime();return t>=ds&&t<de;})).length,0));
-    }
-    const firstHalf = dayCounts.slice(0,3).reduce((a,b)=>a+b,0)||0, lastHalf = dayCounts.slice(4).reduce((a,b)=>a+b,0)||0;
+    // sessions/day — fixed Mon–Sun; today renders but is EXCLUDED from line + slope
+    // (an in-progress day always looks like a cliff otherwise)
+    const dayLabels = wk.days;
+    const dayCounts = wk.days.map(day=>athletes.reduce((s,a)=>s+pcGroup((woByAth[a.id]||[]).filter(w=>{const t=new Date(w.created_at).getTime();return t>=day.t&&t<day.t+DAYMS;})).length,0));
+    const completed = dayCounts.slice(0,todayIdx);   // full days only
+    const half = Math.floor(completed.length/2);
+    const firstHalf = completed.slice(0,half).reduce((a,b)=>a+b,0)||0, lastHalf = completed.slice(completed.length-half).reduce((a,b)=>a+b,0)||0;
+    const trendKnown = completed.length>=2;
 
     // active this week
     const activeCount = rows.filter(r=>r.thisWk.length>0).length;
@@ -1458,16 +1481,16 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
     const feelCounts={great:0,good:0,average:0,rough:0}; let feelTotal=0;
     workouts.filter(w=>inWin(w,weekAgo)).forEach(w=>{const f=w.parsed_data?.session_feel; if(f&&feelCounts[f]!=null){feelCounts[f]++;feelTotal++;}});
 
-    // volume-load: total working sets across roster, last 4 weeks
+    // volume-load: total working sets across roster, last 4 calendar weeks (current partial)
     const volWeeks=[];
-    for(let i=3;i>=0;i--){ const from=now-(i+1)*7*DAYMS, to=now-i*7*DAYMS;
+    for(let i=3;i>=0;i--){ const from=wk.start-i*7*DAYMS, to=from+7*DAYMS;
       volWeeks.push(athletes.reduce((s,a)=>s+totalSetVolume(pcGroup((woByAth[a.id]||[]).filter(w=>inWin(w,from,to)))),0));
     }
 
-    // true PRs — this week + last 6 weeks (weekly bars)
+    // true PRs — this week + last 6 weeks (calendar-week bars, current week partial)
     const truePRs = trueImprovementPRs(prs);
     const prWeeks=[];
-    for(let i=5;i>=0;i--){ const from=now-(i+1)*7*DAYMS, to=now-i*7*DAYMS;
+    for(let i=5;i>=0;i--){ const from=wk.start-i*7*DAYMS, to=from+7*DAYMS;
       prWeeks.push(truePRs.filter(p=>{const t=new Date(p.created_at||p.date||0).getTime();return t>=from&&t<to;}).length);
     }
     const prThisWk = prWeeks[prWeeks.length-1];
@@ -1498,6 +1521,8 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
     if(activePct>=80) statWins.push({icon:"⚡",title:`${activePct}% active`,detail:`${activeCount} of ${athletes.length} training this week`});
     // interleave stat / personal so it reads varied
     const wins=[]; while(wins.length<4){ if(statWins.length)wins.push(statWins.shift()); if(wins.length>=4)break; if(personalWins.length)wins.push(personalWins.shift()); if(!statWins.length&&!personalWins.length)break; }
+    // raw standouts for the shareable image export (same shape exportWins expects)
+    const notablePRs = recentTrue.slice(0,6).map(p=>({athlete:(athletes.find(a=>a.id===p.athlete_id)||{}).name||"Athlete",exercise:p.exercise,weight:fmtWeight(p.weight,p.unit),gain:Math.round(p.gain)}));
 
     // roster extras (folded in from the old Group Stats tab): active-by-sport,
     // this-week pain flags, inactive athletes.
@@ -1520,22 +1545,24 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
     });
     triage.sort((a,b)=>(a.sev==="crit"?0:1)-(b.sev==="crit"?0:1));
 
-    return {rows,dayCounts,dayLabels,firstHalf,lastHalf,activeCount,activePct,teamAdh,noProgram,volWeeks,prWeeks,prThisWk,strengths,weaknesses,wins,movers,bySport,weekPain,inactive,triage};
+    return {rows,dayCounts,dayLabels,todayIdx,trendKnown,firstHalf,lastHalf,activeCount,activePct,teamAdh,noProgram,volWeeks,prWeeks,prThisWk,strengths,weaknesses,wins,notablePRs,movers,bySport,weekPain,inactive,triage};
   },[athletes,workouts,prs,manualRMs,prescriptions]);
 
   if(!athletes.length) return <div style={{textAlign:"center",padding:60,color:C.muted}}>No athletes on your roster yet.</div>;
 
   const triage = D.triage.filter(t=>!resolved.has(t.id));
 
-  const volMax = Math.max(1,...D.volWeeks), prMax = Math.max(1,...D.prWeeks), sMax = Math.max(1,...D.dayCounts);
+  const volMax = Math.max(1,...D.volWeeks), prMax = Math.max(1,...D.prWeeks), sMax = Math.max(1,...D.dayCounts.slice(0,D.todayIdx+1));
   const cell = (v)=>v?C.green:C.navy3;
   // Hover tooltip shared across every chart data point.
   const tipOn = (text)=>({onMouseEnter:(e)=>setTip({x:e.clientX,y:e.clientY,text}),onMouseMove:(e)=>setTip({x:e.clientX,y:e.clientY,text}),onMouseLeave:()=>setTip(null)});
   const wkLabel = (i)=>i===D.prWeeks.length-1?"This week":`${D.prWeeks.length-1-i} wk ago`;
   const span = (n)=>isMobile?{}:{gridColumn:`span ${n}`};
-  // top rows to show in the adherence heatmap: worst adherence first (needs attention)
-  const heatRows = [...D.rows].filter(r=>r.hasProgram||r.thisWk.length>0)
-    .sort((a,b)=>((a.score??999)-(b.score??999))).slice(0,6);
+  // adherence heatmap rows: worst adherence first (needs attention); truncation is
+  // labeled + expandable so the coach knows it's a sample, not the roster
+  const heatEligible = [...D.rows].filter(r=>r.hasProgram||r.thisWk.length>0)
+    .sort((a,b)=>((a.score??999)-(b.score??999)));
+  const heatRows = showAllHeat?heatEligible:heatEligible.slice(0,6);
 
   const secLabel = (t)=>(
     <div style={{display:"flex",alignItems:"center",gap:12,margin:"24px 2px 12px"}}>
@@ -1545,7 +1572,7 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
   );
 
   return (
-    <div style={{maxWidth:1220}}>
+    <div>
       {/* ── Briefing triage — who needs you today ── */}
       <div style={{background:`linear-gradient(180deg,${C.navy3},${C.navy2})`,border:`1px solid ${C.border}`,borderRadius:16,overflow:"hidden",marginTop:4}}>
         <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:12,padding:"15px 18px",borderBottom:`1px solid ${C.border}`,flexWrap:"wrap"}}>
@@ -1581,13 +1608,21 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
           readout={D.teamAdh==null?`No parsed programs yet — assign & lock programs to track adherence.`:`Team average. ${D.noProgram>0?`${D.noProgram} without a program (excluded).`:"Everyone has a program."}`}
           tone={D.teamAdh==null?null:(D.teamAdh>=80?{k:"good",t:"Healthy"}:D.teamAdh>=60?{k:"warn",t:"Slipping"}:{k:"crit",t:"At risk"})}>
           <div style={{fontFamily:"'Bebas Neue'",fontSize:46,color:C.text,lineHeight:.9}}>{D.teamAdh==null?"—":D.teamAdh}<span style={{fontSize:18,color:C.muted}}> {D.teamAdh==null?"":"% team avg"}</span></div>
-          <div style={{display:"grid",gridTemplateColumns:"92px repeat(7,1fr)",gap:5,alignItems:"center",marginTop:14}}>
-            <span/>{D.dayLabels.map((l,i)=><span key={i} style={{fontSize:10,color:C.muted,textAlign:"center"}}>{l[0]}</span>)}
+          <div style={{maxHeight:showAllHeat?340:"none",overflowY:showAllHeat?"auto":"visible"}}>
+          <div style={{display:"grid",gridTemplateColumns:"92px repeat(7,minmax(0,1fr))",gap:5,alignItems:"center",marginTop:14}}>
+            <span/>{D.dayLabels.map((l,i)=><span key={i} style={{fontSize:10,color:i===D.todayIdx?C.gold:C.muted,textAlign:"center",fontWeight:i===D.todayIdx?800:400}}>{l.l}<div style={{fontSize:8,opacity:.75}}>{l.d}</div></span>)}
             {heatRows.flatMap((r,ri)=>[
               <span key={`n${ri}`} style={{fontSize:11.5,color:C.muted2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.a.name}</span>,
-              ...r.days.map((d,di)=><i key={`c${ri}-${di}`} style={{aspectRatio:"1",borderRadius:3,background:r.hasProgram?cell(d):(d?C.blue:C.navy3),opacity:r.hasProgram?1:.55,border:`1px solid #ffffff08`,cursor:"pointer"}} {...tipOn(`${r.a.name.split(" ")[0]} · ${D.dayLabels[di]}: ${d?"logged a session":"no session"}${r.hasProgram?"":" (no program)"}`)}/>)
+              ...r.days.map((d,di)=><i key={`c${ri}-${di}`} style={{aspectRatio:"1",borderRadius:3,background:d==null?"transparent":r.hasProgram?cell(d):(d?C.blue:C.navy3),opacity:d==null?1:r.hasProgram?1:.55,border:d==null?`1px dashed ${C.border}`:`1px solid #ffffff08`,cursor:"pointer"}} {...tipOn(`${r.a.name.split(" ")[0]} · ${D.dayLabels[di].full} ${D.dayLabels[di].d}: ${d==null?"upcoming":d?"logged a session":"no session"}${r.hasProgram?"":" (no program)"}`)}/>)
             ])}
           </div>
+          </div>
+          {heatEligible.length>6&&(
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:10,gap:8}}>
+              <span style={{fontSize:11,color:C.muted}}>Showing {heatRows.length} of {heatEligible.length} · worst adherence first</span>
+              <button onClick={()=>setShowAllHeat(s=>!s)} style={{border:`1px solid ${C.border}`,background:"transparent",color:C.muted2,borderRadius:7,padding:"3px 10px",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>{showAllHeat?"Show less":"Show all"}</button>
+            </div>
+          )}
         </OverviewCard>
 
         {/* Active this week gauge */}
@@ -1605,17 +1640,23 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
           </div>
         </OverviewCard>
 
-        {/* Sessions/day */}
-        <OverviewCard style={span(3)} title="Sessions / day · last 7d"
-          trend={{dir:D.lastHalf>=D.firstHalf?"up":"down",txt:`${D.dayCounts.reduce((a,b)=>a+b,0)} total`}}
-          readout={D.lastHalf>=D.firstHalf?"Holding or climbing into the week.":"Sliding off through the week — worth a nudge."}
-          tone={D.lastHalf>=D.firstHalf?{k:"good",t:"Healthy"}:{k:"warn",t:"Watch"}}>
+        {/* Sessions/day — fixed Mon–Sun; today plotted hollow, excluded from line + slope */}
+        <OverviewCard style={span(3)} title="Sessions / day · this week"
+          trend={{dir:!D.trendKnown||D.lastHalf>=D.firstHalf?"up":"down",txt:`${D.dayCounts.slice(0,D.todayIdx+1).reduce((a,b)=>a+b,0)} so far`}}
+          readout={!D.trendKnown?"Week just started — trend fills in as sessions come in.":D.lastHalf>=D.firstHalf?"Holding or climbing into the week.":"Sliding off through the week — worth a nudge."}
+          tone={!D.trendKnown?null:D.lastHalf>=D.firstHalf?{k:"good",t:"Healthy"}:{k:"warn",t:"Watch"}}>
           <svg viewBox="0 0 300 96" preserveAspectRatio="none" style={{width:"100%",height:96}}>
             <line x1="0" y1="86" x2="300" y2="86" stroke={C.border}/>
-            <polyline fill="none" stroke={C.green} strokeWidth="2.5" points={D.dayCounts.map((v,i)=>`${i*50},${84-72*(v/sMax)}`).join(" ")}/>
-            {D.dayCounts.map((v,i)=><circle key={i} cx={i*50} cy={84-72*(v/sMax)} r="6" fill={C.green} style={{cursor:"pointer"}} {...tipOn(`${D.dayLabels[i]}: ${v} session${v!==1?"s":""}`)}/>)}
+            {D.todayIdx>=2&&<polyline fill="none" stroke={C.green} strokeWidth="2.5" points={D.dayCounts.slice(0,D.todayIdx).map((v,i)=>`${i*50},${84-72*(v/sMax)}`).join(" ")}/>}
+            {D.dayCounts.map((v,i)=>{
+              if(i>D.todayIdx) return null;
+              const cx=i*50, cy=84-72*(v/sMax);
+              return i===D.todayIdx
+                ? <circle key={i} cx={cx} cy={cy} r="5.5" fill={C.navy2} stroke={C.green} strokeWidth="2" strokeDasharray="3 2" style={{cursor:"pointer"}} {...tipOn(`${D.dayLabels[i].full} ${D.dayLabels[i].d} (today, in progress): ${v} session${v!==1?"s":""}`)}/>
+                : <circle key={i} cx={cx} cy={cy} r="6" fill={C.green} style={{cursor:"pointer"}} {...tipOn(`${D.dayLabels[i].full} ${D.dayLabels[i].d}: ${v} session${v!==1?"s":""}`)}/>;
+            })}
           </svg>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:9.5,color:C.dim||C.muted,marginTop:2}}>{D.dayLabels.map((l,i)=><span key={i}>{l[0]}</span>)}</div>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:9.5,color:C.dim||C.muted,marginTop:2}}>{D.dayLabels.map((l,i)=><span key={i} style={{opacity:i>D.todayIdx?.35:1,fontWeight:i===D.todayIdx?800:400,color:i===D.todayIdx?C.gold:undefined}}>{l.l}</span>)}</div>
         </OverviewCard>
 
         {/* True PRs bars */}
@@ -1665,6 +1706,15 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
               <span style={{fontSize:10,fontWeight:800,width:74,textAlign:"right",color:C.red}}>{s.tierName}</span>
             </div>
           ))}
+          {/* Grit ladder legend — decodes the tier names on the rows above */}
+          <div style={{marginTop:14,paddingTop:12,borderTop:`1px solid ${C.border}80`}}>
+            <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+              {TIER_NAMES.map((t,i)=>(
+                <span key={t} style={{fontSize:9,fontWeight:800,letterSpacing:.6,textTransform:"uppercase",padding:"2px 7px",borderRadius:5,background:C.navy3,border:`1px solid ${C.border}`,color:`hsl(${140*(i/(TIER_NAMES.length-1))},60%,${45+20*(i/(TIER_NAMES.length-1))}%)`}} {...tipOn(`Grit tier ${i+1} of ${TIER_NAMES.length}`)}>{t}</span>
+              ))}
+            </div>
+            <div style={{fontSize:10.5,color:C.muted,marginTop:6}}>The Grit ladder, low → high. Bar = roster's average tier for that lift.</div>
+          </div>
         </div>
 
         {/* Wins — mixed notable stats + deduped personal bests */}
@@ -1683,7 +1733,10 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
                   </div>
                 ))}
               </div>}
-          <div style={{fontSize:11,color:C.muted,marginTop:12,fontStyle:"italic"}}>Shareable image export lands in the weekly + monthly Coach's Edition.</div>
+          {(D.prThisWk>0||D.notablePRs.length>0)&&(
+            <button onClick={()=>exportWins({newPRs:D.prThisWk,notablePRs:D.notablePRs},coach)}
+              style={{marginTop:12,width:"100%",background:C.gold,color:"#0a0a0a",border:"none",borderRadius:9,padding:10,fontWeight:800,letterSpacing:1,textTransform:"uppercase",fontSize:12,cursor:"pointer",fontFamily:"'DM Sans'"}}>⤓ Share as image</button>
+          )}
         </div>
       </div>
 
