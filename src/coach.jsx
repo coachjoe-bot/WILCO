@@ -69,6 +69,27 @@ function useCountUp(target, ms=700){
   return v;
 }
 
+// Pixel-space SVG chart container. The Overview charts used a fixed 300-unit
+// viewBox stretched with preserveAspectRatio="none", which deformed circles into
+// ovals and inflated bar widths. This measures the real width (ResizeObserver)
+// and hands it to the render function, so shapes keep their true proportions.
+function ChartBox({h, children}){
+  const ref = useRef(null);
+  const [w,setW] = useState(0);
+  useEffect(()=>{
+    const el = ref.current; if(!el) return;
+    const m = ()=>setW(el.clientWidth);
+    m();
+    const ro = new ResizeObserver(m); ro.observe(el);
+    return ()=>ro.disconnect();
+  },[]);
+  return (
+    <div ref={ref} style={{width:"100%"}}>
+      {w>0 && <svg viewBox={`0 0 ${w} ${h}`} style={{width:"100%",height:h,overflow:"visible",display:"block"}}>{children(w)}</svg>}
+    </div>
+  );
+}
+
 // ─── SCHOOLS LIST (master only) ───────────────────────────────────────────────
 function SchoolsList({schools,coaches,onRefresh}) {
   const [confirmDelete,setConfirmDelete] = useState(null); // school id pending delete
@@ -813,7 +834,7 @@ function CoachDashboard({coach,onLogout}) {
   const tabs = ["overview","athletes","progress","reports",...(isMaster?[]:["settings"]),...(isMaster?["coaches"]:[]),...(!isMaster&&isAdmin?["account"]:[])];
 
   return (
-    <div className="cyber-coach" style={{minHeight:"100dvh",background:CA.navy}}>
+    <div className="cyber-coach" style={{minHeight:"100dvh"}}>
       <style>{GS}{GSC}</style>
       {/* Header */}
       <div style={{background:CA.navy2,borderBottom:`1px solid ${CA.border}`,paddingTop:isMobile?"calc(10px + env(safe-area-inset-top, 0px))":"14px",paddingBottom:isMobile?"10px":"14px",paddingLeft:isMobile?"14px":"20px",paddingRight:isMobile?"14px":"20px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:50,gap:8}}>
@@ -1111,7 +1132,7 @@ function CoachDashboard({coach,onLogout}) {
                 // New rich team report (The Coach's Edition) → dedicated render + check-in.
                 // Legacy team reports (no content_json.team) fall through to the old view.
                 if(isTeam && c.team){
-                  return <CoachEdition digest={selectedDigest} athletes={athletes} coach={coach} onBack={()=>setSelectedDigest(null)} onRead={loadAll}/>;
+                  return <CoachEdition digest={selectedDigest} athletes={athletes} coach={coach} school={school} onBack={()=>setSelectedDigest(null)} onRead={loadAll}/>;
                 }
                 const a = isTeam ? null : athleteById[selectedDigest.athlete_id];
                 // New shape: sections[]. Legacy fallback: keyed fields.
@@ -1674,12 +1695,16 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
           trend={{dir:D.lastHalf>=D.firstHalf?"up":"down",txt:`${D.dayCounts.reduce((a,b)=>a+b,0)} total`}}
           readout={D.lastHalf>=D.firstHalf?"Holding or climbing into the week.":"Sliding off through the week — worth a nudge."}
           tone={D.lastHalf>=D.firstHalf?{k:"good",t:"Healthy"}:{k:"warn",t:"Watch"}}>
-          <svg viewBox="0 0 300 96" preserveAspectRatio="none" style={{width:"100%",height:96,overflow:"visible"}}>
-            <line x1="0" y1="86" x2="300" y2="86" stroke={CA.border}/>
-            <polygon className="c-fade" style={{["--d"]:"280ms"}} fill={`${CA.cyan}14`} stroke="none" points={`0,86 ${D.dayCounts.map((v,i)=>`${i*50},${84-72*(v/sMax)}`).join(" ")} 300,86`}/>
-            <polyline className="c-draw" fill="none" stroke={CA.cyan} strokeWidth="2.5" points={D.dayCounts.map((v,i)=>`${i*50},${84-72*(v/sMax)}`).join(" ")} style={{filter:`drop-shadow(0 0 5px ${CA.cyan}99)`}}/>
-            {D.dayCounts.map((v,i)=><circle key={i} className="c-fade" style={{cursor:"pointer",["--d"]:`${1000+i*60}ms`}} cx={i*50} cy={84-72*(v/sMax)} r="6" fill={CA.cyan} {...tipOn(`${D.dayLabels[i]}: ${v} session${v!==1?"s":""}`)}/>)}
-          </svg>
+          <ChartBox h={96}>{w=>{
+            const px=i=>5+(w-10)*(i/(D.dayCounts.length-1)), py=v=>84-72*(v/sMax);
+            const pts=D.dayCounts.map((v,i)=>`${px(i)},${py(v)}`).join(" ");
+            return <>
+              <line x1="0" y1="86" x2={w} y2="86" stroke={CA.border}/>
+              <polygon className="c-fade" style={{["--d"]:"280ms"}} fill={`${CA.cyan}14`} stroke="none" points={`${px(0)},86 ${pts} ${px(D.dayCounts.length-1)},86`}/>
+              <polyline className="c-draw" fill="none" stroke={CA.cyan} strokeWidth="2.5" points={pts} style={{filter:`drop-shadow(0 0 5px ${CA.cyan}99)`}}/>
+              {D.dayCounts.map((v,i)=><circle key={i} className="c-fade" style={{cursor:"pointer",["--d"]:`${1000+i*60}ms`}} cx={px(i)} cy={py(v)} r="4.5" fill={CA.cyan} {...tipOn(`${D.dayLabels[i]}: ${v} session${v!==1?"s":""}`)}/>)}
+            </>;
+          }}</ChartBox>
           <div style={{display:"flex",justifyContent:"space-between",fontSize:9.5,color:CA.dim||CA.muted,marginTop:2}}>{D.dayLabels.map((l,i)=><span key={i}>{l[0]}</span>)}</div>
         </OverviewCard>
 
@@ -1688,10 +1713,14 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
           trend={{dir:"up",txt:`${D.prThisWk} this wk`}}
           readout={D.prThisWk>0?`Real improvements over prior bests — baselines excluded.`:`No new bests logged this week yet.`}
           tone={D.prThisWk>0?{k:"good",t:"Momentum"}:null}>
-          <svg viewBox="0 0 300 96" preserveAspectRatio="none" style={{width:"100%",height:96}}>
-            <defs><linearGradient id="prBar" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stopColor={CA.accent}/><stop offset="0.8" stopColor={CA.accent}/><stop offset="1" stopColor={CA.cyan}/></linearGradient></defs>
-            {D.prWeeks.map((v,i)=>{const w=36,gap=(300-w*6)/6;const x=gap/2+i*(w+gap);const h=Math.max(3,84*(v/prMax));const last=i===D.prWeeks.length-1;return <rect key={i} className="c-rise" x={x} y={88-h} width={w} height={h} rx="3" fill={last?CA.cyan:"url(#prBar)"} style={{transformBox:"fill-box",transformOrigin:"bottom",["--d"]:`${i*40}ms`,cursor:"pointer",filter:last?`drop-shadow(0 0 5px ${CA.cyan}88)`:"none"}} {...tipOn(`${wkLabel(i)}: ${v} PR${v!==1?"s":""}`)}/>;})}
-          </svg>
+          <ChartBox h={96}>{w=>{
+            const n=D.prWeeks.length, slot=w/n, barW=Math.min(30,slot*0.5);
+            return <>
+              <defs><linearGradient id="prBar" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stopColor={CA.accent}/><stop offset="0.8" stopColor={CA.accent}/><stop offset="1" stopColor={CA.cyan}/></linearGradient></defs>
+              <line x1="0" y1="88" x2={w} y2="88" stroke={CA.border}/>
+              {D.prWeeks.map((v,i)=>{const x=slot*i+(slot-barW)/2;const h=Math.max(3,72*(v/prMax));const last=i===n-1;return <rect key={i} className="c-rise" x={x} y={88-h} width={barW} height={h} rx="3" fill="url(#prBar)" style={{transformBox:"fill-box",transformOrigin:"bottom",["--d"]:`${i*40}ms`,cursor:"pointer",filter:last?`drop-shadow(0 0 6px ${CA.cyan}88)`:"none"}} {...tipOn(`${wkLabel(i)}: ${v} PR${v!==1?"s":""}`)}/>;})}
+            </>;
+          }}</ChartBox>
         </OverviewCard>
 
         {/* Team volume — full-width band */}
@@ -1699,11 +1728,16 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
           trend={{dir:D.volWeeks[3]>=D.volWeeks[0]?"up":"down",txt:"working sets"}}
           readout={D.volWeeks[3]>D.volWeeks[0]*1.5?"Sharp jump vs 4 weeks ago — watch load spikes.":"Gradual, inside a safe band."}
           tone={D.volWeeks[3]>D.volWeeks[0]*1.5?{k:"warn",t:"Watch"}:{k:"good",t:"Healthy"}}>
-          <svg viewBox="0 0 300 80" preserveAspectRatio="none" style={{width:"100%",height:80,overflow:"visible"}}>
-            <polygon className="c-fade" style={{["--d"]:"280ms"}} fill={`${CA.cyan}12`} stroke="none" points={`0,78 ${D.volWeeks.map((v,i)=>`${i*100},${70-60*(v/volMax)}`).join(" ")} 300,78`}/>
-            <polyline className="c-draw" fill="none" stroke={CA.cyan} strokeWidth="2.5" points={D.volWeeks.map((v,i)=>`${i*100},${70-60*(v/volMax)}`).join(" ")} style={{filter:`drop-shadow(0 0 5px ${CA.cyan}99)`}}/>
-            {D.volWeeks.map((v,i)=><circle key={i} className="c-fade" style={{cursor:"pointer",["--d"]:`${1000+i*80}ms`}} cx={i*100} cy={70-60*(v/volMax)} r="6" fill={CA.cyan} {...tipOn(`${i===3?"This week":`${3-i} wk ago`}: ${v} sets`)}/>)}
-          </svg>
+          <ChartBox h={80}>{w=>{
+            const px=i=>6+(w-12)*(i/(D.volWeeks.length-1)), py=v=>70-60*(v/volMax);
+            const pts=D.volWeeks.map((v,i)=>`${px(i)},${py(v)}`).join(" ");
+            return <>
+              <line x1="0" y1="78" x2={w} y2="78" stroke={CA.border}/>
+              <polygon className="c-fade" style={{["--d"]:"280ms"}} fill={`${CA.cyan}12`} stroke="none" points={`${px(0)},78 ${pts} ${px(D.volWeeks.length-1)},78`}/>
+              <polyline className="c-draw" fill="none" stroke={CA.cyan} strokeWidth="2.5" points={pts} style={{filter:`drop-shadow(0 0 5px ${CA.cyan}99)`}}/>
+              {D.volWeeks.map((v,i)=><circle key={i} className="c-fade" style={{cursor:"pointer",["--d"]:`${1000+i*80}ms`}} cx={px(i)} cy={py(v)} r="4.5" fill={CA.cyan} {...tipOn(`${i===3?"This week":`${3-i} wk ago`}: ${v} sets`)}/>)}
+            </>;
+          }}</ChartBox>
           <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:CA.muted,marginTop:2}}>{D.volWeeks.map((v,i)=><span key={i}>{i===3?"This wk":`${3-i}w ago`}</span>)}</div>
         </OverviewCard>
 
@@ -1841,7 +1875,7 @@ function TierBar({name,tier,avgTier,color}){
 // A standalone "night gym" report card (1080x1350, 4:5): near-black ground, blue-to-
 // cyan LED strips, huge Bebas figures with plain-English labels so a parent/AD reading
 // it on a white phone background gets it instantly. ASCII only, no emoji.
-async function exportWins(team, coach){
+async function exportWins(team, coach, school){
   try{
     const W=1080,H=1350,M=84;
     const MONO="600 24px ui-monospace,Menlo,monospace";
@@ -1872,7 +1906,7 @@ async function exportWins(team, coach){
     x.fillStyle=CA.led; x.font='700 90px "Bebas Neue"'; setLS("4px"); x.fillText("WILCO",M,270); setLS("0px");
     x.fillStyle=CA.cyan; x.font=MONO; setLS("3px"); x.fillText("WEEKLY TEAM REPORT",M+4,306); setLS("0px");
     // plain-English title + date range
-    const teamName=String(coach?.name||"THE TEAM").toUpperCase();
+    const teamName=String(school?.name||coach?.name||"THE TEAM").toUpperCase();
     const title=`${teamName} - WINS THIS WEEK`;
     let ts=46; x.font=`700 ${ts}px "DM Sans"`; while(x.measureText(title).width>W-2*M && ts>26){ ts-=2; x.font=`700 ${ts}px "DM Sans"`; }
     x.fillStyle=CA.led; x.fillText(title,M,398);
@@ -2024,7 +2058,7 @@ function CoachCheckin({digest, team, coach, onRead}){
   );
 }
 
-function CoachEdition({digest, athletes, coach, onBack, onRead}){
+function CoachEdition({digest, athletes, coach, school, onBack, onRead}){
   const c = digest.content_json||{};
   const team = c.team||null;
   const sections = Array.isArray(c.sections)?c.sections:[];
@@ -2088,7 +2122,7 @@ function CoachEdition({digest, athletes, coach, onBack, onRead}){
                 <div style={{flex:1,minWidth:0}}><span style={{color:CA.text,fontWeight:650,fontSize:13}}>{p.athlete}</span> <span style={{color:CA.muted,fontSize:12.5}}>{p.exercise} {fmtWeight(p.weight,p.unit)}{p.gain?` — +${p.gain} lbs e1RM`:""}</span></div>
               </div>
             ))}
-            <button onClick={()=>exportWins(team,coach)} style={{marginTop:12,width:"100%",background:CA_BTN,color:"#fff",border:"none",borderRadius:9,padding:10,fontWeight:800,letterSpacing:1,textTransform:"uppercase",fontSize:12,cursor:"pointer",boxShadow:`0 0 14px ${CA_GLOW}`,fontFamily:"'DM Sans'"}}>⤓ Share as image</button>
+            <button onClick={()=>exportWins(team,coach,school)} style={{marginTop:12,width:"100%",background:CA_BTN,color:"#fff",border:"none",borderRadius:9,padding:10,fontWeight:800,letterSpacing:1,textTransform:"uppercase",fontSize:12,cursor:"pointer",boxShadow:`0 0 14px ${CA_GLOW}`,fontFamily:"'DM Sans'"}}>⤓ Share as image</button>
           </div>
         )}
         <CoachCheckin digest={digest} team={team} coach={coach} onRead={onRead}/>
