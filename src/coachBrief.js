@@ -92,7 +92,7 @@ function buildConcernBeat({ t, row, req, dateKey, beatIndex }) {
   if (req) {
     const reason = req.reason || (Array.isArray(req.items) && req.items[0] && req.items[0].suggested_change) || "a program change";
     const item = Array.isArray(req.items) ? req.items[0] : null;
-    const itemNote = item ? ` (${item.lift}: ${item.suggested_change})` : "";
+    const itemNote = item && item.lift && item.suggested_change && item.suggested_change !== reason ? ` (${item.lift}: ${item.suggested_change})` : "";
     // Keep the underlying signal (injury area / quiet days) in meta so the question
     // bank and decisionNote can still cite it even though the request took over.
     const inj = row && row.injuries;
