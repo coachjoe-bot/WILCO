@@ -44,11 +44,19 @@ body{background:${CA.navy};}
 .c-flap{display:inline-block;transform-origin:top;backface-visibility:hidden;animation:cFlap .5s ease both;}
 /* faint cyan scanline overlay (edition page) */
 .coach-scan::after{content:"";position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,transparent 0 3px,rgba(55,230,255,.028) 3px 4px);z-index:8;}
+/* POWER CELL — the athlete benchmark battery tube, verbatim (GSA .htube/.hfill),
+   so team benchmarks read identically to the athlete Progress screen */
+.htube{height:20px;border:1.5px solid ${CA.line2};border-radius:6px;position:relative;overflow:hidden;background:linear-gradient(180deg,#070d18,#05080f);}
+.htube::after{content:"";position:absolute;right:-4px;top:50%;transform:translateY(-50%);width:4px;height:9px;border-radius:2px;background:${CA.line2};}
+.hfill{position:absolute;left:0;top:0;bottom:0;width:100%;transform:scaleX(0);transform-origin:left;background:linear-gradient(90deg,color-mix(in srgb,var(--tc) 62%,#000),var(--tc));box-shadow:0 0 calc(8px + var(--tb,0)*22px) var(--tc);filter:brightness(calc(1 + var(--tb,0)*0.9)) saturate(calc(1 + var(--tb,0)*0.4));transition:transform 1.05s cubic-bezier(.3,.8,.3,1);}
+.hfill::after{content:"";position:absolute;inset:0;background:repeating-linear-gradient(90deg,rgba(0,0,0,.28) 0 13px,transparent 13px 16px);opacity:.45;}
+.hcell.go .hfill{transform:scaleX(var(--pct,0));}
 /* the one allowed loop: a small pulsing LIVE dot */
 @keyframes cLive{0%,100%{opacity:1;box-shadow:0 0 6px ${CA.cyan};}50%{opacity:.35;box-shadow:0 0 2px ${CA.cyan};}}
 .c-live{animation:cLive 1.8s ease-in-out infinite;}
 @media (prefers-reduced-motion: reduce){
   .c-up,.c-rise,.c-draw,.a-draw,.c-fade,.c-flap,.c-live{animation:none!important;transform:none!important;opacity:1!important;}
+  .hcell.go .hfill{transform:scaleX(var(--pct,0))!important;}
   .c-draw,.a-draw{stroke-dasharray:none!important;}
 }
 `;
@@ -2137,6 +2145,14 @@ function CoachEdition({digest, athletes, coach, school, onBack, onRead}){
 // there's no such thing as a group PR). Reuses the Grit engine + LineChart.
 function GroupProgress({athletes,workouts,manualRMs}){
   const [tab,setTab] = useState("benchmarks");
+  // charge the power cells shortly after the Benchmarks tab shows (mirrors the
+  // athlete benchGo gate so the fill animates in its final tier colour)
+  const [cellGo,setCellGo] = useState(false);
+  useEffect(()=>{
+    if(tab!=="benchmarks"){ setCellGo(false); return; }
+    const t=setTimeout(()=>setCellGo(true),120);
+    return ()=>clearTimeout(t);
+  },[tab]);
   const D = useMemo(()=>{
     const now=Date.now(), WK=7*864e5, WEEKS=12, weekStart=now-WEEKS*WK;
     const wl=(wi)=>new Date(weekStart+wi*WK).toLocaleDateString("en-US",{month:"short",day:"numeric"});
@@ -2206,22 +2222,26 @@ function GroupProgress({athletes,workouts,manualRMs}){
           {D.benchmarks.length===0
             ? <div style={{color:CA.muted,textAlign:"center",padding:40,fontSize:13}}>No benchmarked lifts logged across the roster yet.</div>
             : D.benchmarks.map((b,i)=>{
-                const ti=Math.round(b.avgTier);
+                // athlete power-cell semantics: the tube lives in the CURRENT tier
+                // (floor) and fills with progress toward the next rank
+                const tf=Math.min(7,Math.floor(b.avgTier));
+                const frac=tf>=7?1:Math.max(0.06,b.avgTier-tf);
+                const next=tf<7?TIER_NAMES[tf+1]:null;
                 return (
-                  <div key={i} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:12}}>
+                  <div key={i} className={`hcell${cellGo?" go":""}`} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:12}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
                       <div>
                         <div style={{color:CA.text,fontWeight:700,fontSize:14}}>{b.name}</div>
-                        <div style={{color:TIER_COLORS[ti],fontSize:13,fontWeight:700,marginTop:2,letterSpacing:.5}}>{TIER_NAMES[ti]} <span style={{color:CA.muted,fontWeight:400}}>team avg</span></div>
+                        <div style={{color:TIER_COLORS[tf],fontSize:13,fontWeight:700,marginTop:2,letterSpacing:.5}}>{TIER_NAMES[tf]} <span style={{color:CA.muted,fontWeight:400}}>team avg</span></div>
                       </div>
                       <div style={{textAlign:"right"}}>
-                        <div style={{fontFamily:"'Bebas Neue'",fontSize:24,color:TIER_COLORS[ti],lineHeight:1}}>{b.avgE1rm}<span style={{fontSize:11,color:CA.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span></div>
+                        <div style={{fontFamily:"'Bebas Neue'",fontSize:24,color:TIER_COLORS[tf],lineHeight:1,fontVariantNumeric:"tabular-nums"}}>{b.avgE1rm}<span style={{fontSize:11,color:CA.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span></div>
                         <div style={{color:CA.muted,fontSize:10}}>avg e1RM · {b.n} athlete{b.n!==1?"s":""}</div>
                       </div>
                     </div>
-                    <div style={{position:"relative",height:12,borderRadius:6,display:"flex",overflow:"visible"}}>
-                      {TIER_COLORS.map((c,si)=><div key={si} style={{flex:1,background:c,opacity:si===ti?1:0.4,borderRight:si<7?"1px solid rgba(6,13,30,0.6)":""}}/>)}
-                      <div style={{position:"absolute",top:-3,left:`${b.avgTier/7*100}%`,transform:"translateX(-50%)",width:5,height:18,background:CA.led,borderRadius:3,boxShadow:`0 0 7px ${CA.cyan}aa`}}/>
+                    <div className="htube"><div className="hfill" style={{"--tc":TIER_COLORS[tf],"--tb":tf/7,"--pct":frac}}/></div>
+                    <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:9.5,letterSpacing:1.2,textTransform:"uppercase",color:CA.faint,marginTop:7}}>
+                      {next?`${Math.round(frac*100)}% of the way to ${next}`:"Top of the ladder"}
                     </div>
                     <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:10,justifyContent:"center"}}>
                       {b.dist.map((cnt,ti2)=>cnt>0&&<span key={ti2} style={{fontSize:10,color:TIER_COLORS[ti2],background:`${TIER_COLORS[ti2]}18`,border:`1px solid ${TIER_COLORS[ti2]}44`,borderRadius:999,padding:"2px 8px",fontWeight:700}}>{TIER_NAMES[ti2]} {cnt}</span>)}
