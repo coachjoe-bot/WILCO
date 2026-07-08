@@ -1215,6 +1215,7 @@ export const CA = {
   navy:"#04060c", navy2:"#0a0f1d", navy3:"#0e1830", border:"#182543",
   line2:"#25375d",                      // brighter hairline (panel borders, tubes)
   gold:"#3a7bff",                       // legacy primary-accent slot → artifact blue
+                                         // key kept for palette-prop compatibility — use CA.accent in code
   green:"#10b981", red:"#ef4444",
   text:"#e6ecf6", muted:"#7c8aa3", muted2:"#aeb9cf", blue:"#6aa0ff",
   accent:"#3a7bff", cyan:"#37e6ff", led:"#eaf3ff", steel:"#7a8798", faint:"#55637d",
@@ -1223,6 +1224,10 @@ export const CA = {
 // Reusable primary-button skin (blue gradient + glow) — the artifact's .abtn/.navbtn.pri.
 export const CA_BTN = "linear-gradient(180deg,#57a0ff,#2a63e6)";
 export const CA_GLOW = "rgba(58,123,255,.5)";
+// Chat bubble/avatar gradients, hoisted out of inline JSX (were hardcoded hex
+// literals repeated at each call site) — same values, zero visual change.
+export const CA_BUBBLE = "linear-gradient(180deg,#3f7bff,#2258e0)"; // user message bubble
+export const CA_AVATAR = "linear-gradient(135deg,#3f7bff,#123a9e)"; // assistant avatar circle
 // Fonts (Bebas Neue + DM Sans) load from index.html with preconnect — an @import
 // here would sit unread until the whole JS bundle parses, delaying first text paint.
 export const GS = `
@@ -1242,12 +1247,9 @@ input,textarea,select,button{font-family:'DM Sans',sans-serif;}
 /* Proof Feed "drop" motion — elements are visible by default (final state),
    the animation only plays the entrance, so reduced-motion / no-anim = still shown. */
 @keyframes proofDrop{from{opacity:0;transform:translateY(14px) scale(0.985);}to{opacity:1;transform:translateY(0) scale(1);}}
-@keyframes sealBreak{0%{transform:translate(-50%,-50%) scale(1);}45%{transform:translate(-50%,-50%) scale(1.14);}100%{transform:translate(-50%,-50%) scale(1);}}
-@keyframes envFloat{0%,100%{transform:translateY(0);}50%{transform:translateY(-4px);}}
 .proof-drop{animation:proofDrop 0.5s cubic-bezier(.2,.7,.2,1) both;}
-.env-float{animation:envFloat 4.5s ease-in-out infinite;}
 @media (prefers-reduced-motion: reduce){
-  .proof-drop,.env-float,.word-in{animation:none!important;}
+  .proof-drop,.word-in{animation:none!important;}
 }
 `;
 // GSA — athlete-side motion primitives for the aesthetic overhaul. All keyframe
@@ -1257,9 +1259,6 @@ input,textarea,select,button{font-family:'DM Sans',sans-serif;}
 // prefers-reduced-motion (and any stutter) degrades to the static end state.
 // Injected at the athlete roots alongside GS; coach.jsx never mounts it.
 export const GSA = `
-/* electric-blue accent surfaces */
-.a-card{background:${CA.navy2};border:1px solid ${CA.border};border-radius:14px;}
-.a-glow{box-shadow:0 0 0 1px ${CA.accent}22, 0 8px 30px -12px ${CA.accent}55;}
 /* hide the horizontal scrollbar on swipe rows (kills the dead scrollbar band) */
 .no-sb{scrollbar-width:none;-ms-overflow-style:none;}
 .no-sb::-webkit-scrollbar{display:none;width:0;height:0;}
@@ -1268,40 +1267,15 @@ export const GSA = `
 @keyframes aTicker{from{transform:translateX(0);}to{transform:translateX(-50%);}}
 .a-ticker{display:inline-flex;white-space:nowrap;animation:aTicker 26s linear infinite;will-change:transform;}
 .a-ticker:hover{animation-play-state:paused;}
-/* line-chart / bar draw-in (scaleY from baseline) */
-@keyframes aRise{from{transform:scaleY(0);}to{transform:scaleY(1);}}
-.a-rise{transform-origin:bottom;animation:aRise .7s cubic-bezier(.2,.7,.2,1) both;}
 /* line-chart draw-in (stroke reveals left-to-right); overestimated dash length is fine */
 @keyframes aDraw{from{stroke-dashoffset:1000;}to{stroke-dashoffset:0;}}
 .a-draw{stroke-dasharray:1000;animation:aDraw 1.05s ease-out forwards;}
-/* power cell fill (battery charges up) */
-@keyframes aCharge{from{transform:scaleX(0);}to{transform:scaleX(var(--fill,1));}}
-.a-charge{transform-origin:left;animation:aCharge .9s cubic-bezier(.2,.7,.2,1) both;}
 /* split-flap headline flip-in */
 @keyframes aFlap{0%{transform:rotateX(-90deg);opacity:0;}60%{transform:rotateX(8deg);opacity:1;}100%{transform:rotateX(0);opacity:1;}}
 .a-flap{display:inline-block;transform-origin:top;backface-visibility:hidden;animation:aFlap .5s ease both;}
-/* loader — scan sweep + hex pulse + charge bar */
-@keyframes aScan{0%{transform:translateX(-120%);}100%{transform:translateX(120%);}}
-.a-scan{animation:aScan 1.15s ease-in-out infinite;}
-@keyframes aPulse{0%,100%{opacity:.35;transform:scale(.94);}50%{opacity:1;transform:scale(1);}}
-.a-pulse{animation:aPulse 1.3s ease-in-out infinite;}
-@keyframes aBar{0%{transform:translateX(-100%);}100%{transform:translateX(100%);}}
-.a-bar{animation:aBar 1.1s ease-in-out infinite;}
-/* Grit reactor core breathing */
-@keyframes aReactor{0%,100%{box-shadow:0 0 24px -6px var(--rc,${CA.accent});}50%{box-shadow:0 0 42px 0 var(--rc,${CA.accent});}}
-.a-reactor{animation:aReactor 3.4s ease-in-out infinite;}
-/* form-review diagnostic scan line */
-@keyframes aDiag{0%{transform:translateY(-100%);}100%{transform:translateY(1200%);}}
-.a-diag{animation:aDiag 1.8s linear infinite;}
 /* PR "NEW MAX" stamp — press straight on (no rotation) */
 @keyframes aStamp{0%{transform:scale(1.6);opacity:0;}55%{transform:scale(.92);opacity:1;}100%{transform:scale(1);opacity:1;}}
 .a-stamp{animation:aStamp .5s cubic-bezier(.2,.8,.2,1) both;}
-/* streak charge-chain link light-up (staggered via --d inline) */
-@keyframes aLink{from{opacity:.25;}to{opacity:1;}}
-.a-link{animation:aLink .4s ease both;animation-delay:var(--d,0s);}
-/* entrance door-dive crossfade+scale (one-time) */
-@keyframes aDive{0%{opacity:0;transform:scale(1.08);}12%{opacity:1;}100%{opacity:1;transform:scale(1);}}
-.a-dive{animation:aDive 1.1s cubic-bezier(.2,.7,.2,1) both;}
 /* ═══ artifact-faithful console skin — ported 1:1 from the athlete overhaul artifact
    (40b4a378). These are the pieces that give the app its HUD look. ═══ */
 /* blue grid ground for interior app screens (the single biggest "matches the artifact" change) */
@@ -1346,9 +1320,11 @@ export const GSA = `
 /* streak charge-chain — thin bars, trained days fill blue→cyan */
 .streaklnk{flex:1;height:6px;border-radius:2px;background:#0c1526;border:1px solid ${CA.line2};position:relative;overflow:hidden;}
 .streaklnk.on::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,${CA.accent},${CA.cyan});box-shadow:0 0 6px ${CA.cyan};}
+/* mono HUD-kicker register (matches Field Mode kickers / loader captions) — used
+   for Settings group labels ("PROOF FEED", "WEIGHT UNIT", etc.) */
+.setgrp{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:${CA.faint};}
 @media (prefers-reduced-motion: reduce){
-  .a-ticker,.a-rise,.a-charge,.a-flap,.a-scan,.a-pulse,.a-bar,.a-reactor,.a-diag,.a-stamp,.a-link,.a-dive,.a-draw,.radar::before,.ld-charge i,.ld-scan::before,.ld-hex i,.stamp,.proof-loop{animation:none!important;transform:none!important;opacity:1!important;}
-  .a-charge{transform:scaleX(var(--fill,1))!important;}
+  .a-ticker,.a-flap,.a-stamp,.a-draw,.radar::before,.ld-charge i,.ld-scan::before,.ld-hex i,.stamp,.proof-loop{animation:none!important;transform:none!important;opacity:1!important;}
   .hcell.go .hfill{transform:scaleX(var(--pct,0))!important;}
   .a-draw{stroke-dasharray:none!important;}
 }
@@ -1434,9 +1410,9 @@ export function LineChart({data, color=C.gold, unit="", palette=C}) {
 
 // ─── AWAITING SIGNAL ──────────────────────────────────────────────────────────
 // Athlete-side empty state: a "no signal yet" console readout instead of a flat
-// gray line. A pulsing hex node + mono kicker, on the CA palette. Pure
-// transform/opacity motion (.a-pulse), so reduced-motion degrades to the static
-// end state. `hint` is the plain-language "how to fill this" line.
+// gray line. A sweeping radar ring (.radar) + mono kicker, on the CA palette.
+// Pure transform motion, so reduced-motion degrades to the static end state.
+// `hint` is the plain-language "how to fill this" line.
 export function AwaitingSignal({hint, label="AWAITING SIGNAL"}) {
   return (
     <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14,padding:"48px 24px",textAlign:"center",minHeight:280}}>
@@ -1587,8 +1563,8 @@ const syncPushSubscription = async () => {
 // before opening. Tapping "OPEN THIS WEEK'S EDITION" goes STRAIGHT into the guided
 // check-in (ProofChatModal) — no separate re-render of the digest. Presentation
 // only: generation (api/_proof.js), notification policy, and the check-in question
-// logic are all unchanged. Built in the current gold accent; the app-wide swap to
-// the brand's electric-blue is a separate, deferred pass (docs/app-aesthetic-overhaul.md).
+// logic are all unchanged. Renders on the CA palette's accent (electric-blue) —
+// the gold-to-blue repoint already applies here via CA.accent, no separate pass needed.
 
 // Section-label matchers — the generator's labels vary a little across digests
 // (and legacy keyed fallbacks), so match on intent, not exact strings.
@@ -1716,7 +1692,7 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
       {hero&&hero.score!=null&&(
         <div style={{display:"flex",justifyContent:"center",alignItems:"baseline",gap:10,padding:"2px 0 8px"}}>
           <span style={{...kick(),fontSize:9}}>Strength Score</span>
-          <span style={{fontFamily:NEWS.serif,fontWeight:900,fontSize:40,lineHeight:0.8,color:CA.gold}}>{hero.score}</span>
+          <span style={{fontFamily:NEWS.serif,fontWeight:900,fontSize:40,lineHeight:0.8,color:CA.accent}}>{hero.score}</span>
           {hero.delta!=null&&hero.delta!==0&&<span style={{fontFamily:NEWS.label,fontWeight:700,fontSize:14,color:hero.delta>0?CA.green:CA.red}}>{hero.delta>0?"▲ +":"▼ "}{hero.delta>0?hero.delta:Math.abs(hero.delta)}</span>}
         </div>
       )}
@@ -1734,7 +1710,7 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
         {boxSec&&(
           <div style={{flex:1}}>
             <div style={{border:`1.5px solid ${injurySec&&urgent?CA.red:NEWS.rule2}`,padding:"8px 9px"}}>
-              <div style={{...kick(injurySec?CA.gold:CA.cyan),borderBottom:`1px solid ${NEWS.rule}`,paddingBottom:3,marginBottom:4}}>{injurySec?"⚠ Injury Alert":"Focus Next Week"}</div>
+              <div style={{...kick(injurySec?CA.accent:CA.cyan),borderBottom:`1px solid ${NEWS.rule}`,paddingBottom:3,marginBottom:4}}>{injurySec?"⚠ Injury Alert":"Focus Next Week"}</div>
               <div style={{fontFamily:NEWS.body,fontSize:10.5,lineHeight:1.4,color:NEWS.ink2}}>{boxSec.body}</div>
             </div>
           </div>
@@ -1799,7 +1775,7 @@ function ProofLetter({intro, sections, flags, label, dateStr}) {
     <div>
       {/* Letterhead + greeting */}
       <div className="proof-drop" style={{...delay(),display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:`1px solid ${CA.border}`,paddingBottom:9,marginBottom:14}}>
-        <div style={{fontFamily:"'Bebas Neue'",fontSize:15,letterSpacing:3,color:CA.gold}}>THE PROOF</div>
+        <div style={{fontFamily:"'Bebas Neue'",fontSize:15,letterSpacing:3,color:CA.accent}}>THE PROOF</div>
         {dateStr&&<div style={{fontSize:10,letterSpacing:1.5,color:CA.muted,fontWeight:600}}>{dateStr}</div>}
       </div>
       {intro&&<div className="proof-drop" style={{...delay(),fontFamily:"'Bebas Neue'",fontSize:28,letterSpacing:0.5,lineHeight:1,marginBottom:16,color:CA.text}}>{intro}</div>}
@@ -1814,7 +1790,7 @@ function ProofLetter({intro, sections, flags, label, dateStr}) {
                   <span style={{width:9,height:9,borderRadius:"50%",background:hero.tierColor,boxShadow:`0 0 10px ${hero.tierColor}`}}/>
                   <span style={{fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2,color:hero.tierColor}}>{hero.tier}</span>
                 </div>
-              : <div style={{fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,color:CA.gold}}>GRIT RANK</div>}
+              : <div style={{fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,color:CA.accent}}>GRIT RANK</div>}
             <div style={{textAlign:"right"}}>
               <div style={{fontSize:9,letterSpacing:2,color:CA.muted2}}>{hero.rankUp?"RANK UP":"RANK HELD"}</div>
               {hero.tierDesc&&<div style={{fontSize:10,color:CA.muted2,marginTop:3}}>{hero.tierDesc}</div>}
@@ -1833,8 +1809,8 @@ function ProofLetter({intro, sections, flags, label, dateStr}) {
 
       {/* PR block — distinct gold, not a routine card */}
       {prSec&&(
-        <div className="proof-drop" style={{...delay(),background:`linear-gradient(150deg, ${CA.gold}1f, ${CA.navy2} 70%)`,border:`1px solid ${CA.gold}52`,borderRadius:12,padding:"13px 14px",marginBottom:10}}>
-          <div style={{fontSize:9,letterSpacing:2,color:CA.gold,fontWeight:700,marginBottom:8}}>🏅 {prSec.label}</div>
+        <div className="proof-drop" style={{...delay(),background:`linear-gradient(150deg, ${CA.accent}1f, ${CA.navy2} 70%)`,border:`1px solid ${CA.accent}52`,borderRadius:12,padding:"13px 14px",marginBottom:10}}>
+          <div style={{fontSize:9,letterSpacing:2,color:CA.accent,fontWeight:700,marginBottom:8}}>🏅 {prSec.label}</div>
           <div style={{fontSize:12.5,lineHeight:1.6,color:"#c7d2e0",whiteSpace:"pre-wrap"}}>{prSec.body}</div>
         </div>
       )}
@@ -1866,8 +1842,8 @@ function ProofLetter({intro, sections, flags, label, dateStr}) {
 
       {/* Focus — closing directive */}
       {focusSec&&(
-        <div className="proof-drop" style={{...delay(),borderLeft:`3px solid ${CA.gold}`,background:`${CA.gold}10`,borderRadius:"0 12px 12px 0",padding:"12px 14px",marginBottom:6}}>
-          <div style={{fontSize:9,letterSpacing:2,color:CA.gold,fontWeight:700,marginBottom:6}}>▶ {focusSec.label}</div>
+        <div className="proof-drop" style={{...delay(),borderLeft:`3px solid ${CA.accent}`,background:`${CA.accent}10`,borderRadius:"0 12px 12px 0",padding:"12px 14px",marginBottom:6}}>
+          <div style={{fontSize:9,letterSpacing:2,color:CA.accent,fontWeight:700,marginBottom:6}}>▶ {focusSec.label}</div>
           <div style={{fontSize:13,lineHeight:1.55,color:CA.text,fontWeight:500,whiteSpace:"pre-wrap"}}>{focusSec.body}</div>
         </div>
       )}
@@ -2189,7 +2165,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
             so render from index 1 onward. */}
         {messages.slice(1).map((m,i)=>(
           <div key={i} className="proof-drop" style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
-            <div style={{maxWidth:"86%",background:m.role==="user"?"linear-gradient(180deg,#3f7bff,#2258e0)":CA.navy2,color:m.role==="user"?"#fff":CA.text,borderRadius:14,padding:"11px 14px",fontSize:14,lineHeight:1.6,whiteSpace:"pre-wrap",border:m.role==="user"?"none":`1px solid ${CA.border}`,borderBottomLeftRadius:m.role==="user"?14:4,borderBottomRightRadius:m.role==="user"?4:14}}>
+            <div style={{maxWidth:"86%",background:m.role==="user"?CA_BUBBLE:CA.navy2,color:m.role==="user"?"#fff":CA.text,borderRadius:14,padding:"11px 14px",fontSize:14,lineHeight:1.6,whiteSpace:"pre-wrap",border:m.role==="user"?"none":`1px solid ${CA.border}`,borderBottomLeftRadius:m.role==="user"?14:4,borderBottomRightRadius:m.role==="user"?4:14}}>
               {m.content}
             </div>
           </div>
@@ -2216,8 +2192,8 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
         </div>}
 
         {programPending&&!loading&&(
-          <div style={{background:CA.navy3,border:`1px solid ${CA.gold}`,borderRadius:12,padding:14,margin:"6px 0"}}>
-            <div style={{color:CA.gold,fontSize:13,fontWeight:700,marginBottom:8}}>📋 Suggested program update</div>
+          <div style={{background:CA.navy3,border:`1px solid ${CA.accent}`,borderRadius:12,padding:14,margin:"6px 0"}}>
+            <div style={{color:CA.accent,fontSize:13,fontWeight:700,marginBottom:8}}>📋 Suggested program update</div>
             {programPending.summary ? (
               <>
                 <div style={{color:CA.text,fontSize:13,lineHeight:1.5,marginBottom:programPending.why?6:10}}>{programPending.summary}</div>
@@ -2238,14 +2214,14 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
                   onKeyDown={e=>{ if(e.key==="Enter"&&(e.metaKey||e.ctrlKey)){ e.preventDefault(); reviseProgramChange(); } }}
                   style={{width:"100%",minHeight:64,background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:8,padding:"10px 12px",color:CA.text,fontSize:13,lineHeight:1.5,outline:"none",resize:"vertical",fontFamily:"'DM Sans'",boxSizing:"border-box"}}/>
                 <div style={{display:"flex",gap:8,marginTop:8}}>
-                  <button onClick={reviseProgramChange} disabled={!programEditText.trim()} style={{flex:1,background:programEditText.trim()?CA.gold:CA.navy3,color:programEditText.trim()?"#000":CA.muted,border:"none",borderRadius:8,padding:"10px",fontWeight:700,cursor:programEditText.trim()?"pointer":"not-allowed",fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14}}>Send</button>
+                  <button onClick={reviseProgramChange} disabled={!programEditText.trim()} style={{flex:1,background:programEditText.trim()?CA.accent:CA.navy3,color:programEditText.trim()?"#000":CA.muted,border:"none",borderRadius:8,padding:"10px",fontWeight:700,cursor:programEditText.trim()?"pointer":"not-allowed",fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14}}>Send</button>
                   <button onClick={()=>{setEditingProgram(false);setProgramEditText("");}} style={{flex:1,background:"transparent",color:CA.muted,border:`1px solid ${CA.border}`,borderRadius:8,padding:"10px",cursor:"pointer",fontSize:13}}>Cancel</button>
                 </div>
               </div>
             ) : (
               <>
                 <div style={{display:"flex",gap:8}}>
-                  <button onClick={()=>applyProgramChange(true)} style={{flex:1,background:CA.gold,color:"#000",border:"none",borderRadius:8,padding:"10px",fontWeight:700,cursor:"pointer",fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14}}>Yes — Apply</button>
+                  <button onClick={()=>applyProgramChange(true)} style={{flex:1,background:CA.accent,color:"#000",border:"none",borderRadius:8,padding:"10px",fontWeight:700,cursor:"pointer",fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14}}>Yes — Apply</button>
                   <button onClick={()=>applyProgramChange(false)} style={{flex:1,background:"transparent",color:CA.muted,border:`1px solid ${CA.border}`,borderRadius:8,padding:"10px",cursor:"pointer",fontSize:13}}>Skip</button>
                 </div>
                 <button onClick={()=>setEditingProgram(true)} style={{width:"100%",marginTop:8,background:"transparent",color:CA.muted2,border:`1px solid ${CA.border}`,borderRadius:8,padding:"9px",cursor:"pointer",fontSize:12}}>✏️ Edit or ask a question</button>
@@ -2255,16 +2231,16 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
         )}
 
         {phase==="report"&&!loading&&activeQuestions.length>0&&(
-          <div className="proof-drop" style={{background:`linear-gradient(180deg,${CA.navy3},${CA.navy2})`,border:`1px solid ${CA.gold}73`,borderRadius:14,padding:15,marginTop:6}}>
+          <div className="proof-drop" style={{background:`linear-gradient(180deg,${CA.navy3},${CA.navy2})`,border:`1px solid ${CA.accent}73`,borderRadius:14,padding:15,marginTop:6}}>
             <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:8}}>
-              <div style={{width:30,height:30,borderRadius:"50%",background:CA.gold,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:15,color:"#04070f",flexShrink:0}}>J</div>
+              <div style={{width:30,height:30,borderRadius:"50%",background:CA.accent,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:15,color:"#04070f",flexShrink:0}}>J</div>
               <div>
                 <div style={{fontSize:12,fontWeight:700,color:CA.text}}>Coach Joe has {topQuestions.length} question{topQuestions.length===1?"":"s"}</div>
                 <div style={{fontSize:10,color:CA.muted}}>{isMonthly?"Monthly":"Weekly"} check-in · ~2 min</div>
               </div>
             </div>
             <div style={{fontSize:13,lineHeight:1.5,color:"#c7d2e0",marginBottom:12}}>{activeQuestions[0].text}</div>
-            <button onClick={startDialogue} style={{width:"100%",padding:12,borderRadius:10,border:"none",cursor:"pointer",background:"CA.gold",color:"#04070f",fontFamily:"'Bebas Neue'",fontSize:15,letterSpacing:2,textAlign:"center"}}>
+            <button onClick={startDialogue} style={{width:"100%",padding:12,borderRadius:10,border:"none",cursor:"pointer",background:"CA.accent",color:"#04070f",fontFamily:"'Bebas Neue'",fontSize:15,letterSpacing:2,textAlign:"center"}}>
               START CHECK-IN →
             </button>
           </div>
@@ -2272,7 +2248,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
 
         {phase==="deeper-offer"&&!loading&&(
           <div style={{display:"flex",gap:8,marginTop:4}}>
-            <button onClick={goDeeper} style={{flex:1,background:CA.gold,color:"#000",border:"none",borderRadius:10,padding:"11px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14,cursor:"pointer"}}>Go deeper →</button>
+            <button onClick={goDeeper} style={{flex:1,background:CA.accent,color:"#000",border:"none",borderRadius:10,padding:"11px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14,cursor:"pointer"}}>Go deeper →</button>
             <button onClick={()=>finish(answers)} style={{flex:1,background:"transparent",color:CA.muted,border:`1px solid ${CA.border}`,borderRadius:10,padding:"11px",cursor:"pointer",fontSize:13}}>Wrap it here</button>
           </div>
         )}
@@ -2280,7 +2256,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
         {phase==="done"&&!loading&&(
           <div style={{textAlign:"center",marginTop:8}}>
             <div style={{color:CA.muted,fontSize:12,marginBottom:10}}>✓ Check-in complete for this report.</div>
-            <button onClick={onClose} style={{background:"transparent",color:CA.gold,border:`1px solid ${CA.gold}`,borderRadius:10,padding:"11px 28px",cursor:"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>Done ✓</button>
+            <button onClick={onClose} style={{background:"transparent",color:CA.accent,border:`1px solid ${CA.accent}`,borderRadius:10,padding:"11px 28px",cursor:"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>Done ✓</button>
           </div>
         )}
         <div ref={bottomRef}/>
@@ -2293,7 +2269,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
             placeholder="Type your answer..." rows={2}
             style={{flex:1,background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:10,padding:"10px 14px",color:CA.text,fontSize:15,outline:"none",resize:"none",lineHeight:1.5}}
           />
-          <button onClick={sendMessage} disabled={loading||!input.trim()} style={{background:input.trim()&&!loading?CA.gold:CA.navy3,color:input.trim()&&!loading?"#000":CA.muted,border:"none",borderRadius:10,padding:"10px 16px",cursor:input.trim()&&!loading?"pointer":"not-allowed",fontWeight:700,fontSize:18,transition:"background 0.15s"}}>→</button>
+          <button onClick={sendMessage} disabled={loading||!input.trim()} style={{background:input.trim()&&!loading?CA.accent:CA.navy3,color:input.trim()&&!loading?"#000":CA.muted,border:"none",borderRadius:10,padding:"10px 16px",cursor:input.trim()&&!loading?"pointer":"not-allowed",fontWeight:700,fontSize:18,transition:"background 0.15s"}}>→</button>
         </div>
       )}
     </div>
@@ -2320,9 +2296,9 @@ class ErrorBoundary extends Component {
     if(this.state.crashed){
       return (
         <div style={{minHeight:"100vh",background:CA.navy,color:CA.text,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,textAlign:"center",fontFamily:"'DM Sans',sans-serif"}}>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:44,color:CA.gold,letterSpacing:5,lineHeight:1}}>WILCO</div>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:44,color:CA.accent,letterSpacing:5,lineHeight:1}}>WILCO</div>
           <div style={{marginTop:14,fontSize:15,color:CA.muted2}}>Something broke on our end. Your logs are safe.</div>
-          <button onClick={()=>window.location.reload()} style={{marginTop:22,background:CA.gold,color:CA.navy,border:"none",borderRadius:12,padding:"14px 34px",fontWeight:700,fontSize:16,cursor:"pointer",fontFamily:"'Bebas Neue'",letterSpacing:2}}>RELOAD</button>
+          <button onClick={()=>window.location.reload()} style={{marginTop:22,background:CA.accent,color:CA.navy,border:"none",borderRadius:12,padding:"14px 34px",fontWeight:700,fontSize:16,cursor:"pointer",fontFamily:"'Bebas Neue'",letterSpacing:2}}>RELOAD</button>
         </div>
       );
     }
@@ -2445,12 +2421,12 @@ function EventLanding({event, onStart, onLogin}) {
     <div className="fade-up" style={{display:"flex",flexDirection:"column",gap:14}}>
       <div style={{textAlign:"center",color:CA.blue,fontSize:11,letterSpacing:3,fontFamily:"'Bebas Neue'"}}>{event.gym}</div>
       <div style={{textAlign:"center",fontFamily:"'Bebas Neue'",fontSize:34,lineHeight:1.1,color:CA.text,letterSpacing:1}}>{event.headline}</div>
-      <div style={{background:`${CA.gold}15`,border:`1px solid ${CA.gold}55`,borderRadius:12,padding:"14px 16px",textAlign:"center"}}>
-        <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:CA.gold,letterSpacing:2}}>{event.trialDays} DAYS FREE</div>
+      <div style={{background:`${CA.accent}15`,border:`1px solid ${CA.accent}55`,borderRadius:12,padding:"14px 16px",textAlign:"center"}}>
+        <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:CA.accent,letterSpacing:2}}>{event.trialDays} DAYS FREE</div>
         <div style={{color:CA.muted2,fontSize:12,marginTop:4}}>then {PRICE_LABEL[event.tier]?.[event.billing]||""} for WILCO {event.tier.toUpperCase()}. Cancel anytime.</div>
       </div>
       <div style={{color:CA.muted2,fontSize:13,lineHeight:1.6,textAlign:"center"}}>{event.sub}</div>
-      <button onClick={onStart} style={btn(CA.gold,"#000",{fontSize:16})}>Start My Free Month</button>
+      <button onClick={onStart} style={btn(CA.accent,"#000",{fontSize:16})}>Start My Free Month</button>
       <div style={{color:CA.muted,fontSize:11,textAlign:"center",lineHeight:1.6}}>
         No charge today. Your card is only billed if you keep WILCO after the {event.trialDays}-day trial.
       </div>
@@ -2484,7 +2460,7 @@ function InstallPrompt({manual, onClose}) {
 
   const Step = ({n,children}) => (
     <div style={{display:"flex",alignItems:"center",gap:12,background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:10,padding:"12px 14px"}}>
-      <div style={{minWidth:26,height:26,borderRadius:"50%",background:`${CA.gold}22`,border:`1px solid ${CA.gold}66`,color:CA.gold,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,fontWeight:700}}>{n}</div>
+      <div style={{minWidth:26,height:26,borderRadius:"50%",background:`${CA.accent}22`,border:`1px solid ${CA.accent}66`,color:CA.accent,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,fontWeight:700}}>{n}</div>
       <div style={{color:CA.text,fontSize:13,lineHeight:1.5}}>{children}</div>
     </div>
   );
@@ -2495,31 +2471,31 @@ function InstallPrompt({manual, onClose}) {
         style={{width:"100%",maxWidth:380,background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:22}}>
         <div style={{textAlign:"center",marginBottom:14}}>
           <img src="/icon-192.png" alt="" width={56} height={56} style={{borderRadius:14,marginBottom:10}}/>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:24,color:CA.gold,letterSpacing:2}}>PUT WILCO ON YOUR HOME SCREEN</div>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:24,color:CA.accent,letterSpacing:2}}>PUT WILCO ON YOUR HOME SCREEN</div>
           <div style={{color:CA.muted2,fontSize:13,lineHeight:1.6,marginTop:6}}>
             WILCO isn't in the App Store. Install it from here and it opens full screen like a normal app, right next to the rest of your apps.
           </div>
         </div>
 
         {canNativeInstall && (
-          <button onClick={nativeInstall} disabled={installing} style={btn(CA.gold,"#000",{opacity:installing?0.7:1})}>
+          <button onClick={nativeInstall} disabled={installing} style={btn(CA.accent,"#000",{opacity:installing?0.7:1})}>
             {installing?"Installing...":"Add to Home Screen"}
           </button>
         )}
 
         {showIOSSteps && (
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
-            <Step n={1}>Tap the <b style={{color:CA.gold}}>Share</b> button <span style={{color:CA.gold}}>(the square with the arrow, bottom of Safari)</span></Step>
-            <Step n={2}>Scroll down and tap <b style={{color:CA.gold}}>Add to Home Screen</b></Step>
-            <Step n={3}>Tap <b style={{color:CA.gold}}>Add</b> in the top corner</Step>
+            <Step n={1}>Tap the <b style={{color:CA.accent}}>Share</b> button <span style={{color:CA.accent}}>(the square with the arrow, bottom of Safari)</span></Step>
+            <Step n={2}>Scroll down and tap <b style={{color:CA.accent}}>Add to Home Screen</b></Step>
+            <Step n={3}>Tap <b style={{color:CA.accent}}>Add</b> in the top corner</Step>
           </div>
         )}
 
         {!canNativeInstall && !showIOSSteps && (
           <div style={{color:CA.muted2,fontSize:13,lineHeight:1.6,textAlign:"center",background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:10,padding:"12px 14px"}}>
             {isIOS()
-              ? <>Open <b style={{color:CA.gold}}>app.trainwilco.com</b> in <b style={{color:CA.gold}}>Safari</b> to install. In-app browsers can't add to your home screen.</>
-              : <>Open <b style={{color:CA.gold}}>app.trainwilco.com</b> on your phone to install it there.</>}
+              ? <>Open <b style={{color:CA.accent}}>app.trainwilco.com</b> in <b style={{color:CA.accent}}>Safari</b> to install. In-app browsers can't add to your home screen.</>
+              : <>Open <b style={{color:CA.accent}}>app.trainwilco.com</b> on your phone to install it there.</>}
           </div>
         )}
 
@@ -2544,7 +2520,7 @@ function PaymentDisclosures({tier, billing, giftApplied, trialDays=7}) {
     <div style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:10,padding:"12px 14px",marginBottom:14}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
         <span style={{color:CA.muted,fontSize:11,letterSpacing:1}}>{tier.toUpperCase()} · {billing==="annual"?"ANNUAL":"MONTHLY"}</span>
-        <span style={{color:CA.gold,fontWeight:700,fontSize:16}}>{priceLabel}</span>
+        <span style={{color:CA.accent,fontWeight:700,fontSize:16}}>{priceLabel}</span>
       </div>
       {!giftApplied ? (
         <div style={{color:CA.muted2,fontSize:12,lineHeight:1.6}}>
@@ -2561,7 +2537,7 @@ function PaymentDisclosures({tier, billing, giftApplied, trialDays=7}) {
         Your subscription renews automatically each {renewWord} until cancelled. Manage or cancel anytime in Settings → Your Plan.
       </div>
       <div style={{color:CA.muted,fontSize:11,lineHeight:1.6,marginTop:6}}>
-        By subscribing you agree to our <a href={TERMS_URL} target="_blank" rel="noreferrer" style={{color:CA.gold}}>Terms &amp; Conditions</a> and <a href={PRIVACY_URL} target="_blank" rel="noreferrer" style={{color:CA.gold}}>Privacy Policy</a>.
+        By subscribing you agree to our <a href={TERMS_URL} target="_blank" rel="noreferrer" style={{color:CA.accent}}>Terms &amp; Conditions</a> and <a href={PRIVACY_URL} target="_blank" rel="noreferrer" style={{color:CA.accent}}>Privacy Policy</a>.
       </div>
     </div>
   );
@@ -2597,7 +2573,7 @@ function PayForm({confirmMode, payLabel, onSuccess}) {
       <PaymentElement options={{layout:"tabs"}}/>
       {error && <div style={{color:CA.red,fontSize:12,marginTop:10,textAlign:"center"}}>{error}</div>}
       <button onClick={submit} disabled={!stripe||submitting}
-        style={btn(CA.gold,"#000",{marginTop:14,opacity:(!stripe||submitting)?0.7:1,cursor:(!stripe||submitting)?"not-allowed":"pointer"})}>
+        style={btn(CA.accent,"#000",{marginTop:14,opacity:(!stripe||submitting)?0.7:1,cursor:(!stripe||submitting)?"not-allowed":"pointer"})}>
         {submitting ? "Processing..." : payLabel}
       </button>
     </div>
@@ -2703,7 +2679,7 @@ function PaymentStep({athleteId, pin, tier, billing, eventCtx, onSuccess}) {
               <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>HAVE A GIFT CODE? <span style={{color:CA.muted,fontWeight:400,textTransform:"none",letterSpacing:0}}>(optional)</span></label>
               <div style={{display:"flex",gap:8}}>
                 <input value={giftInput} onChange={e=>setGiftInput(e.target.value.toUpperCase())}
-                  placeholder="WILCO-XXXXX" style={inp({textTransform:"uppercase",letterSpacing:2,fontWeight:700})}/>
+                  placeholder="WILCO-XXXXX" style={inpA({textTransform:"uppercase",letterSpacing:2,fontWeight:700})}/>
                 <button onClick={applyGift} disabled={giftChecking||!giftInput.trim()}
                   style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.text,borderRadius:10,padding:"0 16px",cursor:"pointer",fontSize:13,fontWeight:700,whiteSpace:"nowrap",opacity:(giftChecking||!giftInput.trim())?0.6:1}}>
                   {giftChecking?"...":"Apply"}
@@ -2724,11 +2700,11 @@ function PaymentStep({athleteId, pin, tier, billing, eventCtx, onSuccess}) {
       {initError && (
         <div style={{textAlign:"center",padding:"12px 0"}}>
           <div style={{color:CA.red,fontSize:13,marginBottom:10}}>{initError}</div>
-          <button onClick={()=>setRetryKey(k=>k+1)} style={btn(CA.gold,"#000")}>Try Again</button>
+          <button onClick={()=>setRetryKey(k=>k+1)} style={btn(CA.accent,"#000")}>Try Again</button>
         </div>
       )}
       {clientSecret && stripeObj && (
-        <Elements stripe={stripeObj} options={{clientSecret, appearance:{theme:"night", variables:{colorPrimary:CA.gold, colorBackground:CA.navy3, colorText:CA.text, borderRadius:"10px"}}}}>
+        <Elements stripe={stripeObj} options={{clientSecret, appearance:{theme:"night", variables:{colorPrimary:CA.accent, colorBackground:CA.navy3, colorText:CA.text, borderRadius:"10px"}}}}>
           <PayForm confirmMode={confirmMode} payLabel={payLabel} onSuccess={onSuccess}/>
         </Elements>
       )}
@@ -2738,7 +2714,7 @@ function PaymentStep({athleteId, pin, tier, billing, eventCtx, onSuccess}) {
       {clientSecret && stripeFailed && (
         <div style={{textAlign:"center",padding:"12px 0"}}>
           <div style={{color:CA.red,fontSize:13,marginBottom:10,lineHeight:1.5}}>Payment couldn't load. An ad blocker may be blocking Stripe. Turn it off for this site, then tap retry.</div>
-          <button onClick={()=>setStripeRetryKey(k=>k+1)} style={btn(CA.gold,"#000")}>Retry</button>
+          <button onClick={()=>setStripeRetryKey(k=>k+1)} style={btn(CA.accent,"#000")}>Retry</button>
         </div>
       )}
       {clientSecret && !STRIPE_PK && (
@@ -3027,16 +3003,16 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
     <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:24}}>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
         <button onClick={()=>{const p=prevStep(); p?setStep(p):setView("home");}} style={{background:"none",border:"none",color:CA.muted,cursor:"pointer",fontSize:18}}>←</button>
-        <div style={{color:CA.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>NEW ATHLETE — STEP {Math.max(1,visibleSteps.indexOf(step)+1)} OF {visibleSteps.length}</div>
+        <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>NEW ATHLETE — STEP {Math.max(1,visibleSteps.indexOf(step)+1)} OF {visibleSteps.length}</div>
       </div>
       {step===1&&<>
         <div style={{marginBottom:16}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>FULL NAME</label>
-          <input value={data.name} onChange={e=>setD("name",e.target.value)} placeholder="Your name" style={inp()}/>
+          <input value={data.name} onChange={e=>setD("name",e.target.value)} placeholder="Your name" style={inpA()}/>
         </div>
         <div style={{marginBottom:16}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>PRIMARY SPORT</label>
-          <select value={data.sport} onChange={e=>setD("sport",e.target.value)} style={inp()}>
+          <select value={data.sport} onChange={e=>setD("sport",e.target.value)} style={inpA()}>
             {SPORTS.map(s=><option key={s}>{s}</option>)}
           </select>
         </div>
@@ -3049,8 +3025,8 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
             {k:"college",l:"College athlete"},
           ].map(o=>(
             <div key={o.k} onClick={()=>setD("level",o.k)}
-              style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",marginBottom:8,padding:"12px 14px",background:data.level===o.k?`${CA.gold}18`:CA.navy3,borderRadius:10,border:`2px solid ${data.level===o.k?CA.gold:CA.border}`,transition:"all 0.15s"}}>
-              <div style={{width:20,height:20,borderRadius:"50%",border:`2px solid ${data.level===o.k?CA.gold:CA.muted}`,background:data.level===o.k?CA.gold:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+              style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",marginBottom:8,padding:"12px 14px",background:data.level===o.k?`${CA.accent}18`:CA.navy3,borderRadius:10,border:`2px solid ${data.level===o.k?CA.accent:CA.border}`,transition:"all 0.15s"}}>
+              <div style={{width:20,height:20,borderRadius:"50%",border:`2px solid ${data.level===o.k?CA.accent:CA.muted}`,background:data.level===o.k?CA.accent:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
                 {data.level===o.k&&<span style={{color:"#000",fontSize:10,fontWeight:700}}>✓</span>}
               </div>
               <div>
@@ -3067,19 +3043,19 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CREATE PIN</label>
           <input type="password" inputMode="numeric" maxLength={4} value={data.pin}
             onChange={e=>setD("pin",e.target.value.replace(/\D/g,"").slice(0,4))}
-            placeholder="----" style={inp({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
+            placeholder="----" style={inpA({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
         </div>
         <div style={{marginBottom:16}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CONFIRM PIN</label>
           <input type="password" inputMode="numeric" maxLength={4} value={data.confirmPin}
             onChange={e=>setD("confirmPin",e.target.value.replace(/\D/g,"").slice(0,4))}
-            placeholder="----" style={inp({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
+            placeholder="----" style={inpA({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
         </div>
         <div style={{marginBottom:20}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>EMAIL <span style={{color:CA.muted,fontWeight:400}}>(used to recover your PIN or username)</span></label>
           <input type="email" inputMode="email" value={data.email}
             onChange={e=>setD("email",e.target.value)}
-            placeholder="you@email.com" style={inp()}/>
+            placeholder="you@email.com" style={inpA()}/>
         </div>
       </>}
       {step===3&&<>
@@ -3092,8 +3068,8 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
           {key:"fitness",label:"General Health & Fitness",sub:"Stay active, balanced approach, longevity"},
         ].map(g=>(
           <div key={g.key} onClick={()=>setD("goal",g.key)}
-            style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",marginBottom:8,padding:"12px 14px",background:data.goal===g.key?`${CA.gold}18`:CA.navy3,borderRadius:10,border:`2px solid ${data.goal===g.key?CA.gold:CA.border}`,transition:"all 0.15s"}}>
-            <div style={{width:20,height:20,borderRadius:"50%",border:`2px solid ${data.goal===g.key?CA.gold:CA.muted}`,background:data.goal===g.key?CA.gold:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+            style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",marginBottom:8,padding:"12px 14px",background:data.goal===g.key?`${CA.accent}18`:CA.navy3,borderRadius:10,border:`2px solid ${data.goal===g.key?CA.accent:CA.border}`,transition:"all 0.15s"}}>
+            <div style={{width:20,height:20,borderRadius:"50%",border:`2px solid ${data.goal===g.key?CA.accent:CA.muted}`,background:data.goal===g.key?CA.accent:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
               {data.goal===g.key&&<span style={{color:"#000",fontSize:10,fontWeight:700}}>✓</span>}
             </div>
             <div>
@@ -3112,21 +3088,21 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
           If your coach or athletic director gave you a team code, enter it below — it connects you to their dashboard automatically. <span style={{color:CA.text,fontWeight:600}}>Training on your own? Just leave this blank and hit Next.</span>
         </div>
         {/* Team code — joins athlete to a specific coach's dashboard */}
-        <div style={{marginBottom:14,background:`${CA.gold}0f`,border:`1px solid ${CA.gold}44`,borderRadius:10,padding:"12px 14px"}}>
-          <label style={{color:CA.gold,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>TEAM CODE <span style={{color:CA.muted,fontWeight:400,textTransform:"none",letterSpacing:0}}>(optional — from your coach or athletic director)</span></label>
+        <div style={{marginBottom:14,background:`${CA.accent}0f`,border:`1px solid ${CA.accent}44`,borderRadius:10,padding:"12px 14px"}}>
+          <label style={{color:CA.accent,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>TEAM CODE <span style={{color:CA.muted,fontWeight:400,textTransform:"none",letterSpacing:0}}>(optional — from your coach or athletic director)</span></label>
           <input value={data.coachCode} onChange={e=>setD("coachCode",e.target.value.toUpperCase())}
-            placeholder="e.g. LHS01" style={inp({textTransform:"uppercase",letterSpacing:3,fontWeight:700})}/>
+            placeholder="e.g. LHS01" style={inpA({textTransform:"uppercase",letterSpacing:3,fontWeight:700})}/>
           <div style={{color:CA.muted,fontSize:11,marginTop:6,lineHeight:1.5}}>No team code? No problem — WILCO works great on its own.</div>
         </div>
         <div style={{marginBottom:14}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH'S NAME <span style={{color:CA.muted,fontWeight:400}}>(optional)</span></label>
           <input value={data.coachName} onChange={e=>setD("coachName",e.target.value)}
-            placeholder="Coach Smith" style={inp()}/>
+            placeholder="Coach Smith" style={inpA()}/>
         </div>
         <div style={{marginBottom:20}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH'S EMAIL <span style={{color:CA.muted,fontWeight:400}}>(optional)</span></label>
           <input type="email" value={data.coachEmail} onChange={e=>setD("coachEmail",e.target.value)}
-            placeholder="coach@school.edu" style={inp()}/>
+            placeholder="coach@school.edu" style={inpA()}/>
           <div style={{color:CA.muted,fontSize:11,marginTop:6,lineHeight:1.5}}>Pro/Elite: coach gets weekly progress reports. All tiers: coach gets a welcome email.</div>
         </div>
       </>}
@@ -3138,7 +3114,7 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
           {["monthly","annual"].map(b=>(
             <button key={b} onClick={()=>setD("billing",b)}
               style={{flex:1,padding:"7px 0",borderRadius:8,border:"none",cursor:"pointer",fontSize:12,fontWeight:700,letterSpacing:1,fontFamily:"'Bebas Neue'",
-                background:data.billing===b?CA.gold:"transparent",
+                background:data.billing===b?CA.accent:"transparent",
                 color:data.billing===b?"#000":CA.muted,transition:"all 0.15s"}}>
               {b==="monthly"?"MONTHLY":"ANNUAL · SAVE ~17%"}
             </button>
@@ -3162,7 +3138,7 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
           <input type="date" value={data.birthday}
             onChange={e=>setD("birthday",e.target.value)}
             max={new Date().toISOString().split("T")[0]}
-            style={inp({colorScheme:"dark"})}/>
+            style={inpA({colorScheme:"dark"})}/>
         </div>
       </>}
 
@@ -3174,11 +3150,11 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
           <div style={{display:"flex",gap:8}}>
             <div style={{flex:1,position:"relative"}}>
               <input type="number" inputMode="numeric" min={3} max={8} value={data.heightFt}
-                onChange={e=>setD("heightFt",e.target.value)} placeholder="5" style={inp({textAlign:"center"})}/>
+                onChange={e=>setD("heightFt",e.target.value)} placeholder="5" style={inpA({textAlign:"center"})}/>
               <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:CA.muted,fontSize:12,pointerEvents:"none"}}>ft</span>
             </div>
             <div style={{flex:1}}>
-              <select value={data.heightIn} onChange={e=>setD("heightIn",e.target.value)} style={inp({textAlign:"center"})}>
+              <select value={data.heightIn} onChange={e=>setD("heightIn",e.target.value)} style={inpA({textAlign:"center"})}>
                 {[0,1,2,3,4,5,6,7,8,9,10,11].map(n=><option key={n} value={n}>{n} in</option>)}
               </select>
             </div>
@@ -3187,7 +3163,7 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
         <div style={{marginBottom:20}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>WEIGHT <span style={{color:CA.muted,fontWeight:400}}>(lbs)</span></label>
           <input type="number" inputMode="numeric" min={50} max={500} value={data.weight}
-            onChange={e=>setD("weight",e.target.value)} placeholder="e.g. 185" style={inp()}/>
+            onChange={e=>setD("weight",e.target.value)} placeholder="e.g. 185" style={inpA()}/>
         </div>
       </>}
 
@@ -3196,8 +3172,8 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
         <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Used to calibrate your strength benchmarks.</div>
         {["Male","Female"].map(g=>(
           <div key={g} onClick={()=>setD("gender",g)}
-            style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",marginBottom:8,padding:"14px 16px",background:data.gender===g?`${CA.gold}18`:CA.navy3,borderRadius:10,border:`2px solid ${data.gender===g?CA.gold:CA.border}`,transition:"all 0.15s"}}>
-            <div style={{width:20,height:20,borderRadius:"50%",border:`2px solid ${data.gender===g?CA.gold:CA.muted}`,background:data.gender===g?CA.gold:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+            style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",marginBottom:8,padding:"14px 16px",background:data.gender===g?`${CA.accent}18`:CA.navy3,borderRadius:10,border:`2px solid ${data.gender===g?CA.accent:CA.border}`,transition:"all 0.15s"}}>
+            <div style={{width:20,height:20,borderRadius:"50%",border:`2px solid ${data.gender===g?CA.accent:CA.muted}`,background:data.gender===g?CA.accent:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
               {data.gender===g&&<span style={{color:"#000",fontSize:10,fontWeight:700}}>✓</span>}
             </div>
             <div style={{color:CA.text,fontWeight:600,fontSize:14}}>{g}</div>
@@ -3212,8 +3188,8 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
         <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:20}}>
           {[2,3,4,5,6].map(d=>(
             <div key={d} onClick={()=>setD("trainingDays",d)}
-              style={{flex:"1 1 60px",padding:"16px 8px",textAlign:"center",cursor:"pointer",background:data.trainingDays===d?`${CA.gold}18`:CA.navy3,borderRadius:10,border:`2px solid ${data.trainingDays===d?CA.gold:CA.border}`,transition:"all 0.15s"}}>
-              <div style={{fontFamily:"'Bebas Neue'",fontSize:28,color:data.trainingDays===d?CA.gold:CA.muted2,lineHeight:1}}>{d}</div>
+              style={{flex:"1 1 60px",padding:"16px 8px",textAlign:"center",cursor:"pointer",background:data.trainingDays===d?`${CA.accent}18`:CA.navy3,borderRadius:10,border:`2px solid ${data.trainingDays===d?CA.accent:CA.border}`,transition:"all 0.15s"}}>
+              <div style={{fontFamily:"'Bebas Neue'",fontSize:28,color:data.trainingDays===d?CA.accent:CA.muted2,lineHeight:1}}>{d}</div>
               <div style={{color:CA.muted,fontSize:10,marginTop:2}}>days</div>
             </div>
           ))}
@@ -3227,8 +3203,8 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
           const selected = data.equipment.includes(eq);
           return (
             <div key={eq} onClick={()=>setD("equipment",selected?data.equipment.filter(e=>e!==eq):[...data.equipment,eq])}
-              style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",marginBottom:8,padding:"12px 16px",background:selected?`${CA.gold}18`:CA.navy3,borderRadius:10,border:`2px solid ${selected?CA.gold:CA.border}`,transition:"all 0.15s"}}>
-              <div style={{width:20,height:20,borderRadius:4,border:`2px solid ${selected?CA.gold:CA.muted}`,background:selected?CA.gold:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+              style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",marginBottom:8,padding:"12px 16px",background:selected?`${CA.accent}18`:CA.navy3,borderRadius:10,border:`2px solid ${selected?CA.accent:CA.border}`,transition:"all 0.15s"}}>
+              <div style={{width:20,height:20,borderRadius:4,border:`2px solid ${selected?CA.accent:CA.muted}`,background:selected?CA.accent:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
                 {selected&&<span style={{color:"#000",fontSize:10,fontWeight:700}}>✓</span>}
               </div>
               <div style={{color:CA.text,fontWeight:600,fontSize:14}}>{eq}</div>
@@ -3245,7 +3221,7 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>POSITION OR EVENT <span style={{color:CA.muted,fontWeight:400}}>(optional)</span></label>
           <input value={data.positionOrEvent} onChange={e=>setD("positionOrEvent",e.target.value)}
             placeholder="e.g. Linebacker, 100m sprints, Power lifter..."
-            style={inp()}/>
+            style={inpA()}/>
         </div>
         <button onClick={()=>{setErr("");setStep(11);}}
           style={{background:"none",border:"none",color:CA.muted,fontSize:13,cursor:"pointer",textAlign:"center",width:"100%",marginBottom:12}}>
@@ -3261,7 +3237,7 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
           <textarea value={data.injuryHistory} onChange={e=>setD("injuryHistory",e.target.value)}
             placeholder="e.g. Left knee surgery 2022, lower back tightness..."
             rows={3}
-            style={{...inp(),resize:"none",lineHeight:1.5}}/>
+            style={{...inpA(),resize:"none",lineHeight:1.5}}/>
         </div>
         <button onClick={()=>{setErr(""); if(student) setStep(12); else proceedToConsent();}}
           style={{background:"none",border:"none",color:CA.muted,fontSize:13,cursor:"pointer",textAlign:"center",width:"100%",marginBottom:12}}>
@@ -3276,7 +3252,7 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>GRADUATION YEAR <span style={{color:CA.muted,fontWeight:400}}>(optional)</span></label>
           <input type="number" inputMode="numeric" value={data.graduationYear}
             onChange={e=>setD("graduationYear",e.target.value.replace(/\D/g,"").slice(0,4))}
-            placeholder="e.g. 2027" style={inp({fontSize:20,letterSpacing:2,textAlign:"center"})}/>
+            placeholder="e.g. 2027" style={inpA({fontSize:20,letterSpacing:2,textAlign:"center"})}/>
         </div>
         <button onClick={()=>{setErr(""); proceedToConsent();}}
           style={{background:"none",border:"none",color:CA.muted,fontSize:13,cursor:"pointer",textAlign:"center",width:"100%",marginBottom:12}}>
@@ -3298,7 +3274,7 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
 
       {err&&<div style={{color:CA.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
       {step!==15 && (
-        <button onClick={nextStep} disabled={loading} style={btn(CA.gold,"#000",{opacity:loading?0.7:1,cursor:loading?"not-allowed":"pointer"})}>
+        <button onClick={nextStep} disabled={loading} style={btn(CA.accent,"#000",{opacity:loading?0.7:1,cursor:loading?"not-allowed":"pointer"})}>
           {loading ? "Please wait..."
             : step===14 ? (isPaidTier ? "Continue to Payment →" : "Start with Free →")
             : (step===lastDataStep && data.isSchool) ? "Create Account →"
@@ -3397,12 +3373,12 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
     return (
       <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:24,textAlign:"center"}}>
         <div style={{fontSize:34,marginBottom:12}}>⚡️</div>
-        <div style={{color:CA.gold,fontFamily:"'Bebas Neue'",fontSize:22,letterSpacing:2,marginBottom:8}}>FASTER SIGN-IN</div>
+        <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:22,letterSpacing:2,marginBottom:8}}>FASTER SIGN-IN</div>
         <div style={{color:CA.muted2,fontSize:13,lineHeight:1.6,marginBottom:20}}>
           Use Face ID to sign in next time — no name or PIN to type. You can still use your PIN anytime.
         </div>
         {err&&<div style={{color:CA.red,fontSize:12,marginBottom:12}}>{err}</div>}
-        <button onClick={enableBio} disabled={bioBusy} style={btn(CA.gold,"#000",{opacity:bioBusy?0.7:1,cursor:bioBusy?"not-allowed":"pointer"})}>
+        <button onClick={enableBio} disabled={bioBusy} style={btn(CA.accent,"#000",{opacity:bioBusy?0.7:1,cursor:bioBusy?"not-allowed":"pointer"})}>
           {bioBusy?"Setting up…":"Enable Face ID"}
         </button>
         <div style={{marginTop:10}}>
@@ -3416,7 +3392,7 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
     <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:24}}>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
         <button onClick={mode==="forgot"?backToLogin:()=>setView("home")} style={{background:"none",border:"none",color:CA.muted,cursor:"pointer",fontSize:18}}>←</button>
-        <div style={{color:CA.gold,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>
+        <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:18,letterSpacing:2}}>
           {mode==="forgot"?"FORGOT PIN":"ATHLETE LOGIN"}
         </div>
       </div>
@@ -3424,21 +3400,21 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
       {mode==="login"&&<>
         <div style={{marginBottom:16}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>YOUR NAME</label>
-          <input value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&login()} placeholder="Exact name you signed up with" style={inp()}/>
+          <input value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&login()} placeholder="Exact name you signed up with" style={inpA()}/>
         </div>
         <div style={{marginBottom:20}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>YOUR PIN</label>
           <input type="password" inputMode="numeric" maxLength={4} value={pin}
             onChange={e=>setPin(e.target.value.replace(/\D/g,"").slice(0,4))}
             onKeyDown={e=>e.key==="Enter"&&login()}
-            placeholder="----" style={inp({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
+            placeholder="----" style={inpA({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
         </div>
         {err&&<div style={{color:CA.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
-        <button onClick={login} disabled={loading} style={btn(CA.gold,"#000",{opacity:loading?0.7:1,cursor:loading?"not-allowed":"pointer"})}>
+        <button onClick={login} disabled={loading} style={btn(CA.accent,"#000",{opacity:loading?0.7:1,cursor:loading?"not-allowed":"pointer"})}>
           {loading?"Checking...":"Let's Get to Work ->"}
         </button>
         <div style={{textAlign:"center",marginTop:12,display:"flex",flexDirection:"column",gap:6}}>
-          {bioReady&&<button onClick={faceLogin} disabled={bioBusy} style={{background:"none",border:"none",color:CA.gold,fontSize:12,cursor:bioBusy?"default":"pointer"}}>{bioBusy?"Verifying…":"Use Face ID instead"}</button>}
+          {bioReady&&<button onClick={faceLogin} disabled={bioBusy} style={{background:"none",border:"none",color:CA.accent,fontSize:12,cursor:bioBusy?"default":"pointer"}}>{bioBusy?"Verifying…":"Use Face ID instead"}</button>}
           <button onClick={enterForgot} style={{background:"none",border:"none",color:CA.muted,fontSize:12,cursor:"pointer"}}>Forgot your PIN?</button>
           <button onClick={()=>setView("signup")} style={{background:"none",border:"none",color:CA.muted,fontSize:12,cursor:"pointer"}}>New athlete? Sign up here</button>
         </div>
@@ -3452,7 +3428,7 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
               <div style={{color:CA.muted2,fontSize:13,lineHeight:1.6,marginBottom:20}}>
                 If we found an account matching that name and email, your PIN has been sent. Check your spam folder too.
               </div>
-              <button onClick={backToLogin} style={btn(CA.gold,"#000")}>Back to Login</button>
+              <button onClick={backToLogin} style={btn(CA.accent,"#000")}>Back to Login</button>
             </div>
           : <>
               <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>
@@ -3460,16 +3436,16 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
               </div>
               <div style={{marginBottom:16}}>
                 <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>YOUR NAME</label>
-                <input value={recoveryName} onChange={e=>setRecoveryName(e.target.value)} placeholder="Exact name you signed up with" style={inp()}/>
+                <input value={recoveryName} onChange={e=>setRecoveryName(e.target.value)} placeholder="Exact name you signed up with" style={inpA()}/>
               </div>
               <div style={{marginBottom:20}}>
                 <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>RECOVERY EMAIL</label>
                 <input type="email" inputMode="email" value={recoveryEmail} onChange={e=>setRecoveryEmail(e.target.value)}
                   onKeyDown={e=>e.key==="Enter"&&sendRecovery()}
-                  placeholder="you@email.com" style={inp()}/>
+                  placeholder="you@email.com" style={inpA()}/>
               </div>
               {err&&<div style={{color:CA.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
-              <button onClick={sendRecovery} disabled={loading} style={btn(CA.gold,"#000",{opacity:loading?0.7:1,cursor:loading?"not-allowed":"pointer"})}>
+              <button onClick={sendRecovery} disabled={loading} style={btn(CA.accent,"#000",{opacity:loading?0.7:1,cursor:loading?"not-allowed":"pointer"})}>
                 {loading?"Sending...":"Email My PIN →"}
               </button>
               <div style={{textAlign:"center",marginTop:10}}>
@@ -4522,18 +4498,18 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           {historyLoaded&&(
           <div style={{display:"flex",alignItems:"baseline",gap:4,flexShrink:0}} title="Workouts logged">
             <span style={{color:CA.muted,fontSize:9,letterSpacing:1,fontWeight:600}}>WORKOUTS:</span>
-            <span style={{fontFamily:"'Bebas Neue'",fontSize:18,color:CA.gold,lineHeight:1}}>{groupIntoSessions(workoutHistory).length}</span>
+            <span style={{fontFamily:"'Bebas Neue'",fontSize:18,color:CA.accent,lineHeight:1}}>{groupIntoSessions(workoutHistory).length}</span>
           </div>
           )}
           <div style={{flex:1,minWidth:0,color:CA.muted,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{athlete.name}</div>
           {/* Tier badge — athlete world holds the accent electric-blue (TIERS.color stays
               gold for the coach side / pricing; we repoint just this render). */}
           {(()=>{const t=TIERS[athlete.tier||"free"];const bc=CA.accent;return(<span style={{flexShrink:0,background:`${bc}22`,border:`1px solid ${bc}`,borderRadius:4,padding:"1px 6px",color:bc,fontSize:9,fontWeight:700,letterSpacing:1}}>{t.badge}</span>);})()}
-          {athlete.certified_badge_earned_at&&(()=>{const cnt=athlete.total_sessions_logged||0;const tier=cnt>=1000?"×4":cnt>=500?"×3":cnt>=250?"×2":"";return<span title="WILCO Certified" style={{flexShrink:0,background:`${CA.gold}22`,border:`1px solid ${CA.gold}`,borderRadius:4,padding:"1px 6px",color:CA.gold,fontSize:9,fontWeight:700,letterSpacing:1}}>✦ CERTIFIED{tier?` ${tier}`:""}</span>;})()}
+          {athlete.certified_badge_earned_at&&(()=>{const cnt=athlete.total_sessions_logged||0;const tier=cnt>=1000?"×4":cnt>=500?"×3":cnt>=250?"×2":"";return<span title="WILCO Certified" style={{flexShrink:0,background:`${CA.accent}22`,border:`1px solid ${CA.accent}`,borderRadius:4,padding:"1px 6px",color:CA.accent,fontSize:9,fontWeight:700,letterSpacing:1}}>✦ CERTIFIED{tier?` ${tier}`:""}</span>;})()}
         </div>
         {/* Row 1.5: streak charge-chain — this week's training as a row of links,
             trained days lit + glowing (electric blue), rest cooled steel. Today is
-            marked by a brighter letter. Staggered light-up via .a-link on mount. */}
+            marked by a brighter letter. Static on mount — no light-up animation. */}
         {historyLoaded&&(()=>{
           const now=new Date();
           const dow=(now.getDay()+6)%7;                       // Mon=0 .. Sun=6
@@ -4572,7 +4548,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
               {athlete.temp_program_text?"✈️ Temp Program":"📋 "+(athlete.program_text?"Program":"Add Program")}
             </button>
           )}
-          {(athlete.tier||"free")!=="free"&&<button onClick={()=>{track("screen_view","nav",{screen:"log"});setShowLog(true);}} style={{background:CA.navy3,border:`1px solid ${CA.gold}`,color:CA.gold,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>MY LOG</button>}
+          {(athlete.tier||"free")!=="free"&&<button onClick={()=>{track("screen_view","nav",{screen:"log"});setShowLog(true);}} style={{background:CA.navy3,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>MY LOG</button>}
           {(athlete.tier||"free")!=="free"&&<button onClick={()=>{track("screen_view","nav",{screen:"progress"});setShowProgress(true);}} style={{background:CA.navy3,border:`1px solid ${CA.blue}`,color:CA.blue,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>PROGRESS</button>}
           <button onClick={()=>setShowSettings(true)} title="Settings" style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:14,lineHeight:1}}>⚙</button>
           {!isMobile&&<button onClick={onLogout} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12}}>Log Out</button>}
@@ -4582,10 +4558,10 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
 
       {/* Profile completion banner */}
       {!profileBannerDismissed&&!athlete.birthday&&(
-        <div style={{background:`${CA.gold}15`,borderBottom:`1px solid ${CA.gold}40`,padding:"8px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexShrink:0}}>
-          <div style={{color:CA.gold,fontSize:12}}>Help us personalize your program — takes 60 seconds.</div>
+        <div style={{background:`${CA.accent}15`,borderBottom:`1px solid ${CA.accent}40`,padding:"8px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexShrink:0}}>
+          <div style={{color:CA.accent,fontSize:12}}>Help us personalize your program — takes 60 seconds.</div>
           <div style={{display:"flex",gap:6,flexShrink:0}}>
-            <button onClick={()=>setShowProfileCompletion(true)} style={{background:CA.gold,border:"none",color:"#000",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontWeight:700}}>Complete Profile</button>
+            <button onClick={()=>setShowProfileCompletion(true)} style={{background:CA.accent,border:"none",color:"#000",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontWeight:700}}>Complete Profile</button>
             <button onClick={()=>{setProfileBannerDismissed(true);try{localStorage.setItem(`wilco_profile_banner_${athlete.id}`,"1");}catch(_){}}} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11}}>Later</button>
           </div>
         </div>
@@ -4594,14 +4570,14 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
       {/* One-time notifications offer (post-workout). Answering either way stamps
           PUSH_PROMPT_KEY so it never shows again. */}
       {showPushPrompt&&(
-        <div style={{background:`${CA.gold}15`,borderBottom:`1px solid ${CA.gold}40`,padding:"8px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexShrink:0}}>
-          <div style={{color:CA.gold,fontSize:12}}>Want Joe to remind you when you go quiet?</div>
+        <div style={{background:`${CA.accent}15`,borderBottom:`1px solid ${CA.accent}40`,padding:"8px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexShrink:0}}>
+          <div style={{color:CA.accent,fontSize:12}}>Want Joe to remind you when you go quiet?</div>
           <div style={{display:"flex",gap:6,flexShrink:0}}>
             <button onClick={async()=>{
               try{localStorage.setItem(PUSH_PROMPT_KEY,"1");}catch(_){}
               setShowPushPrompt(false);
               try{ await enablePush(); }catch(_){}
-            }} style={{background:CA.gold,border:"none",color:"#000",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontWeight:700}}>Turn On</button>
+            }} style={{background:CA.accent,border:"none",color:"#000",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontWeight:700}}>Turn On</button>
             <button onClick={()=>{
               try{localStorage.setItem(PUSH_PROMPT_KEY,"1");}catch(_){}
               setShowPushPrompt(false);
@@ -4621,15 +4597,15 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           <>
             {messages.map((m,i)=>(
               <div key={i} className="fade-up" style={{marginBottom:12,display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
-                {m.role==="assistant"&&<div style={{width:28,height:28,borderRadius:"50%",background:"linear-gradient(135deg,#3f7bff,#123a9e)",boxShadow:`0 0 12px ${CA_GLOW}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#fff",flexShrink:0,marginRight:8,marginTop:2}}>J</div>}
-                <div style={{maxWidth:"80%",padding:"10px 14px",borderRadius:m.role==="user"?"15px 15px 4px 15px":"15px 15px 15px 4px",background:m.role==="user"?"linear-gradient(180deg,#3f7bff,#2258e0)":"rgba(10,18,38,.62)",backdropFilter:m.role==="assistant"?"blur(6px)":undefined,WebkitBackdropFilter:m.role==="assistant"?"blur(6px)":undefined,color:m.role==="user"?"#fff":"#dde5f2",fontSize:14,lineHeight:1.7,border:m.role==="assistant"?"1px solid rgba(120,150,210,.22)":"none",whiteSpace:"pre-wrap"}}>
+                {m.role==="assistant"&&<div style={{width:28,height:28,borderRadius:"50%",background:CA_AVATAR,boxShadow:`0 0 12px ${CA_GLOW}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#fff",flexShrink:0,marginRight:8,marginTop:2}}>J</div>}
+                <div style={{maxWidth:"80%",padding:"10px 14px",borderRadius:m.role==="user"?"15px 15px 4px 15px":"15px 15px 15px 4px",background:m.role==="user"?CA_BUBBLE:"rgba(10,18,38,.62)",backdropFilter:m.role==="assistant"?"blur(6px)":undefined,WebkitBackdropFilter:m.role==="assistant"?"blur(6px)":undefined,color:m.role==="user"?"#fff":"#dde5f2",fontSize:14,lineHeight:1.7,border:m.role==="assistant"?"1px solid rgba(120,150,210,.22)":"none",whiteSpace:"pre-wrap"}}>
                   {m.role==="assistant"?<StreamText text={m.content}/>:m.content}
                 </div>
               </div>
             ))}
             {(loading||videoLoading)&&(
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
-                <div style={{width:28,height:28,borderRadius:"50%",background:"linear-gradient(135deg,#3f7bff,#123a9e)",boxShadow:`0 0 12px ${CA_GLOW}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#fff"}}>J</div>
+                <div style={{width:28,height:28,borderRadius:"50%",background:CA_AVATAR,boxShadow:`0 0 12px ${CA_GLOW}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#fff"}}>J</div>
                 <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:"16px 16px 16px 4px",padding:"12px 16px",display:"flex",alignItems:"center",gap:12}}>
                   {videoLoading
                     ? <><div className="ld-scan" style={{width:42,height:42}}/><span style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:11,color:CA.muted}}>Reviewing form</span></>
@@ -4653,7 +4629,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             Same workout
           </button>
           <button onClick={()=>confirmSession(true)}
-            style={{background:`${CA.gold}20`,border:`1px solid ${CA.gold}`,color:CA.gold,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+            style={{background:`${CA.accent}20`,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
             New session
           </button>
         </div>
@@ -4693,7 +4669,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           {movementPrompt&&(
             <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:24}}>
               <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:360}}>
-                <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:CA.gold,letterSpacing:2,marginBottom:4}}>FORM REVIEW</div>
+                <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:CA.accent,letterSpacing:2,marginBottom:4}}>FORM REVIEW</div>
                 <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>What movement are you filming? <span style={{color:CA.muted,fontSize:12}}>(optional but helps)</span></div>
                 <input
                   autoFocus
@@ -4708,7 +4684,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
                     Cancel
                   </button>
                   <button onClick={()=>{ setMovementPrompt(false); videoInputRef.current?.click(); }}
-                    style={{flex:2,background:CA.gold,border:"none",color:"#000",borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>
+                    style={{flex:2,background:CA.accent,border:"none",color:"#000",borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>
                     Choose Video →
                   </button>
                 </div>
@@ -4763,7 +4739,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
               </div>
             ):athlete.program_locked?(
               <>
-                <div style={{background:`${CA.gold}15`,border:`1px solid ${CA.gold}40`,margin:"12px 16px 0",borderRadius:10,padding:"8px 14px",color:CA.gold,fontSize:12}}>
+                <div style={{background:`${CA.accent}15`,border:`1px solid ${CA.accent}40`,margin:"12px 16px 0",borderRadius:10,padding:"8px 14px",color:CA.accent,fontSize:12}}>
                   🔒 Program locked by coach — contact your coach to make changes.
                 </div>
                 <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
@@ -4784,7 +4760,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
                   onChange={e=>setAthleteProgramText(e.target.value)}
                   placeholder="Paste or type your program here, or use the photo upload above..."
                   rows={10}
-                  style={{flex:1,minHeight:180,background:"rgba(58,123,255,0.03)",border:`1px solid ${athleteProgramText!==(athlete.program_text||"")?CA.gold:CA.line2}`,borderRadius:12,padding:"12px 14px",color:CA.text,fontSize:12.5,outline:"none",resize:"none",lineHeight:1.75,fontFamily:"ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",transition:"border-color 0.15s"}}
+                  style={{flex:1,minHeight:180,background:"rgba(58,123,255,0.03)",border:`1px solid ${athleteProgramText!==(athlete.program_text||"")?CA.accent:CA.line2}`,borderRadius:12,padding:"12px 14px",color:CA.text,fontSize:12.5,outline:"none",resize:"none",lineHeight:1.75,fontFamily:"ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",transition:"border-color 0.15s"}}
                 />
                 {athleteProgramMsg&&(
                   <div style={{color:athleteProgramMsg==="Saved."?CA.green:CA.red,fontSize:12,fontWeight:600,textAlign:"center"}}>
@@ -4792,7 +4768,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
                   </div>
                 )}
                 <button onClick={saveAthleteProgram} disabled={athleteProgramSaving||athleteProgramText===(athlete.program_text||"")}
-                  style={{background:athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?CA.navy3:CA.gold,color:athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?CA.muted:"#000",border:`1px solid ${athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?CA.border:CA.gold}`,borderRadius:10,padding:"11px 20px",cursor:athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?"not-allowed":"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>
+                  style={{background:athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?CA.navy3:CA.accent,color:athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?CA.muted:"#000",border:`1px solid ${athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?CA.border:CA.accent}`,borderRadius:10,padding:"11px 20px",cursor:athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?"not-allowed":"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>
                   {athleteProgramSaving?"Saving...":"Save Program →"}
                 </button>
               </div>
@@ -5051,7 +5027,7 @@ function QuickLogSheet({athlete, workoutHistory, onClose, onAddProgram, onSend})
           <div style={{fontSize:32}}>📋</div>
           <div style={{color:CA.text,fontSize:15,lineHeight:1.6}}>Quick Log preps today's workout from your program — but I don't have a program on file for you yet.</div>
           <div style={{color:CA.muted,fontSize:13,lineHeight:1.6}}>Add it once and every log after that is one tap.</div>
-          <button onClick={onAddProgram} style={{background:CA.gold,color:"#000",border:"none",borderRadius:10,padding:"12px 28px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:15,cursor:"pointer"}}>Add My Program →</button>
+          <button onClick={onAddProgram} style={{background:CA.accent,color:"#000",border:"none",borderRadius:10,padding:"12px 28px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:15,cursor:"pointer"}}>Add My Program →</button>
         </div>
       ):phase==="loading"?(
         <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14}}>
@@ -5061,7 +5037,7 @@ function QuickLogSheet({athlete, workoutHistory, onClose, onAddProgram, onSend})
       ):phase==="error"?(
         <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"0 32px",gap:14,textAlign:"center"}}>
           <div style={{color:CA.text,fontSize:14,lineHeight:1.6}}>Couldn't build the draft. Might be a connection hiccup.</div>
-          <button onClick={generate} style={{background:CA.navy3,border:`1px solid ${CA.gold}`,color:CA.gold,borderRadius:10,padding:"10px 24px",cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>Try Again</button>
+          <button onClick={generate} style={{background:CA.navy3,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:10,padding:"10px 24px",cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>Try Again</button>
         </div>
       ):(
         <div style={{flex:1,minHeight:0,display:"flex",flexDirection:"column",padding:"14px 16px",gap:10}}>
@@ -5121,7 +5097,7 @@ function QuickLogSheet({athlete, workoutHistory, onClose, onAddProgram, onSend})
           {/* No safe-area bottom margin — reclaimed app-wide on purpose (47941e6);
               re-adding it here renders as a dead navy band under this button. */}
           <button onClick={()=>onSend(draft.replace(/\s*[@+]\s*_{2,}/g,"").trim())} disabled={!canSend}
-            style={{background:canSend?CA.gold:CA.navy3,color:canSend?"#000":CA.muted,border:`1px solid ${canSend?CA.gold:CA.border}`,borderRadius:12,padding:"14px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:16,cursor:canSend?"pointer":"not-allowed"}}>
+            style={{background:canSend?CA.accent:CA.navy3,color:canSend?"#000":CA.muted,border:`1px solid ${canSend?CA.accent:CA.border}`,borderRadius:12,padding:"14px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:16,cursor:canSend?"pointer":"not-allowed"}}>
             SEND TO CHAT →
           </button>
         </div>
@@ -5163,7 +5139,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
           <button key={t} onClick={()=>setTab(t)}
             style={{padding:"10px 20px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?CA.cyan:"transparent"}`,color:tab===t?CA.cyan:CA.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"color 0.15s",position:"relative"}}>
             {t}
-            {t==="proof"&&proofDigest&&!proofDigest.is_read&&<span style={{position:"absolute",top:8,right:8,width:6,height:6,borderRadius:"50%",background:CA.gold,display:"block"}}/>}
+            {t==="proof"&&proofDigest&&!proofDigest.is_read&&<span style={{position:"absolute",top:8,right:8,width:6,height:6,borderRadius:"50%",background:CA.accent,display:"block"}}/>}
           </button>
         ))}
       </div>
@@ -5225,10 +5201,10 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
                           <div style={{width:6,height:6,borderRadius:"50%",background:runDotColor,flexShrink:0}}/>
-                          <div style={{color:CA.gold,fontSize:11,fontWeight:700,letterSpacing:1}}>{isRunSession?"RUN":"WORKOUT"} — {fmtDateRelative(sessionDate)}</div>
+                          <div style={{color:CA.accent,fontSize:11,fontWeight:700,letterSpacing:1}}>{isRunSession?"RUN":"WORKOUT"} — {fmtDateRelative(sessionDate)}</div>
                         </div>
                         <div style={{display:"flex",alignItems:"center",gap:10}}>
-                          {!isRunSession&&feelVal&&<div style={{fontSize:11,color:feelVal==="great"||feelVal==="good"?CA.green:feelVal==="rough"?CA.red:CA.gold,fontWeight:600}}>{feelVal}</div>}
+                          {!isRunSession&&feelVal&&<div style={{fontSize:11,color:feelVal==="great"||feelVal==="good"?CA.green:feelVal==="rough"?CA.red:CA.accent,fontWeight:600}}>{feelVal}</div>}
                           {!isRunSession&&allExercises.length>0&&(
                             <button onClick={()=>setEditSession(session)} title="Edit this workout" style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:6,padding:"3px 8px",cursor:"pointer",fontSize:11}}>✎ Edit</button>
                           )}
@@ -5422,19 +5398,19 @@ function EditWorkoutModal({session, onClose, setWorkoutHistory}) {
               <div style={{display:"flex",gap:8}}>
                 <div style={{flex:1}}>
                   <label style={{color:CA.muted,fontSize:9,letterSpacing:1,display:"block",marginBottom:3}}>SETS</label>
-                  <input type="number" min={0} value={r.sets} onChange={e=>updateRow(idx,"sets",e.target.value)} style={inp({padding:"6px 8px",fontSize:12})}/>
+                  <input type="number" min={0} value={r.sets} onChange={e=>updateRow(idx,"sets",e.target.value)} style={inpA({padding:"6px 8px",fontSize:12})}/>
                 </div>
                 <div style={{flex:1}}>
                   <label style={{color:CA.muted,fontSize:9,letterSpacing:1,display:"block",marginBottom:3}}>REPS</label>
-                  <input type="number" min={0} value={r.reps} onChange={e=>updateRow(idx,"reps",e.target.value)} style={inp({padding:"6px 8px",fontSize:12})}/>
+                  <input type="number" min={0} value={r.reps} onChange={e=>updateRow(idx,"reps",e.target.value)} style={inpA({padding:"6px 8px",fontSize:12})}/>
                 </div>
                 <div style={{flex:1.3}}>
                   <label style={{color:CA.muted,fontSize:9,letterSpacing:1,display:"block",marginBottom:3}}>WEIGHT</label>
-                  <input type="number" min={0} value={r.weight} onChange={e=>updateRow(idx,"weight",e.target.value)} style={inp({padding:"6px 8px",fontSize:12})}/>
+                  <input type="number" min={0} value={r.weight} onChange={e=>updateRow(idx,"weight",e.target.value)} style={inpA({padding:"6px 8px",fontSize:12})}/>
                 </div>
                 <div style={{flex:1}}>
                   <label style={{color:CA.muted,fontSize:9,letterSpacing:1,display:"block",marginBottom:3}}>UNIT</label>
-                  <select value={r.unit} onChange={e=>updateRow(idx,"unit",e.target.value)} style={inp({padding:"6px 8px",fontSize:12})}>
+                  <select value={r.unit} onChange={e=>updateRow(idx,"unit",e.target.value)} style={inpA({padding:"6px 8px",fontSize:12})}>
                     <option value="lbs">lbs</option>
                     <option value="kg">kg</option>
                     <option value="bodyweight">BW</option>
@@ -5448,7 +5424,7 @@ function EditWorkoutModal({session, onClose, setWorkoutHistory}) {
         {/* ⚠️ Flat paddingBottom — never env(safe-area-inset-bottom) (47941e6). */}
         <div style={{padding:"12px 20px",paddingBottom:"12px",borderTop:`1px solid ${CA.border}`,display:"flex",gap:10,flexShrink:0}}>
           <button onClick={onClose} style={{flex:1,background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"12px 14px",cursor:"pointer",fontSize:14,fontWeight:600}}>Cancel</button>
-          <button onClick={save} disabled={saving} style={{flex:1,background:CA.gold,border:"none",color:CA.navy,borderRadius:8,padding:"12px 14px",cursor:saving?"default":"pointer",fontSize:14,fontWeight:700,opacity:saving?0.6:1}}>{saving?"Saving...":"Save changes"}</button>
+          <button onClick={save} disabled={saving} style={{flex:1,background:CA.accent,border:"none",color:CA.navy,borderRadius:8,padding:"12px 14px",cursor:saving?"default":"pointer",fontSize:14,fontWeight:700,opacity:saving?0.6:1}}>{saving?"Saving...":"Save changes"}</button>
         </div>
       </div>
     </div>
@@ -5659,7 +5635,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
           value={search}
           onChange={e=>setSearch(e.target.value)}
           placeholder="Search exercises..."
-          style={inp({padding:"8px 12px",fontSize:13})}
+          style={inpA({padding:"8px 12px",fontSize:13})}
         />
       </div>
 
@@ -5681,7 +5657,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
             {/* ── Rank Counter: PRs Hit · Top Rank · Strength Score ── */}
             <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:16,display:"flex",justifyContent:"space-around",textAlign:"center",alignItems:"center"}}>
               <div style={{flex:1}}>
-                <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:CA.gold,lineHeight:1}}>{prsHit}</div>
+                <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:CA.accent,lineHeight:1}}>{prsHit}</div>
                 <div style={{color:CA.muted,fontSize:10,letterSpacing:1,marginTop:2}}>PRs HIT</div>
               </div>
               <div style={{width:1,alignSelf:"stretch",background:CA.border}}/>
@@ -5694,7 +5670,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
               </div>
               <div style={{width:1,alignSelf:"stretch",background:CA.border}}/>
               <div style={{flex:1}}>
-                <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:CA.gold,lineHeight:1,textShadow:`0 0 16px ${CA.gold}66`}}>{strengthScore.toLocaleString()}</div>
+                <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:CA.accent,lineHeight:1,textShadow:`0 0 16px ${CA.accent}66`}}>{strengthScore.toLocaleString()}</div>
                 <div style={{color:CA.muted,fontSize:10,letterSpacing:1,marginTop:2,display:"flex",alignItems:"center",justifyContent:"center",gap:4}}>
                   STRENGTH SCORE
                   <span onClick={()=>setShowScoreInfo(true)} title="How is this calculated?" style={{cursor:"pointer",border:`1px solid ${CA.border}`,borderRadius:"50%",width:14,height:14,display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:9,color:CA.muted2,lineHeight:1}}>i</span>
@@ -5705,10 +5681,10 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
             <div style={{color:CA.cyan,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>STRENGTH BENCHMARKS</div>
 
             {!bodyweight&&(
-              <div style={{background:`${CA.gold}15`,border:`1px solid ${CA.gold}40`,borderRadius:10,padding:"12px 14px",marginBottom:16,display:"flex",alignItems:"center",gap:10}}>
+              <div style={{background:`${CA.accent}15`,border:`1px solid ${CA.accent}40`,borderRadius:10,padding:"12px 14px",marginBottom:16,display:"flex",alignItems:"center",gap:10}}>
                 <span style={{fontSize:18}}>⚠</span>
                 <div>
-                  <div style={{color:CA.gold,fontSize:12,fontWeight:600}}>Add your weight to see benchmarks</div>
+                  <div style={{color:CA.accent,fontSize:12,fontWeight:600}}>Add your weight to see benchmarks</div>
                   <div style={{color:CA.muted2,fontSize:11,marginTop:2}}>Go to Settings to add your weight in lbs.</div>
                 </div>
               </div>
@@ -5785,7 +5761,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                   </div>
                   <div style={{textAlign:"right"}}>
                     <div style={{color:CA.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>BEST EST. 1RM</div>
-                    <div style={{fontFamily:"'Bebas Neue'",fontSize:28,color:CA.gold,lineHeight:1}}>{Math.round(ex.e1rm)}<span style={{fontSize:11,color:CA.muted,fontFamily:"'DM Sans'",marginLeft:2}}>{ex.unit==="kg"?"kg":"lbs"}</span></div>
+                    <div style={{fontFamily:"'Bebas Neue'",fontSize:28,color:CA.accent,lineHeight:1}}>{Math.round(ex.e1rm)}<span style={{fontSize:11,color:CA.muted,fontFamily:"'DM Sans'",marginLeft:2}}>{ex.unit==="kg"?"kg":"lbs"}</span></div>
                     {ex.bwLoaded&&bwLoadLabel(ex.e1rm,bodyweight)&&<div style={{color:CA.muted,fontSize:10,marginTop:3}}>{bwLoadLabel(ex.e1rm,bodyweight)}</div>}
                   </div>
                 </div>
@@ -5838,18 +5814,18 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                   <div>
                     <div style={{color:CA.text,fontWeight:700,fontSize:14}}>{row.name}</div>
-                    <div style={{color:row.manual?CA.gold:CA.muted,fontSize:10,fontWeight:700,letterSpacing:1,marginTop:2}}>{row.manual?"ACTUAL 1RM":"ESTIMATED 1RM"}</div>
+                    <div style={{color:row.manual?CA.accent:CA.muted,fontSize:10,fontWeight:700,letterSpacing:1,marginTop:2}}>{row.manual?"ACTUAL 1RM":"ESTIMATED 1RM"}</div>
                   </div>
                   <div style={{textAlign:"right"}}>
-                    <div style={{fontFamily:"'Bebas Neue'",fontSize:28,color:CA.gold,lineHeight:1}}>{Math.round(row.active)}<span style={{fontSize:11,color:CA.muted,fontFamily:"'DM Sans'",marginLeft:2}}>{row.unit==="kg"?"kg":"lbs"}</span></div>
+                    <div style={{fontFamily:"'Bebas Neue'",fontSize:28,color:CA.accent,lineHeight:1}}>{Math.round(row.active)}<span style={{fontSize:11,color:CA.muted,fontFamily:"'DM Sans'",marginLeft:2}}>{row.unit==="kg"?"kg":"lbs"}</span></div>
                     {row.bwLoaded&&bwLoadLabel(row.active,bodyweight)&&<div style={{color:CA.muted,fontSize:10,marginTop:2}}>{bwLoadLabel(row.active,bodyweight)}</div>}
                     {row.manual&&row.estimated>0&&<div style={{color:CA.muted,fontSize:10,marginTop:2}}>est. {Math.round(row.estimated)}lbs</div>}
                   </div>
                 </div>
                 {editingKey===row.key?(
                   <div style={{display:"flex",gap:8,marginTop:10}}>
-                    <input autoFocus type="number" min={0} value={editVal} onChange={e=>setEditVal(e.target.value)} placeholder={`Actual 1RM (${row.unit==="kg"?"kg":"lbs"})`} style={inp({padding:"8px 10px",fontSize:13,flex:1})}/>
-                    <button onClick={()=>saveManual(row)} style={{background:CA.gold,border:"none",color:CA.navy,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13,fontWeight:700}}>Save</button>
+                    <input autoFocus type="number" min={0} value={editVal} onChange={e=>setEditVal(e.target.value)} placeholder={`Actual 1RM (${row.unit==="kg"?"kg":"lbs"})`} style={inpA({padding:"8px 10px",fontSize:13,flex:1})}/>
+                    <button onClick={()=>saveManual(row)} style={{background:CA.accent,border:"none",color:CA.navy,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13,fontWeight:700}}>Save</button>
                     <button onClick={()=>{setEditingKey(null);setEditVal("");}} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13}}>Cancel</button>
                   </div>
                 ):(
@@ -5872,7 +5848,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
         return (
         <div onClick={()=>setShowRankInfo(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.82)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:600,padding:24}}>
           <div onClick={e=>e.stopPropagation()} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:"20px 22px",maxWidth:360,width:"100%"}}>
-            <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:CA.gold,letterSpacing:1,marginBottom:4}}>THE RANKS</div>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:CA.accent,letterSpacing:1,marginBottom:4}}>THE RANKS</div>
             <div style={{color:CA.muted2,fontSize:12,lineHeight:1.5,marginBottom:14}}>How strong is the lift, as a multiple of your bodyweight — squat shown, tuned to your bodyweight and age{bodyweight?"":" (add your weight for exact numbers)"}. Every lift scales to its own standard.</div>
             <div style={{display:"flex",flexDirection:"column",gap:7,marginBottom:14}}>
               {TIER_NAMES.map((t,ti)=>ti).reverse().map(ti=>(
@@ -5883,10 +5859,10 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                 </div>
               ))}
             </div>
-            <div style={{background:`${CA.gold}12`,border:`1px solid ${CA.gold}40`,borderRadius:10,padding:"9px 12px",color:CA.muted2,fontSize:11.5,lineHeight:1.5,marginBottom:14}}>
-              Hit <span style={{color:"#a855f7",fontWeight:700}}>LEGENDARY</span>? Reach out to <a href="mailto:support@trainwilco.com" style={{color:CA.gold}}>support@trainwilco.com</a> to get your lift featured.
+            <div style={{background:`${CA.accent}12`,border:`1px solid ${CA.accent}40`,borderRadius:10,padding:"9px 12px",color:CA.muted2,fontSize:11.5,lineHeight:1.5,marginBottom:14}}>
+              Hit <span style={{color:"#a855f7",fontWeight:700}}>LEGENDARY</span>? Reach out to <a href="mailto:support@trainwilco.com" style={{color:CA.accent}}>support@trainwilco.com</a> to get your lift featured.
             </div>
-            <button onClick={()=>setShowRankInfo(false)} style={{width:"100%",background:CA.gold,border:"none",color:"#000",borderRadius:10,padding:"11px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14,cursor:"pointer"}}>Got it</button>
+            <button onClick={()=>setShowRankInfo(false)} style={{width:"100%",background:CA.accent,border:"none",color:"#000",borderRadius:10,padding:"11px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14,cursor:"pointer"}}>Got it</button>
           </div>
         </div>
         );
@@ -5896,7 +5872,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
       {showScoreInfo&&(
         <div onClick={()=>setShowScoreInfo(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.82)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:600,padding:24}}>
           <div onClick={e=>e.stopPropagation()} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:"20px 22px",maxWidth:340,width:"100%"}}>
-            <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:CA.gold,letterSpacing:1,marginBottom:8}}>STRENGTH SCORE</div>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:CA.accent,letterSpacing:1,marginBottom:8}}>STRENGTH SCORE</div>
             <div style={{color:CA.muted2,fontSize:13,lineHeight:1.6,marginBottom:14}}>
               Every lift you've ranked earns points for the level it's reached — and each level is worth more than the last. Rank up any lift, or add a new one, and your score climbs.
             </div>
@@ -5908,7 +5884,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                 </div>
               ))}
             </div>
-            <button onClick={()=>setShowScoreInfo(false)} style={{width:"100%",background:CA.gold,border:"none",color:"#000",borderRadius:10,padding:"11px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14,cursor:"pointer"}}>Got it</button>
+            <button onClick={()=>setShowScoreInfo(false)} style={{width:"100%",background:CA.accent,border:"none",color:"#000",borderRadius:10,padding:"11px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14,cursor:"pointer"}}>Got it</button>
           </div>
         </div>
       )}
@@ -5998,23 +5974,23 @@ function ProfileCompletionModal({athlete, onClose, onSave}) {
         </div>
         <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
 
-          {needsBirthday&&<div style={{marginBottom:16}}>{label("BIRTHDAY")}<input type="date" value={data.birthday} onChange={e=>setD("birthday",e.target.value)} max={new Date().toISOString().split("T")[0]} style={inp({colorScheme:"dark"})}/></div>}
+          {needsBirthday&&<div style={{marginBottom:16}}>{label("BIRTHDAY")}<input type="date" value={data.birthday} onChange={e=>setD("birthday",e.target.value)} max={new Date().toISOString().split("T")[0]} style={inpA({colorScheme:"dark"})}/></div>}
 
           {needsPhysical&&<>
             <div style={{marginBottom:16}}>{label("HEIGHT")}
               <div style={{display:"flex",gap:8}}>
-                <div style={{flex:1,position:"relative"}}><input type="number" min={3} max={8} value={data.heightFt} onChange={e=>setD("heightFt",e.target.value)} placeholder="5" style={inp({textAlign:"center"})}/><span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:CA.muted,fontSize:12,pointerEvents:"none"}}>ft</span></div>
-                <div style={{flex:1}}><select value={data.heightIn} onChange={e=>setD("heightIn",e.target.value)} style={inp({textAlign:"center"})}>{[0,1,2,3,4,5,6,7,8,9,10,11].map(n=><option key={n} value={n}>{n} in</option>)}</select></div>
+                <div style={{flex:1,position:"relative"}}><input type="number" min={3} max={8} value={data.heightFt} onChange={e=>setD("heightFt",e.target.value)} placeholder="5" style={inpA({textAlign:"center"})}/><span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:CA.muted,fontSize:12,pointerEvents:"none"}}>ft</span></div>
+                <div style={{flex:1}}><select value={data.heightIn} onChange={e=>setD("heightIn",e.target.value)} style={inpA({textAlign:"center"})}>{[0,1,2,3,4,5,6,7,8,9,10,11].map(n=><option key={n} value={n}>{n} in</option>)}</select></div>
               </div>
             </div>
-            <div style={{marginBottom:16}}>{label("WEIGHT (lbs)")}<input type="number" min={50} max={500} value={data.weight} onChange={e=>setD("weight",e.target.value)} placeholder="e.g. 185" style={inp()}/></div>
+            <div style={{marginBottom:16}}>{label("WEIGHT (lbs)")}<input type="number" min={50} max={500} value={data.weight} onChange={e=>setD("weight",e.target.value)} placeholder="e.g. 185" style={inpA()}/></div>
           </>}
 
           {needsGender&&<div style={{marginBottom:16}}>{label("GENDER")}
             <div style={{display:"flex",gap:8}}>
               {["Male","Female"].map(g=>(
                 <button key={g} onClick={()=>setD("gender",g)}
-                  style={{flex:1,padding:"10px 6px",borderRadius:8,border:`2px solid ${data.gender===g?CA.gold:CA.border}`,background:data.gender===g?`${CA.gold}18`:CA.navy3,color:data.gender===g?CA.gold:CA.muted2,cursor:"pointer",fontSize:11,fontWeight:600,transition:"all 0.15s"}}>
+                  style={{flex:1,padding:"10px 6px",borderRadius:8,border:`2px solid ${data.gender===g?CA.accent:CA.border}`,background:data.gender===g?`${CA.accent}18`:CA.navy3,color:data.gender===g?CA.accent:CA.muted2,cursor:"pointer",fontSize:11,fontWeight:600,transition:"all 0.15s"}}>
                   {g}
                 </button>
               ))}
@@ -6025,7 +6001,7 @@ function ProfileCompletionModal({athlete, onClose, onSave}) {
             <div style={{display:"flex",gap:8}}>
               {[2,3,4,5,6].map(d=>(
                 <button key={d} onClick={()=>setD("trainingDays",d)}
-                  style={{flex:1,padding:"10px 6px",borderRadius:8,border:`2px solid ${data.trainingDays===d?CA.gold:CA.border}`,background:data.trainingDays===d?`${CA.gold}18`:CA.navy3,color:data.trainingDays===d?CA.gold:CA.muted2,cursor:"pointer",fontFamily:"'Bebas Neue'",fontSize:18,transition:"all 0.15s"}}>
+                  style={{flex:1,padding:"10px 6px",borderRadius:8,border:`2px solid ${data.trainingDays===d?CA.accent:CA.border}`,background:data.trainingDays===d?`${CA.accent}18`:CA.navy3,color:data.trainingDays===d?CA.accent:CA.muted2,cursor:"pointer",fontFamily:"'Bebas Neue'",fontSize:18,transition:"all 0.15s"}}>
                   {d}
                 </button>
               ))}
@@ -6036,19 +6012,19 @@ function ProfileCompletionModal({athlete, onClose, onSave}) {
             {["Full gym","Barbells & racks","Dumbbells only","Bodyweight only","Home gym (mixed)"].map(eq=>{
               const sel=data.equipment.includes(eq);
               return <div key={eq} onClick={()=>setD("equipment",sel?data.equipment.filter(e=>e!==eq):[...data.equipment,eq])}
-                style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",marginBottom:6,padding:"10px 12px",background:sel?`${CA.gold}18`:CA.navy3,borderRadius:8,border:`2px solid ${sel?CA.gold:CA.border}`,transition:"all 0.15s"}}>
-                <div style={{width:18,height:18,borderRadius:4,border:`2px solid ${sel?CA.gold:CA.muted}`,background:sel?CA.gold:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontSize:9,color:"#000",fontWeight:700}}>{sel?"✓":""}</div>
+                style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",marginBottom:6,padding:"10px 12px",background:sel?`${CA.accent}18`:CA.navy3,borderRadius:8,border:`2px solid ${sel?CA.accent:CA.border}`,transition:"all 0.15s"}}>
+                <div style={{width:18,height:18,borderRadius:4,border:`2px solid ${sel?CA.accent:CA.muted}`,background:sel?CA.accent:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontSize:9,color:"#000",fontWeight:700}}>{sel?"✓":""}</div>
                 <div style={{color:CA.text,fontSize:13,fontWeight:600}}>{eq}</div>
               </div>;
             })}
           </div>}
 
-          {needsPosition&&<div style={{marginBottom:16}}>{label("POSITION OR EVENT",true)}<input value={data.positionOrEvent} onChange={e=>setD("positionOrEvent",e.target.value)} placeholder="e.g. Linebacker, 100m sprints..." style={inp()}/></div>}
+          {needsPosition&&<div style={{marginBottom:16}}>{label("POSITION OR EVENT",true)}<input value={data.positionOrEvent} onChange={e=>setD("positionOrEvent",e.target.value)} placeholder="e.g. Linebacker, 100m sprints..." style={inpA()}/></div>}
 
-          {needsInjury&&<div style={{marginBottom:16}}>{label("INJURIES OR LIMITATIONS",true)}<textarea value={data.injuryHistory} onChange={e=>setD("injuryHistory",e.target.value)} placeholder="e.g. Left knee surgery 2022..." rows={2} style={{...inp(),resize:"none",lineHeight:1.5}}/></div>}
+          {needsInjury&&<div style={{marginBottom:16}}>{label("INJURIES OR LIMITATIONS",true)}<textarea value={data.injuryHistory} onChange={e=>setD("injuryHistory",e.target.value)} placeholder="e.g. Left knee surgery 2022..." rows={2} style={{...inpA(),resize:"none",lineHeight:1.5}}/></div>}
 
           {err&&<div style={{color:CA.red,fontSize:12,marginBottom:12,textAlign:"center"}}>{err}</div>}
-          <button onClick={save} disabled={saving} style={btn(CA.gold,"#000",{opacity:saving?0.7:1,cursor:saving?"not-allowed":"pointer",marginBottom:8})}>
+          <button onClick={save} disabled={saving} style={btn(CA.accent,"#000",{opacity:saving?0.7:1,cursor:saving?"not-allowed":"pointer",marginBottom:8})}>
             {saving?"Saving...":"Save Profile →"}
           </button>
           <button onClick={onClose} style={btn("transparent",CA.muted,{border:`1px solid ${CA.border}`,fontSize:13,padding:"10px",letterSpacing:1})}>Skip for now</button>
@@ -6254,13 +6230,13 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
   };
 
   return (
-    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:400,padding:24,overflowY:"auto"}}>
+    <div className="cyber" style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:400,padding:24,overflowY:"auto"}}>
       <style>{GS}</style>
       <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:380,margin:"auto"}}>
 
         {/* Header */}
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:CA.gold,letterSpacing:3}}>SETTINGS</div>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:CA.accent,letterSpacing:3}}>SETTINGS</div>
           <button onClick={onClose} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"4px 12px",cursor:"pointer",fontSize:12}}>✕ Close</button>
         </div>
 
@@ -6273,11 +6249,11 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
 
         {/* Proof Feed schedule (Phase 6) */}
         <div style={{marginBottom:16}}>
-          <div style={{color:CA.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>PROOF FEED</div>
+          <div className="setgrp" style={{marginBottom:8}}>PROOF FEED</div>
           <div style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:10,padding:"12px 14px"}}>
             <label style={{display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",marginBottom:proofEnabled?12:0}}>
               <span style={{color:CA.text,fontSize:13}}>Weekly digest from Coach Joe</span>
-              <input type="checkbox" checked={proofEnabled} onChange={e=>setProofEnabled(e.target.checked)} style={{width:18,height:18,accentColor:CA.gold,cursor:"pointer"}}/>
+              <input type="checkbox" checked={proofEnabled} onChange={e=>setProofEnabled(e.target.checked)} style={{width:18,height:18,accentColor:CA.accent,cursor:"pointer"}}/>
             </label>
             {proofEnabled&&(
               <div style={{display:"flex",gap:8,marginBottom:10}}>
@@ -6298,7 +6274,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
             {proofEnabled&&<div style={{color:CA.muted,fontSize:10,marginBottom:10}}>Your timezone: {tz}</div>}
             <div style={{display:"flex",gap:8}}>
               <button onClick={saveProofSchedule} disabled={proofSaving} style={{flex:1,background:proofSaving?CA.navy:CA.navy,border:`1px solid ${CA.border}`,color:CA.text,borderRadius:8,padding:"9px",cursor:proofSaving?"default":"pointer",fontSize:13,fontWeight:600}}>{proofSaving?"Saving...":"Save schedule"}</button>
-              <button onClick={runProofNow} disabled={runningNow} style={{flex:1,background:runningNow?CA.navy3:CA.gold,border:"none",color:runningNow?CA.muted:"#000",borderRadius:8,padding:"9px",cursor:runningNow?"default":"pointer",fontSize:13,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>{runningNow?"Generating...":"Run now"}</button>
+              <button onClick={runProofNow} disabled={runningNow} style={{flex:1,background:runningNow?CA.navy3:CA.accent,border:"none",color:runningNow?CA.muted:"#000",borderRadius:8,padding:"9px",cursor:runningNow?"default":"pointer",fontSize:13,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>{runningNow?"Generating...":"Run now"}</button>
             </div>
             {proofSaveMsg&&<div style={{color:proofSaveMsg==="Saved."?CA.green:CA.red,fontSize:11,marginTop:8,textAlign:"center"}}>{proofSaveMsg}</div>}
             {runNowMsg&&<div style={{color:runNowMsg.startsWith("✓")?CA.green:CA.muted,fontSize:11,marginTop:8,textAlign:"center",lineHeight:1.4}}>{runNowMsg}</div>}
@@ -6307,7 +6283,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
 
         {/* Weight unit preference */}
         <div style={{marginBottom:20}}>
-          <div style={{color:CA.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>WEIGHT UNIT</div>
+          <div className="setgrp" style={{marginBottom:8}}>WEIGHT UNIT</div>
           <div style={{display:"flex",gap:0,background:CA.navy3,borderRadius:10,padding:4,border:`1px solid ${CA.border}`}}>
             {["lbs","kg"].map(u=>(
               <button key={u} onClick={()=>setUnit(u)}
@@ -6319,7 +6295,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
         </div>
 
         {/* Coach section — auto-saves on blur (no bulk Save button) */}
-        <div style={{color:CA.muted,fontSize:11,letterSpacing:1,marginBottom:6}}>MY COACH</div>
+        <div className="setgrp" style={{marginBottom:6}}>MY COACH</div>
         <div style={{color:CA.muted2,fontSize:12,marginBottom:16,lineHeight:1.5}}>
           {(athlete.tier||"free")==="free"
             ? "Your coach will receive a welcome email. Upgrade to Pro for weekly progress reports."
@@ -6333,7 +6309,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
             onChange={e=>setCoachName(e.target.value)}
             onBlur={saveCoachName}
             placeholder="Coach's full name"
-            style={inp()}/>
+            style={inpA()}/>
         </div>
 
         <div style={{marginBottom:14}}>
@@ -6344,7 +6320,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
             onChange={e=>setCoachEmail(e.target.value)}
             onBlur={saveCoachEmail}
             placeholder="coach@example.com"
-            style={inp()}/>
+            style={inpA()}/>
         </div>
 
         {savedMsg&&(
@@ -6357,11 +6333,11 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
             Turning it on auto-fires a welcome push (see enablePush) — no manual test. */}
         {pushOk&&(
           <div style={{marginBottom:16}}>
-            <div style={{color:CA.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>NOTIFICATIONS</div>
+            <div className="setgrp" style={{marginBottom:8}}>NOTIFICATIONS</div>
             <div style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:10,padding:"12px 14px"}}>
               <label style={{display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer"}}>
                 <span style={{color:CA.text,fontSize:13}}>Reminders from Coach Joe</span>
-                <input type="checkbox" checked={pushOn} disabled={pushBusy} onChange={togglePush} style={{width:18,height:18,accentColor:CA.gold,cursor:"pointer"}}/>
+                <input type="checkbox" checked={pushOn} disabled={pushBusy} onChange={togglePush} style={{width:18,height:18,accentColor:CA.accent,cursor:"pointer"}}/>
               </label>
               <div style={{color:CA.muted,fontSize:10,marginTop:6,lineHeight:1.5}}>Joe checks in when you go quiet for a few days. That's it. No spam.</div>
               {pushDenied&&!pushOn&&(
@@ -6375,7 +6351,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
         {/* Install app — the persistent entry point for users who dismissed the
             post-signup prompt. Hidden once the app is already on the home screen. */}
         {onInstallApp&&!isStandalone()&&(
-          <button onClick={onInstallApp} style={btn("transparent",CA.gold,{border:`1px solid ${CA.gold}55`,fontSize:13,padding:"10px",letterSpacing:1,marginBottom:10})}>
+          <button onClick={onInstallApp} style={btn("transparent",CA.accent,{border:`1px solid ${CA.accent}55`,fontSize:13,padding:"10px",letterSpacing:1,marginBottom:10})}>
             Install the App on Your Phone
           </button>
         )}
@@ -6384,7 +6360,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
             Tucked away near the bottom so the settings list stays uncluttered. */}
         <div style={{marginBottom:16}}>
           <button onClick={()=>setShowPlan(s=>!s)}
-            style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:CA.navy3,border:`1px solid ${showPlan?`${CA.gold}66`:CA.border}`,borderRadius:10,padding:"11px 14px",cursor:"pointer",transition:"border-color 0.15s"}}>
+            style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:CA.navy3,border:`1px solid ${showPlan?`${CA.accent}66`:CA.border}`,borderRadius:10,padding:"11px 14px",cursor:"pointer",transition:"border-color 0.15s"}}>
             <span style={{display:"flex",flexDirection:"column",alignItems:"flex-start",gap:2}}>
               <span style={{color:CA.muted,fontSize:11,letterSpacing:1,fontWeight:700}}>YOUR PLAN</span>
               <span style={{color:CA.muted2,fontSize:10.5}}>Billing, upgrade &amp; gift codes</span>
@@ -6436,7 +6412,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
               {["monthly","annual"].map(b=>(
                 <button key={b} onClick={()=>setSelectedBilling(b)}
                   style={{flex:1,padding:"7px 0",borderRadius:8,border:"none",cursor:"pointer",fontSize:12,fontWeight:700,letterSpacing:1,fontFamily:"'Bebas Neue'",
-                    background:selectedBilling===b?CA.gold:"transparent",
+                    background:selectedBilling===b?CA.accent:"transparent",
                     color:selectedBilling===b?"#000":CA.muted,transition:"all 0.15s"}}>
                   {b==="monthly"?"MONTHLY":"ANNUAL · SAVE ~17%"}
                 </button>
@@ -6485,7 +6461,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
               <input type="password" inputMode="numeric" maxLength={4} value={actionPin}
                 onChange={e=>setActionPin(e.target.value.replace(/\D/g,"").slice(0,4))}
                 placeholder="Enter PIN to confirm"
-                style={inp({textAlign:"center",letterSpacing:6,marginBottom:8})}/>
+                style={inpA({textAlign:"center",letterSpacing:6,marginBottom:8})}/>
               <button onClick={startUpgrade} disabled={upgrading}
                 style={btn(TIERS[selectedTier].color,"#000",{opacity:upgrading?0.7:1,cursor:upgrading?"not-allowed":"pointer"})}>
                 {upgrading?"Updating...":hasStripeSub?`Switch to ${TIERS[selectedTier].label} →`:`Subscribe to ${TIERS[selectedTier].label} →`}
@@ -6524,19 +6500,19 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
           };
           const copyBtn = (code)=>{
             const done = copiedCode===code;
-            return <button onClick={()=>copyCode(code)} style={{background:done?CA.gold:"none",border:`1px solid ${done?CA.gold:CA.border}`,color:done?"#000":CA.text,borderRadius:8,padding:"4px 10px",cursor:done?"default":"pointer",fontSize:11,fontWeight:700,transition:"all 0.15s",minWidth:64}}>{done?"Copied!":"Copy"}</button>;
+            return <button onClick={()=>copyCode(code)} style={{background:done?CA.accent:"none",border:`1px solid ${done?CA.accent:CA.border}`,color:done?"#000":CA.text,borderRadius:8,padding:"4px 10px",cursor:done?"default":"pointer",fontSize:11,fontWeight:700,transition:"all 0.15s",minWidth:64}}>{done?"Copied!":"Copy"}</button>;
           };
           return (
           <div style={{marginTop:4,marginBottom:16}}>
-            <div style={{color:CA.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>{hasFounder?"YOUR FOUNDER GIFT CODE":"GIFT WILCO TO 4 FRIENDS"}</div>
+            <div className="setgrp" style={{marginBottom:8}}>{hasFounder?"YOUR FOUNDER GIFT CODE":"GIFT WILCO TO 4 FRIENDS"}</div>
             {codes.length>0 ? (
               <div style={{display:"flex",flexDirection:"column",gap:6}}>
                 <div style={{color:CA.muted2,fontSize:11,marginBottom:2,lineHeight:1.5}}>{hasFounder?"Share this code with anyone — each person gets their first month of Pro free. Reusable, no limit.":"Each code gives a friend their first month of Pro free. Single use."}</div>
                 {codes.map((g,i)=>{
                   const redeemed = g.status==="redeemed" && !g.unlimited;
                   return (
-                    <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:CA.navy3,border:`1px solid ${g.unlimited?CA.gold:CA.border}`,borderRadius:10,padding:"9px 12px"}}>
-                      <span style={{fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:15,color:redeemed?CA.muted:CA.gold,textDecoration:redeemed?"line-through":"none"}}>{g.code}</span>
+                    <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:CA.navy3,border:`1px solid ${g.unlimited?CA.accent:CA.border}`,borderRadius:10,padding:"9px 12px"}}>
+                      <span style={{fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:15,color:redeemed?CA.muted:CA.accent,textDecoration:redeemed?"line-through":"none"}}>{g.code}</span>
                       {g.unlimited
                         ? <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
                             {g.redeemed_count>0&&<span style={{color:CA.muted,fontSize:11}}>{g.redeemed_count} claimed</span>}
@@ -6568,7 +6544,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
               <input type="password" inputMode="numeric" maxLength={4} value={actionPin}
                 onChange={e=>setActionPin(e.target.value.replace(/\D/g,"").slice(0,4))}
                 placeholder="PIN"
-                style={inp({textAlign:"center",letterSpacing:6,flex:1})}/>
+                style={inpA({textAlign:"center",letterSpacing:6,flex:1})}/>
               {cancelAtPeriodEnd ? (
                 <button onClick={resumeSub} disabled={actionBusy}
                   style={{flex:2,background:CA.green,border:"none",color:"#000",borderRadius:10,padding:"0 12px",cursor:"pointer",fontSize:13,fontWeight:700,opacity:actionBusy?0.7:1}}>
