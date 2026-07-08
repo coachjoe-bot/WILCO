@@ -1836,7 +1836,7 @@ function MorningBrief({D,athletes,changeRequests,coach,briefContext,onOpenAthlet
   const [outcomes,setOutcomes] = useState({});  // beatId -> outcome chip label
   const [qMsgs,setQMsgs] = useState({});        // beatId -> [{role,text}] reply thread
   const [qDone,setQDone] = useState({});        // beatId -> answered
-  const [input,setInput] = useState("");
+  const [inputs,setInputs] = useState({});      // beatId -> draft text (every open question has its own box)
   const [busy,setBusy] = useState(false);
 
   const week = briefWeekKey();
@@ -1882,7 +1882,7 @@ function MorningBrief({D,athletes,changeRequests,coach,briefContext,onOpenAthlet
 
   const answerQuestion = async (beat,text,viaChip)=>{
     const t=String(text||"").trim(); if(!t||busy) return;
-    setInput("");
+    setInputs(v=>({...v,[beat.id]:""}));
     setQMsgs(m=>({...m,[beat.id]:[...(m[beat.id]||[]),{role:"coach",text:t}]}));
     setBusy(true);
     try{
@@ -1925,7 +1925,6 @@ function MorningBrief({D,athletes,changeRequests,coach,briefContext,onOpenAthlet
 
   // ── open conversation ──
   const beats=brief.beats;
-  const activeQ=beats.find(b=>b.kind==="question"&&!qDone[b.id]);
   const myCalls=[...Object.values(outcomes)];
   const convo=(
     <div>
@@ -1951,7 +1950,9 @@ function MorningBrief({D,athletes,changeRequests,coach,briefContext,onOpenAthlet
                     {b.actions.map(a=><button key={a.id} disabled={busy} onClick={()=>act(b,a)} style={btnS(a.id!=="open"&&a.kind!=="done"&&b.actions[0]===a)}>{a.label}</button>)}
                   </div>
                 )}
-              {b.kind==="question"&&!qDone[b.id]&&b===activeQ&&(
+              {/* Every open question keeps its own chips + text box — answer in any
+                  order, not forced first-to-last. */}
+              {b.kind==="question"&&!qDone[b.id]&&(
                 <div style={{marginTop:10}}>
                   {b.question.chips&&b.question.chips.length>0&&(
                     <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
@@ -1959,9 +1960,9 @@ function MorningBrief({D,athletes,changeRequests,coach,briefContext,onOpenAthlet
                     </div>
                   )}
                   <div style={{display:"flex",gap:8}}>
-                    <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")answerQuestion(b,input,false);}} placeholder="Type a reply — or tap a chip" disabled={busy}
+                    <input value={inputs[b.id]||""} onChange={e=>setInputs(v=>({...v,[b.id]:e.target.value}))} onKeyDown={e=>{if(e.key==="Enter")answerQuestion(b,inputs[b.id],false);}} placeholder="Type a reply — or tap a chip" disabled={busy}
                       style={{flex:1,background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:9,padding:"9px 12px",color:CA.text,fontSize:13,outline:"none",fontFamily:"'DM Sans'"}}/>
-                    <button disabled={busy||!input.trim()} onClick={()=>answerQuestion(b,input,false)} style={btnS(true)}>{busy?"…":"Send"}</button>
+                    <button disabled={busy||!(inputs[b.id]||"").trim()} onClick={()=>answerQuestion(b,inputs[b.id],false)} style={btnS(true)}>{busy?"…":"Send"}</button>
                   </div>
                 </div>
               )}
@@ -2130,7 +2131,10 @@ function CoachCheckin({digest, team, coach, onRead}){
   const [busy,setBusy] = useState(false);
   const [done,setDone] = useState(!!c.checkin_done);
   const endRef = useRef(null);
-  useEffect(()=>{ endRef.current?.scrollIntoView({behavior:"smooth",block:"nearest"}); },[msgs]);
+  // Scroll only on NEW messages — the mount-time scroll dragged the page straight
+  // down past the Edition to this check-in (report opened at the bottom, not the top).
+  const didMount = useRef(false);
+  useEffect(()=>{ if(!didMount.current){didMount.current=true;return;} endRef.current?.scrollIntoView({behavior:"smooth",block:"nearest"}); },[msgs]);
 
   const q = questions[qi];
   const teamCtx = ()=> team? `Team read: ${team.n} athletes, ${team.activePct}% active, adherence ${team.adherenceAvg??"n/a"}%. Strengths: ${(team.strengths||[]).map(s=>s.name).join(", ")||"—"}. Weak spots: ${(team.weaknesses||[]).map(s=>s.name).join(", ")||"—"}. Slipping: ${(team.quiet||[]).map(v=>v.athlete).join(", ")||"none"}.` : "";
@@ -2230,6 +2234,8 @@ function CoachCheckin({digest, team, coach, onRead}){
 
 function CoachEdition({digest, athletes, coach, school, onBack, onRead}){
   const c = digest.content_json||{};
+  // Always open the Edition at the masthead, not wherever Reports was scrolled.
+  useEffect(()=>{ window.scrollTo(0,0); },[digest.id]);
   // Edition number = this coach's Nth team edition (weekly+monthly, oldest = No. 1).
   // The gateway scopes coach-digest reads to this coach, so no coach filter needed.
   const [edNo,setEdNo] = useState(null);
@@ -2424,8 +2430,12 @@ function GroupProgress({athletes,workouts,manualRMs}){
   const [cellGo,setCellGo] = useState(false);
   useEffect(()=>{
     if(tab!=="benchmarks"){ setCellGo(false); return; }
-    const t=setTimeout(()=>setCellGo(true),120);
-    return ()=>clearTimeout(t);
+    // Double-rAF instead of a 120ms timer: the roster-wide Grit compute can still
+    // be laying out when a timer fires, so the charge transition started from a
+    // half-painted frame and visibly jumped into place. Two frames guarantees the
+    // empty tubes have painted before the fill animates.
+    let r2; const r1=requestAnimationFrame(()=>{ r2=requestAnimationFrame(()=>setCellGo(true)); });
+    return ()=>{ cancelAnimationFrame(r1); if(r2)cancelAnimationFrame(r2); };
   },[tab]);
   const D = useMemo(()=>{
     const now=Date.now(), WK=7*864e5, WEEKS=12, weekStart=now-WEEKS*WK;
@@ -2502,7 +2512,7 @@ function GroupProgress({athletes,workouts,manualRMs}){
                 const frac=tf>=7?1:Math.max(0.06,b.avgTier-tf);
                 const next=tf<7?TIER_NAMES[tf+1]:null;
                 return (
-                  <div key={i} className={`hcell${cellGo?" go":""}`} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:12}}>
+                  <div key={i} className={`hcell proof-drop${cellGo?" go":""}`} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:12,animationDelay:`${Math.min(i*70,420)}ms`}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
                       <div>
                         <div style={{color:CA.text,fontWeight:700,fontSize:14}}>{b.name}</div>
@@ -2513,7 +2523,7 @@ function GroupProgress({athletes,workouts,manualRMs}){
                         <div style={{color:CA.muted,fontSize:10}}>avg e1RM · {b.n} athlete{b.n!==1?"s":""}</div>
                       </div>
                     </div>
-                    <div className="htube"><div className="hfill" style={{"--tc":TIER_COLORS[tf],"--tb":tf/7,"--pct":frac}}/></div>
+                    <div className="htube"><div className="hfill" style={{"--tc":TIER_COLORS[tf],"--tb":tf/7,"--pct":frac,transitionDelay:`${Math.min(i*70,420)}ms`}}/></div>
                     <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:9.5,letterSpacing:1.2,textTransform:"uppercase",color:CA.faint,marginTop:7}}>
                       {next?`${Math.round(frac*100)}% of the way to ${next}`:"Top of the ladder"}
                     </div>
@@ -2634,16 +2644,18 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
   return (
     <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,overflow:"hidden"}}>
       {/* Athlete header */}
-      <div style={{padding:"16px 20px",borderBottom:`1px solid ${CA.border}`,background:CA.navy3,display:"flex",alignItems:"center",gap:14}}>
+      {/* flexWrap: on narrow screens the status chips drop to their own row instead
+          of crushing into the name (the ⚠ Pain smush) */}
+      <div style={{padding:"16px 20px",borderBottom:`1px solid ${CA.border}`,background:CA.navy3,display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
         <div style={{width:48,height:48,borderRadius:"50%",background:`linear-gradient(135deg,#57a0ff,#2a63e6)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Bebas Neue'",fontSize:22,color:"#fff",flexShrink:0}}>
           {athlete.name[0].toUpperCase()}
         </div>
-        <div style={{flex:1,minWidth:0}}>
+        <div style={{flex:"1 1 180px",minWidth:0}}>
           <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.text,letterSpacing:1}}>{athlete.name}</div>
           <div style={{color:CA.muted,fontSize:12}}>{athlete.sport} · {groupIntoSessions(workouts).length} sessions</div>
           {athlete.season_date&&<div style={{color:CA.accent,fontSize:11}}>Season: {fmtDate(athlete.season_date)}</div>}
         </div>
-        <div style={{display:"flex",gap:8,flexShrink:0,alignItems:"center"}}>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
           {hasPain&&<div style={{background:`${CA.red}20`,border:`1px solid ${CA.red}`,borderRadius:8,padding:"4px 10px",color:CA.red,fontSize:11}}>⚠ Pain</div>}
           {athlete.temp_program_text&&<div style={{background:`${CA.amber}15`,border:`1px solid ${CA.amber}`,borderRadius:8,padding:"4px 10px",color:CA.amber,fontSize:11}}>✈️ Temp program</div>}
           {!athlete.temp_program_text&&athlete.program_text&&<div style={{background:CA.navy3,border:`1px solid ${CA.blue}`,borderRadius:8,padding:"4px 10px",color:CA.blue,fontSize:11}}>Program set</div>}
