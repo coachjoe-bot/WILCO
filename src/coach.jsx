@@ -12,9 +12,12 @@ import {
 // App.jsx's multi-athlete groupIntoSessions already imported above.
 import {
   groupIntoSessions as pcGroup, compareProgramVsActual, buildOneRMs, aggregateInjuries, totalSetVolume,
-  trueImprovementPRs, classifyTiers, blendAdherenceScore, buildLiftHistory,
+  trueImprovementPRs, classifyTiers, blendAdherenceScore, adherenceBreakdown, buildLiftHistory,
 } from "./proofcore.js";
 import { computeGritSnapshot, TIER_NAMES, TIER_COLORS, getBenchKey, resolveLift } from "./grit.js";
+// The Morning Brief — deterministic conversational beats (zero tokens to build;
+// Haiku only reacts when the coach free-types). See coach-dashboard-v2-spec §C.
+import { buildMorningBrief, decisionNote, briefWeekKey } from "./coachBrief.js";
 
 // ─── GSC — coach "control room" motion skin ──────────────────────────────────
 // The coach dashboard is the CONTROL ROOM to the athlete's gym floor: denser,
@@ -605,6 +608,8 @@ async function sbReadPaged(table, order = "created_at.desc") {
 
 // ─── COACH DASHBOARD ──────────────────────────────────────────────────────────
 function CoachDashboard({coach,onLogout}) {
+  // isMobile (<640) = phone layout; isNarrow (<900) = too tight for list+detail side-by-side
+
   const isMaster = coach.role==="master"||coach.access_code===MASTER_CODE;
   const isAdmin = coach.role==="admin";
   const [athletes,setAthletes] = useState([]);
@@ -623,6 +628,8 @@ function CoachDashboard({coach,onLogout}) {
   const [manualRMs,setManualRMs] = useState([]);        // manual_one_rms — Grit + adherence-load
   const [prescriptions,setPrescriptions] = useState([]); // program_prescriptions (parsed programs) — Overview adherence
   const [changeRequests,setChangeRequests] = useState([]); // program_change_requests — locked-program inbox
+  const [briefContext,setBriefContext] = useState([]);     // coach_context — Morning Brief suppression + notes
+  const [programPrefill,setProgramPrefill] = useState(null); // {athleteId, note} — brief "Draft the change" deep-link
   const [notifPrefs,setNotifPrefs] = useState(coach.notification_prefs||{injury:true,big_pr:true,inactive:true,digest:true});
   const [pushOn,setPushOn] = useState(false);
   const [pushBusy,setPushBusy] = useState(false);
@@ -635,6 +642,7 @@ function CoachDashboard({coach,onLogout}) {
   const [selectedDigest,setSelectedDigest] = useState(null);
   useEffect(()=>{ track("coach_dashboard_view","coach_dashboard"); },[]);
   const isMobile = useIsMobile();
+  const isNarrow = useIsMobile(900);
   const [selectMode,setSelectMode] = useState(false);
   const [selectedIds,setSelectedIds] = useState(new Set());
   const [bulkProgram,setBulkProgram] = useState("");
@@ -724,6 +732,12 @@ function CoachDashboard({coach,onLogout}) {
           setChangeRequests(Array.isArray(reqs)?reqs:[]);
         } catch(e){ /* table/rows may be empty */ }
       }
+      // Recent coach context (gateway scopes by coach_id) — the Morning Brief reads
+      // this week's decisions from it so acted-on flags don't resurface.
+      try {
+        const ctx = await sbRead("coach_context","?order=created_at.desc&limit=200&select=*");
+        setBriefContext(Array.isArray(ctx)?ctx:[]);
+      } catch(e){ /* empty is fine */ }
     } catch(e){console.error(e);}
     setLoading(false);
   };
@@ -866,11 +880,11 @@ function CoachDashboard({coach,onLogout}) {
         </div>
       </div>
 
-      {/* Tabs */}
-      <div style={{background:CA.navy2,borderBottom:`1px solid ${CA.border}`,display:"flex",padding:"0 20px"}}>
+      {/* Tabs — horizontally scrollable on narrow screens */}
+      <div style={{background:CA.navy2,borderBottom:`1px solid ${CA.border}`,display:"flex",padding:isMobile?"0 8px":"0 20px",overflowX:"auto",WebkitOverflowScrolling:"touch",scrollbarWidth:"none"}}>
         {tabs.map(t=>(
           <button key={t} onClick={()=>{setActiveTab(t);if(t!=="athletes")setSelected(null);}}
-            style={{padding:"12px 18px",background:"none",border:"none",borderBottom:`2px solid ${activeTab===t?CA.accent:"transparent"}`,color:activeTab===t?CA.accent:CA.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"color 0.15s"}}>
+            style={{padding:isMobile?"12px 13px":"12px 18px",background:"none",border:"none",borderBottom:`2px solid ${activeTab===t?CA.accent:"transparent"}`,color:activeTab===t?CA.accent:CA.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'",transition:"color 0.15s",whiteSpace:"nowrap",flexShrink:0}}>
             {t==="stats"?"Group Stats":t}
           </button>
         ))}
@@ -883,16 +897,23 @@ function CoachDashboard({coach,onLogout}) {
           <>
             {/* ── OVERVIEW TAB ── */}
             {activeTab==="overview"&&(
-              <CoachOverview athletes={athletes} workouts={workouts} prs={prs} manualRMs={manualRMs} prescriptions={prescriptions}
-                onOpenAthlete={(id)=>{const at=athletes.find(a=>a.id===id); if(at){setSelected(at);setActiveTab("athletes");}}}/>
+              <CoachOverview athletes={athletes} workouts={workouts} prs={prs} manualRMs={manualRMs} prescriptions={prescriptions} coach={coach}
+                changeRequests={changeRequests} briefContext={briefContext}
+                onOpenAthlete={(id)=>{const at=athletes.find(a=>a.id===id); if(at){setSelected(at);setActiveTab("athletes");}}}
+                onPrefillProgram={(id,note)=>{const at=athletes.find(a=>a.id===id); if(at){setProgramPrefill({athleteId:id,note});setSelected(at);setActiveTab("athletes");}}}
+                onResolveRequest={async (requestId,status)=>{
+                  await sbUpdate("program_change_requests",requestId,{status,resolved_at:new Date().toISOString()});
+                  setChangeRequests(prev=>prev.filter(r=>r.id!==requestId));
+                }}
+                onContextWritten={(row)=>setBriefContext(prev=>[row,...prev])}/>
             )}
 
             {/* ── ATHLETES TAB ── */}
             {activeTab==="athletes"&&(
-              <div style={{display:"grid",gridTemplateColumns:(!isMobile&&selected)?"300px 1fr":"1fr",gap:20,alignItems:"start"}}>
-                {/* Left: Athlete List — hidden on mobile when detail is open */}
-                {(!isMobile||!selected)&&(
-                <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,overflow:"hidden",position:isMobile?"static":"sticky",top:90}}>
+              <div style={{display:"grid",gridTemplateColumns:(!isNarrow&&selected)?"300px minmax(0,1fr)":"1fr",gap:20,alignItems:"start"}}>
+                {/* Left: Athlete List — hidden on narrow screens when detail is open */}
+                {(!isNarrow||!selected)&&(
+                <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,overflow:"hidden",position:isNarrow?"static":"sticky",top:90}}>
                   <div style={{padding:"12px 14px",borderBottom:`1px solid ${CA.border}`}}>
                     <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search athletes..."
                       style={{width:"100%",background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:8,padding:"8px 12px",color:CA.text,fontSize:13,outline:"none",marginBottom:8}}/>
@@ -971,10 +992,12 @@ function CoachDashboard({coach,onLogout}) {
                 </div>
                 )}
 
-                {/* Right: Athlete Detail — full-screen on mobile when selected */}
+                {/* Right: Athlete Detail — full-width on narrow screens when selected.
+                    minWidth:0 lets the pane shrink inside the grid (grid children
+                    default to min-width:auto → horizontal page overflow otherwise) */}
                 {selected&&(
-                  <div>
-                    {isMobile&&(
+                  <div style={{minWidth:0}}>
+                    {isNarrow&&(
                       <button onClick={()=>setSelected(null)}
                         style={{display:"flex",alignItems:"center",gap:6,background:CA.navy2,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13,marginBottom:12,fontFamily:"'DM Sans'"}}>
                         ← Athletes
@@ -985,6 +1008,8 @@ function CoachDashboard({coach,onLogout}) {
                       workouts={workouts.filter(w=>w.athlete_id===selected.id)}
                       prs={prs.filter(p=>p.athlete_id===selected.id)}
                       requests={changeRequests.filter(r=>r.athlete_id===selected.id)}
+                      prefill={programPrefill&&programPrefill.athleteId===selected.id?programPrefill:null}
+                      onPrefillConsumed={()=>setProgramPrefill(null)}
                       onResolveRequest={async (req,status)=>{
                         await sbUpdate("program_change_requests",req.id,{status,resolved_at:new Date().toISOString()});
                         setChangeRequests(prev=>prev.filter(r=>r.id!==req.id));
@@ -1001,7 +1026,7 @@ function CoachDashboard({coach,onLogout}) {
                     />
                   </div>
                 )}
-                {!selected&&!isMobile&&(
+                {!selected&&!isNarrow&&(
                   <div style={{display:"flex",alignItems:"center",justifyContent:"center",padding:60,color:CA.muted,fontSize:13,border:`1px dashed ${CA.border}`,borderRadius:14}}>
                     Select an athlete to view details
                   </div>
@@ -1317,101 +1342,8 @@ function CoachDashboard({coach,onLogout}) {
             })()}
 
             {/* ── ACCOUNT TAB (admin only) ── */}
-            {activeTab==="account"&&isAdmin&&!isMaster&&(()=>{
-              const schoolCoachesList = allCoaches.filter(c=>c.school_id===coach.school_id&&c.role!=="admin");
-              const atLimit = schoolCoachesList.length>=(school?.max_coaches||3);
-              const [acName,setAcName] = useState("");
-              const [acEmail,setAcEmail] = useState("");
-              const [acErr,setAcErr] = useState("");
-              const [acOk,setAcOk] = useState("");
-              const [acCode,setAcCode] = useState("");          // freshly-created coach code (for its copy button)
-              const [codeCopied,setCodeCopied] = useState(null); // which code is showing "Copied!"
-              const [acSaving,setAcSaving] = useState(false);
-
-              const copyCoachCode = (code) => {
-                if(!code || codeCopied===code) return;
-                try{ navigator.clipboard.writeText(code); }catch(_){}
-                haptic(10);
-                setCodeCopied(code);
-                setTimeout(()=>setCodeCopied(c=>c===code?null:c), 2000);
-              };
-              const codeBtn = (code) => {
-                const done = codeCopied===code;
-                return <button onClick={()=>copyCoachCode(code)} style={{background:done?CA.accent:"none",border:`1px solid ${done?CA.accent:CA.border}`,color:done?"#fff":CA.muted2,borderRadius:6,padding:"2px 9px",cursor:done?"default":"pointer",fontSize:10,fontWeight:700,marginLeft:8,verticalAlign:"middle"}}>{done?"Copied!":"Copy"}</button>;
-              };
-
-              const doAddCoach = async () => {
-                if(!acName.trim()||!acEmail.trim()||!acEmail.includes("@")){setAcErr("Enter a name and valid email.");return;}
-                if(atLimit){setAcErr("Coach limit reached for your plan.");return;}
-                setAcSaving(true);setAcErr("");setAcOk("");setAcCode("");
-                try {
-                  const nextNum=(schoolCoachesList.reduce((m,c)=>Math.max(m,c.coach_number||0),0))+1;
-                  const newCode=(school?.code||"???").toUpperCase()+String(nextNum).padStart(2,"0");
-                  const row=await sbInsert("coaches",{name:acName.trim(),email:acEmail.trim().toLowerCase(),school_id:coach.school_id,coach_number:nextNum,access_code:newCode,role:"coach"});
-                  if(row?.length){
-                    fetch("/api/send-coach-invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth:getAuth(),coachName:acName.trim(),coachEmail:acEmail.trim().toLowerCase(),accessCode:newCode,schoolName:school?.name||""})}).catch(()=>{});
-                    setAcOk(`✓ ${acName.trim()} added — invite sent.`); setAcCode(newCode);
-                    setAcName("");setAcEmail("");
-                    loadAll();
-                  }else{setAcErr("Could not create coach. Try again.");}
-                }catch(e){setAcErr("Error: "+e.message);}
-                setAcSaving(false);
-              };
-
-              const doRemoveCoach = async (c) => {
-                if(!window.confirm(`Remove ${c.name}? Their athletes will remain unassigned.`)) return;
-                try {
-                  await sbUpdate("coaches",c.id,{pin:null,access_code:`REMOVED_${c.access_code}`});
-                  await sbUpdateWhere("athletes",`?coach_id=eq.${c.id}`,{coach_id:null});
-                  loadAll();
-                }catch(e){}
-              };
-
-              return (
-                <div style={{maxWidth:600}}>
-                  <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,padding:20,marginBottom:16}}>
-                    <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:14}}>SCHOOL ACCOUNT</div>
-                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:4}}>
-                      <div><div style={{color:CA.muted,fontSize:10,letterSpacing:1}}>SCHOOL</div><div style={{color:CA.text,fontWeight:600,fontSize:14,marginTop:2}}>{school?.name||"—"}</div></div>
-                      <div><div style={{color:CA.muted,fontSize:10,letterSpacing:1}}>CODE</div><div style={{display:"flex",alignItems:"center",marginTop:2}}><span style={{color:CA.accent,fontWeight:700,fontSize:18,fontFamily:"'Bebas Neue'",letterSpacing:2}}>{school?.code||"—"}</span>{school?.code&&codeBtn(school.code)}</div></div>
-                      <div><div style={{color:CA.muted,fontSize:10,letterSpacing:1}}>TIER</div><div style={{color:CA.text,fontSize:13,marginTop:2}}>{school?.tier||"—"}</div></div>
-                      <div><div style={{color:CA.muted,fontSize:10,letterSpacing:1}}>COACHES</div><div style={{color:CA.text,fontSize:13,marginTop:2}}>{schoolCoachesList.length} / {school?.max_coaches||3}</div></div>
-                    </div>
-                  </div>
-
-                  <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,padding:20,marginBottom:16}}>
-                    <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:14}}>COACHES</div>
-                    {schoolCoachesList.length===0?<div style={{color:CA.muted,fontSize:13,marginBottom:12}}>No coaches added yet.</div>:schoolCoachesList.map(c=>{
-                      const athCount=athletes.filter(a=>a.coach_id===c.id).length;
-                      return(
-                        <div key={c.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:`1px solid ${CA.border}`}}>
-                          <div>
-                            <div style={{color:CA.text,fontWeight:600,fontSize:13}}>{c.name}</div>
-                            <div style={{color:CA.muted,fontSize:11}}>{c.email} · Code: {c.access_code} · {athCount} athlete{athCount!==1?"s":""}</div>
-                          </div>
-                          <button onClick={()=>doRemoveCoach(c)} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.red,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:11}}>Remove</button>
-                        </div>
-                      );
-                    })}
-
-                    <div style={{marginTop:16}}>
-                      <div style={{color:CA.muted,fontSize:11,letterSpacing:1,marginBottom:10}}>ADD COACH</div>
-                      {atLimit?<div style={{color:CA.muted,fontSize:12,fontStyle:"italic"}}>Coach limit reached for your plan ({school?.max_coaches||3} max).</div>:(
-                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:8,alignItems:"center"}}>
-                          <input value={acName} onChange={e=>setAcName(e.target.value)} placeholder="Coach name" style={inpA({padding:"9px 12px",fontSize:13})}/>
-                          <input type="email" value={acEmail} onChange={e=>setAcEmail(e.target.value)} placeholder="email@school.edu" style={inpA({padding:"9px 12px",fontSize:13})}/>
-                          <button onClick={doAddCoach} disabled={acSaving} style={{background:CA_BTN,boxShadow:"0 4px 16px "+CA_GLOW,border:"none",color:"#fff",borderRadius:8,padding:"9px 14px",cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"'Bebas Neue'",letterSpacing:1,whiteSpace:"nowrap",opacity:acSaving?0.7:1}}>
-                            {acSaving?"Adding...":"Add Coach →"}
-                          </button>
-                        </div>
-                      )}
-                      {acErr&&<div style={{color:CA.red,fontSize:12,marginTop:8}}>{acErr}</div>}
-                      {acOk&&<div style={{color:CA.green,fontSize:12,marginTop:8,fontWeight:600}}>{acOk}{acCode&&<> Code: <span style={{fontFamily:"'Bebas Neue'",letterSpacing:1,color:CA.accent,fontSize:14}}>{acCode}</span>{codeBtn(acCode)}</>}</div>}
-                    </div>
-                  </div>
-                </div>
-              );
-            })()}
+            {/* hooks-order fix: account tab is a real component, not a conditional IIFE (mirrors the sales-demo fix) */}
+            {activeTab==="account"&&isAdmin&&!isMaster&&<AccountTab coach={coach} allCoaches={allCoaches} school={school} athletes={athletes} loadAll={loadAll}/>}
 
             {/* ── COACHES TAB (master only) ── */}
             {activeTab==="coaches"&&isMaster&&(
@@ -1463,6 +1395,18 @@ function CoachDashboard({coach,onLogout}) {
 // from the shared proofcore engine (Phase 0) over the roster data already loaded —
 // zero tokens, no new round-trip. See docs/coach-experience-vision.md §1.
 const DAYMS = 86400000;
+// Fixed Mon–Sun calendar week. Single source of the "this week" window for the
+// whole Overview — every stat card and the briefing share it (no rolling 7d).
+const weekBounds = (ref=Date.now())=>{
+  const d=new Date(ref); d.setHours(0,0,0,0);
+  const todayIdx=(d.getDay()+6)%7;                    // Mon=0 … Sun=6
+  const start=d.getTime()-todayIdx*DAYMS;
+  const days=Array.from({length:7},(_,i)=>{
+    const dd=new Date(start+i*DAYMS);
+    return {t:start+i*DAYMS, l:"MTWTFSS"[i], full:dd.toLocaleDateString("en-US",{weekday:"short"}), d:dd.getDate()};
+  });
+  return {start, end:start+7*DAYMS, days, todayIdx};
+};
 const FEEL_ORDER = [["great","Great",CA.green],["good","Good",CA.blue],["average","OK",CA.amber],["rough","Rough",CA.red]];
 // prE1RM, trueImprovementPRs, classifyTiers, blendAdherenceScore now live in
 // proofcore (shared with the server Coach's Edition so the two never disagree).
@@ -1484,14 +1428,14 @@ function OverviewCard({title,trend,children,readout,tone,style}){
   );
 }
 
-function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthlete}){
+function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthlete,coach,changeRequests,briefContext,onPrefillProgram,onResolveRequest,onContextWritten}){
   const isMobile = useIsMobile();
-  const [resolved,setResolved] = useState(()=>new Set());
   const [tip,setTip] = useState(null);
   // one-shot entrance flag: charts render at their empty state on first paint,
   // then sweep/draw to their real values once this flips (next frame).
   const [mounted,setMounted] = useState(false);
   useEffect(()=>{ const r=requestAnimationFrame(()=>requestAnimationFrame(()=>setMounted(true))); return ()=>cancelAnimationFrame(r); },[]);
+  const [showAllHeat,setShowAllHeat] = useState(false);
   const D = useMemo(()=>{
     const now = Date.now();
     const dstart = (t)=>{const x=new Date(t);x.setHours(0,0,0,0);return x.getTime();};
@@ -1501,11 +1445,15 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
     prs.forEach(p=>{(prByAth[p.athlete_id]=prByAth[p.athlete_id]||[]).push(p);});
     manualRMs.forEach(m=>{(manByAth[m.athlete_id]=manByAth[m.athlete_id]||[]).push(m);});
     prescriptions.forEach(pp=>{prescByAth[pp.athlete_id]=pp;});
-    const weekAgo=now-7*DAYMS, twoWk=now-14*DAYMS;
+    // Fixed Mon–Sun calendar week — the ONE week window every "this week" stat on
+    // this screen shares (heatmap, donut, wins, pain, by-sport, triage).
+    const wk = weekBounds(now);
+    const weekAgo=wk.start, twoWk=wk.start-7*DAYMS;
+    const todayIdx = wk.todayIdx;
 
     const rows = athletes.map(a=>{
       const wo = woByAth[a.id]||[];
-      const thisWk = pcGroup(wo.filter(w=>inWin(w,weekAgo)));
+      const thisWk = pcGroup(wo.filter(w=>inWin(w,weekAgo,wk.end)));
       const lastWk = pcGroup(wo.filter(w=>inWin(w,twoWk,weekAgo)));
       const parsed = prescByAth[a.id]?.parsed_json || null;
       const oneRMs = buildOneRMs(prByAth[a.id]||[], manByAth[a.id]||[]);
@@ -1513,24 +1461,31 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
       const injuries = aggregateInjuries([...lastWk,...thisWk]);
       const hasProgram = !!(a.program_text && a.program_text.trim().length>10);
       const presDays = a.training_days_per_week || parsed?.blocks?.[0]?.days?.length || null;
-      const score = blendAdherenceScore(thisWk.length, adherence, hasProgram, presDays);
-      // per-day logged flags for the heatmap (Mon..Sun of the last 7 days)
-      const days = [];
-      for(let i=6;i>=0;i--){ const ds=dstart(now-i*DAYMS), de=ds+DAYMS; days.push((wo.some(w=>{const t=new Date(w.created_at).getTime();return t>=ds&&t<de&&(w.parsed_data?.exercises?.length>0||w.parsed_data?.run_data);}))?1:0); }
+      // adherence v2: exercise choice (50) > volume (30) > load (20), targets
+      // pro-rated for how much of the fixed Mon–Sun week has elapsed
+      const elapsedFrac = (todayIdx+1)/7;
+      const score = blendAdherenceScore(thisWk.length, adherence, hasProgram, presDays, elapsedFrac);
+      const adhB = adherenceBreakdown(adherence, elapsedFrac);
+      const lastAt = (wo[0]&&new Date(wo[0].created_at).getTime())||null;
+      const daysSince = lastAt?Math.floor((now-lastAt)/DAYMS):null;
+      // per-day logged flags for the heatmap — fixed Mon..Sun; days after today = null (future)
+      const days = wk.days.map((day,i)=> i>todayIdx ? null :
+        (wo.some(w=>{const t=new Date(w.created_at).getTime();return t>=day.t&&t<day.t+DAYMS&&(w.parsed_data?.exercises?.length>0||w.parsed_data?.run_data);})?1:0));
       const snap = computeGritSnapshot(wo, manByAth[a.id]||[], {bodyweightLbs:a.weight_lbs||a.weight||0, gender:a.gender, age:a.age});
       // per-lift e1RM delta this week vs last (for the team strength-movement win)
       const twL=buildLiftHistory(thisWk), lwL=buildLiftHistory(lastWk);
       const lifts=Object.entries(twL).map(([lift,entries])=>{ const best=entries.reduce((x,y)=>y.e1rm>x.e1rm?y:x); const lw=lwL[lift]; let delta=null; if(lw){const lb=lw.reduce((x,y)=>y.e1rm>x.e1rm?y:x); delta=best.e1rm-lb.e1rm;} return {lift,deltaVsLastWeek:delta}; });
-      return {a, thisWk, lastWk, adherence, injuries, hasProgram, score, days, snap, lifts};
+      return {a, thisWk, lastWk, adherence, injuries, hasProgram, score, adhB, daysSince, days, snap, lifts};
     });
 
-    // sessions/day last 7d (across roster)
-    const dayCounts=[], dayLabels=[];
-    for(let i=6;i>=0;i--){ const ds=dstart(now-i*DAYMS), de=ds+DAYMS;
-      dayLabels.push(new Date(ds).toLocaleDateString("en-US",{weekday:"short"}));
-      dayCounts.push(athletes.reduce((s,a)=>s+pcGroup((woByAth[a.id]||[]).filter(w=>{const t=new Date(w.created_at).getTime();return t>=ds&&t<de;})).length,0));
-    }
-    const firstHalf = dayCounts.slice(0,3).reduce((a,b)=>a+b,0)||0, lastHalf = dayCounts.slice(4).reduce((a,b)=>a+b,0)||0;
+    // sessions/day — fixed Mon–Sun; today renders but is EXCLUDED from line + slope
+    // (an in-progress day always looks like a cliff otherwise)
+    const dayLabels = wk.days;
+    const dayCounts = wk.days.map(day=>athletes.reduce((s,a)=>s+pcGroup((woByAth[a.id]||[]).filter(w=>{const t=new Date(w.created_at).getTime();return t>=day.t&&t<day.t+DAYMS;})).length,0));
+    const completed = dayCounts.slice(0,todayIdx);   // full days only
+    const half = Math.floor(completed.length/2);
+    const firstHalf = completed.slice(0,half).reduce((a,b)=>a+b,0)||0, lastHalf = completed.slice(completed.length-half).reduce((a,b)=>a+b,0)||0;
+    const trendKnown = completed.length>=2;
 
     // active this week
     const activeCount = rows.filter(r=>r.thisWk.length>0).length;
@@ -1545,16 +1500,16 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
     const feelCounts={great:0,good:0,average:0,rough:0}; let feelTotal=0;
     workouts.filter(w=>inWin(w,weekAgo)).forEach(w=>{const f=w.parsed_data?.session_feel; if(f&&feelCounts[f]!=null){feelCounts[f]++;feelTotal++;}});
 
-    // volume-load: total working sets across roster, last 4 weeks
+    // volume-load: total working sets across roster, last 4 calendar weeks (current partial)
     const volWeeks=[];
-    for(let i=3;i>=0;i--){ const from=now-(i+1)*7*DAYMS, to=now-i*7*DAYMS;
+    for(let i=3;i>=0;i--){ const from=wk.start-i*7*DAYMS, to=from+7*DAYMS;
       volWeeks.push(athletes.reduce((s,a)=>s+totalSetVolume(pcGroup((woByAth[a.id]||[]).filter(w=>inWin(w,from,to)))),0));
     }
 
-    // true PRs — this week + last 6 weeks (weekly bars)
+    // true PRs — this week + last 6 weeks (calendar-week bars, current week partial)
     const truePRs = trueImprovementPRs(prs);
     const prWeeks=[];
-    for(let i=5;i>=0;i--){ const from=now-(i+1)*7*DAYMS, to=now-i*7*DAYMS;
+    for(let i=5;i>=0;i--){ const from=wk.start-i*7*DAYMS, to=from+7*DAYMS;
       prWeeks.push(truePRs.filter(p=>{const t=new Date(p.created_at||p.date||0).getTime();return t>=from&&t<to;}).length);
     }
     const prThisWk = prWeeks[prWeeks.length-1];
@@ -1585,6 +1540,8 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
     if(activePct>=80) statWins.push({icon:"⚡",title:`${activePct}% active`,detail:`${activeCount} of ${athletes.length} training this week`});
     // interleave stat / personal so it reads varied
     const wins=[]; while(wins.length<4){ if(statWins.length)wins.push(statWins.shift()); if(wins.length>=4)break; if(personalWins.length)wins.push(personalWins.shift()); if(!statWins.length&&!personalWins.length)break; }
+    // raw standouts for the shareable image export (same shape exportWins expects)
+    const notablePRs = recentTrue.slice(0,6).map(p=>({athlete:(athletes.find(a=>a.id===p.athlete_id)||{}).name||"Athlete",exercise:p.exercise,weight:fmtWeight(p.weight,p.unit),gain:Math.round(p.gain)}));
 
     // roster extras (folded in from the old Group Stats tab): active-by-sport,
     // this-week pain flags, inactive athletes.
@@ -1592,22 +1549,28 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
     const weekPain=[]; workouts.filter(w=>inWin(w,weekAgo)).forEach(w=>{ const pf=w.parsed_data?.pain_flags; if(pf&&pf.length){ const a=athletes.find(x=>x.id===w.athlete_id); weekPain.push({name:a?.name||"Athlete",areas:pf.map(p=>p.area).join(", "),at:w.created_at}); } });
     const inactive=rows.filter(r=>r.thisWk.length===0).map(r=>{ const last=(woByAth[r.a.id]||[])[0]||(woByAth[r.a.id]||[]).slice(-1)[0]; const days=last?Math.floor((now-new Date(last.created_at).getTime())/DAYMS):null; return {name:r.a.name, days}; }).sort((a,b)=>(a.days??9999)-(b.days??9999));
 
-    // briefing triage — ranked "who needs you today" (injury > quiet > adherence drop)
+    // briefing triage — ranked "who needs you today" (injury > quiet > adherence drop).
+    // Quiet is days-since-last-session (window-independent — a fixed Mon–Sun week
+    // would flag every weekend trainer on Monday morning otherwise); adherence
+    // waits until Thursday so pro-rated early-week scores don't cry wolf.
     const triage=[];
     rows.forEach(r=>{
       const inj=r.injuries;
       if(inj&&((inj.recurring&&inj.recurring.length)||(inj.active&&inj.active.length))){
         const rec=inj.recurring&&inj.recurring[0]; const area=rec?rec.area:inj.active[0];
         triage.push({id:r.a.id,sev:"crit",kind:"Injury",name:r.a.name,what:`${area} flagged${rec?` ${rec.count} sessions running`:" this week"}`});
-      } else if(r.thisWk.length===0 && r.lastWk.length>0){
-        triage.push({id:r.a.id,sev:"warn",kind:"Quiet",name:r.a.name,what:`no session this week — trained last week`});
-      } else if(r.score!=null && r.score<55){
-        triage.push({id:r.a.id,sev:"warn",kind:"Adherence",name:r.a.name,what:`adherence slipping (${r.score}%)`});
+      } else if(r.daysSince!=null && r.daysSince>=5 && r.daysSince<=21){
+        triage.push({id:r.a.id,sev:"warn",kind:"Quiet",name:r.a.name,what:`no session in ${r.daysSince} days`});
+      } else if(todayIdx>=3 && r.score!=null && r.score<55){
+        const b=r.adhB;
+        let why="";
+        if(b){ const parts=[["skipping prescribed lifts",b.E],["cutting sets short",b.V],...(b.W!=null?[["working lighter than prescribed",b.W]]:[])].sort((x,y)=>x[1]-y[1]); why=` — ${parts[0][0]}`; }
+        triage.push({id:r.a.id,sev:"warn",kind:"Adherence",name:r.a.name,what:`adherence slipping (${r.score}%)${why}`});
       }
     });
     triage.sort((a,b)=>(a.sev==="crit"?0:1)-(b.sev==="crit"?0:1));
 
-    return {rows,dayCounts,dayLabels,firstHalf,lastHalf,activeCount,activePct,teamAdh,noProgram,volWeeks,prWeeks,prThisWk,strengths,weaknesses,wins,movers,bySport,weekPain,inactive,triage};
+    return {rows,dayCounts,dayLabels,todayIdx,trendKnown,firstHalf,lastHalf,activeCount,activePct,teamAdh,noProgram,volWeeks,prWeeks,prThisWk,strengths,weaknesses,wins,notablePRs,movers,bySport,weekPain,inactive,triage};
   },[athletes,workouts,prs,manualRMs,prescriptions]);
 
   // count-up KPI figures (jump to final under reduced-motion) — declared before the
@@ -1617,17 +1580,26 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
 
   if(!athletes.length) return <div style={{textAlign:"center",padding:60,color:CA.muted}}>No athletes on your roster yet.</div>;
 
-  const triage = D.triage.filter(t=>!resolved.has(t.id));
-
-  const volMax = Math.max(1,...D.volWeeks), prMax = Math.max(1,...D.prWeeks), sMax = Math.max(1,...D.dayCounts);
+  const volMax = Math.max(1,...D.volWeeks), prMax = Math.max(1,...D.prWeeks), sMax = Math.max(1,...D.dayCounts.slice(0,D.todayIdx+1));
   const cell = (v)=>v?CA.green:CA.navy3;
+  // red → green gradient across the 0–100 adherence blend (hue 0 → 120) — health
+  // semantic, so it stays a true red→green scale (hsl, palette-independent).
+  const adhColor = (s)=>s==null?CA.muted:`hsl(${Math.round(1.2*Math.max(0,Math.min(100,s)))},62%,48%)`;
+  const adhTip = (r)=>{
+    if(r.score==null) return "No program to grade against";
+    const b=r.adhB;
+    if(!b) return `${r.score}% — sessions vs prescribed days (program not parsed yet)`;
+    return `${r.score}% · Exercises ${b.E}% · Volume ${b.V}%${b.W!=null?` · Weights ${b.W}%`:""} — weighted 50/30/20, pro-rated for mid-week`;
+  };
   // Hover tooltip shared across every chart data point.
   const tipOn = (text)=>({onMouseEnter:(e)=>setTip({x:e.clientX,y:e.clientY,text}),onMouseMove:(e)=>setTip({x:e.clientX,y:e.clientY,text}),onMouseLeave:()=>setTip(null)});
   const wkLabel = (i)=>i===D.prWeeks.length-1?"This week":`${D.prWeeks.length-1-i} wk ago`;
   const span = (n)=>isMobile?{}:{gridColumn:`span ${n}`};
-  // top rows to show in the adherence heatmap: worst adherence first (needs attention)
-  const heatRows = [...D.rows].filter(r=>r.hasProgram||r.thisWk.length>0)
-    .sort((a,b)=>((a.score??999)-(b.score??999))).slice(0,6);
+  // adherence heatmap rows: worst adherence first (needs attention); truncation is
+  // labeled + expandable so the coach knows it's a sample, not the roster
+  const heatEligible = [...D.rows].filter(r=>r.hasProgram||r.thisWk.length>0)
+    .sort((a,b)=>((a.score??999)-(b.score??999)));
+  const heatRows = showAllHeat?heatEligible:heatEligible.slice(0,6);
 
   const secLabel = (t)=>(
     <div style={{display:"flex",alignItems:"center",gap:12,margin:"24px 2px 12px"}}>
@@ -1637,33 +1609,10 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
   );
 
   return (
-    <div style={{maxWidth:1220}}>
-      {/* ── Briefing triage — who needs you today ── */}
-      <div style={{background:`linear-gradient(180deg,${CA.navy3},${CA.navy2})`,border:`1px solid ${CA.border}`,borderRadius:16,overflow:"hidden",marginTop:4}}>
-        <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:12,padding:"15px 18px",borderBottom:`1px solid ${CA.border}`,flexWrap:"wrap"}}>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:CA.text,letterSpacing:1}}>{triage.length>0?`${triage.length} athlete${triage.length!==1?"s":""} need you today`:"You're all caught up"}</div>
-          <div style={{color:CA.muted,fontSize:12}}>Today's briefing · auto-updated from this week's logs</div>
-        </div>
-        {triage.length===0
-          ? <div style={{padding:"26px 18px",textAlign:"center"}}><div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:CA.green,letterSpacing:1}}>✓ Everything looks healthy</div><div style={{color:CA.muted,fontSize:13,marginTop:4}}>Nothing needs you right now. The briefing refreshes as sessions come in.</div></div>
-          : triage.slice(0,6).map((t)=>(
-              <div key={t.id} style={{display:"flex",gap:12,padding:"12px 18px",borderBottom:`1px solid ${CA.border}80`,alignItems:"center"}}>
-                <span style={{width:3,alignSelf:"stretch",borderRadius:3,background:t.sev==="crit"?CA.red:CA.amber,flexShrink:0}}/>
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-                    <span style={{fontSize:9.5,fontWeight:800,letterSpacing:1,textTransform:"uppercase",padding:"2px 7px",borderRadius:5,color:t.sev==="crit"?CA.red:CA.amber,background:t.sev==="crit"?`${CA.red}22`:`${CA.amber}22`,border:`1px solid ${t.sev==="crit"?CA.red:CA.amber}55`}}>{t.kind}</span>
-                    <span style={{fontWeight:700,color:CA.text,fontSize:14}}>{t.name}</span>
-                    <span style={{color:CA.muted,fontSize:13}}>— {t.what}</span>
-                  </div>
-                </div>
-                <div style={{display:"flex",gap:6,flexShrink:0}}>
-                  {onOpenAthlete&&<button onClick={()=>onOpenAthlete(t.id)} style={{border:`1px solid ${CA.border}`,background:"transparent",color:CA.muted,borderRadius:8,padding:"5px 11px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Open</button>}
-                  <button onClick={()=>setResolved(s=>new Set(s).add(t.id))} style={{border:`1px solid ${CA.border}`,background:"transparent",color:CA.muted,borderRadius:8,padding:"5px 11px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Clear</button>
-                </div>
-              </div>
-            ))}
-        {triage.length>0&&<div style={{padding:"10px 18px",color:CA.muted,fontSize:12,background:`${CA.green}0d`}}>✓ {D.rows.length-triage.length} of {D.rows.length} on track · {D.prThisWk} true PR{D.prThisWk!==1?"s":""} this week</div>}
-      </div>
+    <div>
+      {/* ── The Morning Brief — proof-feed-style daily conversation ── */}
+      <MorningBrief D={D} athletes={athletes} changeRequests={changeRequests||[]} coach={coach} briefContext={briefContext||[]}
+        onOpenAthlete={onOpenAthlete} onPrefillProgram={onPrefillProgram} onResolveRequest={onResolveRequest} onContextWritten={onContextWritten}/>
 
       {secLabel("Team Health")}
       <div style={{display:"grid",gridTemplateColumns:isMobile?"1fr":"repeat(6,minmax(0,1fr))",gap:14}}>
@@ -1672,14 +1621,25 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
         <OverviewCard style={span(4)} title="Program adherence · this week"
           readout={D.teamAdh==null?`No parsed programs yet — assign & lock programs to track adherence.`:`Team average. ${D.noProgram>0?`${D.noProgram} without a program (excluded).`:"Everyone has a program."}`}
           tone={D.teamAdh==null?null:(D.teamAdh>=80?{k:"good",t:"Healthy"}:D.teamAdh>=60?{k:"warn",t:"Slipping"}:{k:"crit",t:"At risk"})}>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:46,color:CA.led,lineHeight:.9,textShadow:`0 0 18px ${CA.cyan}22`}}>{D.teamAdh==null?"—":Math.round(adhCU)}<span style={{fontSize:18,color:CA.muted,textShadow:"none"}}> {D.teamAdh==null?"":"% team avg"}</span></div>
-          <div style={{display:"grid",gridTemplateColumns:"92px repeat(7,1fr)",gap:5,alignItems:"center",marginTop:14}}>
-            <span/>{D.dayLabels.map((l,i)=><span key={i} style={{fontSize:10,color:CA.muted,textAlign:"center"}}>{l[0]}</span>)}
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:46,color:adhColor(D.teamAdh),lineHeight:.9}}>{D.teamAdh==null?"—":Math.round(adhCU)}<span style={{fontSize:18,color:CA.muted}}> {D.teamAdh==null?"":"% team avg"}</span></div>
+          <div style={{fontSize:10.5,color:CA.muted,marginTop:4}}>Exercise choice 50 · volume 30 · weight 20 — graded red → green</div>
+          <div style={{maxHeight:showAllHeat?340:"none",overflowY:showAllHeat?"auto":"visible"}}>
+          <div style={{display:"grid",gridTemplateColumns:"92px repeat(7,minmax(0,1fr)) 42px",gap:5,alignItems:"center",marginTop:14}}>
+            <span/>{D.dayLabels.map((l,i)=><span key={i} style={{fontSize:10,color:i===D.todayIdx?CA.cyan:CA.muted,textAlign:"center",fontWeight:i===D.todayIdx?800:400}}>{l.l}<div style={{fontSize:8,opacity:.75}}>{l.d}</div></span>)}
+            <span style={{fontSize:9,color:CA.muted,textAlign:"right",letterSpacing:.5}}>ADH</span>
             {heatRows.flatMap((r,ri)=>[
               <span key={`n${ri}`} style={{fontSize:11.5,color:CA.muted2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.a.name}</span>,
-              ...r.days.map((d,di)=><i key={`c${ri}-${di}`} className="c-fade" style={{aspectRatio:"1",borderRadius:3,background:r.hasProgram?cell(d):(d?`${CA.accent}66`:CA.navy3),border:`1px solid ${CA.line2}22`,cursor:"pointer",["--d"]:`${Math.min(780,(ri*7+di)*16)}ms`}} {...tipOn(`${r.a.name.split(" ")[0]} · ${D.dayLabels[di]}: ${d?"logged a session":"no session"}${r.hasProgram?"":" (no program)"}`)}/>)
+              ...r.days.map((d,di)=><i key={`c${ri}-${di}`} className="c-fade" style={{aspectRatio:"1",borderRadius:3,background:d==null?"transparent":r.hasProgram?cell(d):(d?CA.accent:CA.navy3),opacity:d==null?1:r.hasProgram?1:.55,border:d==null?`1px dashed ${CA.border}`:`1px solid ${CA.line2}22`,cursor:"pointer",["--d"]:`${Math.min(780,(ri*7+di)*16)}ms`}} {...tipOn(`${r.a.name.split(" ")[0]} · ${D.dayLabels[di].full} ${D.dayLabels[di].d}: ${d==null?"upcoming":d?"logged a session":"no session"}${r.hasProgram?"":" (no program)"}`)}/>),
+              <span key={`s${ri}`} style={{fontSize:11,fontWeight:800,textAlign:"right",color:adhColor(r.score),cursor:"pointer"}} {...tipOn(adhTip(r))}>{r.score==null?"—":`${r.score}`}</span>
             ])}
           </div>
+          </div>
+          {heatEligible.length>6&&(
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:10,gap:8}}>
+              <span style={{fontSize:11,color:CA.muted}}>Showing {heatRows.length} of {heatEligible.length} · worst adherence first</span>
+              <button onClick={()=>setShowAllHeat(s=>!s)} style={{border:`1px solid ${CA.border}`,background:"transparent",color:CA.muted2,borderRadius:7,padding:"3px 10px",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>{showAllHeat?"Show less":"Show all"}</button>
+            </div>
+          )}
         </OverviewCard>
 
         {/* Active this week gauge */}
@@ -1698,22 +1658,28 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
           </div>
         </OverviewCard>
 
-        {/* Sessions/day */}
-        <OverviewCard style={span(3)} title="Sessions / day · last 7d"
-          trend={{dir:D.lastHalf>=D.firstHalf?"up":"down",txt:`${D.dayCounts.reduce((a,b)=>a+b,0)} total`}}
-          readout={D.lastHalf>=D.firstHalf?"Holding or climbing into the week.":"Sliding off through the week — worth a nudge."}
-          tone={D.lastHalf>=D.firstHalf?{k:"good",t:"Healthy"}:{k:"warn",t:"Watch"}}>
+        {/* Sessions/day — fixed Mon–Sun; today plotted hollow, excluded from line + slope */}
+        <OverviewCard style={span(3)} title="Sessions / day · this week"
+          trend={{dir:!D.trendKnown||D.lastHalf>=D.firstHalf?"up":"down",txt:`${D.dayCounts.slice(0,D.todayIdx+1).reduce((a,b)=>a+b,0)} so far`}}
+          readout={!D.trendKnown?"Week just started — trend fills in as sessions come in.":D.lastHalf>=D.firstHalf?"Holding or climbing into the week.":"Sliding off through the week — worth a nudge."}
+          tone={!D.trendKnown?null:D.lastHalf>=D.firstHalf?{k:"good",t:"Healthy"}:{k:"warn",t:"Watch"}}>
           <ChartBox h={96}>{w=>{
-            const px=i=>5+(w-10)*(i/(D.dayCounts.length-1)), py=v=>84-72*(v/sMax);
-            const pts=D.dayCounts.map((v,i)=>`${px(i)},${py(v)}`).join(" ");
+            const px=i=>5+(w-10)*(i/6), py=v=>84-72*(v/sMax);
+            // line covers only the days strictly before today (today is in-progress)
+            const linePts=D.dayCounts.slice(0,D.todayIdx).map((v,i)=>`${px(i)},${py(v)}`).join(" ");
             return <>
               <line x1="0" y1="86" x2={w} y2="86" stroke={CA.border}/>
-              <polygon className="c-fade" style={{["--d"]:"280ms"}} fill={`${CA.cyan}14`} stroke="none" points={`${px(0)},86 ${pts} ${px(D.dayCounts.length-1)},86`}/>
-              <polyline className="c-draw" fill="none" stroke={CA.cyan} strokeWidth="2.5" points={pts} style={{filter:`drop-shadow(0 0 5px ${CA.cyan}99)`}}/>
-              {D.dayCounts.map((v,i)=><circle key={i} className="c-fade" style={{cursor:"pointer",["--d"]:`${1000+i*60}ms`}} cx={px(i)} cy={py(v)} r="4.5" fill={CA.cyan} {...tipOn(`${D.dayLabels[i]}: ${v} session${v!==1?"s":""}`)}/>)}
+              {D.todayIdx>=2&&<polyline className="c-draw" fill="none" stroke={CA.cyan} strokeWidth="2.5" points={linePts} style={{filter:`drop-shadow(0 0 5px ${CA.cyan}99)`}}/>}
+              {D.dayCounts.map((v,i)=>{
+                if(i>D.todayIdx) return null;
+                const cx=px(i), cy=py(v);
+                return i===D.todayIdx
+                  ? <circle key={i} className="c-fade" style={{cursor:"pointer",["--d"]:`${900+i*60}ms`}} cx={cx} cy={cy} r="5.5" fill={CA.navy2} stroke={CA.cyan} strokeWidth="2" strokeDasharray="3 2" {...tipOn(`${D.dayLabels[i].full} ${D.dayLabels[i].d} (today, in progress): ${v} session${v!==1?"s":""}`)}/>
+                  : <circle key={i} className="c-fade" style={{cursor:"pointer",["--d"]:`${900+i*60}ms`}} cx={cx} cy={cy} r="4.5" fill={CA.cyan} {...tipOn(`${D.dayLabels[i].full} ${D.dayLabels[i].d}: ${v} session${v!==1?"s":""}`)}/>;
+              })}
             </>;
           }}</ChartBox>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:9.5,color:CA.dim||CA.muted,marginTop:2}}>{D.dayLabels.map((l,i)=><span key={i}>{l[0]}</span>)}</div>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:9.5,color:CA.dim||CA.muted,marginTop:2}}>{D.dayLabels.map((l,i)=><span key={i} style={{opacity:i>D.todayIdx?.35:1,fontWeight:i===D.todayIdx?800:400,color:i===D.todayIdx?CA.cyan:undefined}}>{l.l}</span>)}</div>
         </OverviewCard>
 
         {/* True PRs bars */}
@@ -1774,6 +1740,15 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
               <span style={{fontSize:10,fontWeight:800,width:74,textAlign:"right",color:CA.red}}>{s.tierName}</span>
             </div>
           ))}
+          {/* Grit ladder legend — decodes the tier names on the rows above */}
+          <div style={{marginTop:14,paddingTop:12,borderTop:`1px solid ${CA.border}80`}}>
+            <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+              {TIER_NAMES.map((t,i)=>(
+                <span key={t} style={{fontSize:9,fontWeight:800,letterSpacing:.6,textTransform:"uppercase",padding:"2px 7px",borderRadius:5,background:CA.navy3,border:`1px solid ${CA.border}`,color:`hsl(${140*(i/(TIER_NAMES.length-1))},60%,${45+20*(i/(TIER_NAMES.length-1))}%)`}} {...tipOn(`Grit tier ${i+1} of ${TIER_NAMES.length}`)}>{t}</span>
+              ))}
+            </div>
+            <div style={{fontSize:10.5,color:CA.muted,marginTop:6}}>The Grit ladder, low → high. Bar = roster's average tier for that lift.</div>
+          </div>
         </div>
 
         {/* Wins — mixed notable stats + deduped personal bests */}
@@ -1792,7 +1767,10 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
                   </div>
                 ))}
               </div>}
-          <div style={{fontSize:11,color:CA.muted,marginTop:12,fontStyle:"italic"}}>Shareable image export lands in the weekly + monthly Coach's Edition.</div>
+          {(D.prThisWk>0||D.notablePRs.length>0)&&(
+            <button onClick={()=>exportWins({newPRs:D.prThisWk,notablePRs:D.notablePRs,activePct:D.activePct,adherenceAvg:D.teamAdh},coach)}
+              style={{marginTop:12,width:"100%",background:CA_BTN,color:"#fff",border:"none",borderRadius:9,padding:10,fontWeight:800,letterSpacing:1,textTransform:"uppercase",fontSize:12,cursor:"pointer",boxShadow:`0 0 14px ${CA_GLOW}`,fontFamily:"'DM Sans'"}}>⤓ Share as image</button>
+          )}
         </div>
       </div>
 
@@ -1839,6 +1817,190 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
 
       {/* floating hover tooltip */}
       {tip&&<div style={{position:"fixed",left:Math.min(tip.x+14,(typeof window!=="undefined"?window.innerWidth:9999)-220),top:tip.y+14,background:CA.navy,border:`1px solid ${CA.accent}`,borderRadius:8,padding:"6px 10px",fontSize:12,color:CA.text,pointerEvents:"none",zIndex:200,boxShadow:"0 6px 20px rgba(0,0,0,0.5)",maxWidth:220}}>{tip.text}</div>}
+    </div>
+  );
+}
+
+// ─── THE MORNING BRIEF — daily conversation over the triage (see spec §C) ──────
+// The proof-feed pattern turned toward the coach: a collapsed headline that opens
+// into a beat-by-beat walkthrough of highs, lows and trends, with suggestions the
+// coach decides on (Apply/Edit/Skip · handled/watching/dismiss) and 1–2 questions.
+// Beats are deterministic templates (coachBrief.js — zero tokens); Haiku reacts
+// only when the coach free-types. Every action writes a coach_context row, which
+// (a) suppresses that flag for the rest of the ISO week and (b) flows into next
+// week's Coach's Edition prompt via generateCoach — the follow-through loop.
+function MorningBrief({D,athletes,changeRequests,coach,briefContext,onOpenAthlete,onPrefillProgram,onResolveRequest,onContextWritten}){
+  const isMobile = useIsMobile();
+  const [open,setOpen] = useState(false);
+  const [brief,setBrief] = useState(null);      // snapshot while open — beats don't vanish mid-conversation
+  const [outcomes,setOutcomes] = useState({});  // beatId -> outcome chip label
+  const [qMsgs,setQMsgs] = useState({});        // beatId -> [{role,text}] reply thread
+  const [qDone,setQDone] = useState({});        // beatId -> answered
+  const [input,setInput] = useState("");
+  const [busy,setBusy] = useState(false);
+
+  const week = briefWeekKey();
+  const now = new Date();
+  const dateKey = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
+  const cleared = useMemo(()=>{
+    const s=new Set();
+    (briefContext||[]).forEach(r=>{const m=r.meta||{}; if(m.source==="morning_brief"&&m.kind==="decision"&&m.week===week&&m.athlete_id&&m.flag) s.add(`${m.athlete_id}:${m.flag}`);});
+    return s;
+  },[briefContext,week]);
+  // Cheap + pure — recomputes for the collapsed headline as decisions land.
+  const preview = useMemo(()=>buildMorningBrief({D,athletes,changeRequests,cleared,dateKey}),[D,athletes,changeRequests,cleared,dateKey]);
+  const concernsLeft = preview.beats.filter(b=>b.kind==="concern").length;
+
+  const openBrief = ()=>{ setBrief(preview); setOutcomes({}); setQMsgs({}); setQDone({}); setOpen(true); try{track("brief_open","coach_dashboard");}catch(e){} };
+
+  const writeContext = async (note,meta)=>{
+    const row={coach_id:coach.id, note, meta, is_long_term:false};
+    await sbInsert("coach_context",row);
+    onContextWritten&&onContextWritten({...row,created_at:new Date().toISOString()});
+  };
+
+  const act = async (beat,action)=>{
+    if(busy) return;
+    if(action.kind==="open_athlete"){ onOpenAthlete&&onOpenAthlete(beat.athleteId); return; }
+    if(action.kind==="share_wins"){ exportWins({newPRs:D.prThisWk,notablePRs:D.notablePRs},coach); setOutcomes(o=>({...o,[beat.id]:"Shared ✓"})); return; }
+    if(action.kind==="done"){ setOutcomes(o=>({...o,[beat.id]:"Done ✓"})); return; }
+    setBusy(true);
+    try{
+      if(action.kind==="resolve_request"&&action.payload?.resolution!=="edit"){
+        await onResolveRequest(action.payload.requestId, action.payload.resolution);
+      }
+      // "Edit" on a request and "Draft the change" both hand off to the program
+      // editor with the suggestion prefilled — the coach stays the author.
+      const handsOff = action.kind==="prefill_program"||(action.kind==="resolve_request"&&action.payload?.resolution==="edit");
+      await writeContext(decisionNote(beat,action.id), {kind:"decision",source:"morning_brief",athlete_id:beat.athleteId||null,flag:beat.meta?.baseFlag||beat.flag||null,action:action.id,week});
+      setOutcomes(o=>({...o,[beat.id]:`${action.label} ✓`}));
+      try{track("brief_decision","coach_dashboard");}catch(e){}
+      if(handsOff) onPrefillProgram&&onPrefillProgram(beat.athleteId, action.payload?.suggestion||beat.meta?.reason||beat.prose);
+    }catch(e){ console.error("brief action",e); }
+    setBusy(false);
+  };
+
+  const answerQuestion = async (beat,text,viaChip)=>{
+    const t=String(text||"").trim(); if(!t||busy) return;
+    setInput("");
+    setQMsgs(m=>({...m,[beat.id]:[...(m[beat.id]||[]),{role:"coach",text:t}]}));
+    setBusy(true);
+    try{
+      if(!viaChip&&isAskingBack(t)){
+        // Coach asked back — answer briefly, stay on the question. (Haiku, ~250 tok)
+        const sys=`You are WILCO, a strength coach's AI assistant, mid morning-brief. Answer the coach's question directly in 1-2 sentences, grounded in the team read, then stop. Team read: ${D.activeCount}/${athletes.length} trained this week, ${D.prThisWk} true PRs, team adherence ${D.teamAdh??"n/a"}%.`;
+        const reply=await askClaude(sys,`You asked them: "${beat.question.text}"\nThe coach replied: "${t}"`,250,[],"claude-haiku-4-5","coach_brief");
+        setQMsgs(m=>({...m,[beat.id]:[...(m[beat.id]||[]),{role:"wilco",text:reply||"Your call either way."}]}));
+        setBusy(false); return;
+      }
+      if(!viaChip){
+        // One-sentence reaction before moving on (Haiku, ~160 tok) — chips skip AI entirely.
+        const sys=`You are WILCO, a strength coach's AI assistant. React to the coach's answer in ONE short, direct sentence — acknowledge it and note one concrete implication if there is one. No follow-up question. Team: ${D.activeCount}/${athletes.length} trained this week, adherence ${D.teamAdh??"n/a"}%.`;
+        const reply=await askClaude(sys,`Q: "${beat.question.text}"\nCoach: "${t}"`,160,[],"claude-haiku-4-5","coach_brief");
+        if(reply) setQMsgs(m=>({...m,[beat.id]:[...(m[beat.id]||[]),{role:"wilco",text:reply}]}));
+      }
+      await writeContext(`${beat.question.text} → ${t}`.slice(0,280), {kind:"notes",source:"morning_brief",week,...(beat.athleteId?{athlete_id:beat.athleteId}:{})});
+      setQDone(d=>({...d,[beat.id]:true}));
+    }catch(e){ console.error("brief answer",e); setQDone(d=>({...d,[beat.id]:true})); }
+    setBusy(false);
+  };
+
+  // ONE primary-styled action max (CA_BTN + white); the rest are calm ghost buttons.
+  const btnS=(primary)=>({border:primary?"none":`1px solid ${CA.border}`,background:primary?CA_BTN:"transparent",color:primary?"#fff":CA.muted2,borderRadius:8,padding:"6px 12px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'",boxShadow:primary?`0 0 12px ${CA_GLOW}`:"none",opacity:busy?.6:1});
+  // injury/request = attention semantics (red for hard flags, amber for the rest).
+  const flagColor=(b)=>b.flag==="injury"||b.flag==="request"?CA.red:CA.amber;
+
+  // ── collapsed headline card ──
+  if(!open) return (
+    <div style={{background:`linear-gradient(180deg,${CA.navy3},${CA.navy2})`,border:`1px solid ${CA.border}`,borderRadius:16,marginTop:4,padding:"16px 18px",display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
+      <div style={{flex:1,minWidth:220}}>
+        <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:CA.text,letterSpacing:1}}>{preview.headline}</div>
+        <div style={{color:CA.muted,fontSize:12,marginTop:2}}>
+          {concernsLeft>0?`${concernsLeft} to handle · `:""}{D.prThisWk} true PR{D.prThisWk!==1?"s":""} this week{D.teamAdh!=null?` · ${D.teamAdh}% adherence`:""} · updates as sessions come in
+        </div>
+      </div>
+      <button onClick={openBrief} style={{background:CA_BTN,border:"none",color:"#fff",borderRadius:10,padding:"11px 20px",fontWeight:800,letterSpacing:1,textTransform:"uppercase",fontSize:12,cursor:"pointer",boxShadow:`0 0 14px ${CA_GLOW}`,fontFamily:"'DM Sans'",flexShrink:0}}>Open brief →</button>
+    </div>
+  );
+
+  // ── open conversation ──
+  const beats=brief.beats;
+  const activeQ=beats.find(b=>b.kind==="question"&&!qDone[b.id]);
+  const myCalls=[...Object.values(outcomes)];
+  const convo=(
+    <div>
+      {beats.map((b,i)=>{
+        const isNarration=b.kind==="opening"||b.kind==="trend"||b.kind==="allclear";
+        const out=outcomes[b.id];
+        return (
+          <div key={b.id} className="proof-drop" style={{animationDelay:`${Math.min(i*110,660)}ms`,display:"flex",gap:10,marginBottom:12}}>
+            <span style={{width:3,alignSelf:"stretch",borderRadius:3,flexShrink:0,background:isNarration?`${CA.accent}66`:b.kind==="wins"?CA.accent:b.kind==="question"?CA.blue:flagColor(b)}}/>
+            <div style={{flex:1,minWidth:0,background:isNarration?"transparent":CA.navy2,border:isNarration?"none":`1px solid ${CA.border}`,borderRadius:12,padding:isNarration?"2px 0":"12px 14px"}}>
+              {b.athleteName&&<div style={{fontSize:9.5,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:flagColor(b),marginBottom:4}}>{b.flag==="request"?"Change request":b.flag} · {b.athleteName}</div>}
+              <div style={{color:CA.text,fontSize:13.5,lineHeight:1.55}}>{b.prose}</div>
+              {b.question&&<div style={{color:CA.muted2,fontSize:13,marginTop:6,fontStyle:"italic"}}>{b.question.text}</div>}
+              {(qMsgs[b.id]||[]).map((m,mi)=>(
+                <div key={mi} style={{marginTop:8,display:"flex",justifyContent:m.role==="coach"?"flex-end":"flex-start"}}>
+                  <div style={{maxWidth:"85%",background:m.role==="coach"?`${CA.accent}22`:CA.navy3,border:`1px solid ${m.role==="coach"?`${CA.accent}55`:CA.border}`,borderRadius:10,padding:"7px 11px",fontSize:12.5,color:CA.text}}>{m.text}</div>
+                </div>
+              ))}
+              {out
+                ? <div style={{marginTop:10}}><span style={{fontSize:11,fontWeight:800,color:CA.green,background:`${CA.green}18`,border:`1px solid ${CA.green}55`,borderRadius:6,padding:"3px 9px"}}>{out}</span></div>
+                : b.actions&&b.actions.length>0&&(
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:10}}>
+                    {b.actions.map(a=><button key={a.id} disabled={busy} onClick={()=>act(b,a)} style={btnS(a.id!=="open"&&a.kind!=="done"&&b.actions[0]===a)}>{a.label}</button>)}
+                  </div>
+                )}
+              {b.kind==="question"&&!qDone[b.id]&&b===activeQ&&(
+                <div style={{marginTop:10}}>
+                  {b.question.chips&&b.question.chips.length>0&&(
+                    <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+                      {b.question.chips.map(ch=><button key={ch} disabled={busy} onClick={()=>answerQuestion(b,ch,true)} style={btnS(false)}>{ch}</button>)}
+                    </div>
+                  )}
+                  <div style={{display:"flex",gap:8}}>
+                    <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")answerQuestion(b,input,false);}} placeholder="Type a reply — or tap a chip" disabled={busy}
+                      style={{flex:1,background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:9,padding:"9px 12px",color:CA.text,fontSize:13,outline:"none",fontFamily:"'DM Sans'"}}/>
+                    <button disabled={busy||!input.trim()} onClick={()=>answerQuestion(b,input,false)} style={btnS(true)}>{busy?"…":"Send"}</button>
+                  </div>
+                </div>
+              )}
+              {b.kind==="question"&&qDone[b.id]&&!qMsgs[b.id]?.length&&<div style={{marginTop:8,fontSize:11,color:CA.green}}>✓ noted</div>}
+            </div>
+          </div>
+        );
+      })}
+      <div style={{padding:"8px 0 2px",color:CA.muted,fontSize:11.5}}>Everything you decide here is remembered — it shapes next week's Coach's Edition.</div>
+    </div>
+  );
+
+  const header=(
+    <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:10,marginBottom:14,flexWrap:"wrap"}}>
+      <div>
+        <div style={{fontFamily:"'Bebas Neue'",fontSize:24,color:CA.cyan,letterSpacing:1.5}}>THE MORNING BRIEF</div>
+        <div style={{color:CA.muted,fontSize:11.5}}>{now.toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"})} · from this week's logs</div>
+      </div>
+      <button onClick={()=>setOpen(false)} style={{border:`1px solid ${CA.border}`,background:"transparent",color:CA.muted2,borderRadius:8,padding:"6px 14px",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Close</button>
+    </div>
+  );
+
+  if(isMobile) return (
+    <div style={{position:"fixed",inset:0,background:CA.navy,zIndex:400,overflowY:"auto",padding:"calc(14px + env(safe-area-inset-top, 0px)) 14px 40px"}}>
+      {header}{convo}
+    </div>
+  );
+  return (
+    <div style={{background:`linear-gradient(180deg,${CA.navy3},${CA.navy2})`,border:`1px solid ${CA.border}`,borderRadius:16,marginTop:4,padding:"16px 18px"}}>
+      {header}
+      <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) 230px",gap:18,alignItems:"start"}}>
+        {convo}
+        <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:14,position:"sticky",top:100}}>
+          <div style={{fontSize:10.5,letterSpacing:1.2,textTransform:"uppercase",color:CA.cyan,fontWeight:700,marginBottom:8}}>Your calls today</div>
+          {myCalls.length===0
+            ? <div style={{fontSize:12,color:CA.muted}}>Decisions you make land here — and in next week's Edition.</div>
+            : myCalls.map((c,i)=><div key={i} style={{fontSize:12,color:CA.muted2,padding:"4px 0",borderBottom:i<myCalls.length-1?`1px solid ${CA.border}60`:"none"}}>{c}</div>)}
+        </div>
+      </div>
     </div>
   );
 }
@@ -2155,6 +2317,106 @@ function CoachEdition({digest, athletes, coach, school, onBack, onRead}){
 // The team-level mirror of the athlete Progress screen: all athletes' dated data
 // combined into GROUP trends. Same Benchmarks / Strength / Running tabs (no PRs —
 // there's no such thing as a group PR). Reuses the Grit engine + LineChart.
+
+// ── ACCOUNT TAB (admin only) — extracted from a conditional IIFE inside the
+// dashboard render: hooks in a conditional block violate the Rules of Hooks and
+// crashed the tab when the condition flipped (the sales demo carried this fix).
+function AccountTab({coach,allCoaches,school,athletes,loadAll}){
+              const schoolCoachesList = allCoaches.filter(c=>c.school_id===coach.school_id&&c.role!=="admin");
+              const atLimit = schoolCoachesList.length>=(school?.max_coaches||3);
+              const [acName,setAcName] = useState("");
+              const [acEmail,setAcEmail] = useState("");
+              const [acErr,setAcErr] = useState("");
+              const [acOk,setAcOk] = useState("");
+              const [acCode,setAcCode] = useState("");          // freshly-created coach code (for its copy button)
+              const [codeCopied,setCodeCopied] = useState(null); // which code is showing "Copied!"
+              const [acSaving,setAcSaving] = useState(false);
+
+              const copyCoachCode = (code) => {
+                if(!code || codeCopied===code) return;
+                try{ navigator.clipboard.writeText(code); }catch(_){}
+                haptic(10);
+                setCodeCopied(code);
+                setTimeout(()=>setCodeCopied(c=>c===code?null:c), 2000);
+              };
+              const codeBtn = (code) => {
+                const done = codeCopied===code;
+                return <button onClick={()=>copyCoachCode(code)} style={{background:done?CA.accent:"none",border:`1px solid ${done?CA.accent:CA.border}`,color:done?"#fff":CA.muted2,borderRadius:6,padding:"2px 9px",cursor:done?"default":"pointer",fontSize:10,fontWeight:700,marginLeft:8,verticalAlign:"middle"}}>{done?"Copied!":"Copy"}</button>;
+              };
+
+              const doAddCoach = async () => {
+                if(!acName.trim()||!acEmail.trim()||!acEmail.includes("@")){setAcErr("Enter a name and valid email.");return;}
+                if(atLimit){setAcErr("Coach limit reached for your plan.");return;}
+                setAcSaving(true);setAcErr("");setAcOk("");setAcCode("");
+                try {
+                  const nextNum=(schoolCoachesList.reduce((m,c)=>Math.max(m,c.coach_number||0),0))+1;
+                  const newCode=(school?.code||"???").toUpperCase()+String(nextNum).padStart(2,"0");
+                  const row=await sbInsert("coaches",{name:acName.trim(),email:acEmail.trim().toLowerCase(),school_id:coach.school_id,coach_number:nextNum,access_code:newCode,role:"coach"});
+                  if(row?.length){
+                    fetch("/api/send-coach-invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth:getAuth(),coachName:acName.trim(),coachEmail:acEmail.trim().toLowerCase(),accessCode:newCode,schoolName:school?.name||""})}).catch(()=>{});
+                    setAcOk(`✓ ${acName.trim()} added — invite sent.`); setAcCode(newCode);
+                    setAcName("");setAcEmail("");
+                    loadAll();
+                  }else{setAcErr("Could not create coach. Try again.");}
+                }catch(e){setAcErr("Error: "+e.message);}
+                setAcSaving(false);
+              };
+
+              const doRemoveCoach = async (c) => {
+                if(!window.confirm(`Remove ${c.name}? Their athletes will remain unassigned.`)) return;
+                try {
+                  await sbUpdate("coaches",c.id,{pin:null,access_code:`REMOVED_${c.access_code}`});
+                  await sbUpdateWhere("athletes",`?coach_id=eq.${c.id}`,{coach_id:null});
+                  loadAll();
+                }catch(e){}
+              };
+
+              return (
+                <div style={{maxWidth:600}}>
+                  <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,padding:20,marginBottom:16}}>
+                    <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:14}}>SCHOOL ACCOUNT</div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:4}}>
+                      <div><div style={{color:CA.muted,fontSize:10,letterSpacing:1}}>SCHOOL</div><div style={{color:CA.text,fontWeight:600,fontSize:14,marginTop:2}}>{school?.name||"—"}</div></div>
+                      <div><div style={{color:CA.muted,fontSize:10,letterSpacing:1}}>CODE</div><div style={{display:"flex",alignItems:"center",marginTop:2}}><span style={{color:CA.accent,fontWeight:700,fontSize:18,fontFamily:"'Bebas Neue'",letterSpacing:2}}>{school?.code||"—"}</span>{school?.code&&codeBtn(school.code)}</div></div>
+                      <div><div style={{color:CA.muted,fontSize:10,letterSpacing:1}}>TIER</div><div style={{color:CA.text,fontSize:13,marginTop:2}}>{school?.tier||"—"}</div></div>
+                      <div><div style={{color:CA.muted,fontSize:10,letterSpacing:1}}>COACHES</div><div style={{color:CA.text,fontSize:13,marginTop:2}}>{schoolCoachesList.length} / {school?.max_coaches||3}</div></div>
+                    </div>
+                  </div>
+
+                  <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,padding:20,marginBottom:16}}>
+                    <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:14}}>COACHES</div>
+                    {schoolCoachesList.length===0?<div style={{color:CA.muted,fontSize:13,marginBottom:12}}>No coaches added yet.</div>:schoolCoachesList.map(c=>{
+                      const athCount=athletes.filter(a=>a.coach_id===c.id).length;
+                      return(
+                        <div key={c.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:`1px solid ${CA.border}`}}>
+                          <div>
+                            <div style={{color:CA.text,fontWeight:600,fontSize:13}}>{c.name}</div>
+                            <div style={{color:CA.muted,fontSize:11}}>{c.email} · Code: {c.access_code} · {athCount} athlete{athCount!==1?"s":""}</div>
+                          </div>
+                          <button onClick={()=>doRemoveCoach(c)} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.red,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:11}}>Remove</button>
+                        </div>
+                      );
+                    })}
+
+                    <div style={{marginTop:16}}>
+                      <div style={{color:CA.muted,fontSize:11,letterSpacing:1,marginBottom:10}}>ADD COACH</div>
+                      {atLimit?<div style={{color:CA.muted,fontSize:12,fontStyle:"italic"}}>Coach limit reached for your plan ({school?.max_coaches||3} max).</div>:(
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:8,alignItems:"center"}}>
+                          <input value={acName} onChange={e=>setAcName(e.target.value)} placeholder="Coach name" style={inpA({padding:"9px 12px",fontSize:13})}/>
+                          <input type="email" value={acEmail} onChange={e=>setAcEmail(e.target.value)} placeholder="email@school.edu" style={inpA({padding:"9px 12px",fontSize:13})}/>
+                          <button onClick={doAddCoach} disabled={acSaving} style={{background:CA_BTN,boxShadow:"0 4px 16px "+CA_GLOW,border:"none",color:"#fff",borderRadius:8,padding:"9px 14px",cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"'Bebas Neue'",letterSpacing:1,whiteSpace:"nowrap",opacity:acSaving?0.7:1}}>
+                            {acSaving?"Adding...":"Add Coach →"}
+                          </button>
+                        </div>
+                      )}
+                      {acErr&&<div style={{color:CA.red,fontSize:12,marginTop:8}}>{acErr}</div>}
+                      {acOk&&<div style={{color:CA.green,fontSize:12,marginTop:8,fontWeight:600}}>{acOk}{acCode&&<> Code: <span style={{fontFamily:"'Bebas Neue'",letterSpacing:1,color:CA.accent,fontSize:14}}>{acCode}</span>{codeBtn(acCode)}</>}</div>}
+                    </div>
+                  </div>
+                </div>
+              );
+}
+
 function GroupProgress({athletes,workouts,manualRMs}){
   const [tab,setTab] = useState("benchmarks");
   // charge the power cells shortly after the Benchmarks tab shows (mirrors the
@@ -2295,7 +2557,7 @@ function GroupProgress({athletes,workouts,manualRMs}){
 }
 
 // ─── ATHLETE DETAIL (Coach Dashboard) ────────────────────────────────────────
-function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProgramSave,onAthleteDelete}) {
+function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProgramSave,onAthleteDelete,prefill,onPrefillConsumed}) {
   const [tab,setTab] = useState("overview");
   const [programText,setProgramText] = useState(athlete.program_text||"");
   const [programLocked,setProgramLocked] = useState(!!athlete.program_locked);
@@ -2316,6 +2578,14 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
   };
 
   useEffect(()=>{ setProgramText(athlete.program_text||""); },[athlete.id,athlete.program_text]);
+  // Morning Brief "Draft the change" deep-link: open the Program tab with the
+  // suggestion appended to the DRAFT (nothing saves until the coach hits save).
+  useEffect(()=>{
+    if(!prefill||prefill.athleteId!==athlete.id) return;
+    setTab("program");
+    setProgramText(t=>`${(t||athlete.program_text||"").trimEnd()}\n\n# From today's brief — edit into the program, then delete this note:\n# ${prefill.note}`);
+    onPrefillConsumed&&onPrefillConsumed();
+  },[prefill,athlete.id]);
 
   const handleProgramSave = async () => {
     setProgramSaving(true);
