@@ -245,7 +245,7 @@ export const sbRead = async (table,params="") => {
   return dataApi("read",table,{params});
 };
 // Insert-or-update on a conflict column (e.g. "athlete_id").
-const sbUpsert = async (table,data,conflict) => {
+export const sbUpsert = async (table,data,conflict) => {
   if(!CURRENT_AUTH){
     await fetch(`${SUPABASE_URL}/rest/v1/${table}?on_conflict=${conflict}`,{method:"POST",headers:{...sbH,"Prefer":"return=minimal,resolution=merge-duplicates"},body:JSON.stringify(data)});
     return;

@@ -225,15 +225,18 @@ export function compareProgramVsActual(parsed, thisWeekSessions, oneRMs = {}) {
   let presSetsAll = 0, presSetsMatched = 0, matchedPresVol = 0, matchedActVolCapped = 0;
   const loadRatios = [];
   for (const p of Object.values(prescribed)) {
-    if (!p.sets) continue;
+    // A prescribed lift with no parseable set count still COUNTS — grade it as one
+    // working set so prose-y programs ("Bench 3x5" parses; "heavy bench day" doesn't)
+    // don't evaluate to an empty prescription and null the whole breakdown.
+    const pSets = p.sets || 1;
     const match = Object.entries(actual).find(([name]) => liftsMatch(name, p.name));
     const a = match ? match[1] : { sets: 0, reps: 0, topLoad: 0 };
-    const pVol = p.sets * (p.reps || 1);
+    const pVol = pSets * (p.reps || 1);
     const aVol = a.sets * (a.reps || (p.reps || 1));
     presVol += pVol; actVol += aVol;
-    presSetsAll += p.sets;
+    presSetsAll += pSets;
     if (match) {
-      presSetsMatched += p.sets;
+      presSetsMatched += pSets;
       matchedPresVol += pVol;
       matchedActVolCapped += Math.min(aVol, pVol); // overshoot isn't extra credit
     }
@@ -242,7 +245,7 @@ export function compareProgramVsActual(parsed, thisWeekSessions, oneRMs = {}) {
     if (match && prescribedLoad && a.topLoad) loadRatios.push(a.topLoad / prescribedLoad);
     byLift.push({
       lift: p.name, matched: !!match,
-      prescribedSets: p.sets, prescribedReps: p.reps,
+      prescribedSets: pSets, prescribedReps: p.reps,
       actualSets: a.sets, actualReps: a.reps,
       prescribedLoad, actualLoad: a.topLoad || null,
       volumeGapPct: pVol ? Math.max(0, Math.round((pVol - aVol) / pVol * 100)) : 0,

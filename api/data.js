@@ -34,6 +34,11 @@ const WRITABLE = new Set([
   // request loop. Scoping enforced below (coach_context/coach_push_subscriptions =
   // own coach_id; program_change_requests = athlete inserts own, coach updates status).
   "coach_context", "coach_push_subscriptions", "program_change_requests",
+  // Parsed-program cache: the coach dashboard parses missing/stale programs on
+  // demand (Haiku via api/claude.js, hash-keyed) and upserts the result here —
+  // same row shape parseProgramIfNeeded writes on the proof cron. Ownership-scoped
+  // like the raw athlete tables.
+  "program_prescriptions",
 ]);
 
 // ─── Phase 1b(b): scoped READS ────────────────────────────────────────────────
@@ -53,7 +58,8 @@ const READ_OWN_COL = {
   // Parsed structured program cache (Haiku-parsed program_text, hash-keyed). Read-
   // only for the coach dashboard's Overview adherence math (load %×1RM band). Scoped
   // by athlete_id exactly like the raw tables, so a coach only sees their roster's
-  // prescriptions. Written server-side only (parseProgramIfNeeded, service key).
+  // prescriptions. Written by the proof cron (service key) AND by the coach
+  // dashboard's on-demand parse (gateway upsert, ownership-scoped).
   program_prescriptions: "athlete_id",
   // Server-side session-count rollup (SQL port of groupIntoSessions, verified to
   // match the client row-for-row). Read-only VIEW; scoped by athlete_id exactly
@@ -92,6 +98,10 @@ const ATHLETE_OWN_COL = {
   deletion_requests: "athlete_id",
   // An athlete may FILE a program-change request on their own locked program.
   program_change_requests: "athlete_id",
+  // Parse-cache rows (see WRITABLE note). Listing here scopes COACH writes to their
+  // roster; it also permits an athlete to (re)write their OWN row — same trust as
+  // them writing the workouts that feed the same adherence math.
+  program_prescriptions: "athlete_id",
 };
 
 // ── Per-COLUMN allowlist for athlete writes to sensitive tables ───────────────

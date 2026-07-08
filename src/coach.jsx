@@ -5,7 +5,7 @@
 // the dynamic import means the cycle App→coach→App is resolved at load time.
 import { useState, useEffect, useRef, useMemo } from "react";
 import {
-  CA, CA_BTN, CA_GLOW, GS, LineChart, MASTER_CODE, RunCard, SUPABASE_KEY, SUPABASE_URL, askClaude, bestE1RMForExercise, btn, cleanerName, daysBetween, disablePush, displayForKey, enablePush, epley1RM, fmtDate, fmtDateRelative, fmtDateShort, fmtWeight, formatSetDetails, getAuth, getExerciseSets, getPushSubscription, groupIntoSessions, haptic, idApi, inpA, isRealSession, liftTier, normalizeExName, sbDelete, sbInsert, sbRead, sbUpdate, sbUpdateWhere, toLbs, track, useIsMobile
+  CA, CA_BTN, CA_GLOW, GS, LineChart, MASTER_CODE, RunCard, SUPABASE_KEY, SUPABASE_URL, askClaude, bestE1RMForExercise, btn, cleanerName, daysBetween, disablePush, displayForKey, enablePush, epley1RM, fmtDate, fmtDateRelative, fmtDateShort, fmtWeight, formatSetDetails, getAuth, getExerciseSets, getPushSubscription, groupIntoSessions, haptic, idApi, inpA, isRealSession, liftTier, normalizeExName, sbDelete, sbInsert, sbRead, sbUpdate, sbUpdateWhere, sbUpsert, toLbs, track, useIsMobile
 } from "./App.jsx";
 // Shared deterministic engine (Phase 0 extraction) — per-athlete session/adherence
 // math, computed live client-side for the Overview. Aliased to avoid colliding with
@@ -18,6 +18,22 @@ import { computeGritSnapshot, TIER_NAMES, TIER_COLORS, getBenchKey, resolveLift 
 // The Morning Brief — deterministic conversational beats (zero tokens to build;
 // Haiku only reacts when the coach free-types). See coach-dashboard-v2-spec §C.
 import { buildMorningBrief, decisionNote, briefWeekKey } from "./coachBrief.js";
+
+// ─── ON-DEMAND PROGRAM PARSE ──────────────────────────────────────────────────
+// The proof cron parses programs only on each athlete's weekly run, so a program
+// assigned or edited mid-week has no structured prescription for days — and the
+// Overview adherence math (and day inspector) grades against nothing. The coach
+// dashboard closes that gap: any roster program that's missing or stale
+// (source_hash mismatch) is parsed right here (Haiku, hash-guarded, ≤4/load) and
+// upserted through the gateway. KEEP THE PROMPT VERBATIM-IN-SYNC with
+// parseProgramIfNeeded in api/_proof.js so both paths cache identical shapes.
+const PARSE_SYSTEM = `You convert a strength athlete's written training program into STRICT JSON. No prose, no markdown — JSON only. Shape:
+{"blocks":[{"name":string,"weeks":number,"start":string|null,"days":[{"day":string,"label":string,"exercises":[{"name":string,"sets":number,"reps":number,"pct_by_week":number[],"ref_1rm_lift":string|null}]}]}],"ref_1rms":{}}
+Rules: sets/reps are the prescribed working sets per session. pct_by_week is %1RM per week of the block (empty array if the program gives no percentages). ref_1rm_lift is which max the % is of (usually the lift itself). If the program has no blocks/weeks, use one block with weeks=1. Extract every exercise you can. Leave ref_1rms as {} (filled later from real data).`;
+const sha256hex = async (text)=>{
+  const b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(text||"")));
+  return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,"0")).join("");
+};
 
 // ─── GSC — coach "control room" motion skin ──────────────────────────────────
 // The coach dashboard is the CONTROL ROOM to the athlete's gym floor: denser,
@@ -630,6 +646,8 @@ function CoachDashboard({coach,onLogout}) {
   const [changeRequests,setChangeRequests] = useState([]); // program_change_requests — locked-program inbox
   const [briefContext,setBriefContext] = useState([]);     // coach_context — Morning Brief suppression + notes
   const [programPrefill,setProgramPrefill] = useState(null); // {athleteId, note} — brief "Draft the change" deep-link
+  const [parsingIds,setParsingIds] = useState(()=>new Set()); // programs being parsed on demand right now
+  const parseAttempted = useRef(new Set());                 // one attempt per athlete per session
   const [notifPrefs,setNotifPrefs] = useState(coach.notification_prefs||{injury:true,big_pr:true,inactive:true,digest:true});
   const [pushOn,setPushOn] = useState(false);
   const [pushBusy,setPushBusy] = useState(false);
@@ -641,6 +659,44 @@ function CoachDashboard({coach,onLogout}) {
   const [reportFlagFilter,setReportFlagFilter] = useState(false);
   const [selectedDigest,setSelectedDigest] = useState(null);
   useEffect(()=>{ track("coach_dashboard_view","coach_dashboard"); },[]);
+
+  // On-demand program parse (see PARSE_SYSTEM note at top of file): fill missing/
+  // stale prescription rows for this roster so adherence grades against something
+  // TODAY, not after the athlete's next weekly proof run. Hash-guarded (no repeat
+  // AI calls for unchanged text), ≤4 programs per dashboard load, one attempt per
+  // athlete per session (failures don't loop).
+  useEffect(()=>{
+    if(loading||!athletes.length) return;
+    let cancelled=false;
+    (async()=>{
+      const byId={}; prescriptions.forEach(p=>{byId[p.athlete_id]=p;});
+      const targets=[];
+      for(const a of athletes){
+        if(!a.program_text||a.program_text.trim().length<20) continue;
+        if(parseAttempted.current.has(a.id)) continue;
+        const row=byId[a.id];
+        if(row&&row.parsed_json){ const h=await sha256hex(a.program_text); if(row.source_hash===h) continue; }
+        targets.push(a);
+        if(targets.length>=4) break;
+      }
+      if(!targets.length||cancelled) return;
+      targets.forEach(a=>parseAttempted.current.add(a.id));
+      setParsingIds(new Set(targets.map(t=>t.id)));
+      for(const a of targets){
+        if(cancelled) break;
+        try{
+          const raw=await askClaude(PARSE_SYSTEM, `Program:\n${a.program_text.slice(0,6000)}`, 1500, [], "claude-haiku-4-5", "program_parse");
+          const parsed=JSON.parse(String(raw).replace(/```json|```/g,"").trim());
+          if(!parsed||!Array.isArray(parsed.blocks)) throw new Error("no blocks in parse");
+          const rowNew={athlete_id:a.id, source_hash:await sha256hex(a.program_text), parsed_json:parsed, updated_at:new Date().toISOString()};
+          await sbUpsert("program_prescriptions", rowNew, "athlete_id");
+          if(!cancelled) setPrescriptions(prev=>[...prev.filter(p=>p.athlete_id!==a.id), rowNew]);
+        }catch(e){ console.error("on-demand program parse failed",a.name,e); }
+        if(!cancelled) setParsingIds(prev=>{const s=new Set(prev); s.delete(a.id); return s;});
+      }
+    })();
+    return ()=>{cancelled=true;};
+  },[loading,athletes,prescriptions]);
   const isMobile = useIsMobile();
   const isNarrow = useIsMobile(900);
   const [selectMode,setSelectMode] = useState(false);
@@ -898,7 +954,7 @@ function CoachDashboard({coach,onLogout}) {
             {/* ── OVERVIEW TAB ── */}
             {activeTab==="overview"&&(
               <CoachOverview athletes={athletes} workouts={workouts} prs={prs} manualRMs={manualRMs} prescriptions={prescriptions} coach={coach}
-                changeRequests={changeRequests} briefContext={briefContext}
+                changeRequests={changeRequests} briefContext={briefContext} parsingIds={parsingIds}
                 onOpenAthlete={(id)=>{const at=athletes.find(a=>a.id===id); if(at){setSelected(at);setActiveTab("athletes");}}}
                 onPrefillProgram={(id,note)=>{const at=athletes.find(a=>a.id===id); if(at){setProgramPrefill({athleteId:id,note});setSelected(at);setActiveTab("athletes");}}}
                 onResolveRequest={async (requestId,status)=>{
@@ -1428,7 +1484,7 @@ function OverviewCard({title,trend,children,readout,tone,style}){
   );
 }
 
-function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthlete,coach,changeRequests,briefContext,onPrefillProgram,onResolveRequest,onContextWritten}){
+function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthlete,coach,changeRequests,briefContext,onPrefillProgram,onResolveRequest,onContextWritten,parsingIds}){
   const isMobile = useIsMobile();
   const [tip,setTip] = useState(null);
   // one-shot entrance flag: charts render at their empty state on first paint,
@@ -1707,7 +1763,12 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
                   </div>
                 )}
                 <div style={{fontSize:10.5,fontWeight:800,letterSpacing:.8,textTransform:"uppercase",color:CA.muted,margin:"12px 0 6px"}}>Why {first}'s week = <span style={{color:adhColor(r.score)}}>{r.score==null?"—":`${r.score}%`}</span></div>
-                {!b&&<div style={{fontSize:11.5,color:CA.muted}}>{r.hasProgram?"Program not parsed yet — score is sessions vs prescribed days.":"No program assigned — nothing to grade against."}</div>}
+                {!b&&<div style={{fontSize:11.5,color:CA.muted}}>{
+                  parsingIds&&parsingIds.has(r.a.id) ? "Parsing this program now — tap the cell again in a moment."
+                  : !r.hasProgram ? "No program assigned — nothing to grade against."
+                  : r.adherence ? "This program has no gradeable lifts — it reads as a note, not a prescription. Score is sessions vs prescribed days."
+                  : "Program isn't parsed yet — it parses automatically on the next dashboard load. Score is sessions vs prescribed days."
+                }</div>}
                 {b&&[["Exercise choice",b.E,.5],["Volume (sets×reps)",b.V,.3],["Working weight",b.W,.2]].map(([lab,v,wt],i)=>v==null?null:(
                   <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"2px 0"}}>
                     <span style={{width:118,fontSize:11,color:CA.muted2,flexShrink:0}}>{lab}</span>
