@@ -15,6 +15,9 @@ import {
   trueImprovementPRs, classifyTiers, blendAdherenceScore, buildLiftHistory,
 } from "./proofcore.js";
 import { computeGritSnapshot, TIER_NAMES, TIER_COLORS, getBenchKey, resolveLift } from "./grit.js";
+// The Morning Brief — deterministic conversational beats (zero tokens to build;
+// Haiku only reacts when the coach free-types). See coach-dashboard-v2-spec §C.
+import { buildMorningBrief, decisionNote, briefWeekKey } from "./coachBrief.js";
 // ─── SCHOOLS LIST (master only) ───────────────────────────────────────────────
 function SchoolsList({schools,coaches,onRefresh}) {
   const [confirmDelete,setConfirmDelete] = useState(null); // school id pending delete
@@ -542,6 +545,8 @@ function CoachDashboard({coach,onLogout}) {
   const [manualRMs,setManualRMs] = useState([]);        // manual_one_rms — Grit + adherence-load
   const [prescriptions,setPrescriptions] = useState([]); // program_prescriptions (parsed programs) — Overview adherence
   const [changeRequests,setChangeRequests] = useState([]); // program_change_requests — locked-program inbox
+  const [briefContext,setBriefContext] = useState([]);     // coach_context — Morning Brief suppression + notes
+  const [programPrefill,setProgramPrefill] = useState(null); // {athleteId, note} — brief "Draft the change" deep-link
   const [notifPrefs,setNotifPrefs] = useState(coach.notification_prefs||{injury:true,big_pr:true,inactive:true,digest:true});
   const [pushOn,setPushOn] = useState(false);
   const [pushBusy,setPushBusy] = useState(false);
@@ -644,6 +649,12 @@ function CoachDashboard({coach,onLogout}) {
           setChangeRequests(Array.isArray(reqs)?reqs:[]);
         } catch(e){ /* table/rows may be empty */ }
       }
+      // Recent coach context (gateway scopes by coach_id) — the Morning Brief reads
+      // this week's decisions from it so acted-on flags don't resurface.
+      try {
+        const ctx = await sbRead("coach_context","?order=created_at.desc&limit=200&select=*");
+        setBriefContext(Array.isArray(ctx)?ctx:[]);
+      } catch(e){ /* empty is fine */ }
     } catch(e){console.error(e);}
     setLoading(false);
   };
@@ -804,7 +815,14 @@ function CoachDashboard({coach,onLogout}) {
             {/* ── OVERVIEW TAB ── */}
             {activeTab==="overview"&&(
               <CoachOverview athletes={athletes} workouts={workouts} prs={prs} manualRMs={manualRMs} prescriptions={prescriptions} coach={coach}
-                onOpenAthlete={(id)=>{const at=athletes.find(a=>a.id===id); if(at){setSelected(at);setActiveTab("athletes");}}}/>
+                changeRequests={changeRequests} briefContext={briefContext}
+                onOpenAthlete={(id)=>{const at=athletes.find(a=>a.id===id); if(at){setSelected(at);setActiveTab("athletes");}}}
+                onPrefillProgram={(id,note)=>{const at=athletes.find(a=>a.id===id); if(at){setProgramPrefill({athleteId:id,note});setSelected(at);setActiveTab("athletes");}}}
+                onResolveRequest={async (requestId,status)=>{
+                  await sbUpdate("program_change_requests",requestId,{status,resolved_at:new Date().toISOString()});
+                  setChangeRequests(prev=>prev.filter(r=>r.id!==requestId));
+                }}
+                onContextWritten={(row)=>setBriefContext(prev=>[row,...prev])}/>
             )}
 
             {/* ── ATHLETES TAB ── */}
@@ -907,6 +925,8 @@ function CoachDashboard({coach,onLogout}) {
                       workouts={workouts.filter(w=>w.athlete_id===selected.id)}
                       prs={prs.filter(p=>p.athlete_id===selected.id)}
                       requests={changeRequests.filter(r=>r.athlete_id===selected.id)}
+                      prefill={programPrefill&&programPrefill.athleteId===selected.id?programPrefill:null}
+                      onPrefillConsumed={()=>setProgramPrefill(null)}
                       onResolveRequest={async (req,status)=>{
                         await sbUpdate("program_change_requests",req.id,{status,resolved_at:new Date().toISOString()});
                         setChangeRequests(prev=>prev.filter(r=>r.id!==req.id));
@@ -1418,9 +1438,8 @@ function OverviewCard({title,trend,children,readout,tone,style}){
   );
 }
 
-function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthlete,coach}){
+function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthlete,coach,changeRequests,briefContext,onPrefillProgram,onResolveRequest,onContextWritten}){
   const isMobile = useIsMobile();
-  const [resolved,setResolved] = useState(()=>new Set());
   const [tip,setTip] = useState(null);
   const [showAllHeat,setShowAllHeat] = useState(false);
   const D = useMemo(()=>{
@@ -1550,8 +1569,6 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
 
   if(!athletes.length) return <div style={{textAlign:"center",padding:60,color:C.muted}}>No athletes on your roster yet.</div>;
 
-  const triage = D.triage.filter(t=>!resolved.has(t.id));
-
   const volMax = Math.max(1,...D.volWeeks), prMax = Math.max(1,...D.prWeeks), sMax = Math.max(1,...D.dayCounts.slice(0,D.todayIdx+1));
   const cell = (v)=>v?C.green:C.navy3;
   // Hover tooltip shared across every chart data point.
@@ -1573,32 +1590,9 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
 
   return (
     <div>
-      {/* ── Briefing triage — who needs you today ── */}
-      <div style={{background:`linear-gradient(180deg,${C.navy3},${C.navy2})`,border:`1px solid ${C.border}`,borderRadius:16,overflow:"hidden",marginTop:4}}>
-        <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:12,padding:"15px 18px",borderBottom:`1px solid ${C.border}`,flexWrap:"wrap"}}>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:C.text,letterSpacing:1}}>{triage.length>0?`${triage.length} athlete${triage.length!==1?"s":""} need you today`:"You're all caught up"}</div>
-          <div style={{color:C.muted,fontSize:12}}>Today's briefing · auto-updated from this week's logs</div>
-        </div>
-        {triage.length===0
-          ? <div style={{padding:"26px 18px",textAlign:"center"}}><div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:C.green,letterSpacing:1}}>✓ Everything looks healthy</div><div style={{color:C.muted,fontSize:13,marginTop:4}}>Nothing needs you right now. The briefing refreshes as sessions come in.</div></div>
-          : triage.slice(0,6).map((t)=>(
-              <div key={t.id} style={{display:"flex",gap:12,padding:"12px 18px",borderBottom:`1px solid ${C.border}80`,alignItems:"center"}}>
-                <span style={{width:3,alignSelf:"stretch",borderRadius:3,background:t.sev==="crit"?C.red:C.gold,flexShrink:0}}/>
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-                    <span style={{fontSize:9.5,fontWeight:800,letterSpacing:1,textTransform:"uppercase",padding:"2px 7px",borderRadius:5,color:t.sev==="crit"?C.red:C.gold,background:t.sev==="crit"?`${C.red}22`:`${C.gold}22`,border:`1px solid ${t.sev==="crit"?C.red:C.gold}55`}}>{t.kind}</span>
-                    <span style={{fontWeight:700,color:C.text,fontSize:14}}>{t.name}</span>
-                    <span style={{color:C.muted,fontSize:13}}>— {t.what}</span>
-                  </div>
-                </div>
-                <div style={{display:"flex",gap:6,flexShrink:0}}>
-                  {onOpenAthlete&&<button onClick={()=>onOpenAthlete(t.id)} style={{border:`1px solid ${C.border}`,background:"transparent",color:C.muted,borderRadius:8,padding:"5px 11px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Open</button>}
-                  <button onClick={()=>setResolved(s=>new Set(s).add(t.id))} style={{border:`1px solid ${C.border}`,background:"transparent",color:C.muted,borderRadius:8,padding:"5px 11px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Clear</button>
-                </div>
-              </div>
-            ))}
-        {triage.length>0&&<div style={{padding:"10px 18px",color:C.muted,fontSize:12,background:`${C.green}0d`}}>✓ {D.rows.length-triage.length} of {D.rows.length} on track · {D.prThisWk} true PR{D.prThisWk!==1?"s":""} this week</div>}
-      </div>
+      {/* ── The Morning Brief — proof-feed-style daily conversation ── */}
+      <MorningBrief D={D} athletes={athletes} changeRequests={changeRequests||[]} coach={coach} briefContext={briefContext||[]}
+        onOpenAthlete={onOpenAthlete} onPrefillProgram={onPrefillProgram} onResolveRequest={onResolveRequest} onContextWritten={onContextWritten}/>
 
       {secLabel("Team Health")}
       <div style={{display:"grid",gridTemplateColumns:isMobile?"1fr":"repeat(6,minmax(0,1fr))",gap:14}}>
@@ -1783,6 +1777,188 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
 
       {/* floating hover tooltip */}
       {tip&&<div style={{position:"fixed",left:Math.min(tip.x+14,(typeof window!=="undefined"?window.innerWidth:9999)-220),top:tip.y+14,background:C.navy,border:`1px solid ${C.gold}`,borderRadius:8,padding:"6px 10px",fontSize:12,color:C.text,pointerEvents:"none",zIndex:200,boxShadow:"0 6px 20px rgba(0,0,0,0.5)",maxWidth:220}}>{tip.text}</div>}
+    </div>
+  );
+}
+
+// ─── THE MORNING BRIEF — daily conversation over the triage (see spec §C) ──────
+// The proof-feed pattern turned toward the coach: a collapsed headline that opens
+// into a beat-by-beat walkthrough of highs, lows and trends, with suggestions the
+// coach decides on (Apply/Edit/Skip · handled/watching/dismiss) and 1–2 questions.
+// Beats are deterministic templates (coachBrief.js — zero tokens); Haiku reacts
+// only when the coach free-types. Every action writes a coach_context row, which
+// (a) suppresses that flag for the rest of the ISO week and (b) flows into next
+// week's Coach's Edition prompt via generateCoach — the follow-through loop.
+function MorningBrief({D,athletes,changeRequests,coach,briefContext,onOpenAthlete,onPrefillProgram,onResolveRequest,onContextWritten}){
+  const isMobile = useIsMobile();
+  const [open,setOpen] = useState(false);
+  const [brief,setBrief] = useState(null);      // snapshot while open — beats don't vanish mid-conversation
+  const [outcomes,setOutcomes] = useState({});  // beatId -> outcome chip label
+  const [qMsgs,setQMsgs] = useState({});        // beatId -> [{role,text}] reply thread
+  const [qDone,setQDone] = useState({});        // beatId -> answered
+  const [input,setInput] = useState("");
+  const [busy,setBusy] = useState(false);
+
+  const week = briefWeekKey();
+  const now = new Date();
+  const dateKey = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
+  const cleared = useMemo(()=>{
+    const s=new Set();
+    (briefContext||[]).forEach(r=>{const m=r.meta||{}; if(m.source==="morning_brief"&&m.kind==="decision"&&m.week===week&&m.athlete_id&&m.flag) s.add(`${m.athlete_id}:${m.flag}`);});
+    return s;
+  },[briefContext,week]);
+  // Cheap + pure — recomputes for the collapsed headline as decisions land.
+  const preview = useMemo(()=>buildMorningBrief({D,athletes,changeRequests,cleared,dateKey}),[D,athletes,changeRequests,cleared,dateKey]);
+  const concernsLeft = preview.beats.filter(b=>b.kind==="concern").length;
+
+  const openBrief = ()=>{ setBrief(preview); setOutcomes({}); setQMsgs({}); setQDone({}); setOpen(true); try{track("brief_open","coach_dashboard");}catch(e){} };
+
+  const writeContext = async (note,meta)=>{
+    const row={coach_id:coach.id, note, meta, is_long_term:false};
+    await sbInsert("coach_context",row);
+    onContextWritten&&onContextWritten({...row,created_at:new Date().toISOString()});
+  };
+
+  const act = async (beat,action)=>{
+    if(busy) return;
+    if(action.kind==="open_athlete"){ onOpenAthlete&&onOpenAthlete(beat.athleteId); return; }
+    if(action.kind==="share_wins"){ exportWins({newPRs:D.prThisWk,notablePRs:D.notablePRs},coach); setOutcomes(o=>({...o,[beat.id]:"Shared ✓"})); return; }
+    if(action.kind==="done"){ setOutcomes(o=>({...o,[beat.id]:"Done ✓"})); return; }
+    setBusy(true);
+    try{
+      if(action.kind==="resolve_request"&&action.payload?.resolution!=="edit"){
+        await onResolveRequest(action.payload.requestId, action.payload.resolution);
+      }
+      // "Edit" on a request and "Draft the change" both hand off to the program
+      // editor with the suggestion prefilled — the coach stays the author.
+      const handsOff = action.kind==="prefill_program"||(action.kind==="resolve_request"&&action.payload?.resolution==="edit");
+      await writeContext(decisionNote(beat,action.id), {kind:"decision",source:"morning_brief",athlete_id:beat.athleteId||null,flag:beat.meta?.baseFlag||beat.flag||null,action:action.id,week});
+      setOutcomes(o=>({...o,[beat.id]:`${action.label} ✓`}));
+      try{track("brief_decision","coach_dashboard");}catch(e){}
+      if(handsOff) onPrefillProgram&&onPrefillProgram(beat.athleteId, action.payload?.suggestion||beat.meta?.reason||beat.prose);
+    }catch(e){ console.error("brief action",e); }
+    setBusy(false);
+  };
+
+  const answerQuestion = async (beat,text,viaChip)=>{
+    const t=String(text||"").trim(); if(!t||busy) return;
+    setInput("");
+    setQMsgs(m=>({...m,[beat.id]:[...(m[beat.id]||[]),{role:"coach",text:t}]}));
+    setBusy(true);
+    try{
+      if(!viaChip&&isAskingBack(t)){
+        // Coach asked back — answer briefly, stay on the question. (Haiku, ~250 tok)
+        const sys=`You are WILCO, a strength coach's AI assistant, mid morning-brief. Answer the coach's question directly in 1-2 sentences, grounded in the team read, then stop. Team read: ${D.activeCount}/${athletes.length} trained this week, ${D.prThisWk} true PRs, team adherence ${D.teamAdh??"n/a"}%.`;
+        const reply=await askClaude(sys,`You asked them: "${beat.question.text}"\nThe coach replied: "${t}"`,250,[],"claude-haiku-4-5","coach_brief");
+        setQMsgs(m=>({...m,[beat.id]:[...(m[beat.id]||[]),{role:"wilco",text:reply||"Your call either way."}]}));
+        setBusy(false); return;
+      }
+      if(!viaChip){
+        // One-sentence reaction before moving on (Haiku, ~160 tok) — chips skip AI entirely.
+        const sys=`You are WILCO, a strength coach's AI assistant. React to the coach's answer in ONE short, direct sentence — acknowledge it and note one concrete implication if there is one. No follow-up question. Team: ${D.activeCount}/${athletes.length} trained this week, adherence ${D.teamAdh??"n/a"}%.`;
+        const reply=await askClaude(sys,`Q: "${beat.question.text}"\nCoach: "${t}"`,160,[],"claude-haiku-4-5","coach_brief");
+        if(reply) setQMsgs(m=>({...m,[beat.id]:[...(m[beat.id]||[]),{role:"wilco",text:reply}]}));
+      }
+      await writeContext(`${beat.question.text} → ${t}`.slice(0,280), {kind:"notes",source:"morning_brief",week,...(beat.athleteId?{athlete_id:beat.athleteId}:{})});
+      setQDone(d=>({...d,[beat.id]:true}));
+    }catch(e){ console.error("brief answer",e); setQDone(d=>({...d,[beat.id]:true})); }
+    setBusy(false);
+  };
+
+  const btnS=(primary)=>({border:primary?"none":`1px solid ${C.border}`,background:primary?C.gold:"transparent",color:primary?"#0a0a0a":C.muted2,borderRadius:8,padding:"6px 12px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'",opacity:busy?.6:1});
+  const flagColor=(b)=>b.flag==="injury"||b.flag==="request"?C.red:C.gold;
+
+  // ── collapsed headline card ──
+  if(!open) return (
+    <div style={{background:`linear-gradient(180deg,${C.navy3},${C.navy2})`,border:`1px solid ${C.border}`,borderRadius:16,marginTop:4,padding:"16px 18px",display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
+      <div style={{flex:1,minWidth:220}}>
+        <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:C.text,letterSpacing:1}}>{preview.headline}</div>
+        <div style={{color:C.muted,fontSize:12,marginTop:2}}>
+          {concernsLeft>0?`${concernsLeft} to handle · `:""}{D.prThisWk} true PR{D.prThisWk!==1?"s":""} this week{D.teamAdh!=null?` · ${D.teamAdh}% adherence`:""} · updates as sessions come in
+        </div>
+      </div>
+      <button onClick={openBrief} style={{background:C.gold,border:"none",color:"#0a0a0a",borderRadius:10,padding:"11px 20px",fontWeight:800,letterSpacing:1,textTransform:"uppercase",fontSize:12,cursor:"pointer",fontFamily:"'DM Sans'",flexShrink:0}}>Open brief →</button>
+    </div>
+  );
+
+  // ── open conversation ──
+  const beats=brief.beats;
+  const activeQ=beats.find(b=>b.kind==="question"&&!qDone[b.id]);
+  const myCalls=[...Object.values(outcomes)];
+  const convo=(
+    <div>
+      {beats.map((b,i)=>{
+        const isNarration=b.kind==="opening"||b.kind==="trend"||b.kind==="allclear";
+        const out=outcomes[b.id];
+        return (
+          <div key={b.id} className="proof-drop" style={{animationDelay:`${Math.min(i*110,660)}ms`,display:"flex",gap:10,marginBottom:12}}>
+            <span style={{width:3,alignSelf:"stretch",borderRadius:3,flexShrink:0,background:isNarration?`${C.gold}66`:b.kind==="wins"?C.gold:b.kind==="question"?C.blue:flagColor(b)}}/>
+            <div style={{flex:1,minWidth:0,background:isNarration?"transparent":C.navy2,border:isNarration?"none":`1px solid ${C.border}`,borderRadius:12,padding:isNarration?"2px 0":"12px 14px"}}>
+              {b.athleteName&&<div style={{fontSize:9.5,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:flagColor(b),marginBottom:4}}>{b.flag==="request"?"Change request":b.flag} · {b.athleteName}</div>}
+              <div style={{color:C.text,fontSize:13.5,lineHeight:1.55}}>{b.prose}</div>
+              {b.question&&<div style={{color:C.muted2,fontSize:13,marginTop:6,fontStyle:"italic"}}>{b.question.text}</div>}
+              {(qMsgs[b.id]||[]).map((m,mi)=>(
+                <div key={mi} style={{marginTop:8,display:"flex",justifyContent:m.role==="coach"?"flex-end":"flex-start"}}>
+                  <div style={{maxWidth:"85%",background:m.role==="coach"?`${C.gold}22`:C.navy3,border:`1px solid ${m.role==="coach"?`${C.gold}55`:C.border}`,borderRadius:10,padding:"7px 11px",fontSize:12.5,color:C.text}}>{m.text}</div>
+                </div>
+              ))}
+              {out
+                ? <div style={{marginTop:10}}><span style={{fontSize:11,fontWeight:800,color:C.green,background:`${C.green}18`,border:`1px solid ${C.green}55`,borderRadius:6,padding:"3px 9px"}}>{out}</span></div>
+                : b.actions&&b.actions.length>0&&(
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:10}}>
+                    {b.actions.map(a=><button key={a.id} disabled={busy} onClick={()=>act(b,a)} style={btnS(a.id!=="open"&&a.kind!=="done"&&b.actions[0]===a)}>{a.label}</button>)}
+                  </div>
+                )}
+              {b.kind==="question"&&!qDone[b.id]&&b===activeQ&&(
+                <div style={{marginTop:10}}>
+                  {b.question.chips&&b.question.chips.length>0&&(
+                    <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+                      {b.question.chips.map(ch=><button key={ch} disabled={busy} onClick={()=>answerQuestion(b,ch,true)} style={btnS(false)}>{ch}</button>)}
+                    </div>
+                  )}
+                  <div style={{display:"flex",gap:8}}>
+                    <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")answerQuestion(b,input,false);}} placeholder="Type a reply — or tap a chip" disabled={busy}
+                      style={{flex:1,background:C.navy3,border:`1px solid ${C.border}`,borderRadius:9,padding:"9px 12px",color:C.text,fontSize:13,outline:"none",fontFamily:"'DM Sans'"}}/>
+                    <button disabled={busy||!input.trim()} onClick={()=>answerQuestion(b,input,false)} style={btnS(true)}>{busy?"…":"Send"}</button>
+                  </div>
+                </div>
+              )}
+              {b.kind==="question"&&qDone[b.id]&&!qMsgs[b.id]?.length&&<div style={{marginTop:8,fontSize:11,color:C.green}}>✓ noted</div>}
+            </div>
+          </div>
+        );
+      })}
+      <div style={{padding:"8px 0 2px",color:C.muted,fontSize:11.5}}>Everything you decide here is remembered — it shapes next week's Coach's Edition.</div>
+    </div>
+  );
+
+  const header=(
+    <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:10,marginBottom:14,flexWrap:"wrap"}}>
+      <div>
+        <div style={{fontFamily:"'Bebas Neue'",fontSize:24,color:C.gold,letterSpacing:1.5}}>THE MORNING BRIEF</div>
+        <div style={{color:C.muted,fontSize:11.5}}>{now.toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"})} · from this week's logs</div>
+      </div>
+      <button onClick={()=>setOpen(false)} style={{border:`1px solid ${C.border}`,background:"transparent",color:C.muted2,borderRadius:8,padding:"6px 14px",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Close</button>
+    </div>
+  );
+
+  if(isMobile) return (
+    <div style={{position:"fixed",inset:0,background:C.navy,zIndex:400,overflowY:"auto",padding:"calc(14px + env(safe-area-inset-top, 0px)) 14px 40px"}}>
+      {header}{convo}
+    </div>
+  );
+  return (
+    <div style={{background:`linear-gradient(180deg,${C.navy3},${C.navy2})`,border:`1px solid ${C.border}`,borderRadius:16,marginTop:4,padding:"16px 18px"}}>
+      {header}
+      <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) 230px",gap:18,alignItems:"start"}}>
+        {convo}
+        <div style={{background:C.navy2,border:`1px solid ${C.border}`,borderRadius:12,padding:14,position:"sticky",top:100}}>
+          <div style={{fontSize:10.5,letterSpacing:1.2,textTransform:"uppercase",color:C.gold,fontWeight:700,marginBottom:8}}>Your calls today</div>
+          {myCalls.length===0
+            ? <div style={{fontSize:12,color:C.muted}}>Decisions you make land here — and in next week's Edition.</div>
+            : myCalls.map((c,i)=><div key={i} style={{fontSize:12,color:C.muted2,padding:"4px 0",borderBottom:i<myCalls.length-1?`1px solid ${C.border}60`:"none"}}>{c}</div>)}
+        </div>
+      </div>
     </div>
   );
 }
@@ -2142,7 +2318,7 @@ function GroupProgress({athletes,workouts,manualRMs}){
 }
 
 // ─── ATHLETE DETAIL (Coach Dashboard) ────────────────────────────────────────
-function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProgramSave,onAthleteDelete}) {
+function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProgramSave,onAthleteDelete,prefill,onPrefillConsumed}) {
   const [tab,setTab] = useState("overview");
   const [programText,setProgramText] = useState(athlete.program_text||"");
   const [programLocked,setProgramLocked] = useState(!!athlete.program_locked);
@@ -2163,6 +2339,14 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
   };
 
   useEffect(()=>{ setProgramText(athlete.program_text||""); },[athlete.id,athlete.program_text]);
+  // Morning Brief "Draft the change" deep-link: open the Program tab with the
+  // suggestion appended to the DRAFT (nothing saves until the coach hits save).
+  useEffect(()=>{
+    if(!prefill||prefill.athleteId!==athlete.id) return;
+    setTab("program");
+    setProgramText(t=>`${(t||athlete.program_text||"").trimEnd()}\n\n# From today's brief — edit into the program, then delete this note:\n# ${prefill.note}`);
+    onPrefillConsumed&&onPrefillConsumed();
+  },[prefill,athlete.id]);
 
   const handleProgramSave = async () => {
     setProgramSaving(true);
