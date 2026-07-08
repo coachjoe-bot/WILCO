@@ -1687,7 +1687,19 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
   const dt = digest?.generated_at || digest?.created_at;
   const d = dt ? new Date(dt) : null;
   const dateLine = d ? d.toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"}).toUpperCase() : "";
-  const weekNo = d ? Math.ceil((((d - new Date(d.getFullYear(),0,1)) / 86400000) + new Date(d.getFullYear(),0,1).getDay()+1)/7) : null;
+  // Edition number = this athlete's Nth digest (weekly+monthly, oldest = No. 1).
+  // Counted server-side so it stays right even though only the latest digest is
+  // loaded here; on any fetch hiccup the masthead just omits the number.
+  const [edNo,setEdNo] = useState(null);
+  useEffect(()=>{
+    let on=true;
+    const aid=digest?.athlete_id, at=digest?.generated_at||digest?.created_at;
+    if(!aid||!at){ setEdNo(null); return; }
+    sbRead("proof_digests",`?athlete_id=eq.${aid}&digest_type=in.(weekly,monthly)&generated_at=lte.${encodeURIComponent(at)}&select=id`)
+      .then(r=>{ if(on) setEdNo(Array.isArray(r)&&r.length?r.length:null); })
+      .catch(()=>{ if(on) setEdNo(null); });
+    return ()=>{ on=false; };
+  },[digest?.id]);
   const who = (athleteName||digest?.athlete_name||"").split(" ")[0];
   const editionLabel = who ? `${who.toUpperCase()}'S ${isMonthly?"MONTHLY":"WEEKLY"} EDITION` : (isMonthly?"MONTHLY EDITION":"WEEKLY EDITION");
 
@@ -1695,7 +1707,7 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
   const masthead = (
     <>
       <div style={{display:"flex",justifyContent:"space-between",...kick()}}>
-        <span>Coach Joe, Editor</span><span style={{...kick(CA.cyan),display:"flex",gap:5,alignItems:"center"}}><span style={{width:5,height:5,borderRadius:"50%",background:CA.cyan,boxShadow:`0 0 7px ${CA.cyan}`}}/>LIVE{weekNo?` · No. ${weekNo}`:""}</span>
+        <span>Coach Joe, Editor</span><span style={{...kick(CA.cyan),display:"flex",gap:5,alignItems:"center"}}><span style={{width:5,height:5,borderRadius:"50%",background:CA.cyan,boxShadow:`0 0 7px ${CA.cyan}`}}/>LIVE{edNo?` · No. ${edNo}`:""}</span>
       </div>
       <NRule v="2px" m="4px 0 4px" c={NEWS.rule2}/>
       <div style={{fontFamily:NEWS.serif,fontWeight:900,fontSize:40,lineHeight:0.9,letterSpacing:-1,color:NEWS.ink,textAlign:"center"}}>The Proof</div>

@@ -2068,6 +2068,18 @@ function CoachCheckin({digest, team, coach, onRead}){
 
 function CoachEdition({digest, athletes, coach, school, onBack, onRead}){
   const c = digest.content_json||{};
+  // Edition number = this coach's Nth team edition (weekly+monthly, oldest = No. 1).
+  // The gateway scopes coach-digest reads to this coach, so no coach filter needed.
+  const [edNo,setEdNo] = useState(null);
+  useEffect(()=>{
+    let on=true;
+    const at=digest?.generated_at||digest?.created_at;
+    if(!at){ setEdNo(null); return; }
+    sbRead("proof_digests",`?digest_type=in.(weekly_coach,monthly_coach)&generated_at=lte.${encodeURIComponent(at)}&select=id`)
+      .then(r=>{ if(on) setEdNo(Array.isArray(r)&&r.length?r.length:null); })
+      .catch(()=>{ if(on) setEdNo(null); });
+    return ()=>{ on=false; };
+  },[digest?.id]);
   const team = c.team||null;
   const sections = Array.isArray(c.sections)?c.sections:[];
   const isMonthly = digest.digest_type==="monthly_coach";
@@ -2083,7 +2095,7 @@ function CoachEdition({digest, athletes, coach, school, onBack, onRead}){
           </div>
           <div style={{fontFamily:"'Bebas Neue'",fontSize:12,letterSpacing:2,color:CA.muted,marginTop:6,display:"flex",alignItems:"center",justifyContent:"center",gap:7}}>
             <span className="c-live" style={{width:6,height:6,borderRadius:"50%",background:CA.cyan,display:"inline-block",flexShrink:0}}/>
-            <span>{coach?.name||"Coach"} · {new Date(digest.generated_at||Date.now()).toLocaleDateString("en-US",{month:"long",day:"numeric"})}{team?` · ${team.n} Athletes`:""}</span>
+            <span>{coach?.name||"Coach"} · {new Date(digest.generated_at||Date.now()).toLocaleDateString("en-US",{month:"long",day:"numeric"})}{team?` · ${team.n} Athletes`:""}{edNo?` · No. ${edNo}`:""}</span>
           </div>
         </div>
         {c.intro&&<div style={{fontFamily:EDITION_SERIF,fontSize:16,color:EDITION_BODY,fontStyle:"italic",marginBottom:14,textAlign:"center"}}>{c.intro}</div>}
