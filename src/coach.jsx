@@ -34,6 +34,21 @@ const sha256hex = async (text)=>{
   const b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(text||"")));
   return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,"0")).join("");
 };
+// Parse one program text → prescription row, cache via gateway. Returns the row or
+// null. maxTokens 4000 (api/claude.js's clamp), NOT 1500 — long multi-week programs
+// overflow 1500 mid-JSON and silently never parse (proven in prod: 12 straight
+// calls truncated at exactly the old cap). Shared by the dashboard-load backfill
+// AND parse-at-save, so a program is gradeable the moment it's assigned.
+const parseAndCacheProgram = async (athleteId, programText)=>{
+  const text = String(programText||"");
+  if(text.trim().length<20) return null;
+  const raw = await askClaude(PARSE_SYSTEM, `Program:\n${text.slice(0,6000)}`, 4000, [], "claude-haiku-4-5", "program_parse");
+  const parsed = JSON.parse(String(raw).replace(/```json|```/g,"").trim());
+  if(!parsed||!Array.isArray(parsed.blocks)) throw new Error("no blocks in parse");
+  const row = {athlete_id:athleteId, source_hash:await sha256hex(text), parsed_json:parsed, updated_at:new Date().toISOString()};
+  await sbUpsert("program_prescriptions", row, "athlete_id");
+  return row;
+};
 
 // ─── GSC — coach "control room" motion skin ──────────────────────────────────
 // The coach dashboard is the CONTROL ROOM to the athlete's gym floor: denser,
@@ -685,12 +700,8 @@ function CoachDashboard({coach,onLogout}) {
       for(const a of targets){
         if(cancelled) break;
         try{
-          const raw=await askClaude(PARSE_SYSTEM, `Program:\n${a.program_text.slice(0,6000)}`, 1500, [], "claude-haiku-4-5", "program_parse");
-          const parsed=JSON.parse(String(raw).replace(/```json|```/g,"").trim());
-          if(!parsed||!Array.isArray(parsed.blocks)) throw new Error("no blocks in parse");
-          const rowNew={athlete_id:a.id, source_hash:await sha256hex(a.program_text), parsed_json:parsed, updated_at:new Date().toISOString()};
-          await sbUpsert("program_prescriptions", rowNew, "athlete_id");
-          if(!cancelled) setPrescriptions(prev=>[...prev.filter(p=>p.athlete_id!==a.id), rowNew]);
+          const rowNew = await parseAndCacheProgram(a.id, a.program_text);
+          if(rowNew&&!cancelled) setPrescriptions(prev=>[...prev.filter(p=>p.athlete_id!==a.id), rowNew]);
         }catch(e){ console.error("on-demand program parse failed",a.name,e); }
         if(!cancelled) setParsingIds(prev=>{const s=new Set(prev); s.delete(a.id); return s;});
       }
@@ -854,6 +865,22 @@ function CoachDashboard({coach,onLogout}) {
         await sbUpdate("athletes",id,{program_text:bulkProgram.trim()});
       }
       setAthletes(prev=>prev.map(a=>selectedIds.has(a.id)?{...a,program_text:bulkProgram.trim()}:a));
+      // parse-at-save for bulk: same text for everyone → ONE Haiku call, then the
+      // parsed row is fanned out per athlete (fire-and-forget).
+      (async()=>{
+        try{
+          const ids=[...selectedIds];
+          const first=await parseAndCacheProgram(ids[0],bulkProgram.trim());
+          if(!first) return;
+          const rows=[first];
+          for(const id of ids.slice(1)){
+            const row={...first,athlete_id:id};
+            await sbUpsert("program_prescriptions",row,"athlete_id");
+            rows.push(row);
+          }
+          setPrescriptions(prev=>[...prev.filter(p=>!selectedIds.has(p.athlete_id)),...rows]);
+        }catch(e){ console.error("bulk parse-at-save",e); }
+      })();
       setSelectedIds(new Set());
       setSelectMode(false);
       setBulkProgram("");
@@ -1074,6 +1101,12 @@ function CoachDashboard({coach,onLogout}) {
                         await sbUpdate("athletes",selected.id,{program_text:text});
                         setAthletes(prev=>prev.map(a=>a.id===selected.id?{...a,program_text:text}:a));
                         setSelected(prev=>({...prev,program_text:text}));
+                        // parse-at-save: the program is gradeable immediately, no
+                        // "not parsed yet" window (fire-and-forget; backfill catches failures)
+                        const aid=selected.id;
+                        parseAndCacheProgram(aid,text)
+                          .then(row=>{ if(row) setPrescriptions(prev=>[...prev.filter(p=>p.athlete_id!==aid),row]); })
+                          .catch(e=>console.error("parse-at-save",e));
                       }}
                       onAthleteDelete={(id)=>{
                         setAthletes(prev=>prev.filter(a=>a.id!==id));

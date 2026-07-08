@@ -74,7 +74,11 @@ Rules: sets/reps are the prescribed working sets per session. pct_by_week is %1R
     const raw = await deps.askClaudeServer({
       system,
       user: `Program:\n${programText.slice(0, 6000)}`,
-      maxTokens: 1500,
+      // 4000, not 1500: multi-week programs (8-wk conjugate sheets, long %-tables)
+      // overflow 1500 mid-JSON → truncation → JSON.parse throws → the athlete
+      // silently never gets a prescription row (proven in prod: 12 straight calls
+      // at exactly the old cap, three real programs never parsed).
+      maxTokens: 4000,
       model: "claude-haiku-4-5",
       feature: "program_parse",
       attribution: deps.attribution,
