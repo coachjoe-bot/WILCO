@@ -89,6 +89,9 @@ const FEATURES = new Set([
   // Quick Log: draft = prefill today's log from program+history; edit = revise the
   // draft per an athlete instruction ("I did day 2", "all bench at 185").
   "quick_log_draft", "quick_log_edit",
+  // Morning Brief (coach dashboard): Haiku reactions to the coach's free-text
+  // replies + ask-backs. The brief itself is deterministic — zero tokens.
+  "coach_brief",
 ]);
 
 // Snapshot the segmentation fields AT CALL TIME so cost stays correctly attributed
