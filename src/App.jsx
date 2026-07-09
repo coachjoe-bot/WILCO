@@ -1185,12 +1185,20 @@ export const propagateForPRs = async (programText, prs) => {
   const raw = await askClaude(
     `You are Coach Joe Thomas updating an athlete's written program after they hit new PR(s). FIRST read the program and work out what each lift's numbers are based on, then change as LITTLE as possible:\n- If the program states a REFERENCE MAX / 1RM baseline that percentages are figured from (e.g. a "1RM Used" or "baselines" line), and a lift that PR'd has such a baseline, update ONLY that one lift's baseline number to the new max. NEVER change another lift's baseline. NEVER change the percentages themselves — they're relative and stay exactly as written.\n- Many athletes set their own WORKING WEIGHTS or a TRAINING MAX deliberately different from their true 1RM/e1RM — never touch those.\n- Leave fixed working weights, goal/target numbers (e.g. "MAX ATTEMPT @315lbs"), and anything the athlete chose UNCHANGED.\n- If the lift that PR'd has NO baseline entry and NO %-of-max loads (e.g. it's programmed as "load climbing week to week" or fixed reps), there is nothing to update — answer CHANGED: no.\n- When in doubt, leave it unchanged. NEVER claim a change you did not actually make to the program text below.\nRespond in EXACTLY this format and nothing else:\nCHANGED: <yes|no>\nSUMMARY: <if yes, ONE sentence, second person, describing ONLY what you actually changed (e.g. "Updated your Back Squat reference max to 425 — your % loads now come off the new number"); if no, "No changes — your numbers aren't tied to your max.">\nPROGRAM:\n<the FULL program text, updated only where appropriate; if nothing changed, return it verbatim>`,
     `New PR(s):\n${prLines}\n\nProgram:\n${programText}`,
-    1700, [], "claude-sonnet-5", "program_generate"
+    // Must be large enough to echo the ENTIRE program back (server caps at 4000).
+    // 1700 truncated long programs mid-text — the partial then overwrote the real
+    // program_text (see the length guard below, which is the actual safety net).
+    4000, [], "claude-sonnet-5", "program_generate"
   );
   const m = String(raw||"").match(/CHANGED:\s*(yes|no)[\s\S]*?SUMMARY:\s*([\s\S]*?)\n\s*PROGRAM:\s*\n?([\s\S]*)$/i);
   if(!m) return null;
   const prog = m[3].trim();
   if(!prog || prog.length<60) return null;
+  // Propagation only edits a few numbers, so the returned program must be ~as long
+  // as the input. A materially shorter result means the response was truncated (hit
+  // the token limit) or garbled — NEVER let that overwrite the athlete's program.
+  // Bail to null so the caller falls back and leaves program_text untouched.
+  if(prog.length < programText.length * 0.9) return null;
   return {text:prog, summary:m[2].trim(), changed:/yes/i.test(m[1])};
 };
 
@@ -1233,7 +1241,12 @@ export const CA_AVATAR = "linear-gradient(135deg,#3f7bff,#123a9e)"; // assistant
 export const GS = `
 *{box-sizing:border-box;margin:0;padding:0;}
 html,body{touch-action:manipulation;overscroll-behavior:none;-webkit-text-size-adjust:100%;text-size-adjust:100%;}
-body{background:${C.navy};color:${C.text};font-family:'DM Sans',sans-serif;-webkit-tap-highlight-color:transparent;}
+/* Body bg = athlete near-black base (CA.navy), NOT C.navy. The aesthetic overhaul
+   moved athlete screens to #04070f but left body at the old #060d1e — on iOS the
+   home-indicator safe area paints the body color, so the lighter old navy showed as
+   a strip below the near-black footer (the "navy band" that kept coming back — it
+   was a COLOR mismatch, not padding). Match body to the athlete base so it blends. */
+body{background:${CA.navy};color:${C.text};font-family:'DM Sans',sans-serif;-webkit-tap-highlight-color:transparent;}
 input,textarea,select,button{font-family:'DM Sans',sans-serif;}
 ::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-track{background:${C.navy2};}::-webkit-scrollbar-thumb{background:${C.border};border-radius:2px;}
 @keyframes fadeUp{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
@@ -4686,7 +4699,6 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
                 <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:CA.accent,letterSpacing:2,marginBottom:4}}>FORM REVIEW</div>
                 <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>What movement are you filming? <span style={{color:CA.muted,fontSize:12}}>(optional but helps)</span></div>
                 <input
-                  autoFocus
                   value={movementLabel}
                   onChange={e=>setMovementLabel(e.target.value)}
                   onKeyDown={e=>{ if(e.key==="Enter"){ setMovementPrompt(false); videoInputRef.current?.click(); }}}
