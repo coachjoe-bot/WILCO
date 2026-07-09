@@ -901,6 +901,8 @@ const parseWorkout = async (message, name, sport) => {
   "context_request":{"is_explicit":boolean,"note":string|null,"is_injury":boolean,"weight_lbs":number|null}|null,
   "general_notes":string|null,
   "is_program_update":boolean,
+  "program_append":boolean,
+  "program_create_request":boolean,
   "is_temp_program_update":boolean,
   "is_program_revert":boolean
 }
@@ -935,6 +937,8 @@ Rules:
 - Populate "practice_data" when the message describes a sport practice, game, scrimmage, team conditioning session, skill work, or film/walkthrough. Set practice_type to the best match. Intensity: light=walkthrough/film/skill_work (shooting, ball handling, passing drills — minimal physical exertion), moderate=half-speed/light practice, high=full practice, very_high=game/scrimmage/full-contact. Do NOT populate for gym workouts or standalone runs.
 - A single message may have BOTH practice_data AND exercises (e.g. athlete did practice then hit the weight room). Populate both when applicable.
 - Set is_program_update:true ONLY when the athlete is handing you their TRAINING PROGRAM / PLAN to save — a FORWARD-LOOKING prescription for future sessions (usually multiple days or weeks: "here's my program", "my new plan/split", "put me on this") AND the actual program content is present in the message. A past-tense WORKOUT LOG of what they just did is NOT a program update — even a full multi-exercise one with sets, reps and weights, and even a clean formatted Quick Log day list. Tell them apart by INTENT and tense: a program is what they WILL do (a plan); a log is what they DID ("did", "got", "hit today", "just finished", "logged"). Do NOT set it for content-free requests ("update my program", "save that"), and do NOT set it for a single day's session. When unsure, treat it as a LOG, not a program.
+- Set program_append:true when the athlete explicitly asks you to ADD the content in THIS message onto their existing saved program — "add this to my program", "add this to my program tab", "put this in my program", "append this to my plan", "tack this onto my program". The program content to add must be present in the message. This is ADDITIVE (extends the program), never a replacement — do NOT set it for a normal workout log, and if they're handing over a whole new program to save, that's is_program_update instead.
+- Set program_create_request:true when the athlete asks YOU to CREATE, WRITE, BUILD, DESIGN, or GENERATE a training program/plan FOR them and does NOT paste their own — "make me a program", "build me a program", "can you write me a plan", "design me a workout program", "I need a program, can you make one". This is them asking you to AUTHOR it, distinct from is_program_update (where they hand you an already-written program). Set it even if the request is short or details are still being gathered.
 - Set is_temp_program_update:true when the athlete has described their available equipment or conditions for a non-standard training situation (hotel, cruise, travel, beach, limited equipment, injury restrictions). Must include actual condition info — NOT set just because they mention traveling or ask what to do.
 - Set is_program_revert:true when the athlete signals they are returning to their normal training environment ("I'm back", "home now", "back at the gym", "back to normal", "cruise is over", etc.).
 - If weight is given in kg (e.g. "100kg squat"), set unit:"kg".
@@ -970,7 +974,7 @@ Rules:
     try { parsed = await runParse("claude-sonnet-5"); }
     catch { /* keep the Haiku result (or null) and fall through to the default */ }
   }
-  return parsed || {exercises:[],run_data:null,practice_data:null,pain_flags:[],equipment_issues:[],questions:[],pr_attempts:[],session_feel:null,general_notes:message,is_program_update:false,is_temp_program_update:false,is_program_revert:false};
+  return parsed || {exercises:[],run_data:null,practice_data:null,pain_flags:[],equipment_issues:[],questions:[],pr_attempts:[],session_feel:null,general_notes:message,is_program_update:false,program_append:false,program_create_request:false,is_temp_program_update:false,is_program_revert:false};
 };
 
 // athlete_context is a SINGLE upserted row per athlete (UNIQUE(athlete_id)). To give
@@ -3731,6 +3735,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [movementPrompt,setMovementPrompt] = useState(false);
   const [movementLabel,setMovementLabel] = useState("");
   const [sessionCheckPending,setSessionCheckPending] = useState(null);
+  const [programReplacePending,setProgramReplacePending] = useState(null);
   const [showLog,setShowLog] = useState(false);
   const [showSettings,setShowSettings] = useState(false);
   const [showProgram,setShowProgram] = useState(false);
@@ -4109,6 +4114,26 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     setLoading(false);
   };
 
+  // Athlete already has a program and Joe proposed a new/pasted one. We NEVER
+  // overwrite an existing program silently — switching needs the athlete's explicit
+  // tap here. Replace = swap it in; Keep = discard the proposal, program untouched.
+  const confirmProgramReplace = async (apply) => {
+    const pending = programReplacePending;
+    setProgramReplacePending(null);
+    if(!pending) return;
+    if(apply){
+      try {
+        await sbUpdate("athletes",athlete.id,{program_text:pending.newText});
+        setAthlete(prev=>({...prev,program_text:pending.newText}));
+        setMessages(prev=>[...prev,{role:"assistant",content:"📋 Done — swapped in the new program. It's in your Program tab now."}]);
+      } catch(e){
+        setMessages(prev=>[...prev,{role:"assistant",content:"Couldn't save that one — try again in a sec."}]);
+      }
+    } else {
+      setMessages(prev=>[...prev,{role:"assistant",content:"👍 Kept your current program. Nothing changed."}]);
+    }
+  };
+
   // `overrideText` lets Quick Log submit a prepared message directly — the click
   // handler passes an event object (not a string), which safely falls back to `input`.
   const send = async (overrideText) => {
@@ -4119,6 +4144,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     const fromQuickLog = quickLogPending.current;
     quickLogPending.current = false;
     track("chat_message_sent","ai");
+    // A typed message while a program-replace confirmation is pending = the athlete
+    // chose NOT to use the chips. Drop the proposal (never switch without an explicit
+    // tap) and process this new message normally.
+    if(programReplacePending) setProgramReplacePending(null);
 
     // ── Goal collection flow (first chat only) ──────────────────────────────
     if(goalCollectionActive){
@@ -4223,22 +4252,17 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         setMessages(prev=>[...prev,{role:"assistant",content:note}]);
       };
 
-      // Detect and save program updates — any tier, as long as coach hasn't locked it
-      if(parsed.is_program_update && !updatedAthlete.program_locked && !fromQuickLog){
-        try {
-          const programText = await extractProgramText(msg);
-          // Guard: only save if there's real program content (not a one-line command)
-          const hasContent = programText && programText.trim().length > 60 && programText.trim().split("\n").length > 1;
-          if(hasContent){
-            await sbUpdate("athletes",athlete.id,{program_text:programText});
-            updatedAthlete.program_text = programText;
-            setAthlete(updatedAthlete);
-            followUp("📋 Program saved — I'll reference this in every session.");
-          }
-        } catch(e){}
-      } else if(parsed.is_program_update && updatedAthlete.program_locked){
-        // Program is coach-locked: don't apply. File a change request to the coach's
-        // inbox and tell the athlete exactly what to raise (coach-experience-vision §4).
+      // ── Program tab writes (any tier). Three intents: paste-to-save
+      // (is_program_update), "add this to my program" (program_append), and "make me a
+      // program" (program_create_request). GOLDEN RULE: never silently overwrite an
+      // EXISTING program — a replace needs the athlete's explicit tap
+      // (setProgramReplacePending → confirm chips). Creating a first program or
+      // APPENDING loses nothing, so those save straight away.
+      const wantsProgramWrite = parsed.is_program_update || parsed.program_append || parsed.program_create_request;
+      const hasProgram = !!(updatedAthlete.program_text && updatedAthlete.program_text.trim());
+      if(wantsProgramWrite && updatedAthlete.program_locked){
+        // Coach-locked: never touch it. File a change request to the coach's inbox
+        // and tell the athlete what to raise (coach-experience-vision §4).
         try {
           await sbInsert("program_change_requests",{
             athlete_id: athlete.id,
@@ -4248,6 +4272,56 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             source: "feedback",
           });
           followUp("🔒 Your coach has your program locked, so I didn't change it — but I've flagged this for them. Next time you talk to your coach, bring up that you'd like to adjust your program and why.");
+        } catch(e){}
+      } else if(parsed.program_append && !fromQuickLog){
+        // "add this to my program tab" — additive. Merge onto the existing program
+        // (or create it if there's none). Never destructive, so no permission needed.
+        try {
+          const addition = await extractProgramText(msg);
+          if(addition && addition.trim().length > 20){
+            const merged = hasProgram ? (updatedAthlete.program_text.trim() + "\n\n" + addition.trim()) : addition.trim();
+            await sbUpdate("athletes",athlete.id,{program_text:merged});
+            updatedAthlete.program_text = merged;
+            setAthlete(updatedAthlete);
+            followUp(hasProgram ? "📋 Added that to your Program tab." : "📋 Saved that to your Program tab.");
+          }
+        } catch(e){}
+      } else if(parsed.is_program_update && !fromQuickLog){
+        // Athlete handed over a full program to save.
+        try {
+          const programText = await extractProgramText(msg);
+          const hasContent = programText && programText.trim().length > 60 && programText.trim().split("\n").length > 1;
+          if(hasContent){
+            if(hasProgram){
+              // Already have one — ASK before switching, don't write yet.
+              setProgramReplacePending({newText:programText.trim()});
+              followUp("You've already got a program saved. Want me to replace it with this one? Tap “Replace program” below to switch, or “Keep current” to leave it as-is. I won't change anything until you say so.");
+            } else {
+              await sbUpdate("athletes",athlete.id,{program_text:programText});
+              updatedAthlete.program_text = programText;
+              setAthlete(updatedAthlete);
+              followUp("📋 Program saved to your Program tab — I'll reference it every session.");
+            }
+          }
+        } catch(e){}
+      } else if(parsed.program_create_request && !fromQuickLog){
+        // Athlete asked Joe to BUILD them a program. Joe already wrote it into `reply`;
+        // pull the clean program out of it. Only act if the reply actually contains a
+        // real program (not just clarifying questions).
+        try {
+          const generated = await extractProgramText(reply);
+          const looksLikeProgram = generated && generated.trim().length > 120 && generated.trim().split("\n").length > 3;
+          if(looksLikeProgram){
+            if(hasProgram){
+              setProgramReplacePending({newText:generated.trim()});
+              followUp("That's the program I'd put you on. You've already got one saved though — want me to replace it? Tap “Replace program” below to switch, or “Keep current”. Nothing changes until you say so.");
+            } else {
+              await sbUpdate("athletes",athlete.id,{program_text:generated.trim()});
+              updatedAthlete.program_text = generated.trim();
+              setAthlete(updatedAthlete);
+              followUp("📋 Saved that to your Program tab — it'll drive every session from here. Tweak it anytime in the Program tab.");
+            }
+          }
         } catch(e){}
       }
 
@@ -4625,7 +4699,11 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             {messages.map((m,i)=>(
               <div key={i} className="fade-up" style={{marginBottom:12,display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
                 {m.role==="assistant"&&<div style={{width:28,height:28,borderRadius:"50%",background:CA_AVATAR,boxShadow:`0 0 12px ${CA_GLOW}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#fff",flexShrink:0,marginRight:8,marginTop:2}}>J</div>}
-                <div style={{maxWidth:"80%",padding:"10px 14px",borderRadius:m.role==="user"?"15px 15px 4px 15px":"15px 15px 15px 4px",background:m.role==="user"?CA_BUBBLE:"rgba(10,18,38,.62)",backdropFilter:m.role==="assistant"?"blur(6px)":undefined,WebkitBackdropFilter:m.role==="assistant"?"blur(6px)":undefined,color:m.role==="user"?"#fff":"#dde5f2",fontSize:14,lineHeight:1.7,border:m.role==="assistant"?"1px solid rgba(120,150,210,.22)":"none",whiteSpace:"pre-wrap"}}>
+                <div style={{maxWidth:"80%",padding:"10px 14px",borderRadius:m.role==="user"?"15px 15px 4px 15px":"15px 15px 15px 4px",background:m.role==="user"?CA_BUBBLE:"rgba(10,18,38,.62)",backdropFilter:m.role==="assistant"?"blur(6px)":undefined,WebkitBackdropFilter:m.role==="assistant"?"blur(6px)":undefined,color:m.role==="user"?"#fff":"#dde5f2",fontSize:14,lineHeight:1.7,border:m.role==="assistant"?"1px solid rgba(120,150,210,.22)":"none",whiteSpace:"pre-wrap",
+                  // iMessage-style: long-press to select/copy. iOS standalone PWAs
+                  // default chat text to non-selectable with the callout suppressed,
+                  // so enable both explicitly on every bubble.
+                  userSelect:"text",WebkitUserSelect:"text",WebkitTouchCallout:"default",cursor:"text"}}>
                   {m.role==="assistant"?<StreamText text={m.content}/>:m.content}
                 </div>
               </div>
@@ -4660,6 +4738,18 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             New session
           </button>
         </div>
+      ):programReplacePending?(
+        <div className="no-sb" style={{padding:"0 14px 4px",display:"flex",gap:6,overflowX:"auto",flexShrink:0,alignItems:"center",flexWrap:"nowrap"}}>
+          <span style={{color:CA.muted,fontSize:12,flexShrink:0}}>↑</span>
+          <button onClick={()=>confirmProgramReplace(true)}
+            style={{background:`${CA.accent}20`,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+            Replace program
+          </button>
+          <button onClick={()=>confirmProgramReplace(false)}
+            style={{background:`${CA.green}20`,border:`1px solid ${CA.green}`,color:CA.green,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+            Keep current
+          </button>
+        </div>
       ):(
         <div style={{padding:"0 0 5px",overflow:"hidden",flexShrink:0,WebkitMaskImage:"linear-gradient(90deg,transparent,#000 5%,#000 95%,transparent)",maskImage:"linear-gradient(90deg,transparent,#000 5%,#000 95%,transparent)"}}>
           <div className="a-ticker" style={{alignItems:"center"}}>
@@ -4691,32 +4781,6 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,width:44,height:44,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontSize:18,opacity:(loading||videoLoading)?0.4:1}}>
             🎬
           </button>
-
-          {/* Movement label modal */}
-          {movementPrompt&&(
-            <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:24}}>
-              <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:360}}>
-                <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:CA.accent,letterSpacing:2,marginBottom:4}}>FORM REVIEW</div>
-                <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>What movement are you filming? <span style={{color:CA.muted,fontSize:12}}>(optional but helps)</span></div>
-                <input
-                  value={movementLabel}
-                  onChange={e=>setMovementLabel(e.target.value)}
-                  onKeyDown={e=>{ if(e.key==="Enter"){ setMovementPrompt(false); videoInputRef.current?.click(); }}}
-                  placeholder="e.g. snatch, back squat, deadlift..."
-                  style={{width:"100%",background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:10,padding:"11px 14px",color:CA.text,fontSize:15,outline:"none",marginBottom:14}}/>
-                <div style={{display:"flex",gap:8}}>
-                  <button onClick={()=>setMovementPrompt(false)}
-                    style={{flex:1,background:"transparent",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14,fontFamily:"'DM Sans'"}}>
-                    Cancel
-                  </button>
-                  <button onClick={()=>{ setMovementPrompt(false); videoInputRef.current?.click(); }}
-                    style={{flex:2,background:CA.accent,border:"none",color:"#000",borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>
-                    Choose Video →
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
           <textarea value={input} onChange={e=>setInput(e.target.value)}
             placeholder={sessionCheckPending?"Tap Same workout or New session above...":`Tell Coach Joe about your workout, ${athlete.name}...`} rows={2}
             disabled={!!sessionCheckPending}
@@ -4728,6 +4792,36 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         </div>
         <div style={{color:CA.muted,fontSize:10,marginTop:6,textAlign:"center"}}>Type naturally to log workouts, or use ⚡ Quick Log · 🎬 upload a video for form review (MP4 works best)</div>
       </div>
+
+      {/* Form-review movement modal — MUST render here at the root, NOT inside the
+          input bar. That bar has backdrop-filter:blur, which (like transform) makes
+          it the containing block for position:fixed, pinning this overlay to the bar
+          at the bottom of the screen, half off-screen. At the root it centers to the
+          viewport like the other modals. */}
+      {movementPrompt&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:400,padding:24}}>
+          <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:360}}>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:CA.accent,letterSpacing:2,marginBottom:4}}>FORM REVIEW</div>
+            <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>What movement are you filming? <span style={{color:CA.muted,fontSize:12}}>(optional but helps)</span></div>
+            <input
+              value={movementLabel}
+              onChange={e=>setMovementLabel(e.target.value)}
+              onKeyDown={e=>{ if(e.key==="Enter"){ setMovementPrompt(false); videoInputRef.current?.click(); }}}
+              placeholder="e.g. snatch, back squat, deadlift..."
+              style={{width:"100%",background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:10,padding:"11px 14px",color:CA.text,fontSize:15,outline:"none",marginBottom:14}}/>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>setMovementPrompt(false)}
+                style={{flex:1,background:"transparent",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14,fontFamily:"'DM Sans'"}}>
+                Cancel
+              </button>
+              <button onClick={()=>{ setMovementPrompt(false); videoInputRef.current?.click(); }}
+                style={{flex:2,background:CA.accent,border:"none",color:"#000",borderRadius:10,padding:"11px",cursor:"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>
+                Choose Video →
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* My Log Modal */}
       {showLog&&<MyLogModal workoutHistory={workoutHistory} athlete={athlete} onClose={()=>setShowLog(false)} proofDigest={proofDigest} onDigestRead={(d)=>setProofDigest(d)} onOpenProofChat={()=>{setShowLog(false);setShowProofChat(true);}} setWorkoutHistory={setWorkoutHistory}/>}
