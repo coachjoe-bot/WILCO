@@ -89,10 +89,38 @@ export const bestE1RMForExercise = (ex, bwLbs = 0) => {
 };
 
 // ── Exercise-name normalization (same rules as the log/PR/progress screens) ───
+// Structure-aware, not just string-deletion. Order of operations matters:
+// abbreviations → compound-word folding → plural folding → paren UNWRAP (the
+// content is kept — "(close grip)" is a lift-defining qualifier, deleting it used
+// to silently merge close-grip bench into bench press) → execution-descriptor
+// strip → modifier reorder (grip/arm qualifiers move to the front so word order
+// can never split one lift into two).
+
+// Lift-defining modifiers that athletes write in any position ("bench press close
+// grip", "(close grip)", "close-grip bench"). Extracted and re-prepended in THIS
+// fixed order so every word order collapses to one id.
+const MOD_PHRASES = [
+  "close grip", "wide grip", "narrow grip", "neutral grip", "reverse grip",
+  "underhand", "overhand", "single arm", "single leg", "behind the neck",
+];
+
+// Unambiguous sub-phrase synonyms, applied after modifiers are extracted so one
+// entry covers every grip/arm variant of the phrase. Keep TRUE synonyms only.
+const PHRASE_SYNONYMS = [
+  [/\bseated horizontal row\b/g, "seated cable row"],
+  [/\bseated row\b/g, "seated cable row"],
+  [/\btricep pressdown\b/g, "tricep pushdown"],
+  [/\bcable pushdown\b/g, "tricep pushdown"],
+];
+
 export const normalizeExName = (name) => {
   if (!name) return "";
   let n = name.toLowerCase().trim()
     .replace(/\s+/g, " ")
+    // "Clean + Jerk" / "clean & jerk" / "C&J" are the classic lift, not a complex.
+    // Narrow on purpose: a real complex ("clean + front squat + jerk") keeps its +.
+    .replace(/\bc\s*[&+n]\s*j\b/g, "clean and jerk")
+    .replace(/\bclean\s*[&+]\s*jerk\b/g, "clean and jerk")
     .replace(/\bohp\b/g, "overhead press")
     .replace(/\bbb\b/g, "barbell")
     .replace(/\bdb\b/g, "dumbbell")
@@ -100,7 +128,13 @@ export const normalizeExName = (name) => {
     .replace(/\brdl\b/g, "romanian deadlift")
     .replace(/pull[ -]?ups?\b/g, "pull-up")
     .replace(/chin[ -]?ups?\b/g, "chin-up")
-    .replace(/push[ -]?ups?\b/g, "push-up");
+    .replace(/push[ -]?ups?\b/g, "push-up")
+    // Compound movements written open, hyphenated, or closed → one closed form
+    // ("tricep push down" / "lat pull-down" / "press down" → pushdown/pulldown).
+    .replace(/\b(push|pull|press)[ -]down\b/g, "$1down")
+    .replace(/\bpull[ -]over\b/g, "pullover")
+    .replace(/\bkick[ -]back\b/g, "kickback")
+    .replace(/\bstep[ -]up\b/g, "step-up");
   n = n
     .replace(/(ch|sh|x|z)es\b/g, "$1")
     .replace(/sses\b/g, "ss")
@@ -108,12 +142,30 @@ export const normalizeExName = (name) => {
   n = n.replace(/\bbench\b(?!\s*press)/g, "bench press");
   if (n === "squat" || n === "barbell squat") n = "back squat";
   n = n
-    .replace(/\([^)]*\)/g, " ")
+    // UNWRAP parens — keep the words. Qualifiers survive to the modifier pass;
+    // execution junk inside them is stripped by the descriptor rules below.
+    .replace(/[()]/g, " ")
     .replace(/\b(?:from|off)(?:\s+(?:the|a))?\s+(?:floor|ground)\b/g, " ")
     .replace(/\b(?:dead[\s-]?stop|touch[\s-]?and[\s-]?go|tng)\b/g, " ")
     .replace(/\b(?:paused?|tempo|slow|controlled|eccentric)\b/g, " ")
+    .replace(/\b\d+\s*(?:sec(?:ond)?s?|count|ct)\b/g, " ")
     .replace(/\bw\/?\b/g, " ")
     .replace(/\s+/g, " ").trim();
+  // Modifier canonicalization: unify spellings, then move lift-defining modifiers
+  // to the front in MOD_PHRASES order — "bench press close grip", "close-grip
+  // bench press" and "bench press (close grip)" all become "close grip bench press".
+  n = n
+    .replace(/\b(close|wide|narrow|neutral|reverse)[ -]?grip\b/g, "$1 grip")
+    .replace(/\bone[ -](arm|leg)\b/g, "single $1")
+    .replace(/\bsingle[ -](arm|leg)\b/g, "single $1");
+  const mods = [];
+  for (const m of MOD_PHRASES) {
+    const re = new RegExp("\\b" + m + "\\b", "g");
+    if (re.test(n)) { mods.push(m); n = n.replace(re, " "); }
+  }
+  n = n.replace(/\s+/g, " ").trim();
+  for (const [re, out] of PHRASE_SYNONYMS) n = n.replace(re, out);
+  n = (mods.join(" ") + " " + n).replace(/\s+/g, " ").trim();
   return n;
 };
 
@@ -179,6 +231,11 @@ const LIFT_ALIASES = {
   "muscle up": "muscle-up",
   "weighted muscle up": "muscle-up",
   "weighted muscle-up": "muscle-up",
+  // Pushdowns — compound folding gets the spelling; these get the true synonyms.
+  "triceps pushdown": "tricep pushdown",
+  "tricep cable pushdown": "tricep pushdown",
+  "rope pushdown": "tricep pushdown",
+  "tricep rope pushdown": "tricep pushdown",
 };
 
 // Load-bearing bodyweight lifts (by canonical id) — their number is a bodyweight +
@@ -193,6 +250,10 @@ const LIFT_CANON = {
   "sumo deadlift": "Sumo Deadlift", "back squat": "Back Squat", "front squat": "Front Squat",
   "pull-up": "Pull-Up", "chin-up": "Chin-Up", "dip": "Dip", "muscle-up": "Muscle-Up",
   "sit-up": "Sit-Up", "weighted sit-up": "Weighted Sit-Up",
+  "clean and jerk": "Clean & Jerk", "tricep pushdown": "Tricep Pushdown",
+  "lat pulldown": "Lat Pulldown", "seated cable row": "Seated Cable Row",
+  "close grip seated cable row": "Seated Cable Row (Close Grip)",
+  "close grip bench press": "Close-Grip Bench Press",
 };
 export const displayForLift = (id, fallback) => LIFT_CANON[id] || CANON_DISPLAY[id] || fallback || id;
 
@@ -343,6 +404,9 @@ export const getBenchKey = (normalized) => {
     return /(bench|floor|incline|chest)/.test(n) ? "dumbbell bench press" : "dumbbell shoulder press";
   if (n.includes("arnold press")) return "dumbbell shoulder press";
   if (n.includes("incline bench") || n.includes("incline press")) return "incline bench press";
+  // Close-grip bench is its own tracked lift — now that the normalizer keeps the
+  // "(close grip)" qualifier it must never rank against the full bench standard.
+  if (/\bclose grip\b.*bench/.test(n)) return null;
   if (n.includes("bench press") || n === "bench" || n.includes("barbell bench")) return "bench press";
   if (n.includes("overhead press") || n.includes("ohp") || n === "press" || n.includes("military press") || n.includes("strict press")) return "overhead press";
   if (/(barbell|\bbb\b|ez[ -]?bar)[ -]?curl/.test(n)) return "barbell curl";

@@ -920,7 +920,26 @@ const extractProgramText = async (message) => {
   return text?.trim() || message;
 };
 
-const parseWorkout = async (message, name, sport) => {
+// The athlete's existing lift vocabulary for the parser's NAME REUSE rule: one
+// entry per canonical lift (most recent first), spelled the way the progress tabs
+// display it — so new logs converge on the exact names already being charted.
+const knownExerciseNames = (history, cap = 50) => {
+  const seen = new Map();
+  for (const w of history || []) {
+    for (const ex of (w?.parsed_data?.exercises || [])) {
+      const lift = resolveLift(ex.name);
+      if (!ex.name || !lift.tracked || seen.has(lift.id)) continue;
+      seen.set(lift.id, lift.name);
+      if (seen.size >= cap) return [...seen.values()];
+    }
+  }
+  return [...seen.values()];
+};
+
+// knownNames = the athlete's existing exercise vocabulary (canonical + as-logged
+// names). Injected into the USER message (the sys rulebook stays static → cached)
+// so the parser reuses existing spellings instead of minting near-duplicates.
+const parseWorkout = async (message, name, sport, knownNames = []) => {
   const sys = `Extract workout data from an athlete message. Return ONLY valid JSON, no markdown.
 {
   "exercises":[{"name":string,"sets":number|null,"reps":number|null,"rep_scheme":string|null,"time_per_set_seconds":number|null,"weight":number|null,"unit":"lbs"|"kg"|"bodyweight","added_weight":number|null,"assist_weight":number|null,"resistance":string|null,"load_basis":"each"|"total"|null,"rpe":number|null,"rir":number|null,"percent_1rm":number|null,"tempo":string|null,"technique":"drop"|"rest_pause"|"cluster"|"myo"|"amrap"|null,"to_failure":boolean|null,"superset_group":string|null,"feel":"easy"|"good"|"hard"|null,"notes":string|null,"set_details":[{"weight":number,"reps":number,"warmup":boolean}]|null}],
@@ -945,7 +964,7 @@ Rules:
 - Populate "run_data" when the message describes any run, jog, cardio, or running workout. Set run_type to the best match. Calculate pace if distance and time are both given.
 - For interval runs, populate "intervals" array with one entry per repeat type.
 - Populate "exercises" for strength/lifting/conditioning work. Leave empty for pure runs.
-- OLYMPIC WEIGHTLIFTING COMPLEXES: a "complex" is two or more movements done back-to-back within one set, written with "+" (e.g. "muscle snatch+hang snatch", "hang power clean+ hang clean", "clean+jerk", "snatch pull+snatch"). Log the WHOLE complex as ONE exercise entry — do NOT split it into separate exercises. Set "name" to the movements joined with " + " in Title Case (e.g. "Muscle Snatch + Hang Snatch"). Set "rep_scheme" to the literal per-set scheme string exactly as written ("1+1", "1+1+1", "2+1", etc.) and set "reps" to the number of reps of the FIRST movement per set (for 1RM math). "4x1+1" means sets:4, rep_scheme:"1+1", reps:1. Weights written as "@ 135/165/185/185lbs" are the per-set weights in order → populate set_details with one entry per set ({weight, reps: the first-movement reps}). Example: "muscle snatch+hang snatch 4x1+1 @ 135/165/185/185lbs" → exercises:[{"name":"Muscle Snatch + Hang Snatch","sets":4,"reps":1,"rep_scheme":"1+1","weight":185,"unit":"lbs","set_details":[{"weight":135,"reps":1},{"weight":165,"reps":1},{"weight":185,"reps":1},{"weight":185,"reps":1}]}]. NEVER return an empty exercises array just because the notation is dense — extract every lift you can identify.
+- OLYMPIC WEIGHTLIFTING COMPLEXES: a "complex" is two or more movements done back-to-back within one set, written with "+" (e.g. "muscle snatch+hang snatch", "hang power clean+ hang clean", "snatch pull+snatch"). EXCEPTION: "clean + jerk" / "clean & jerk" / "C&J" is NOT a complex — it is the classic competition lift; name it exactly "Clean & Jerk". Log the WHOLE complex as ONE exercise entry — do NOT split it into separate exercises. Set "name" to the movements joined with " + " in Title Case (e.g. "Muscle Snatch + Hang Snatch"). Set "rep_scheme" to the literal per-set scheme string exactly as written ("1+1", "1+1+1", "2+1", etc.) and set "reps" to the number of reps of the FIRST movement per set (for 1RM math). "4x1+1" means sets:4, rep_scheme:"1+1", reps:1. Weights written as "@ 135/165/185/185lbs" are the per-set weights in order → populate set_details with one entry per set ({weight, reps: the first-movement reps}). Example: "muscle snatch+hang snatch 4x1+1 @ 135/165/185/185lbs" → exercises:[{"name":"Muscle Snatch + Hang Snatch","sets":4,"reps":1,"rep_scheme":"1+1","weight":185,"unit":"lbs","set_details":[{"weight":135,"reps":1},{"weight":165,"reps":1},{"weight":185,"reps":1},{"weight":185,"reps":1}]}]. NEVER return an empty exercises array just because the notation is dense — extract every lift you can identify.
 - TIME-BASED / HELD EXERCISES (planks, dead hangs, wall sits, timed carries, isometric holds — anything measured by DURATION, not reps or weight): set "time_per_set_seconds" to the seconds held per set and leave "weight" null, "reps" null, "unit":"bodyweight" (unless external load is stated). Convert units to seconds: "1minute"/"1 min"→60, "30s"/"30 sec"→30, "1:30"→90. Example: "Plank 2x1minute" → {"name":"Plank","sets":2,"time_per_set_seconds":60,"weight":null,"reps":null,"unit":"bodyweight"}. "Dead hang 3x30s" → sets:3, time_per_set_seconds:30. If a movement has BOTH a rep count and a hold, use reps and put the hold in notes.
 - BODYWEIGHT / UNLOADED REP WORK (push-ups, pull-ups, sit-ups, Russian twists, air squats — reps with no external load and no time): set "unit":"bodyweight", "weight":null, and use sets/reps normally. "Russian twists 2x20" → {"name":"Russian Twist","sets":2,"reps":20,"unit":"bodyweight"}. Do NOT set weight to 0.
 - The following load/intensity fields are ALL OPTIONAL — most athletes (especially beginners/high-schoolers) won't use them. Leave a field null unless the athlete's own words clearly contain it. Never invent or infer these.
@@ -967,6 +986,7 @@ Rules:
 - TO FAILURE: "to failure", "till failure", "failed at", "AMRAP" → set "to_failure":true. This can combine with any technique (e.g. a drop set to failure).
 - SUPERSETS / GIANT SETS: when two or more exercises are done back-to-back as a unit — "superset", "SS", "A1/A2", "triset", "giant set", or "X then Y with no rest" — give EVERY exercise in that group the SAME "superset_group" letter ("A" for the first group in the session, "B" for the next, etc.), in the order performed. Each movement is still its OWN exercise entry. "Superset: bench 3x8 185 / bent row 3x8 155" → Bench {..., "superset_group":"A"} and Bent Row {..., "superset_group":"A"}. Leave superset_group null for normal standalone exercises.
 - Exercise "name": use a CANONICAL name = the core lift + equipment + any lift-DEFINING qualifier (front/back, incline/decline/flat, close-/wide-grip, sumo/deficit/romanian, hang/power/full, high-/low-bar). Do NOT put EXECUTION/SETUP descriptors in the name — pause/paused, "from the floor", dead-stop, touch-and-go, slow eccentric, etc. — those belong in "notes" (tempo cadence goes in the "tempo" field, not the name or notes). So "paused back squat" → name:"Back Squat", notes:"paused"; "power snatch from the floor" → name:"Power Snatch". This keeps the same lift from being logged under several names. Use Title Case.
+- NAME REUSE (critical): the user message may include a KNOWN EXERCISE NAMES list — the athlete's existing log vocabulary. When a movement in this message is the SAME exercise as a listed name (same movement, merely worded, spelled, abbreviated, reordered, or punctuated differently — "tricep push down" vs "Tricep Pushdown", "seated horizontal row (close grip)" vs "Seated Cable Row Close Grip"), set "name" to the EXACT listed name, character for character. Only introduce a name NOT on the list when the movement is genuinely different (different equipment or a lift-defining variant: sumo vs conventional, incline vs flat, deficit, RDL, power vs full, a true complex). NEVER mint a slight rewording of a listed name — that splits one lift into two in the athlete's progress charts.
 - If the athlete mentions heart rate, bpm, avg HR, or max HR, populate heart_rate_avg and/or heart_rate_max in run_data.
 - Populate "practice_data" when the message describes a sport practice, game, scrimmage, team conditioning session, skill work, or film/walkthrough. Set practice_type to the best match. Intensity: light=walkthrough/film/skill_work (shooting, ball handling, passing drills — minimal physical exertion), moderate=half-speed/light practice, high=full practice, very_high=game/scrimmage/full-contact. Do NOT populate for gym workouts or standalone runs.
 - A single message may have BOTH practice_data AND exercises (e.g. athlete did practice then hit the weight room). Populate both when applicable.
@@ -981,7 +1001,8 @@ Rules:
 - "pr_attempts": include an entry with reps:1 and achieved:true whenever the athlete reports an ACTUAL (not estimated) 1-rep max for a lift — either because they just performed a true 1RM single in this session, OR because they are simply telling you their current actual max for a lift (e.g. "my real squat max is 405", "current bench 1RM is 275", "just hit a 315 deadlift max"). This applies even if no other exercises were logged in the message. If they describe a failed attempt at a 1RM, set achieved:false.`;
   const nowD = new Date();
   const todayLabel = nowD.toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"});
-  const user = `Athlete: ${name} (${sport})\nTODAY'S DATE: ${todayLabel} (${nowD.toISOString().slice(0,10)}). The athlete is logging this right now — only set log_date if they explicitly say the session was on a past day.\nMessage: ${message}`;
+  const known = knownNames.length ? `\nKNOWN EXERCISE NAMES (reuse the exact spelling when it's the same movement — see NAME REUSE rule): ${knownNames.join(" | ")}` : "";
+  const user = `Athlete: ${name} (${sport})\nTODAY'S DATE: ${todayLabel} (${nowD.toISOString().slice(0,10)}). The athlete is logging this right now — only set log_date if they explicitly say the session was on a past day.${known}\nMessage: ${message}`;
   const runParse = async (model) => {
     // The entire rulebook above is static — cache it (highest-volume call in the app).
     const text = await askClaude({cached:sys},user,1000,[],model,"workout_parse");
@@ -4271,7 +4292,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // arrives — the parse and all persistence below continue in the background.
       // The reply used to be held until parse + save finished (several bcrypt-gated
       // gateway round-trips), which made every message feel slower than the AI was.
-      const parsedP = parseWorkout(msg,athlete.name,athlete.sport);
+      const parsedP = parseWorkout(msg,athlete.name,athlete.sport,knownExerciseNames(workoutHistory));
       // Stream the coaching reply into a live-updating bubble: append an empty
       // assistant message and grow it as deltas arrive. On ANY stream failure (or an
       // empty stream), fall back to the one-shot call and replace the placeholder —
