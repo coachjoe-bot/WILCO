@@ -3737,13 +3737,13 @@ function CoachSetupScreen({setView,setCoach,setErr,err}) {
         <div style={{color:CA.muted,fontSize:12,marginBottom:16}}>You'll use this every time you log in.</div>
         <div style={{marginBottom:16}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CREATE PIN</label>
-          <input type="password" inputMode="numeric" maxLength={4} value={pin}
+          <input type="password" inputMode="numeric" autoComplete="one-time-code" maxLength={4} value={pin}
             onChange={e=>setPin(e.target.value.replace(/\D/g,"").slice(0,4))}
             placeholder="----" style={inpA({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
         </div>
         <div style={{marginBottom:20}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CONFIRM PIN</label>
-          <input type="password" inputMode="numeric" maxLength={4} value={confirmPin}
+          <input type="password" inputMode="numeric" autoComplete="one-time-code" maxLength={4} value={confirmPin}
             onChange={e=>setConfirmPin(e.target.value.replace(/\D/g,"").slice(0,4))}
             placeholder="----" style={inpA({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
         </div>
@@ -5557,15 +5557,15 @@ function EditWorkoutModal({session, onClose, setWorkoutHistory}) {
               <div style={{display:"flex",gap:8}}>
                 <div style={{flex:1}}>
                   <label style={{color:CA.muted,fontSize:9,letterSpacing:1,display:"block",marginBottom:3}}>SETS</label>
-                  <input type="number" min={0} value={r.sets} onChange={e=>updateRow(idx,"sets",e.target.value)} style={inpA({padding:"6px 8px",fontSize:12})}/>
+                  <input type="number" inputMode="numeric" min={0} value={r.sets} onChange={e=>updateRow(idx,"sets",e.target.value)} style={inpA({padding:"6px 8px",fontSize:12})}/>
                 </div>
                 <div style={{flex:1}}>
                   <label style={{color:CA.muted,fontSize:9,letterSpacing:1,display:"block",marginBottom:3}}>REPS</label>
-                  <input type="number" min={0} value={r.reps} onChange={e=>updateRow(idx,"reps",e.target.value)} style={inpA({padding:"6px 8px",fontSize:12})}/>
+                  <input type="number" inputMode="numeric" min={0} value={r.reps} onChange={e=>updateRow(idx,"reps",e.target.value)} style={inpA({padding:"6px 8px",fontSize:12})}/>
                 </div>
                 <div style={{flex:1.3}}>
                   <label style={{color:CA.muted,fontSize:9,letterSpacing:1,display:"block",marginBottom:3}}>WEIGHT</label>
-                  <input type="number" min={0} value={r.weight} onChange={e=>updateRow(idx,"weight",e.target.value)} style={inpA({padding:"6px 8px",fontSize:12})}/>
+                  <input type="number" inputMode="decimal" min={0} value={r.weight} onChange={e=>updateRow(idx,"weight",e.target.value)} style={inpA({padding:"6px 8px",fontSize:12})}/>
                 </div>
                 <div style={{flex:1}}>
                   <label style={{color:CA.muted,fontSize:9,letterSpacing:1,display:"block",marginBottom:3}}>UNIT</label>
@@ -5999,7 +5999,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                 </div>
                 {editingKey===row.key?(
                   <div style={{display:"flex",gap:8,marginTop:10}}>
-                    <input autoFocus type="number" min={0} value={editVal} onChange={e=>setEditVal(e.target.value)} placeholder={`Actual 1RM (${row.unit==="kg"?"kg":"lbs"})`} style={inpA({padding:"8px 10px",fontSize:13,flex:1})}/>
+                    <input autoFocus type="number" inputMode="decimal" min={0} value={editVal} onChange={e=>setEditVal(e.target.value)} placeholder={`Actual 1RM (${row.unit==="kg"?"kg":"lbs"})`} style={inpA({padding:"8px 10px",fontSize:13,flex:1})}/>
                     <button onClick={()=>saveManual(row)} style={{background:CA.accent,border:"none",color:CA.navy,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13,fontWeight:700}}>Save</button>
                     <button onClick={()=>{setEditingKey(null);setEditVal("");}} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13}}>Cancel</button>
                   </div>
@@ -6633,7 +6633,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
           )}
           {planChanged&&selectedTier!=="free"&&!showUpgradePay&&(
             <div style={{marginTop:10}}>
-              <input type="password" inputMode="numeric" maxLength={4} value={actionPin}
+              <input type="password" inputMode="numeric" autoComplete="one-time-code" maxLength={4} value={actionPin}
                 onChange={e=>setActionPin(e.target.value.replace(/\D/g,"").slice(0,4))}
                 placeholder="Enter PIN to confirm"
                 style={inpA({textAlign:"center",letterSpacing:6,marginBottom:8})}/>
@@ -6716,7 +6716,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
               <div style={{color:actionMsg.ok?CA.green:CA.red,fontSize:12,marginBottom:8,textAlign:"center",lineHeight:1.5}}>{actionMsg.text}</div>
             )}
             <div style={{display:"flex",gap:8,marginBottom:8}}>
-              <input type="password" inputMode="numeric" maxLength={4} value={actionPin}
+              <input type="password" inputMode="numeric" autoComplete="one-time-code" maxLength={4} value={actionPin}
                 onChange={e=>setActionPin(e.target.value.replace(/\D/g,"").slice(0,4))}
                 placeholder="PIN"
                 style={inpA({textAlign:"center",letterSpacing:6,flex:1})}/>

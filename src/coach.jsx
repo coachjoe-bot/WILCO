@@ -2505,6 +2505,8 @@ function AccountTab({coach,allCoaches,school,athletes,loadAll}){
               const [acCode,setAcCode] = useState("");          // freshly-created coach code (for its copy button)
               const [codeCopied,setCodeCopied] = useState(null); // which code is showing "Copied!"
               const [acSaving,setAcSaving] = useState(false);
+              const [removeId,setRemoveId] = useState(null);      // coach id pending remove-confirm (inline)
+              const [removing,setRemoving] = useState(false);
 
               const copyCoachCode = (code) => {
                 if(!code || codeCopied===code) return;
@@ -2537,12 +2539,14 @@ function AccountTab({coach,allCoaches,school,athletes,loadAll}){
               };
 
               const doRemoveCoach = async (c) => {
-                if(!window.confirm(`Remove ${c.name}? Their athletes will remain unassigned.`)) return;
+                setAcErr("");setAcOk("");setRemoving(true);
                 try {
                   await sbUpdate("coaches",c.id,{pin:null,access_code:`REMOVED_${c.access_code}`});
                   await sbUpdateWhere("athletes",`?coach_id=eq.${c.id}`,{coach_id:null});
+                  setRemoveId(null);
                   loadAll();
-                }catch(e){}
+                }catch(e){setAcErr("Could not remove "+c.name+": "+(e?.message||"try again."));}
+                setRemoving(false);
               };
 
               return (
@@ -2562,12 +2566,27 @@ function AccountTab({coach,allCoaches,school,athletes,loadAll}){
                     {schoolCoachesList.length===0?<div style={{color:CA.muted,fontSize:13,marginBottom:12}}>No coaches added yet.</div>:schoolCoachesList.map(c=>{
                       const athCount=athletes.filter(a=>a.coach_id===c.id).length;
                       return(
-                        <div key={c.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:`1px solid ${CA.border}`}}>
+                        <div key={c.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:`1px solid ${CA.border}`,gap:10}}>
                           <div>
                             <div style={{color:CA.text,fontWeight:600,fontSize:13}}>{c.name}</div>
                             <div style={{color:CA.muted,fontSize:11}}>{c.email} · Code: {c.access_code} · {athCount} athlete{athCount!==1?"s":""}</div>
                           </div>
-                          <button onClick={()=>doRemoveCoach(c)} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.red,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:11}}>Remove</button>
+                          {removeId===c.id ? (
+                            <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+                              <span style={{color:CA.muted,fontSize:11,textAlign:"right"}}>Remove? Athletes stay unassigned.</span>
+                              <button onClick={()=>doRemoveCoach(c)} disabled={removing}
+                                style={{background:CA.red,border:"none",color:"#fff",borderRadius:6,padding:"4px 10px",cursor:removing?"default":"pointer",fontSize:11,fontWeight:700}}>
+                                {removing?"...":"Confirm"}
+                              </button>
+                              <button onClick={()=>{setRemoveId(null);setAcErr("");}}
+                                style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:11}}>
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <button onClick={()=>{setRemoveId(c.id);setAcErr("");setAcOk("");}}
+                              style={{background:"none",border:`1px solid ${CA.border}`,color:CA.red,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:11,flexShrink:0}}>Remove</button>
+                          )}
                         </div>
                       );
                     })}

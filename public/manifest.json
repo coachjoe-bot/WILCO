@@ -4,7 +4,7 @@
   "description": "Your AI strength coach",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#060d1e",
+  "background_color": "#04060c",
   "theme_color": "#04060c",
   "orientation": "portrait",
   "icons": [
