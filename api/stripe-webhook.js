@@ -4,6 +4,7 @@
 // Body parser MUST be disabled so we can verify the Stripe signature against the
 // raw request body (same pattern as api/analyze-video.js).
 
+import crypto from "node:crypto";
 import {
   getStripe,
   sbAthleteGet,
@@ -164,5 +165,69 @@ async function handleInvoicePaid(stripe, invoice) {
     // Release the claim so a Stripe retry can regenerate.
     await releaseGiftGeneration(athlete.id);
     throw e;
+  }
+
+  // Close the ad→revenue loop. The gift-generation claim above is our
+  // once-per-subscriber gate, so this fires on the FIRST real payment only —
+  // the true Purchase, not renewals. Fully isolated: it can never throw into
+  // the webhook's retry path (a failure here must not re-trigger gift codes).
+  await sendMetaPurchase(invoice, athlete);
+}
+
+// Server-side Meta Purchase (Conversions API). Reaches Meta even when the
+// browser pixel is blocked, which on this traffic is roughly a third of users.
+// Inert until BOTH env vars are set, so merging this is safe and does nothing
+// until it's deliberately switched on (and the privacy policy is squared away).
+//
+//   META_PIXEL_ID    the same pixel the marketing site fires
+//   META_CAPI_TOKEN  a system-user access token from Meta Events Manager
+//
+// Never throws — attribution must never break the authoritative webhook.
+async function sendMetaPurchase(invoice, athlete) {
+  try {
+    const pixelId = process.env.META_PIXEL_ID;
+    const token = process.env.META_CAPI_TOKEN;
+    if (!pixelId || !token) return; // not configured → no-op
+
+    const md =
+      invoice.subscription_details?.metadata ||
+      invoice.lines?.data?.[0]?.metadata ||
+      {};
+    const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
+
+    const user_data = {};
+    const email = (athlete.email || "").trim().toLowerCase();
+    if (email) user_data.em = [sha256(email)];
+    if (md.fbc) user_data.fbc = md.fbc;
+    if (md.fbp) user_data.fbp = md.fbp;
+    // No identifier → Meta can't match it to anyone; don't bother.
+    if (!user_data.em && !user_data.fbc) return;
+
+    const body = {
+      data: [
+        {
+          event_name: "Purchase",
+          event_time: invoice.created || Math.floor(Date.now() / 1000),
+          // Stable per invoice → dedupes against any browser-side Purchase.
+          event_id: `purchase_${invoice.id}`,
+          action_source: "website",
+          user_data,
+          custom_data: {
+            currency: (invoice.currency || "usd").toUpperCase(),
+            value: (invoice.amount_paid || 0) / 100,
+          },
+        },
+      ],
+    };
+
+    const resp = await fetch(
+      `https://graph.facebook.com/v21.0/${pixelId}/events?access_token=${encodeURIComponent(token)}`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+    );
+    if (!resp.ok) {
+      console.warn(`[stripe-webhook] Meta CAPI non-200: ${resp.status}`);
+    }
+  } catch (e) {
+    console.warn("[stripe-webhook] Meta CAPI failed:", e.message);
   }
 }

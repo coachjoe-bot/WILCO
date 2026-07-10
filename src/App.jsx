@@ -610,6 +610,16 @@ function captureFirstTouch(){
       campaign: p.get("utm_campaign") || "",
       content:  p.get("utm_content")  || "",
     };
+    // Meta click id → the _fbc form the Conversions API matches on
+    // (fb.<subdomainIndex>.<clickTime_ms>.<fbclid>). The marketing site now
+    // forwards fbclid across the hop, so it lands here; captured at first touch
+    // so a Pro purchase days later can still be tied back to the ad.
+    const fbclid = p.get("fbclid") || "";
+    const fbc = fbclid ? `fb.1.${Date.now()}.${fbclid}` : "";
+    // _fbp is the pixel's browser id, set by the site's pixel on .trainwilco.com,
+    // so it's readable on the app subdomain too. Empty when the pixel never ran.
+    let fbp = "";
+    try{ fbp = (document.cookie.match(/(?:^|;\s*)_fbp=([^;]+)/) || [])[1] || ""; }catch{}
     let referrer = "";
     try{
       if(document.referrer){
@@ -618,9 +628,26 @@ function captureFirstTouch(){
         if(h && !/(^|\.)trainwilco\.com$/i.test(h) && h !== window.location.hostname) referrer = h;
       }
     }catch{}
-    if(!utm.source && !referrer) return; // no real signal yet — leave it open for a later touch
-    localStorage.setItem(FIRST_TOUCH_KEY, JSON.stringify({ ...utm, referrer }));
+    if(!utm.source && !referrer && !fbc) return; // no real signal — a bare fbclid counts
+    localStorage.setItem(FIRST_TOUCH_KEY, JSON.stringify({ ...utm, referrer, fbc, fbp }));
   }catch{ /* attribution must never break boot */ }
+}
+
+// The Meta identifiers (fbc/fbp) for this browser, read at checkout time so the
+// server can attach them to Stripe and later fire a server-side Purchase. Falls
+// back to a live _fbp cookie if the pixel set one after first touch. Returns
+// null when there's nothing to attribute (organic visitor).
+function getAdIdentity(){
+  try{
+    const raw = typeof window!=="undefined" && localStorage.getItem(FIRST_TOUCH_KEY);
+    const t = raw ? JSON.parse(raw) : {};
+    const ad = {};
+    if(t.fbc) ad.fbc = t.fbc;
+    let fbp = t.fbp || "";
+    if(!fbp){ try{ fbp = (document.cookie.match(/(?:^|;\s*)_fbp=([^;]+)/) || [])[1] || ""; }catch{} }
+    if(fbp) ad.fbp = fbp;
+    return Object.keys(ad).length ? ad : null;
+  }catch{ return null; }
 }
 
 // Compose the single source string at signup, in priority order:
@@ -2647,7 +2674,7 @@ function PaymentStep({athleteId, pin, tier, billing, eventCtx, onSuccess}) {
       try {
         const r = await fetch("/api/create-subscription",{
           method:"POST",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({athleteId,pin,tier,billing,giftCode:appliedGift||undefined,eventSource:eventCtx?.source||undefined})
+          body:JSON.stringify({athleteId,pin,tier,billing,giftCode:appliedGift||undefined,eventSource:eventCtx?.source||undefined,ad:getAdIdentity()||undefined})
         });
         const j = await r.json();
         if(cancelled) return;

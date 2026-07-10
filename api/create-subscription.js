@@ -29,8 +29,17 @@ export default async function handler(req, res) {
   if (applyCors(req, res)) return;
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { athleteId, pin, tier, billing, giftCode, eventSource } = req.body || {};
+  const { athleteId, pin, tier, billing, giftCode, eventSource, ad } = req.body || {};
   let athlete = null; // hoisted so the catch can attribute (only if verified)
+
+  // Meta click identifiers for server-side Purchase attribution. Validated to
+  // their documented shapes so a crafted body can't stuff arbitrary text into
+  // Stripe metadata. fbc: fb.<n>.<ms>.<fbclid>  fbp: fb.<n>.<ms>.<rand>
+  const adMeta = {};
+  if (ad && typeof ad === "object") {
+    if (typeof ad.fbc === "string" && /^fb\.\d\.\d{10,}\.[\w.-]{1,255}$/.test(ad.fbc)) adMeta.fbc = ad.fbc;
+    if (typeof ad.fbp === "string" && /^fb\.\d\.\d{10,}\.\d{1,20}$/.test(ad.fbp)) adMeta.fbp = ad.fbp;
+  }
 
   try {
     athlete = await verifyAthlete({ athleteId, pin });
@@ -119,6 +128,7 @@ export default async function handler(req, res) {
           // Mirror the attribution already stored on the athlete row (event key or
           // free-form UTM/referrer source) so Stripe and Supabase never disagree.
           ...(athlete.signup_source ? { signup_source: String(athlete.signup_source) } : {}),
+          ...adMeta,
         },
       });
       customerId = customer.id;
@@ -157,6 +167,9 @@ export default async function handler(req, res) {
         tier,
         billing: interval,
         ...(athlete.signup_source ? { signup_source: String(athlete.signup_source) } : {}),
+        // Carried onto the subscription so the invoice.paid webhook can fire a
+        // server-side Meta Purchase keyed to the ad click.
+        ...adMeta,
       },
     };
     if (giftApplied) {
