@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, Component, lazy, Suspense } from "react";
+import { useState, useEffect, useRef, useMemo, Component, lazy, Suspense } from "react";
 // Coach dashboard lives in its own lazily-loaded chunk (src/coach.jsx) so the
 // athlete-facing bundle — what 95% of users download — stays smaller.
 const CoachDashboard = lazy(()=>import("./coach.jsx"));
@@ -639,6 +639,12 @@ function captureFirstTouch(){
 // null when there's nothing to attribute (organic visitor).
 function getAdIdentity(){
   try{
+    // Honor Global Privacy Control: a GPC signal is a request not to share for
+    // advertising. Tell the server to skip the Meta Purchase entirely and never
+    // forward any Meta identifier. (See Privacy Policy §13.2.)
+    try{
+      if(typeof navigator!=="undefined" && navigator.globalPrivacyControl===true) return { optout:true };
+    }catch{}
     const raw = typeof window!=="undefined" && localStorage.getItem(FIRST_TOUCH_KEY);
     const t = raw ? JSON.parse(raw) : {};
     const ad = {};
@@ -1239,14 +1245,12 @@ export const propagateForPRs = async (programText, prs) => {
 // server Proof Feed's Grit rank computation (api/_grit.js).
 
 // ─── STYLES ──────────────────────────────────────────────────────────────────
-export const C = {navy:"#060d1e",navy2:"#0a1228",navy3:"#0d1836",border:"#1e2a4a",gold:"#d4a017",green:"#10b981",red:"#ef4444",text:"#e2e8f0",muted:"#64748b",muted2:"#94a3b8",blue:"#3b82f6"};
-// CA = the ATHLETE palette (aesthetic overhaul). "Night gym" hues lifted straight
+// CA = the app palette (aesthetic overhaul). "Night gym" hues lifted straight
 // from the website/ads tokens (wilco-website app/globals.css) so the app matches the
 // brand world: near-black ink base, electric-blue accent held hard, cool LED text.
-// It mirrors C's keys 1:1 so athlete screens repoint with a clean C.→CA. swap; the
-// `gold` slot is the legacy primary-accent slot and now carries electric blue (new
-// code should prefer CA.accent). C itself is LEFT UNTOUCHED because src/coach.jsx
-// imports it — the coach dashboard must stay on navy/gold through its parallel rework.
+// The `gold` slot is the legacy primary-accent slot and now carries electric blue
+// (new code should prefer CA.accent). CA replaced the old navy/gold `C` palette,
+// which both athlete and coach screens have now fully migrated off of.
 // Values lifted 1:1 from the athlete overhaul artifact (40b4a378) :root so the app
 // matches it exactly: near-black ground, a blue+cyan duotone (blue on primary
 // buttons, cyan on HUD labels/charts/borders), steel greys.
@@ -1272,14 +1276,14 @@ export const CA_AVATAR = "linear-gradient(135deg,#3f7bff,#123a9e)"; // assistant
 export const GS = `
 *{box-sizing:border-box;margin:0;padding:0;}
 html,body{touch-action:manipulation;overscroll-behavior:none;-webkit-text-size-adjust:100%;text-size-adjust:100%;}
-/* Body bg = athlete near-black base (CA.navy), NOT C.navy. The aesthetic overhaul
-   moved athlete screens to #04070f but left body at the old #060d1e — on iOS the
-   home-indicator safe area paints the body color, so the lighter old navy showed as
-   a strip below the near-black footer (the "navy band" that kept coming back — it
-   was a COLOR mismatch, not padding). Match body to the athlete base so it blends. */
-body{background:${CA.navy};color:${C.text};font-family:'DM Sans',sans-serif;-webkit-tap-highlight-color:transparent;}
+/* Body bg = near-black base (CA.navy). The aesthetic overhaul moved screens to
+   #04060c; on iOS the home-indicator safe area paints the body color, so any
+   lighter value showed as a strip below the near-black footer (the "navy band"
+   that kept coming back — it was a COLOR mismatch, not padding). Keep body on the
+   base so it blends. */
+body{background:${CA.navy};color:${CA.text};font-family:'DM Sans',sans-serif;-webkit-tap-highlight-color:transparent;}
 input,textarea,select,button{font-family:'DM Sans',sans-serif;}
-::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-track{background:${C.navy2};}::-webkit-scrollbar-thumb{background:${C.border};border-radius:2px;}
+::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-track{background:${CA.navy2};}::-webkit-scrollbar-thumb{background:${CA.border};border-radius:2px;}
 @keyframes fadeUp{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
 @keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.4;}}
 .fade-up{animation:fadeUp 0.25s ease forwards;}
@@ -1377,8 +1381,7 @@ export const GSA = `
   .a-draw{stroke-dasharray:none!important;}
 }
 `;
-export const inp = (extra={}) => ({width:"100%",background:C.navy3,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",color:C.text,fontSize:15,outline:"none",...extra});
-// Athlete-side input on the new palette (near-black surface + steel border).
+// Input on the app palette (near-black surface + steel border).
 export const inpA = (extra={}) => ({width:"100%",background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:10,padding:"12px 14px",color:CA.text,fontSize:15,outline:"none",...extra});
 export const btn = (bg,color,extra={}) => ({background:bg,color,border:"none",borderRadius:12,padding:"14px",fontWeight:700,fontSize:16,cursor:"pointer",width:"100%",fontFamily:"'Bebas Neue'",letterSpacing:2,...extra});
 
@@ -1406,9 +1409,9 @@ export function useIsMobile(bp=640) {
 }
 
 // ─── LINE CHART ───────────────────────────────────────────────────────────────
-// palette defaults to C (legacy navy/gold) so coach.jsx call sites render identically;
-// athlete call sites pass palette={CA} for the new night-gym grid/axis colors.
-export function LineChart({data, color=C.gold, unit="", palette=C}) {
+// All call sites pass color + palette={CA} explicitly for the night-gym grid/axis
+// colors; the defaults are just a safety net on the app palette.
+export function LineChart({data, color=CA.cyan, unit="", palette=CA}) {
   const P = palette;
   const [selected, setSelected] = useState(null);
   if(!data||data.length<2) return (
@@ -1432,7 +1435,7 @@ export function LineChart({data, color=C.gold, unit="", palette=C}) {
         <stop offset="100%" stopColor={color} stopOpacity="0"/>
       </linearGradient></defs>
       <polygon points={area} fill={`url(#${gid})`}/>
-      <polyline className={palette!==C?"a-draw":undefined} points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round"/>
+      <polyline className="a-draw" points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round"/>
       {data.map((d,i)=>(
         <g key={i}>
           <circle cx={px(i)} cy={py(d.y)} r={selected===i?3.5:2.5} fill={color}/>
@@ -1477,8 +1480,9 @@ const RUN_TYPE_LABELS = {
   easy:"Easy Run", tempo:"Tempo", interval:"Intervals", long_run:"Long Run",
   race:"Race", recovery:"Recovery", fartlek:"Fartlek", null:"Run"
 };
-// palette defaults to C so coach.jsx stays legacy; athlete passes palette={CA}.
-export function RunCard({runData, feel, palette=C}) {
+// palette defaults to the app palette (CA); athlete call sites pass palette={CA}
+// explicitly, coach call sites rely on the default.
+export function RunCard({runData, feel, palette=CA}) {
   const P = palette;
   if(!runData) return null;
   const typeLabel = RUN_TYPE_LABELS[runData.run_type] || "Run";
@@ -1645,16 +1649,16 @@ const parseRankHero = (rankBody, flags) => {
   else if(dnM) delta = -num(dnM[1]);
   else if(/strength score[^.]*?(steady|flat|holds?|holding|unchanged|no (?:tier )?change)/i.test(body)) delta = 0;
   const rankUp = !!(flags&&flags.rank_up) || (delta!=null&&delta>0);
-  return { tier, tierIdx, tierColor: tierIdx>=0?TIER_COLORS[tierIdx]:C.gold, tierDesc: tierIdx>=0?TIER_DESC[tierIdx]:null, score, delta, rankUp };
+  return { tier, tierIdx, tierColor: tierIdx>=0?TIER_COLORS[tierIdx]:CA.gold, tierDesc: tierIdx>=0?TIER_DESC[tierIdx]:null, score, delta, rankUp };
 };
 
 // Injury trend read straight from the section prose (the generator writes the trend
 // word into the body; it's not a structured flag). Drives the small trend pill.
 const injuryTrend = (body) => {
   const b = String(body||"").toLowerCase();
-  if(/\bclear(?:ed|ing)?\b/.test(b)) return {txt:"CLEARING", color:C.green};
-  if(/\bimprov/.test(b))             return {txt:"IMPROVING", color:C.green};
-  if(/\bwors|flar|not a coincidence|warning shot/.test(b)) return {txt:"WORSENING", color:C.red};
+  if(/\bclear(?:ed|ing)?\b/.test(b)) return {txt:"CLEARING", color:CA.green};
+  if(/\bimprov/.test(b))             return {txt:"IMPROVING", color:CA.green};
+  if(/\bwors|flar|not a coincidence|warning shot/.test(b)) return {txt:"WORSENING", color:CA.red};
   return null;
 };
 
@@ -2403,7 +2407,7 @@ function WilcoRoot() {
   },[]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if(view==="athlete"&&athlete) return <AthleteView athlete={athlete} onLogout={()=>{clearAuthSession();setAthlete(null);setView("home");}}/>;
-  if(view==="coach"&&coach) return <Suspense fallback={<div style={{minHeight:"100vh",background:C.navy}}/>}><CoachDashboard coach={coach} onLogout={()=>{clearAuthSession();setCoach(null);setView("home");}}/></Suspense>;
+  if(view==="coach"&&coach) return <Suspense fallback={<div style={{minHeight:"100vh",background:CA.navy}}/>}><CoachDashboard coach={coach} onLogout={()=>{clearAuthSession();setCoach(null);setView("home");}}/></Suspense>;
 
   // Coach entry stays on the legacy look (fence); athlete entry gets the night-gym brand
   // world: the electric-blue WILCO storefront as a full-bleed backdrop behind a dark scrim.
@@ -2861,14 +2865,14 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
     return merged;
   };
 
-  // Record the athlete's legal acceptances. Best-effort: a failure is logged but
-  // never blocks account creation (per the consent spec). One row per document,
-  // tagged with the version the athlete actually agreed to.
+  // Record the athlete's legal acceptances. Best-effort: a failure never blocks
+  // account creation (per the consent spec). One row per document, tagged with the
+  // version the athlete actually agreed to.
   const recordAcceptances = async (athleteId, isMinor) => {
     const docs = ["terms","privacy",...(isMinor?["parental_consent"]:[])];
     try {
       await sbInsert("legal_acceptances", docs.map(d=>({athlete_id:athleteId, document:d, version:LEGAL_VERSION})));
-    } catch(e){ console.log("[legal_acceptances] insert failed:", e?.message||e); }
+    } catch{ /* swallow: consent insert is best-effort, must not block signup */ }
   };
 
   // Called when all required consent boxes are checked and "Create Account" is
@@ -3070,7 +3074,7 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
       {step===1&&<>
         <div style={{marginBottom:16}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>FULL NAME</label>
-          <input value={data.name} onChange={e=>setD("name",e.target.value)} placeholder="Your name" style={inpA()}/>
+          <input value={data.name} onChange={e=>setD("name",e.target.value)} autoComplete="name" placeholder="Your name" style={inpA()}/>
         </div>
         <div style={{marginBottom:16}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>PRIMARY SPORT</label>
@@ -3103,19 +3107,19 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
         <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Choose a 4-digit PIN you'll remember. Add your email so you can recover access if you ever forget it.</div>
         <div style={{marginBottom:16}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CREATE PIN</label>
-          <input type="password" inputMode="numeric" maxLength={4} value={data.pin}
+          <input type="password" inputMode="numeric" autoComplete="one-time-code" maxLength={4} value={data.pin}
             onChange={e=>setD("pin",e.target.value.replace(/\D/g,"").slice(0,4))}
             placeholder="----" style={inpA({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
         </div>
         <div style={{marginBottom:16}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CONFIRM PIN</label>
-          <input type="password" inputMode="numeric" maxLength={4} value={data.confirmPin}
+          <input type="password" inputMode="numeric" autoComplete="one-time-code" maxLength={4} value={data.confirmPin}
             onChange={e=>setD("confirmPin",e.target.value.replace(/\D/g,"").slice(0,4))}
             placeholder="----" style={inpA({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
         </div>
         <div style={{marginBottom:20}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>EMAIL <span style={{color:CA.muted,fontWeight:400}}>(used to recover your PIN or username)</span></label>
-          <input type="email" inputMode="email" value={data.email}
+          <input type="email" inputMode="email" autoComplete="email" value={data.email}
             onChange={e=>setD("email",e.target.value)}
             placeholder="you@email.com" style={inpA()}/>
         </div>
@@ -3158,12 +3162,12 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
         </div>
         <div style={{marginBottom:14}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH'S NAME <span style={{color:CA.muted,fontWeight:400}}>(optional)</span></label>
-          <input value={data.coachName} onChange={e=>setD("coachName",e.target.value)}
+          <input value={data.coachName} onChange={e=>setD("coachName",e.target.value)} autoComplete="off"
             placeholder="Coach Smith" style={inpA()}/>
         </div>
         <div style={{marginBottom:20}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH'S EMAIL <span style={{color:CA.muted,fontWeight:400}}>(optional)</span></label>
-          <input type="email" value={data.coachEmail} onChange={e=>setD("coachEmail",e.target.value)}
+          <input type="email" value={data.coachEmail} onChange={e=>setD("coachEmail",e.target.value)} autoComplete="off"
             placeholder="coach@school.edu" style={inpA()}/>
           <div style={{color:CA.muted,fontSize:11,marginTop:6,lineHeight:1.5}}>Pro/Elite: coach gets weekly progress reports. All tiers: coach gets a welcome email.</div>
         </div>
@@ -3462,11 +3466,11 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
       {mode==="login"&&<>
         <div style={{marginBottom:16}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>YOUR NAME</label>
-          <input value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&login()} placeholder="Exact name you signed up with" style={inpA()}/>
+          <input value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&login()} autoComplete="name" placeholder="Exact name you signed up with" style={inpA()}/>
         </div>
         <div style={{marginBottom:20}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>YOUR PIN</label>
-          <input type="password" inputMode="numeric" maxLength={4} value={pin}
+          <input type="password" inputMode="numeric" autoComplete="one-time-code" maxLength={4} value={pin}
             onChange={e=>setPin(e.target.value.replace(/\D/g,"").slice(0,4))}
             onKeyDown={e=>e.key==="Enter"&&login()}
             placeholder="----" style={inpA({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
@@ -3498,11 +3502,11 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
               </div>
               <div style={{marginBottom:16}}>
                 <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>YOUR NAME</label>
-                <input value={recoveryName} onChange={e=>setRecoveryName(e.target.value)} placeholder="Exact name you signed up with" style={inpA()}/>
+                <input value={recoveryName} onChange={e=>setRecoveryName(e.target.value)} autoComplete="name" placeholder="Exact name you signed up with" style={inpA()}/>
               </div>
               <div style={{marginBottom:20}}>
                 <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>RECOVERY EMAIL</label>
-                <input type="email" inputMode="email" value={recoveryEmail} onChange={e=>setRecoveryEmail(e.target.value)}
+                <input type="email" inputMode="email" autoComplete="email" value={recoveryEmail} onChange={e=>setRecoveryEmail(e.target.value)}
                   onKeyDown={e=>e.key==="Enter"&&sendRecovery()}
                   placeholder="you@email.com" style={inpA()}/>
               </div>
@@ -3628,7 +3632,7 @@ function CoachLoginScreen({setView,setCoach,setErr,err}) {
       {mode==="login"&&<>
         <div style={{marginBottom:20}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH PIN</label>
-          <input type="password" inputMode="numeric" maxLength={4} value={pin}
+          <input type="password" inputMode="numeric" autoComplete="one-time-code" maxLength={4} value={pin}
             onChange={e=>setPin(e.target.value.replace(/\D/g,"").slice(0,4))}
             onKeyDown={e=>e.key==="Enter"&&login()}
             placeholder="----" style={inpA({fontSize:24,letterSpacing:8,textAlign:"center"})}/>
@@ -3660,7 +3664,7 @@ function CoachLoginScreen({setView,setCoach,setErr,err}) {
               </div>
               <div style={{marginBottom:20}}>
                 <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH EMAIL</label>
-                <input type="email" inputMode="email" value={recoveryEmail} onChange={e=>setRecoveryEmail(e.target.value)}
+                <input type="email" inputMode="email" autoComplete="email" value={recoveryEmail} onChange={e=>setRecoveryEmail(e.target.value)}
                   onKeyDown={e=>e.key==="Enter"&&sendRecovery()}
                   placeholder="coach@school.edu" style={inpA()}/>
               </div>
@@ -5270,7 +5274,10 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
     try{localStorage.setItem(painKey,JSON.stringify(updated));}catch(_){}
     try{await sbUpdate("athletes",athlete.id,{resolved_pain:updated});}catch(_){}
   };
-  const sessionCount = groupIntoSessions(workoutHistory).length;
+  // Grouping the whole history is the expensive step here; memoize it once and reuse
+  // for both the header count and the workouts-tab timeline below.
+  const allSessions = useMemo(()=>groupIntoSessions(workoutHistory),[workoutHistory]);
+  const sessionCount = allSessions.length;
   const realWorkouts = workoutHistory.filter(w=>w.parsed_data?.exercises?.length>0);
 
   return (
@@ -5300,8 +5307,9 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
 
         {/* ── WORKOUTS TAB ── */}
         {tab==="workouts"&&(()=>{
-          // Group entries into sessions (entries within 3hrs = same session)
-          const sessions = groupIntoSessions(workoutHistory)
+          // Reuse the memoized grouping (entries within 3hrs = same session); copy
+          // before sorting so the sort doesn't mutate the memoized array.
+          const sessions = [...allSessions]
             .sort((a,b)=>new Date(b.entries[0].created_at)-new Date(a.entries[0].created_at));
 
           // Separate form checks (not grouped into sessions)
@@ -5615,72 +5623,134 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
     : (athlete.age||null);
   const ageFactor = ageTierFactor(age);
 
-  // Build best estimated 1RM per CANONICAL lift from workout history. resolveLift is
-  // the SINGLE grouping funnel (see grit.js taxonomy header): every tab keys off
-  // lift.id, so "deadlift" == "conventional deadlift", "deficit pull" == "deficit
-  // deadlift", the two sit-up spellings collapse, and junk ("lift") is dropped —
-  // and the Benchmarks/Strength/PR tabs can never bucket the same lift differently.
-  const byEx = {};
-  workoutHistory.forEach(w=>{
-    const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
-    (pd.exercises||[]).forEach(ex=>{
-      if(!ex.name) return;
-      const lift = resolveLift(ex.name);
-      if(!lift.tracked) return;
-      // Pass bodyweight (athlete.weight_lbs) so load-bearing bodyweight lifts (dips,
-      // pull-ups) score a 1RM; every other bodyweight movement returns 0 and drops out.
-      const e1rm = bestE1RMForExercise(ex, bodyweight);
-      if(!e1rm) return;
-      // A bodyweight lift's e1rm is already a lbs-equivalent, so label it "lbs".
-      const unit = ex.unit==="bodyweight" ? "lbs" : (ex.unit||"lbs");
-      if(!byEx[lift.id]) byEx[lift.id]={key:lift.id,name:lift.name,e1rm,unit,benchKey:lift.benchKey,bwLoaded:lift.bwLoaded};
-      else if(e1rm>byEx[lift.id].e1rm) byEx[lift.id].e1rm=e1rm;
-    });
-  });
-
-  // Overlay ACTUAL 1RMs (manual_one_rms — user-set OR system-detected from a reported/
-  // performed true single). Show the HIGHER of the estimate and the actual 1RM: someone
-  // who rarely tests a true single still deserves their best number, and a fresh actual
-  // PR beats a stale estimate. Seeds a benchmark even for a lift never logged in sets.
-  // The `actual` flag (and PR badge) is set only when the actual is the number shown.
-  manualRMs.forEach(m=>{
-    const lift = resolveLift(m.normalized_exercise||m.exercise);
-    if(!lift.tracked) return;
-    const lbs=toLbs(m.weight, m.unit);
-    if(!(lbs>0)) return;
-    if(!byEx[lift.id]) byEx[lift.id]={key:lift.id,name:lift.name,e1rm:lbs,unit:"lbs",actual:true,benchKey:lift.benchKey,bwLoaded:lift.bwLoaded};
-    else if(lbs>=byEx[lift.id].e1rm){ byEx[lift.id].e1rm=lbs; byEx[lift.id].actual=true; }
-  });
-
-  // Benchmark lifts the athlete has logged (or has an actual 1RM for). benchKey is
-  // already resolved per canonical lift above, so no re-derivation here.
-  const benchmarked = Object.values(byEx).map(ex=>{
-    if(!ex.benchKey) return null;
-    const threshRaw=BENCH_THRESHOLDS[genderKey]?.[ex.benchKey];
-    if(!threshRaw) return null;
-    const thresh = scaledThresholds(threshRaw, bodyweight, genderKey, age);
-    return {key:ex.key,name:ex.name,e1rm:ex.e1rm,benchKey:ex.benchKey,bwLoaded:ex.bwLoaded,thresh,actual:!!ex.actual};
-  }).filter(Boolean);
-
-  // Exactly ONE entry per bench key: keep the highest number; on a tie prefer the actual
-  // 1RM (so the PR badge shows). Order-independent — an earlier low entry can no longer
-  // leave a duplicate behind (which caused two Pull-Up cards). `rankedLifts` drives the
-  // counter; `dedupedBench` adds the search filter and orders big lifts first.
-  const bestByKey={};
-  benchmarked.forEach(b=>{
-    const cur=bestByKey[b.benchKey];
-    if(!cur || b.e1rm>cur.e1rm || (b.e1rm===cur.e1rm && b.actual&&!cur.actual)) bestByKey[b.benchKey]=b;
-  });
-  const rankedLifts = Object.values(bestByKey);
-  const dedupedBench = rankedLifts.filter(b=>matchesSearch(b.name))
-    .sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.e1rm-a.e1rm);
-
-  // ── Benchmark counter stats (top of the Benchmarks tab) ──
-  // Tier per lift needs bodyweight (ratio). Strength Score = sum of tier points across
-  // ranked lifts; Top Rank = the single highest tier reached on any lift.
+  // ── Aggregation (search-INDEPENDENT) ──────────────────────────────────────
+  // JSON-parsing every workout's parsed_data, threshold scaling, dedup and sorting is
+  // the heavy work in this modal. It depends only on history / manual-1RMs / athlete,
+  // so it's memoized here — typing in the search box (or any other local state change)
+  // no longer re-parses the athlete's entire history. The search filter is cheap and is
+  // applied to the memoized result below.
   const tierIdxOf = (b) => (bodyweight ? tierForRatio(b.e1rm/bodyweight, b.thresh) : 0);
-  const strengthScore = bodyweight ? rankedLifts.reduce((s,b)=>s+TIER_POINTS[tierIdxOf(b)],0) : 0;
-  const topTierIdx = (bodyweight && rankedLifts.length) ? Math.max(...rankedLifts.map(tierIdxOf)) : -1;
+  const { rankedLifts, benchSorted, strengthScore, topTierIdx, prsHit, exercisesAll, prListAll } = useMemo(()=>{
+    // Build best estimated 1RM per CANONICAL lift from workout history. resolveLift is
+    // the SINGLE grouping funnel (see grit.js taxonomy header): every tab keys off
+    // lift.id, so "deadlift" == "conventional deadlift", "deficit pull" == "deficit
+    // deadlift", the two sit-up spellings collapse, and junk ("lift") is dropped —
+    // and the Benchmarks/Strength/PR tabs can never bucket the same lift differently.
+    const byEx = {};
+    workoutHistory.forEach(w=>{
+      const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
+      (pd.exercises||[]).forEach(ex=>{
+        if(!ex.name) return;
+        const lift = resolveLift(ex.name);
+        if(!lift.tracked) return;
+        // Pass bodyweight (athlete.weight_lbs) so load-bearing bodyweight lifts (dips,
+        // pull-ups) score a 1RM; every other bodyweight movement returns 0 and drops out.
+        const e1rm = bestE1RMForExercise(ex, bodyweight);
+        if(!e1rm) return;
+        // A bodyweight lift's e1rm is already a lbs-equivalent, so label it "lbs".
+        const unit = ex.unit==="bodyweight" ? "lbs" : (ex.unit||"lbs");
+        if(!byEx[lift.id]) byEx[lift.id]={key:lift.id,name:lift.name,e1rm,unit,benchKey:lift.benchKey,bwLoaded:lift.bwLoaded};
+        else if(e1rm>byEx[lift.id].e1rm) byEx[lift.id].e1rm=e1rm;
+      });
+    });
+
+    // Overlay ACTUAL 1RMs (manual_one_rms — user-set OR system-detected from a reported/
+    // performed true single). Show the HIGHER of the estimate and the actual 1RM: someone
+    // who rarely tests a true single still deserves their best number, and a fresh actual
+    // PR beats a stale estimate. Seeds a benchmark even for a lift never logged in sets.
+    // The `actual` flag (and PR badge) is set only when the actual is the number shown.
+    manualRMs.forEach(m=>{
+      const lift = resolveLift(m.normalized_exercise||m.exercise);
+      if(!lift.tracked) return;
+      const lbs=toLbs(m.weight, m.unit);
+      if(!(lbs>0)) return;
+      if(!byEx[lift.id]) byEx[lift.id]={key:lift.id,name:lift.name,e1rm:lbs,unit:"lbs",actual:true,benchKey:lift.benchKey,bwLoaded:lift.bwLoaded};
+      else if(lbs>=byEx[lift.id].e1rm){ byEx[lift.id].e1rm=lbs; byEx[lift.id].actual=true; }
+    });
+
+    // Benchmark lifts the athlete has logged (or has an actual 1RM for). benchKey is
+    // already resolved per canonical lift above, so no re-derivation here.
+    const benchmarked = Object.values(byEx).map(ex=>{
+      if(!ex.benchKey) return null;
+      const threshRaw=BENCH_THRESHOLDS[genderKey]?.[ex.benchKey];
+      if(!threshRaw) return null;
+      const thresh = scaledThresholds(threshRaw, bodyweight, genderKey, age);
+      return {key:ex.key,name:ex.name,e1rm:ex.e1rm,benchKey:ex.benchKey,bwLoaded:ex.bwLoaded,thresh,actual:!!ex.actual};
+    }).filter(Boolean);
+
+    // Exactly ONE entry per bench key: keep the highest number; on a tie prefer the actual
+    // 1RM (so the PR badge shows). Order-independent — an earlier low entry can no longer
+    // leave a duplicate behind (which caused two Pull-Up cards). `rankedLifts` drives the
+    // counter; `benchSorted` is filtered by search into `dedupedBench` below.
+    const bestByKey={};
+    benchmarked.forEach(b=>{
+      const cur=bestByKey[b.benchKey];
+      if(!cur || b.e1rm>cur.e1rm || (b.e1rm===cur.e1rm && b.actual&&!cur.actual)) bestByKey[b.benchKey]=b;
+    });
+    const rankedLifts = Object.values(bestByKey);
+    const benchSorted = [...rankedLifts].sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.e1rm-a.e1rm);
+
+    // ── Benchmark counter stats (top of the Benchmarks tab) ──
+    // Tier per lift needs bodyweight (ratio). Strength Score = sum of tier points across
+    // ranked lifts; Top Rank = the single highest tier reached on any lift.
+    const strengthScore = bodyweight ? rankedLifts.reduce((s,b)=>s+TIER_POINTS[tierIdxOf(b)],0) : 0;
+    const topTierIdx = (bodyweight && rankedLifts.length) ? Math.max(...rankedLifts.map(tierIdxOf)) : -1;
+
+    // PRs Hit — lifetime count of new-best moments across every lift (first best counts).
+    const prsHit = (()=>{
+      const best={}; let count=0;
+      [...workoutHistory].sort((a,b)=>new Date(a.created_at)-new Date(b.created_at)).forEach(w=>{
+        const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
+        (pd.exercises||[]).forEach(ex=>{
+          if(!ex.name) return;
+          const lift = resolveLift(ex.name);
+          if(!lift.tracked) return;
+          const e=bestE1RMForExercise(ex, bodyweight);
+          if(!e) return;
+          const k=lift.id;
+          if(!(k in best)){ best[k]=e; count++; }
+          else if(e>best[k]+0.5){ best[k]=e; count++; }
+        });
+      });
+      return count;
+    })();
+
+    // Strength/running progress for other tabs. Entries are matched to a lift by the
+    // SAME canonical id (resolveLift), so an aliased spelling in history ("weighted
+    // pull-ups") still lands under its canonical lift ("Pull-Up").
+    const exercisesAll = Object.values(byEx).map(ex=>{
+      const entries = workoutHistory.flatMap(w=>{
+        const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
+        return (pd.exercises||[]).filter(e=>e.name && resolveLift(e.name).id===ex.key).map(e=>({date:new Date(w.created_at),e1rm:bestE1RMForExercise(e, bodyweight)})).filter(e=>e.e1rm>0);
+      }).sort((a,b)=>a.date-b.date);
+      return {...ex,entries};
+    }).sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.e1rm-a.e1rm);
+
+    // PR tab — manual (actual) 1RM takes precedence over the estimated 1RM above.
+    const prMap = {};
+    Object.entries(byEx).forEach(([k,ex])=>{ prMap[k]={key:k,name:ex.name,unit:ex.unit,estimated:ex.e1rm,manual:null,bwLoaded:ex.bwLoaded}; });
+    manualRMs.forEach(m=>{
+      // Resolve to the current canonical id so manual 1RMs saved before a taxonomy
+      // update (e.g. under "bench" or "weighted sit up") still land on the merged lift.
+      const lift = resolveLift(m.normalized_exercise||m.exercise);
+      if(!lift.tracked) return;
+      const k=lift.id;
+      if(!prMap[k]) prMap[k]={key:k,name:lift.name,unit:m.unit,estimated:0,manual:null,bwLoaded:lift.bwLoaded};
+      prMap[k].manual=m;
+    });
+    const prListAll = Object.values(prMap)
+      .map(row=>({...row,active: row.manual ? toLbs(row.manual.weight,row.manual.unit) : row.estimated}))
+      .sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.active-a.active);
+
+    return { rankedLifts, benchSorted, strengthScore, topTierIdx, prsHit, exercisesAll, prListAll };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- bodyweight/genderKey/age/tierIdxOf all derive from athlete
+  }, [workoutHistory, manualRMs, athlete]);
+
+  // Search filter applied to the memoized aggregation (re-runs cheaply on each keystroke).
+  const dedupedBench = benchSorted.filter(b=>matchesSearch(b.name));
+  const exercises = exercisesAll.filter(ex=>matchesSearch(ex.name));
+  const prList = prListAll.filter(row=>matchesSearch(row.name));
+
   // Rank-up detection: compare each lift's current tier to the tier we last showed
   // (persisted per athlete, from a PREVIOUS session) and flash any lift that climbed.
   // Baseline is read once on mount; the compare is debounced 600ms so async loads
@@ -5705,52 +5775,6 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
     },600);
     return ()=>clearTimeout(id);
   },[benchSig,bodyweight]);   // eslint-disable-line react-hooks/exhaustive-deps
-  // PRs Hit — lifetime count of new-best moments across every lift (first best counts).
-  const prsHit = (()=>{
-    const best={}; let count=0;
-    [...workoutHistory].sort((a,b)=>new Date(a.created_at)-new Date(b.created_at)).forEach(w=>{
-      const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
-      (pd.exercises||[]).forEach(ex=>{
-        if(!ex.name) return;
-        const lift = resolveLift(ex.name);
-        if(!lift.tracked) return;
-        const e=bestE1RMForExercise(ex, bodyweight);
-        if(!e) return;
-        const k=lift.id;
-        if(!(k in best)){ best[k]=e; count++; }
-        else if(e>best[k]+0.5){ best[k]=e; count++; }
-      });
-    });
-    return count;
-  })();
-
-  // Strength/running progress for other tabs. Entries are matched to a lift by the
-  // SAME canonical id (resolveLift), so an aliased spelling in history ("weighted
-  // pull-ups") still lands under its canonical lift ("Pull-Up").
-  const exercises = Object.values(byEx).map(ex=>{
-    const entries = workoutHistory.flatMap(w=>{
-      const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
-      return (pd.exercises||[]).filter(e=>e.name && resolveLift(e.name).id===ex.key).map(e=>({date:new Date(w.created_at),e1rm:bestE1RMForExercise(e, bodyweight)})).filter(e=>e.e1rm>0);
-    }).sort((a,b)=>a.date-b.date);
-    return {...ex,entries};
-  }).sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.e1rm-a.e1rm).filter(ex=>matchesSearch(ex.name));
-
-  // PR tab — manual (actual) 1RM takes precedence over the estimated 1RM above.
-  const prMap = {};
-  Object.entries(byEx).forEach(([k,ex])=>{ prMap[k]={key:k,name:ex.name,unit:ex.unit,estimated:ex.e1rm,manual:null,bwLoaded:ex.bwLoaded}; });
-  manualRMs.forEach(m=>{
-    // Resolve to the current canonical id so manual 1RMs saved before a taxonomy
-    // update (e.g. under "bench" or "weighted sit up") still land on the merged lift.
-    const lift = resolveLift(m.normalized_exercise||m.exercise);
-    if(!lift.tracked) return;
-    const k=lift.id;
-    if(!prMap[k]) prMap[k]={key:k,name:lift.name,unit:m.unit,estimated:0,manual:null,bwLoaded:lift.bwLoaded};
-    prMap[k].manual=m;
-  });
-  const prList = Object.values(prMap)
-    .map(row=>({...row,active: row.manual ? toLbs(row.manual.weight,row.manual.unit) : row.estimated}))
-    .sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.active-a.active)
-    .filter(row=>matchesSearch(row.name));
 
   const saveManual = async (row) => {
     const w = parseFloat(editVal);

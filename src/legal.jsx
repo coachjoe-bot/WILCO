@@ -10,7 +10,7 @@
 // agreed to.
 import React, { useState } from "react";
 
-export const LEGAL_VERSION = "2026-06-01";
+export const LEGAL_VERSION = "2026-07-10";
 
 export const TERMS_TEXT = `WILCO TRAINING LLC
 Terms of Service and Liability Waiver
@@ -143,7 +143,7 @@ Wilco Training LLC  |  TrainWilco.com  |  support@trainwilco.com801 Internationa
 
 export const PRIVACY_TEXT = `WILCO TRAINING LLC
 Privacy Policy
-Effective Date: May 22, 2026  |  Last Updated: June 1, 2026
+Effective Date: May 22, 2026  |  Last Updated: July 10, 2026
 Wilco Training LLC (“Wilco,” “we,” “us,” or “our”) is committed to protecting the privacy of all users of the Wilco Training platform (“Platform”), including athletes, coaches, and school administrators. This Privacy Policy explains what information we collect, how we use it, how we protect it, and what choices you have. By using the Platform, you agree to the practices described in this Privacy Policy.
 This Privacy Policy applies to the Platform operated at TrainWilco.com and all associated web and mobile applications.
 1. Information We Collect
@@ -164,7 +164,9 @@ This information is used to operate and improve the Platform and does not identi
 1.3 Payment Information
 Payment transactions are processed by Stripe, Inc., our third-party payment processor. Wilco does not collect, store, or have access to your full credit card number, bank account number, or other sensitive financial data. Stripe’s handling of your financial information is governed by Stripe’s Privacy Policy, available at stripe.com/privacy.
 1.4 Analytics and Tracking Technologies
-We may use analytics tools and similar technologies to collect information about how users interact with the Platform. This may include cookies, pixel tags, and similar tracking technologies that collect aggregate information about device usage and Platform interaction. You may disable certain cookies through your browser settings, though doing so may affect some Platform features. We do not respond to “Do Not Track” browser signals at this time, as no uniform industry standard has been established.
+We use analytics tools and advertising technologies to understand how people discover and use the Platform and to measure our advertising. This may include cookies, pixel tags, and similar tracking technologies. You may disable certain cookies through your browser settings, though doing so may affect some Platform features.
+On our public website at TrainWilco.com we use the Meta Pixel, provided by Meta Platforms, Inc., alongside our own analytics. When you complete a paid subscription, we also send a matching purchase event to Meta through the Meta Conversions API. We use these tools to see whether our ads lead to sign-ups and subscriptions so we can improve them. Section 3.2 describes what we share with Meta, and Section 13.2 explains how to opt out.
+There is no uniform industry standard for “Do Not Track” browser signals, so we do not respond to them. We do honor the Global Privacy Control (“GPC”) signal. If your browser or a browser extension sends a GPC signal, we treat it as a request to opt out of sharing your information for advertising, and we disable the Meta Pixel for that visit. You can also opt out at any time using our “Do Not Sell or Share My Personal Information” page at TrainWilco.com/do-not-sell.
 2. How We Use Your Information
 We use the information we collect to provide, maintain, and improve the Platform. Specifically, we use your information to:
 Generate personalized, AI-powered strength and conditioning training programs based on your athletic profile and history;
@@ -174,19 +176,22 @@ Enable your coach or institution’s coaching staff to access your session data,
 Process subscription payments and manage your account;
 Send essential service communications, including account confirmations, subscription updates, and policy changes;
 Respond to your support inquiries and resolve disputes;
-Analyze aggregate, de-identified usage patterns to improve Platform features and AI model performance; and
-Improve and train our AI systems using de-identified, aggregated data derived from Platform usage. This data cannot reasonably be used to identify you individually.
-We do not use your personal data for targeted advertising and do not sell your personal data to third parties under any circumstances.
+Analyze aggregate, de-identified usage patterns to improve Platform features and AI model performance;
+Improve and train our AI systems using de-identified, aggregated data derived from Platform usage. This data cannot reasonably be used to identify you individually; and
+Measure and optimize our advertising by sharing limited activity, such as page views, trial starts, and purchases, with Meta Platforms, Inc. through the Meta Pixel and Meta Conversions API, as described in Sections 3.2 and 13.2.
+We use only a limited set of your information for advertising, as described above and in Sections 3.2 and 13.2. We do not sell your personal information for money. We never use your health information, workout logs, coach feedback, or video and image submissions for advertising, and we do not share that information with advertising partners. You can opt out of advertising sharing at any time through the “Do Not Sell or Share My Personal Information” page or by turning on Global Privacy Control.
 3. How We Share Your Information
 3.1 With Coaching Staff and Institutions
 If you are an athlete enrolled under a school or coach account, your session data, progress reports, AI coaching interactions, and form review feedback are visible to the coaching staff authorized under that account. This sharing is a core function of the Platform and is necessary to deliver the Services.
 3.2 With Third-Party Service Providers
-We share your data with a limited set of vetted third-party service providers who help us operate the Platform. These providers are contractually prohibited from using your data for any purpose other than providing services to Wilco. Our current service providers include:
+We work with a limited set of vetted third parties that help us operate and promote the Platform. With the exception of Meta Platforms, Inc., which is described below, these providers act as our service providers and are contractually prohibited from using your data for any purpose other than providing services to Wilco. Our current providers include:
 Anthropic PBC — AI processing and language model infrastructure. Athlete data submitted to AI coaching features is processed through Anthropic’s systems, governed by Anthropic’s Privacy Policy at anthropic.com/privacy.
 Supabase — Secure cloud database and authentication infrastructure.
 Vercel, Inc. — Platform hosting and content delivery.
 Stripe, Inc. — Payment processing, governed by Stripe’s Privacy Policy at stripe.com/privacy.
-We do not share your personal data with any other third parties without your explicit consent, except as required by law.
+Meta Platforms, Inc. — Advertising measurement and optimization for our marketing. See the paragraph below and Section 13.2 for what we share and how to opt out. Meta’s practices are governed by Meta’s Privacy Policy at facebook.com/privacy/policy.
+Our relationship with Meta is different from the service providers listed above. When you visit our public website, the Meta Pixel shares activity such as page views, trial starts, and other key actions with Meta. When you complete a paid subscription, we send Meta a purchase event through the Meta Conversions API that includes the purchase amount, your email address in hashed form, and Meta browser identifiers (the “fbc” and “fbp” cookies). Meta may use this information for its own advertising purposes, so under California law this is treated as “sharing” for cross-context behavioral advertising rather than a service-provider relationship. We do not share your health information, workout logs, coach feedback, or video submissions with Meta. You can opt out at any time, as described in Section 13.2.
+Other than the sharing with Meta described above, we do not share your personal data with any other third parties without your explicit consent, except as required by law.
 3.3 Legal Disclosures
 We may disclose your information if required to do so by law, regulation, legal process, or governmental request, or if we believe in good faith that disclosure is necessary to: (a) comply with a legal obligation; (b) protect the safety of any person; or (c) protect the rights, property, or safety of Wilco Training LLC.
 3.4 Business Transfers
@@ -253,14 +258,18 @@ Internet or electronic network activity: pages visited, features used, session d
 Geolocation data: general geographic location derived from IP address;
 Inferences: training program recommendations derived from your athletic profile; and
 Sensitive personal information: health information you voluntarily provide (injuries, medical conditions); and financial data processed by Stripe, Inc. on our behalf.
-13.2 No Sale or Sharing
-Wilco does not sell your personal information. Wilco does not share your personal information with third parties for cross-context behavioral advertising. You have the right to opt out of any such sale or sharing; to exercise this right, contact us at support@trainwilco.com (though no sale or sharing currently occurs).
+13.2 Sale and Sharing of Personal Information
+Wilco does not sell your personal information for money. However, our use of the Meta Pixel and the Meta Conversions API, described in Sections 1.4 and 3.2, is considered “sharing” for cross-context behavioral advertising under the CPRA. In the preceding 12 months, we have shared the following categories of personal information for this purpose: identifiers (Meta browser cookies and a hashed version of your email address) and internet or electronic network activity (page views, trial starts, and purchases). We have never shared, and will not share, your sensitive personal information, health information, workout data, coach feedback, or video and image submissions for advertising.
+You have the right to opt out of this sharing at any time. To opt out, you can:
+Visit our “Do Not Sell or Share My Personal Information” page at TrainWilco.com/do-not-sell and turn sharing off; or
+Turn on the Global Privacy Control (“GPC”) in a supported browser or extension. We treat a GPC signal as a valid request to opt out of sharing for that browser.
+We will not discriminate against you for exercising this right.
 13.3 Your CCPA/CPRA Rights
 In addition to the rights in Section 5, California residents have the right to:
 Know the categories and specific pieces of personal information collected, the sources, the business purpose, and the third parties with whom it is shared;
 Delete personal information we hold about you, subject to certain legal exceptions;
 Correct inaccurate personal information;
-Opt out of sale or sharing (not currently applicable);
+Opt out of the sharing of your personal information for cross-context behavioral advertising, as described in Section 13.2;
 Limit use of sensitive personal information to what is necessary to provide the Services; and
 Non-Discrimination: We will not deny Services, charge different prices, or provide a different quality of service because you exercised any CCPA/CPRA right.
 Contact us at support@trainwilco.com to exercise your rights. We will verify your identity and respond within 45 days, extendable by 45 additional days with notice.

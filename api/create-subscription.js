@@ -37,8 +37,14 @@ export default async function handler(req, res) {
   // Stripe metadata. fbc: fb.<n>.<ms>.<fbclid>  fbp: fb.<n>.<ms>.<rand>
   const adMeta = {};
   if (ad && typeof ad === "object") {
-    if (typeof ad.fbc === "string" && /^fb\.\d\.\d{10,}\.[\w.-]{1,255}$/.test(ad.fbc)) adMeta.fbc = ad.fbc;
-    if (typeof ad.fbp === "string" && /^fb\.\d\.\d{10,}\.\d{1,20}$/.test(ad.fbp)) adMeta.fbp = ad.fbp;
+    if (ad.optout === true) {
+      // Global Privacy Control opt-out — flag it so the webhook skips the Meta
+      // Purchase entirely and never forwards any identifier. (Privacy Policy §13.2.)
+      adMeta.ad_optout = "1";
+    } else {
+      if (typeof ad.fbc === "string" && /^fb\.\d\.\d{10,}\.[\w.-]{1,255}$/.test(ad.fbc)) adMeta.fbc = ad.fbc;
+      if (typeof ad.fbp === "string" && /^fb\.\d\.\d{10,}\.\d{1,20}$/.test(ad.fbp)) adMeta.fbp = ad.fbp;
+    }
   }
 
   try {

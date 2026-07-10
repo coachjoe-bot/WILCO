@@ -193,6 +193,7 @@ async function sendMetaPurchase(invoice, athlete) {
       invoice.subscription_details?.metadata ||
       invoice.lines?.data?.[0]?.metadata ||
       {};
+    if (md.ad_optout === "1") return; // visitor opted out of ad sharing (GPC) — no Purchase
     const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
 
     const user_data = {};
