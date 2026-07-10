@@ -1323,6 +1323,10 @@ export const GSA = `
 .ld-hex i{width:10px;height:10px;background:${CA.accent};border-radius:2px;transform:rotate(45deg);opacity:.2;animation:hp 1.3s ease-in-out infinite;}
 .ld-hex i:nth-child(2){animation-delay:.1s}.ld-hex i:nth-child(3){animation-delay:.2s}.ld-hex i:nth-child(4){animation-delay:.1s}.ld-hex i:nth-child(5){animation-delay:.2s}.ld-hex i:nth-child(6){animation-delay:.3s}.ld-hex i:nth-child(7){animation-delay:.2s}.ld-hex i:nth-child(8){animation-delay:.3s}.ld-hex i:nth-child(9){animation-delay:.4s}
 @keyframes hp{50%{opacity:1;box-shadow:0 0 10px ${CA.cyan};}}
+.ld-dots{display:flex;align-items:center;gap:5px;}
+.ld-dots i{width:8px;height:8px;border-radius:50%;background:${CA.muted};opacity:.4;animation:ldd 1.3s ease-in-out infinite;}
+.ld-dots i:nth-child(2){animation-delay:.18s}.ld-dots i:nth-child(3){animation-delay:.36s}
+@keyframes ldd{0%,60%,100%{opacity:.35;transform:translateY(0);}30%{opacity:1;transform:translateY(-4px);}}
 /* PR "NEW MAX" stamp — straight on, cyan */
 .stampstage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:700;pointer-events:none;}
 .stamp{border:3px solid ${CA.cyan};border-radius:12px;padding:16px 30px;transform:scale(2.4);opacity:0;text-align:center;background:rgba(4,10,20,.72);box-shadow:0 0 40px ${CA.cyan};}
@@ -1341,7 +1345,7 @@ export const GSA = `
    for Settings group labels ("PROOF FEED", "WEIGHT UNIT", etc.) */
 .setgrp{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:${CA.faint};}
 @media (prefers-reduced-motion: reduce){
-  .a-ticker,.a-flap,.a-stamp,.a-draw,.radar::before,.ld-charge i,.ld-scan::before,.ld-hex i,.stamp,.proof-loop{animation:none!important;transform:none!important;opacity:1!important;}
+  .a-ticker,.a-flap,.a-stamp,.a-draw,.radar::before,.ld-charge i,.ld-scan::before,.ld-hex i,.ld-dots i,.stamp,.proof-loop{animation:none!important;transform:none!important;opacity:1!important;}
   .hcell.go .hfill{transform:scaleX(var(--pct,0))!important;}
   .a-draw{stroke-dasharray:none!important;}
 }
@@ -4714,7 +4718,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
                 <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:"16px 16px 16px 4px",padding:"12px 16px",display:"flex",alignItems:"center",gap:12}}>
                   {videoLoading
                     ? <><div className="ld-scan" style={{width:42,height:42}}/><span style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:11,color:CA.muted}}>Reviewing form</span></>
-                    : <><div className="ld-hex"><i/><i/><i/><i/><i/><i/><i/><i/><i/></div><span style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:11,color:CA.muted}}>Joe is thinking</span></>}
+                    : <div className="ld-dots"><i/><i/><i/></div>}
                 </div>
               </div>
             )}
