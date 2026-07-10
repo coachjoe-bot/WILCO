@@ -182,12 +182,32 @@ async function handleInvoicePaid(stripe, invoice) {
 //   META_PIXEL_ID    the same pixel the marketing site fires
 //   META_CAPI_TOKEN  a system-user access token from Meta Events Manager
 //
+// True when the athlete's stored birthday puts them under 16. Birthday is
+// collected (and required) at signup, so for these accounts we have actual
+// knowledge of age. A blank/invalid birthday → not under 16 (no actual
+// knowledge), so attribution proceeds normally. Matches the 365.25-day age
+// math used on the client.
+function isUnder16(athlete) {
+  const b = athlete?.birthday;
+  if (!b) return false;
+  const dob = new Date(b);
+  if (isNaN(dob.getTime())) return false;
+  return (Date.now() - dob.getTime()) / (365.25 * 24 * 60 * 60 * 1000) < 16;
+}
+
+//
 // Never throws — attribution must never break the authoritative webhook.
 async function sendMetaPurchase(invoice, athlete) {
   try {
     const pixelId = process.env.META_PIXEL_ID;
     const token = process.env.META_CAPI_TOKEN;
     if (!pixelId || !token) return; // not configured → no-op
+
+    // CPRA §1798.120(c): with actual knowledge that a consumer is under 16, we
+    // must not share their personal information for cross-context behavioral
+    // advertising without opt-IN consent. We have their birthday, so never fire
+    // the Meta Purchase (hashed email + click id) for a known under-16 athlete.
+    if (isUnder16(athlete)) return;
 
     const md =
       invoice.subscription_details?.metadata ||
