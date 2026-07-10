@@ -23,6 +23,26 @@ export const epley1RM = (weight, reps) => {
   return Math.round(weight * (1 + Math.min(reps, MAX_E1RM_REPS) / 30));
 };
 
+// ── Effective workout date ────────────────────────────────────────────────────
+// The day a workout should be ATTRIBUTED to. Normally the insert time (created_at),
+// but when the athlete logs a PAST session ("that was Monday's workout", "did this
+// yesterday") the workout parser resolves the intended day to parsed_data.log_date
+// (a "YYYY-MM-DD" string) and we honor it everywhere dates matter — the weekly
+// streak, session grouping, the workout log, and the progress charts. A noon-local
+// parse avoids UTC day-boundary drift. Falls back to created_at whenever log_date is
+// absent or malformed, so every existing row is unaffected. Server-safe (no DOM).
+export const effectiveDate = (w) => {
+  const pd = typeof w?.parsed_data === "string"
+    ? (() => { try { return JSON.parse(w.parsed_data); } catch { return {}; } })()
+    : (w?.parsed_data || {});
+  const ld = pd.log_date;
+  if (ld && /^\d{4}-\d{2}-\d{2}$/.test(ld)) {
+    const d = new Date(ld + "T12:00:00");
+    if (!isNaN(d.getTime())) return d;
+  }
+  return new Date(w?.created_at);
+};
+
 // Expand a logged exercise entry into its individual sets. Handles both the new
 // "set_details" array (variable weight/reps per set) and legacy flat fields.
 export const getExerciseSets = (ex) => {
@@ -438,7 +458,7 @@ export function computeGritSnapshot(workouts, manualRMs, opts = {}) {
   let prsHit = 0;
   {
     const best = {};
-    [...(workouts || [])].sort((a, b) => new Date(a.created_at) - new Date(b.created_at)).forEach((w) => {
+    [...(workouts || [])].sort((a, b) => effectiveDate(a) - effectiveDate(b)).forEach((w) => {
       const pd = getPD(w);
       (pd.exercises || []).forEach((ex) => {
         if (!ex.name) return;
