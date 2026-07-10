@@ -3059,7 +3059,7 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
     <>
     {showConsent && (
       <ConsentFlow
-        C={C}
+        C={CA}
         birthday={data.birthday}
         busy={loading}
         onComplete={completeSignup}
