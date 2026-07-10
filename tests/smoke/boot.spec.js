@@ -10,8 +10,10 @@ test("app boots to the home/login screen with no console errors", async ({ page 
   await mockApi(page);
   await page.goto("/");
 
-  // Wordmark + all three entry points of the home screen.
-  await expect(page.getByText("WILCO", { exact: true })).toBeVisible();
+  // Brand line + all three entry points of the home screen. (Since 188569c the
+  // athlete-entry WILCO wordmark lives in the storefront backdrop photo, not a
+  // text node — only coach entry renders the text wordmark.)
+  await expect(page.getByText("COACH JOE-BOT", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Athlete Login" })).toBeVisible();
   await expect(page.getByRole("button", { name: "New Athlete Sign Up" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Coach Login" })).toBeVisible();
