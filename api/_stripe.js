@@ -76,7 +76,7 @@ export const GIFT_COUPON_ID = process.env.STRIPE_GIFT_COUPON_ID || "WILCO_GIFT_P
 // QR link can't redeem the offer before the event.
 export const EVENT_SOURCES = {
   "crunch-aloma": {
-    enabled: false, // ← EVENT-DAY SWITCH (server)
+    enabled: true, // ← EVENT-DAY SWITCH (server)
     label: "Crunch Fitness — Winter Park (Aloma)",
     trialDays: 30,
     tier: "pro", // the only tier this offer sells

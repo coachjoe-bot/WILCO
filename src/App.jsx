@@ -85,7 +85,7 @@ const TIERS = {
 // EVENT DAY: flip `active` to true here (and `enabled` in api/_stripe.js), deploy.
 const EVENTS = {
   "crunch-aloma": {
-    active: false, // ← EVENT-DAY SWITCH (client)
+    active: true, // ← EVENT-DAY SWITCH (client)
     path: "/crunch/aloma",
     gym: "CRUNCH FITNESS · WINTER PARK",
     headline: "Your first month of WILCO Pro is on us.",
