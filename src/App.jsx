@@ -5088,6 +5088,35 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
 // Compact context bundle for the draft/edit prompts. The 1RM math is done HERE in
 // code (client-side) — the model fills in numbers we hand it; it never does the
 // Epley arithmetic itself.
+// The program-day label the athlete typed at the top of a logged session — first
+// non-empty line of raw_message, ignoring stray Quick Log "SECTION …" headers and
+// "===" separators that leaked into some older logs, and form-review rows. Capped so a
+// label-less log (whose first line is an exercise) contributes a short hint, not a wall.
+const dayLabelFromRaw = (raw) => {
+  if(typeof raw!=="string") return "";
+  for(const ln of raw.split("\n")){
+    const s = ln.trim();
+    if(!s || /^section\b/i.test(s) || /^=+$/.test(s) || s.startsWith("[Form review:")) continue;
+    return s.slice(0,60);
+  }
+  return "";
+};
+
+// Does this raw_message look like a workout the athlete LOGGED (vs a question they asked
+// Joe)? Used to anchor Quick Log's "where you are" on the day the athlete typed even when
+// the exercise parser failed to extract anything — the day LABEL lives in raw_message
+// regardless of parse success, so day-sequencing shouldn't be hostage to the parser.
+const looksLikeWorkoutLog = (raw) => {
+  if(typeof raw!=="string") return false;
+  const s = raw.trim();
+  if(!s || s.startsWith("[Form review:")) return false;
+  const first = s.split("\n")[0].trim();
+  // A question / request to the coach is not a log.
+  if(/\?/.test(first) || /^\s*(what|when|which|can|could|should|is|are|do|does|how|why|show|tell|give)\b/i.test(first)) return false;
+  // A log carries set×rep or @weight or a bare lbs/kg load.
+  return /\b\d+\s*[x×]\s*\d+/i.test(s) || /@\s*\d/.test(s) || /\b\d+\s*(lbs|kg)\b/i.test(s);
+};
+
 const buildQuickLogContext = (athlete, workoutHistory, manualRMs, messages, goals, contextNotes) => {
   const program = athlete.temp_program_text || athlete.program_text || "";
   const bodyweight = athlete.weight_lbs;
@@ -5100,20 +5129,69 @@ const buildQuickLogContext = (athlete, workoutHistory, manualRMs, messages, goal
     .slice(-16)
     .map(m=>`${m.role==="user"?"Athlete":"Joe"}: ${m.content.trim()}`)
     .join("\n");
-  // Last 8 sessions, newest first, one compact block each.
-  const sessions = groupIntoSessions(workoutHistory)
+  // Real sessions, newest first. Keep the full sorted list to anchor "where you are" on
+  // the most recent one; show the last 8 as context blocks.
+  const sortedSessions = groupIntoSessions(workoutHistory)
     .map(s=>({entries:s.entries, t:effectiveDate(s.entries[s.entries.length-1])}))
-    .sort((a,b)=>b.t-a.t).slice(0,8);
-  const sessionLines = sessions.map(s=>{
+    .sort((a,b)=>b.t-a.t);
+  // Day label the athlete typed when logging a session (earliest entry's raw_message).
+  const labelFor = (s) => {
+    const first = [...s.entries].sort((a,b)=>effectiveDate(a)-effectiveDate(b))
+      .find(e=>dayLabelFromRaw(e.raw_message));
+    return first ? dayLabelFromRaw(first.raw_message) : "";
+  };
+  const sessionLines = sortedSessions.slice(0,8).map(s=>{
     const day = s.t.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"});
+    const label = labelFor(s);
     const lines = [];
     s.entries.forEach(w=>{
       (w.parsed_data?.exercises||[]).forEach(ex=>{ if(ex.name) lines.push(`${ex.name} ${formatSetDetails(ex)}`); });
       if(w.parsed_data?.run_data) lines.push("(run logged)");
       if(w.parsed_data?.practice_data) lines.push("(practice logged)");
     });
-    return `${day}:\n${lines.join("\n")||"(no exercise detail)"}`;
+    // Surfacing the logged label ("Push A — Block II, Week 2, Day 1") is the anchor the
+    // draft needs — without it the model only sees exercise names and reverse-engineers
+    // the program day, which drifts in block programs where lifts repeat across weeks.
+    return `${day}${label?` — logged as "${label}"`:""}:\n${lines.join("\n")||"(no exercise detail)"}`;
   }).join("\n\n");
+  // ── "Where you are" anchor: last logged day + how many sessions to advance today ────
+  // Advance scales with calendar days elapsed × the program's weekly frequency: on a
+  // 6-day/week plan a 1-day gap is the next session, a 2-day gap means one was skipped
+  // (advance 2); on a 3-day/week plan a 1-day gap is just a rest day (still advance 1).
+  // This is how an athlete counts where they'd be — NOT by pinning the week to today's
+  // calendar date against the program's printed block dates (which they may be behind).
+  // Anchor = the most recent thing the athlete clearly LOGGED. Prefer grouped real
+  // sessions (their label comes from the session's first entry). But a workout whose
+  // exercises failed to PARSE still tells us the day via its typed label — so if a
+  // clearly-logged-but-unparsed row is newer than the newest real session, anchor on it
+  // (this is what made Quick Log skip a day: the last real log didn't parse, so it fell
+  // back to a stale older session and then jumped weeks off the calendar).
+  const last = sortedSessions[0];
+  let anchorLabel = last ? labelFor(last) : "";
+  let anchorDate = last ? last.t : null;
+  const unparsedLog = workoutHistory
+    .filter(w=>!isRealSession(w) && !w?.parsed_data?.is_program_update && !w?.parsed_data?.program_create_request && looksLikeWorkoutLog(w.raw_message))
+    .map(w=>({w, t:effectiveDate(w)}))
+    .sort((a,b)=>b.t-a.t)[0];
+  if(unparsedLog && (!anchorDate || unparsedLog.t>anchorDate)){
+    anchorLabel = dayLabelFromRaw(unparsedLog.w.raw_message);
+    anchorDate = unparsedLog.t;
+  }
+  let whereYouAre = "";
+  if(anchorDate){
+    const t0 = new Date();
+    const todayMid = new Date(t0.getFullYear(),t0.getMonth(),t0.getDate());
+    const lastMid = new Date(anchorDate.getFullYear(),anchorDate.getMonth(),anchorDate.getDate());
+    const daysSince = Math.max(0, Math.round((todayMid-lastMid)/86400000));
+    const dpw = Number(athlete.training_days_per_week)||0;
+    const advance = dpw>0 ? Math.max(1, Math.round(daysSince*dpw/7)) : 1;
+    const ago = daysSince===0?"today":daysSince===1?"yesterday":`${daysSince} days ago`;
+    const when = anchorDate.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"});
+    whereYouAre =
+      `- Last session actually LOGGED: ${anchorLabel?`"${anchorLabel}"`:"(unlabeled — read its exercises in RECENT SESSIONS)"} — ${ago} (${when}).\n`+
+      (dpw>0?`- Program frequency: ${dpw} training days/week.\n`:`- Program frequency: unknown (assume the very next session).\n`)+
+      `- ADVANCE ${advance} session${advance!==1?"s":""} forward from that last logged day to reach TODAY'S session.`;
+  }
   // 1RM cheat sheet: best history e1RM per exercise, overlaid with actual 1RMs
   // (manual_one_rms) — higher number wins, same rule as the Progress modal.
   const byEx = {};
@@ -5151,7 +5229,7 @@ const buildQuickLogContext = (athlete, workoutHistory, manualRMs, messages, goal
       const day = effectiveDate(w).toLocaleDateString("en-US",{month:"short",day:"numeric"});
       return `(${day}) ${w.bot_reply.replace(/\s+/g," ").trim().slice(0,300)}`;
     }).join("\n\n");
-  return { program, sessionLines, rmLines, chatLines, goalLines, injury, ctxNotes, formReviews };
+  return { program, sessionLines, rmLines, chatLines, goalLines, injury, ctxNotes, formReviews, whereYouAre };
 };
 
 const QL_DRAFT_SYS = `You prefill workout logs for an athlete in a fitness app. Based on their training program, recent logged sessions, known 1RMs, goals, saved context, injuries, and form reviews, produce (1) a SHORT focus note explaining the point of today's session, then (2) the log message itself.
@@ -5167,7 +5245,11 @@ Write these as plain short lines, coach-to-athlete. No headers, no bullets-with-
 ===
 
 SECTION 2 — THE LOG (exactly what the athlete would type after the session):
-- FIRST LINE: the program day label (e.g. "Day 5 – Push B" or "Upper B"). Infer which day is NEXT from what they logged most recently and today's date. If the program has no day labels, use a short session name.
+- FIRST LINE: the program day label (e.g. "Day 5 – Push B" or "Upper B"). Choose TODAY'S session with the WHERE YOU ARE block, in this exact order:
+  1. ANCHOR on the LAST LOGGED session named there — that is the athlete's true position in the program (which day AND which week/block), regardless of the calendar.
+  2. ADVANCE forward by the stated number of sessions, in program order. Crossing the last training day of a week wraps to the next week's first day AND steps the week up one (Week 2 → Week 3) — which changes that week's percentages/loads. Crossing the last week of a block moves into the next block.
+  3. Do NOT compute the week from today's date against the program's printed block dates (e.g. "Weeks: Jun 30–Jul 25"). Those dates are only a guide; the athlete may be behind or ahead. Their real week is the logged one moved forward by ADVANCE — nothing else.
+  Read every load/percentage from the column for the WEEK you land on (e.g. Wk2 vs Wk3). If the program has no day labels, use a short session name. If nothing has been logged yet, start at the program's first day, Week 1.
 - CONVERSATION OVERRIDES INFERENCE: if the CONVERSATION THIS SESSION shows the athlete already said which day they're doing ("I'm on day 3", "doing legs today") or that they're changing an exercise today (swapping, adding, or dropping a movement, or a different weight/scheme), BUILD THE DRAFT AROUND WHAT THEY SAID — the stated day wins over your own inference, and reflect any stated swaps/adds/drops in the exercise list. Only fall back to inferring the day when the conversation doesn't state one.
 - Then a blank line, then ONE line per exercise: "Name SETSxREPS @ WEIGHT" (e.g. "Back Squat 5x3 @ 225"). Weighted bodyweight: "Weighted Pull-ups 3x8 +25". Plain bodyweight: "Push-ups 3x20". Timed holds: "Plank 3x60s".
 - WEIGHT HIERARCHY — check in this exact order and STOP at the first that applies. The PROGRAM always outranks both history and the 1RM cheat sheet:
@@ -5206,7 +5288,7 @@ function QuickLogSheet({athlete, workoutHistory, messages, goals, contextNotes, 
   const ctxRef = useRef(null);
 
   const todayStr = () => new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"});
-  const ctxBlock = (ctx) => `PROGRAM:\n${ctx.program||"(none)"}\n\nCONVERSATION THIS SESSION (what the athlete already told Joe today — HONOR any program day or exercise change stated here over your own inference):\n${ctx.chatLines||"(nothing said yet)"}\n\nRECENT SESSIONS (newest first):\n${ctx.sessionLines||"(none logged yet)"}\n\n1RM CHEAT SHEET:\n${ctx.rmLines||"(none known)"}\n\nGOALS (for the focus note — cite only if a goal maps to a lift in today's session):\n${ctx.goalLines||"(none stated)"}\n\nSAVED CONTEXT (preferences/history worth knowing — use only if relevant to today's lifts):\n${ctx.ctxNotes||"(none)"}\n\nINJURY HISTORY (guard the affected areas; note it only if today's lifts touch them):\n${ctx.injury||"(none)"}\n\nRECENT FORM REVIEWS (past video-check cues — cite one only if it names a movement in today's session):\n${ctx.formReviews||"(none)"}`;
+  const ctxBlock = (ctx) => `PROGRAM:\n${ctx.program||"(none)"}\n\nCONVERSATION THIS SESSION (what the athlete already told Joe today — HONOR any program day or exercise change stated here over your own inference):\n${ctx.chatLines||"(nothing said yet)"}\n\nWHERE YOU ARE (pick today's session from THIS — the athlete's real position is where they last logged, moved forward; do NOT compute the week from today's date against the program's printed block dates):\n${ctx.whereYouAre||"(nothing logged yet — start at the program's first day, Week 1)"}\n\nRECENT SESSIONS (newest first):\n${ctx.sessionLines||"(none logged yet)"}\n\n1RM CHEAT SHEET:\n${ctx.rmLines||"(none known)"}\n\nGOALS (for the focus note — cite only if a goal maps to a lift in today's session):\n${ctx.goalLines||"(none stated)"}\n\nSAVED CONTEXT (preferences/history worth knowing — use only if relevant to today's lifts):\n${ctx.ctxNotes||"(none)"}\n\nINJURY HISTORY (guard the affected areas; note it only if today's lifts touch them):\n${ctx.injury||"(none)"}\n\nRECENT FORM REVIEWS (past video-check cues — cite one only if it names a movement in today's session):\n${ctx.formReviews||"(none)"}`;
 
   const generate = async () => {
     setPhase("loading");
