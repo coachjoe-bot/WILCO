@@ -1005,7 +1005,14 @@ Rules:
   const user = `Athlete: ${name} (${sport})\nTODAY'S DATE: ${todayLabel} (${nowD.toISOString().slice(0,10)}). The athlete is logging this right now — only set log_date if they explicitly say the session was on a past day.${known}\nMessage: ${message}`;
   const runParse = async (model) => {
     // The entire rulebook above is static — cache it (highest-volume call in the app).
-    const text = await askClaude({cached:sys},user,1000,[],model,"workout_parse");
+    // max_tokens must be big enough to hold the WHOLE JSON: the schema forces ~25
+    // fields per exercise, so a 6+ exercise session (or any session with set_details
+    // arrays — ramps, warm-ups, Olympic complexes) blew past the old 1000 cap and got
+    // truncated mid-object. Truncated JSON → JSON.parse throws → empty exercises[] →
+    // the workout saves but never shows in the log ("my workout didn't log"). 4x
+    // exercises ran ~825 tokens, so 1000 held only ~5 lifts. 3000 comfortably covers
+    // ~18 lifts with set_details; natural completions stop far short, so cost is flat.
+    const text = await askClaude({cached:sys},user,3000,[],model,"workout_parse");
     return JSON.parse(text.replace(/```json|```/g,"").trim());
   };
   // Structural / technique-heavy logs (supersets, warm-up separation, drop / rest-pause /
@@ -4978,6 +4985,8 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           athlete={athlete}
           workoutHistory={workoutHistory}
           messages={messages}
+          goals={athleteGoals}
+          contextNotes={athleteContext}
           onClose={()=>setShowQuickLog(false)}
           onAddProgram={()=>{setShowQuickLog(false);setShowProgram(true);}}
           onSend={(text)=>{
@@ -5055,7 +5064,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
 // Compact context bundle for the draft/edit prompts. The 1RM math is done HERE in
 // code (client-side) — the model fills in numbers we hand it; it never does the
 // Epley arithmetic itself.
-const buildQuickLogContext = (athlete, workoutHistory, manualRMs, messages) => {
+const buildQuickLogContext = (athlete, workoutHistory, manualRMs, messages, goals, contextNotes) => {
   const program = athlete.temp_program_text || athlete.program_text || "";
   const bodyweight = athlete.weight_lbs;
   // What the athlete has already told Joe in THIS chat session — which program day
@@ -5099,17 +5108,37 @@ const buildQuickLogContext = (athlete, workoutHistory, manualRMs, messages) => {
   });
   const rmLines = Object.values(byEx).sort((a,b)=>b.e1rm-a.e1rm).slice(0,15)
     .map(r=>`${r.name}: ${Math.round(r.e1rm)} lbs${r.actual?" (actual 1RM)":" (est.)"}`).join("\n");
-  return { program, sessionLines, rmLines, chatLines };
+  // Coaching layer — the "why" behind today's programming, for the notes box. The
+  // draft prompt uses these ONLY to explain intent for a movement that appears in
+  // today's session (goal relevance, a saved cue, an injury guard, a form-review
+  // correction), never as a sourcing dump.
+  const goalLines = (goals||[]).map(g=>(g.goal_text||"").trim()).filter(Boolean).slice(0,4).join("\n");
+  const injury = (athlete.injury_history||"").trim();
+  const ctxNotes = (contextNotes||"").trim();
+  // Recent video form reviews are workout rows whose raw_message starts
+  // "[Form review: <filename>]" with the analysis in bot_reply (the lift is named
+  // inside the analysis, not the filename). Surface the last 3 so the notes can
+  // cite a movement-specific cue when today hits that lift.
+  const formReviews = workoutHistory
+    .filter(w=>typeof w.raw_message==="string" && w.raw_message.startsWith("[Form review:") && (w.bot_reply||"").trim())
+    .sort((a,b)=>effectiveDate(b)-effectiveDate(a))
+    .slice(0,3)
+    .map(w=>{
+      const day = effectiveDate(w).toLocaleDateString("en-US",{month:"short",day:"numeric"});
+      return `(${day}) ${w.bot_reply.replace(/\s+/g," ").trim().slice(0,300)}`;
+    }).join("\n\n");
+  return { program, sessionLines, rmLines, chatLines, goalLines, injury, ctxNotes, formReviews };
 };
 
-const QL_DRAFT_SYS = `You prefill workout logs for an athlete in a fitness app. Based on their training program, recent logged sessions, and known 1RMs, produce (1) a compact worksheet showing HOW you built today's log, then (2) the log message itself.
+const QL_DRAFT_SYS = `You prefill workout logs for an athlete in a fitness app. Based on their training program, recent logged sessions, known 1RMs, goals, saved context, injuries, and form reviews, produce (1) a SHORT focus note explaining the point of today's session, then (2) the log message itself.
 
 Output exactly two sections separated by a line containing only "===" :
 
-SECTION 1 — WORKSHEET (shown to the athlete for reference; never sent to chat):
-- First line: which program day you picked and why, in a few words (e.g. "Block II, Week 1 — Thursday is Push B.").
-- Then ONE compact line per exercise showing your sourcing, IN HIERARCHY ORDER — a set working weight written in the program first ("Bench Press: program says 185 → 185"), else percentage math off the 1RM ("Bench Press: 68% x 275 = 187 → round to 185"), else last-time ("DB Lateral Raise: no program weight, last time 30 → 30"), else "no data → blank". Include program notes worth seeing (tempo, RPE targets, rest, coach cues written in the program).
-- Works for every program: if there are no percentages, still show the sourcing (program weight / last time / blank) and any program notes.
+SECTION 1 — TODAY'S FOCUS (shown to the athlete for reference; never sent to chat). Keep it SHORT — a few lines, scannable in two seconds. This is the MEANING behind today's programming, NOT a sourcing breakdown. Do NOT show per-exercise weight math, percentages-times-1RM arithmetic, or "→ round to" reasoning. Include, in this order, ONLY what genuinely applies:
+- ONE line naming the day and its intent: the block/week/day label plus what kind of session it is (e.g. "Block II, Week 2, Day 1 — Push A. Heavy bench day." or "Week 2, Day 3 — Legs A. Squat-focused, moderate volume.").
+- If the program schedules percentages or a climb for the KEY lift, state the STRUCTURE in one short line (e.g. "Bench climbs 67→89% of your 275 max." or "Top set around 85% today."). One line, key lift(s) only — never every exercise.
+- Up to 2 short coaching notes that give the session MEANING, drawn ONLY from the athlete's GOALS, SAVED CONTEXT, INJURY HISTORY, or RECENT FORM REVIEWS, and ONLY when they relate to a movement that appears in TODAY'S session. Examples: "This is your biggest mover toward the 315 bench goal." / "Keep the core braced on the deficit deadlifts — protects the low back you tweaked." / "Last form check on squats: knees caving on the drive — cue them out." Cite a note only if it maps to today's lifts; if nothing relevant applies, omit this entirely. Never invent a goal, cue, or injury that isn't in the provided context.
+Write these as plain short lines, coach-to-athlete. No headers, no bullets-with-labels, no math.
 
 ===
 
@@ -5129,21 +5158,21 @@ SECTION 2 — THE LOG (exactly what the athlete would type after the session):
 If the program says today is a rest day and no training day is clearly next, output exactly REST_DAY (no sections, no separator).
 No markdown, no commentary outside the two sections.`;
 
-const QL_EDIT_SYS = `You revise a prefilled workout-log draft per an athlete's instruction. You get their program, recent sessions, 1RMs, Joe's worksheet notes (reference only), the CURRENT draft, and the instruction.
+const QL_EDIT_SYS = `You revise a prefilled workout-log draft per an athlete's instruction. You get their program, recent sessions, 1RMs, coaching context (goals/context/injury/form reviews), Joe's focus note (reference only), the CURRENT draft, and the instruction.
 
 Rules:
 - Apply the instruction; keep everything else in the draft unchanged.
-- If the instruction names a DIFFERENT program day ("I did day 2"), rebuild BOTH sections for that day and output them in the draft format: the worksheet (day pick + per-exercise sourcing), then a line containing only "===", then the log — same weight hierarchy (a SET working weight in the program FIRST, else % x 1RM rounded to the nearest 5 lbs, else last time, else a "___" fill-in blank — never derive off e1RM when the program states a working weight, and never guess). This is the ONLY case where you output a worksheet.
-- For every other instruction (weight tweaks, sets/reps changes, adding or removing exercises), output ONLY the revised log — no worksheet, no "===".
+- If the instruction names a DIFFERENT program day ("I did day 2"), rebuild BOTH sections for that day and output them in the draft format: the SHORT focus note (day + intent, key-lift structure in one line, up to 2 relevant coaching notes drawn only from the provided goals/context/injury/form reviews — NO per-exercise sourcing math, NO percentages arithmetic), then a line containing only "===", then the log — using the weight hierarchy (a SET working weight in the program FIRST, else % x 1RM rounded to the nearest 5 lbs, else last time, else a "___" fill-in blank — never derive off e1RM when the program states a working weight, and never guess). This is the ONLY case where you output a focus note.
+- For every other instruction (weight tweaks, sets/reps changes, adding or removing exercises), output ONLY the revised log — no focus note, no "===".
 - If the draft is empty and the instruction describes what they did, write the draft from it.
 - Same format: first line = day label, blank line, one exercise per line ("Name SETSxREPS @ WEIGHT").
 - If the instruction is NOT about editing this draft (a coaching question, chit-chat), return the current draft EXACTLY unchanged.
 - Output ONLY the log text. No commentary, no markdown.`;
 
-function QuickLogSheet({athlete, workoutHistory, messages, onClose, onAddProgram, onSend}) {
+function QuickLogSheet({athlete, workoutHistory, messages, goals, contextNotes, onClose, onAddProgram, onSend}) {
   const hasProgram = !!(athlete.temp_program_text||athlete.program_text);
   const [draft,setDraft] = useState("");
-  const [notes,setNotes] = useState(""); // Joe's worksheet — read-only reference, never sent; AI-rebuilt ONLY on a day change
+  const [notes,setNotes] = useState(""); // Joe's focus note — read-only reference, never sent; AI-rebuilt ONLY on a day change
   const [showEditHelp,setShowEditHelp] = useState(false);
   const [phase,setPhase] = useState(hasProgram?"loading":"noprogram"); // loading|ready|rest|error|noprogram
   const [instruction,setInstruction] = useState("");
@@ -5153,14 +5182,14 @@ function QuickLogSheet({athlete, workoutHistory, messages, onClose, onAddProgram
   const ctxRef = useRef(null);
 
   const todayStr = () => new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"});
-  const ctxBlock = (ctx) => `PROGRAM:\n${ctx.program||"(none)"}\n\nCONVERSATION THIS SESSION (what the athlete already told Joe today — HONOR any program day or exercise change stated here over your own inference):\n${ctx.chatLines||"(nothing said yet)"}\n\nRECENT SESSIONS (newest first):\n${ctx.sessionLines||"(none logged yet)"}\n\n1RM CHEAT SHEET:\n${ctx.rmLines||"(none known)"}`;
+  const ctxBlock = (ctx) => `PROGRAM:\n${ctx.program||"(none)"}\n\nCONVERSATION THIS SESSION (what the athlete already told Joe today — HONOR any program day or exercise change stated here over your own inference):\n${ctx.chatLines||"(nothing said yet)"}\n\nRECENT SESSIONS (newest first):\n${ctx.sessionLines||"(none logged yet)"}\n\n1RM CHEAT SHEET:\n${ctx.rmLines||"(none known)"}\n\nGOALS (for the focus note — cite only if a goal maps to a lift in today's session):\n${ctx.goalLines||"(none stated)"}\n\nSAVED CONTEXT (preferences/history worth knowing — use only if relevant to today's lifts):\n${ctx.ctxNotes||"(none)"}\n\nINJURY HISTORY (guard the affected areas; note it only if today's lifts touch them):\n${ctx.injury||"(none)"}\n\nRECENT FORM REVIEWS (past video-check cues — cite one only if it names a movement in today's session):\n${ctx.formReviews||"(none)"}`;
 
   const generate = async () => {
     setPhase("loading");
     try{
       let manualRMs = [];
       try{ manualRMs = await sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`)||[]; }catch(_){}
-      const ctx = buildQuickLogContext(athlete, workoutHistory, manualRMs, messages);
+      const ctx = buildQuickLogContext(athlete, workoutHistory, manualRMs, messages, goals, contextNotes);
       ctxRef.current = ctx;
       const text = await askClaude(QL_DRAFT_SYS, `Today is ${todayStr()}.\n\n${ctxBlock(ctx)}`, 800, [], "claude-sonnet-5", "quick_log_draft");
       const t = (text||"").trim();
@@ -5182,9 +5211,9 @@ function QuickLogSheet({athlete, workoutHistory, messages, onClose, onAddProgram
     if(!ins||editBusy) return;
     setEditBusy(true); setEditErr("");
     try{
-      const ctx = ctxRef.current || buildQuickLogContext(athlete, workoutHistory, [], messages);
+      const ctx = ctxRef.current || buildQuickLogContext(athlete, workoutHistory, [], messages, goals, contextNotes);
       const revised = await askClaude(QL_EDIT_SYS,
-        `Today is ${todayStr()}.\n\n${ctxBlock(ctx)}\n\nCURRENT WORKSHEET:\n${notes||"(none)"}\n\nCURRENT DRAFT:\n${draft.trim()||"(empty)"}\n\nATHLETE'S INSTRUCTION:\n${ins}`,
+        `Today is ${todayStr()}.\n\n${ctxBlock(ctx)}\n\nCURRENT FOCUS NOTE:\n${notes||"(none)"}\n\nCURRENT DRAFT:\n${draft.trim()||"(empty)"}\n\nATHLETE'S INSTRUCTION:\n${ins}`,
         800, [], "claude-sonnet-5", "quick_log_edit");
       let t = (revised||"").trim();
       // A two-section reply means the day changed and the worksheet was rebuilt
@@ -5254,6 +5283,7 @@ function QuickLogSheet({athlete, workoutHistory, messages, onClose, onAddProgram
           )}
           {notes&&phase==="ready"&&(
             <div style={{flexShrink:0,maxHeight:"30%",overflowY:"auto",background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:10,padding:"10px 12px"}}>
+              <div style={{color:CA.cyan,fontSize:9,fontWeight:700,letterSpacing:1.5,marginBottom:5}}>TODAY'S FOCUS</div>
               <div style={{color:CA.muted2,fontSize:12,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{notes}</div>
             </div>
           )}
