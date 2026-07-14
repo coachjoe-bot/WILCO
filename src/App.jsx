@@ -4018,8 +4018,28 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // workoutHistory here is pre-insert — prepending newRow counts this log once.
       try {
         const prevCount = updatedAthlete.total_sessions_logged||0;
-        const newRow = {athlete_id:updatedAthlete.id, parsed_data:parsedFinal, created_at:new Date().toISOString()};
-        const newCount = groupIntoSessions([newRow, ...workoutHistory]).length;
+        // Authoritative session count comes from the SQL view (v_athlete_session_counts,
+        // a server-side port of groupIntoSessions over the athlete's FULL history). The
+        // workout was inserted above, so the view already reflects it — read it back and
+        // trust it. The old client recompute derived the count from workoutHistory, which
+        // is capped at the last 100 raw rows on load (see the boot loads): for any athlete
+        // whose sessions span more than 100 rows that window holds FEWER sessions than they
+        // truly have, so the number ratcheted DOWN on every log and eroded the certification
+        // backfill. Reading the view makes a log strictly increase-or-hold, never drop.
+        let newCount = null;
+        try {
+          const rows = await sbRead("v_athlete_session_counts",`?athlete_id=eq.${updatedAthlete.id}&select=session_count`);
+          const vc = Array.isArray(rows)&&rows[0]!=null ? Number(rows[0].session_count) : NaN;
+          if(Number.isFinite(vc)) newCount = vc;
+        } catch(_){}
+        if(newCount==null){
+          // Fallback (view unreachable): recompute from the capped window, but floor it at
+          // the stored count so a partial window can only hold the number, never ratchet it
+          // down. prevCount already includes prior real sessions; a genuinely new session is
+          // captured because it lands in this window.
+          const newRow = {athlete_id:updatedAthlete.id, parsed_data:parsedFinal, created_at:new Date().toISOString()};
+          newCount = Math.max(prevCount, groupIntoSessions([newRow, ...workoutHistory]).length);
+        }
         const badgeAlreadyEarned = !!updatedAthlete.certified_badge_earned_at;
         const badgeUpdates = {total_sessions_logged:newCount};
         // Stamp the "earned" timestamp the first time real workouts reach 100. We never
@@ -4681,7 +4701,11 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           {historyLoaded&&(
           <div style={{display:"flex",alignItems:"baseline",gap:4,flexShrink:0}} title="Workouts logged">
             <span style={{color:CA.muted,fontSize:9,letterSpacing:1,fontWeight:600}}>WORKOUTS:</span>
-            <span style={{fontFamily:"'Bebas Neue'",fontSize:18,color:CA.accent,lineHeight:1}}>{groupIntoSessions(workoutHistory).length}</span>
+            {/* Authoritative lifetime session total (server-maintained). groupIntoSessions
+                here only sees the capped workoutHistory window, so it can only ever push the
+                shown number UP (e.g. a brand-new athlete before the first server sync) —
+                never below the stored count, which would look like sessions vanishing. */}
+            <span style={{fontFamily:"'Bebas Neue'",fontSize:18,color:CA.accent,lineHeight:1}}>{Math.max(athlete.total_sessions_logged||0, groupIntoSessions(workoutHistory).length)}</span>
           </div>
           )}
           <div style={{flex:1,minWidth:0,color:CA.muted,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{athlete.name}</div>
@@ -5345,6 +5369,15 @@ function QuickLogSheet({athlete, workoutHistory, messages, goals, contextNotes, 
 function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead, onOpenProofChat, setWorkoutHistory}) {
   const [tab,setTab] = useState("workouts");
   const [editSession,setEditSession] = useState(null);
+  // Older-session paging. workoutHistory is the recent working set (capped at ~100 raw
+  // rows on load); anything older only exists on the server. The athlete pages it into
+  // THIS local state on demand. It is deliberately NOT pushed back into workoutHistory:
+  // the coaching AI's prompt is built from workoutHistory, so keeping paged history local
+  // means old sessions render in the timeline without bloating the AI context (the coach
+  // only reasons over old workouts when the athlete explicitly brings them up).
+  const [olderWorkouts,setOlderWorkouts] = useState([]);
+  const [loadingOlder,setLoadingOlder] = useState(false);
+  const [reachedEnd,setReachedEnd] = useState(false);
   const painKey = `wilco_resolved_pain_${athlete.id}`;
   const [resolvedPain,setResolvedPain] = useState(()=>{
     try{return JSON.parse(localStorage.getItem(painKey)||"[]");}catch{return[];}
@@ -5355,11 +5388,35 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
     try{localStorage.setItem(painKey,JSON.stringify(updated));}catch(_){}
     try{await sbUpdate("athletes",athlete.id,{resolved_pain:updated});}catch(_){}
   };
-  // Grouping the whole history is the expensive step here; memoize it once and reuse
-  // for both the header count and the workouts-tab timeline below.
-  const allSessions = useMemo(()=>groupIntoSessions(workoutHistory),[workoutHistory]);
+  // Timeline data = the recent working set plus any older rows the athlete has paged in.
+  // Grouping the whole thing is the expensive step; memoize it once and reuse for both
+  // the header count and the workouts-tab timeline below.
+  const timelineWorkouts = useMemo(()=>[...workoutHistory,...olderWorkouts],[workoutHistory,olderWorkouts]);
+  const allSessions = useMemo(()=>groupIntoSessions(timelineWorkouts),[timelineWorkouts]);
   const sessionCount = allSessions.length;
-  const realWorkouts = workoutHistory.filter(w=>w.parsed_data?.exercises?.length>0);
+  // Authoritative lifetime total (server-maintained). The visible grouped count only
+  // reaches it once every page is loaded, so show whichever is larger — the header must
+  // never under-report the athlete's real session count.
+  const totalSessions = Math.max(athlete.total_sessions_logged||0, sessionCount);
+  const realWorkouts = timelineWorkouts.filter(w=>w.parsed_data?.exercises?.length>0);
+
+  // Fetch the next page of raw workout rows older than the oldest one currently loaded.
+  const loadOlder = async () => {
+    if(loadingOlder||reachedEnd) return;
+    setLoadingOlder(true);
+    try {
+      const oldest = timelineWorkouts.reduce((m,w)=>(!m||w.created_at<m)?w.created_at:m,null);
+      const PAGE = 100;
+      const rows = await sbRead("workouts",`?athlete_id=eq.${athlete.id}${oldest?`&created_at=lt.${encodeURIComponent(oldest)}`:""}&order=created_at.desc&limit=${PAGE}&select=*`);
+      const batch = Array.isArray(rows)?rows:[];
+      if(batch.length>0) setOlderWorkouts(prev=>[...prev,...batch]);
+      if(batch.length<PAGE) setReachedEnd(true);   // short page ⇒ no more history
+    } catch(_){
+      // leave the button in place so the athlete can retry
+    } finally { setLoadingOlder(false); }
+  };
+  // Have we already got the full history in memory? (Then hide the pager.)
+  const allLoaded = reachedEnd || totalSessions<=sessionCount;
 
   return (
     <div className="cyber" style={{position:"fixed",inset:0,zIndex:300,display:"flex",flexDirection:"column",maxWidth:600,margin:"0 auto"}}>
@@ -5368,7 +5425,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
       <div style={{background:CA.navy2,borderBottom:`1px solid ${CA.border}`,paddingTop:"calc(12px + env(safe-area-inset-top, 0px))",paddingBottom:"12px",paddingLeft:"16px",paddingRight:"16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
         <div>
           <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.cyan,letterSpacing:2}}>MY WORKOUT LOG</div>
-          <div style={{color:CA.muted,fontSize:11}}>{athlete.name} · {athlete.sport} · {sessionCount} session{sessionCount!==1?"s":""}</div>
+          <div style={{color:CA.muted,fontSize:11}}>{athlete.name} · {athlete.sport} · {totalSessions} session{totalSessions!==1?"s":""}</div>
         </div>
       </div>
 
@@ -5393,8 +5450,9 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
           const sessions = [...allSessions]
             .sort((a,b)=>effectiveDate(b.entries[0])-effectiveDate(a.entries[0]));
 
-          // Separate form checks (not grouped into sessions)
-          const formChecks = workoutHistory.filter(w=>w.raw_message?.startsWith("[Form review:"));
+          // Separate form checks (not grouped into sessions) — over the full loaded set
+          // so paged-in older form checks appear too.
+          const formChecks = timelineWorkouts.filter(w=>w.raw_message?.startsWith("[Form review:"));
 
           // Merge form checks into a unified timeline item list with sessions.
           // Backdated sessions/form-checks sort by the day they're attributed to.
@@ -5502,6 +5560,14 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                 }
                 return null;
               })}
+              {/* Older-session pager. Loads history beyond the recent working set into a
+                  local store (kept out of the AI context on purpose — see olderWorkouts). */}
+              {!allLoaded&&(
+                <button onClick={loadOlder} disabled={loadingOlder}
+                  style={{width:"100%",background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"11px 14px",cursor:loadingOlder?"default":"pointer",fontSize:12,fontWeight:600,letterSpacing:1,textTransform:"uppercase",opacity:loadingOlder?0.6:1,marginTop:2}}>
+                  {loadingOlder?"Loading…":"Load older sessions"}
+                </button>
+              )}
             </div>
           );
         })()}
