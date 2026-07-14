@@ -3930,7 +3930,22 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           tier!=="free" ? sbRead("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=100&select=*`).catch(()=>[]) : Promise.resolve([]),
         ]);
         const freshAthlete = _fa?.athlete ? [_fa.athlete] : [];
-        if(freshAthlete.length>0) setAthlete({...freshAthlete[0],pin:athlete.pin});
+        if(freshAthlete.length>0){
+          const fa = freshAthlete[0];
+          // Webhook-lag guard. Right after a paid signup the DB tier flip (free→pro)
+          // trails the subscription by a few seconds: Pro is granted server-side only
+          // once the card is confirmed, via the Stripe webhook (see create-subscription's
+          // "don't grant tier before payment" note). This boot refetch — run for the
+          // latest program_text etc. — must not clobber a just-purchased paid tier with
+          // that transient free. If we already hold a paid tier locally and the fresh row
+          // still reads free but already carries a live subscription, keep the paid tier;
+          // the DB catches up by next login. Never elevates without a real live sub, so a
+          // genuine downgrade (canceled/expired sub → free) still applies normally.
+          const localPaid = athlete.tier==="pro" || athlete.tier==="elite";
+          const serverLagging = fa.tier==="free" && ["trialing","active","past_due"].includes(fa.subscription_status);
+          const tier = (localPaid && serverLagging) ? athlete.tier : fa.tier;
+          setAthlete({...fa, tier, pin:athlete.pin});
+        }
         if(Array.isArray(goals)&&goals.length>0) setAthleteGoals(goals);
         if(Array.isArray(ctxRows)&&ctxRows.length>0) setAthleteContext(ctxRows.map(r=>r.content).join("\n\n"));
         if(Array.isArray(digestRows)&&digestRows.length>0) setProofDigest(digestRows[0]);
