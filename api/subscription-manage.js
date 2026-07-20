@@ -65,6 +65,13 @@ export default async function handler(req, res) {
       const itemId = sub.items?.data?.[0]?.id;
       if (!itemId) return res.status(400).json({ error: "Subscription has no billable item." });
 
+      // Tester subs carry a 100%-off-forever coupon scoped to ONE product. Swapping
+      // the price to the other tier would silently drop the discount and start
+      // charging the tester's saved card — block it instead of surprise-billing them.
+      if (sub.metadata?.tester_code === "true") {
+        return res.status(400).json({ error: "Tester access is tied to your plan. Email support@trainwilco.com to switch." });
+      }
+
       const updated = await stripe.subscriptions.update(sub.id, {
         items: [{ id: itemId, price: priceId }],
         proration_behavior: "create_prorations",

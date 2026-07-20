@@ -6918,9 +6918,16 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
           </>
           )}
 
-          {/* Gift codes — single-use friend codes (on first payment) OR a reusable founder code */}
-        {(currentTier==="pro"||currentTier==="elite")&&(()=>{
-          const codes = Array.isArray(athlete.gift_codes)?athlete.gift_codes:[];
+          {/* Gift codes — single-use friend codes (on first payment) OR a reusable
+              founder code — plus the capped tester codes on the accounts that hold
+              them. Tester codes are data-driven (gift_codes rows with tester:true),
+              never hardcoded here, so they don't ship in the public JS bundle. */}
+        {(()=>{
+          const allCodes = Array.isArray(athlete.gift_codes)?athlete.gift_codes:[];
+          const testerCodes = allCodes.filter(g=>g.tester);
+          const codes = allCodes.filter(g=>!g.tester);
+          const showGift = currentTier==="pro"||currentTier==="elite";
+          if(!showGift && testerCodes.length===0) return null;
           const hasFounder = codes.some(g=>g.unlimited);
           const copyCode = (code)=>{
             if(copiedCode===code) return;              // already showing "Copied!" — ignore until it resets
@@ -6934,6 +6941,25 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
             return <button onClick={()=>copyCode(code)} style={{background:done?CA.accent:"none",border:`1px solid ${done?CA.accent:CA.border}`,color:done?"#000":CA.text,borderRadius:8,padding:"4px 10px",cursor:done?"default":"pointer",fontSize:11,fontWeight:700,transition:"all 0.15s",minWidth:64}}>{done?"Copied!":"Copy"}</button>;
           };
           return (
+          <>
+          {testerCodes.length>0&&(
+          <div style={{marginTop:4,marginBottom:16}}>
+            <div className="setgrp" style={{marginBottom:8}}>TESTER CODES</div>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              <div style={{color:CA.muted2,fontSize:11,marginBottom:2,lineHeight:1.5}}>Give a friend the full app free — they enter the code at checkout and their plan is 100% off for life. 25 uses per code, shared across testers.</div>
+              {testerCodes.map((g,i)=>(
+                <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:CA.navy3,border:`1px solid ${CA.blue}66`,borderRadius:10,padding:"9px 12px"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
+                    <span style={{fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:15,color:CA.accent}}>{g.code}</span>
+                    <span style={{color:CA.muted,fontSize:10,letterSpacing:1,border:`1px solid ${CA.border}`,borderRadius:6,padding:"1px 6px",flexShrink:0}}>{(g.tier||"pro").toUpperCase()}</span>
+                  </div>
+                  {copyBtn(g.code)}
+                </div>
+              ))}
+            </div>
+          </div>
+          )}
+          {showGift&&(
           <div style={{marginTop:4,marginBottom:16}}>
             <div className="setgrp" style={{marginBottom:8}}>{hasFounder?"YOUR FOUNDER GIFT CODE":"GIFT WILCO TO 4 FRIENDS"}</div>
             {codes.length>0 ? (
@@ -6962,6 +6988,8 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
               </div>
             )}
           </div>
+          )}
+          </>
           );
         })()}
 
