@@ -5,7 +5,9 @@ const CoachDashboard = lazy(()=>import("./coach.jsx"));
 // The /pure entry does NOT inject the Stripe script at import time — loading only
 // happens when checkout actually calls loadStripe (see getStripeJs below).
 import { loadStripe } from "@stripe/stripe-js/pure";
-import { Elements, PaymentElement, useStripe, useElements } from "@stripe/react-stripe-js";
+// Stripe's React bindings live in their own lazy chunk (src/payform.jsx) — the
+// card form is the only consumer and most sessions never reach checkout.
+const StripePayBlock = lazy(()=>import("./payform.jsx"));
 import { ConsentFlow, LEGAL_VERSION } from "./legal.jsx";
 // Grit strength-ranking module (e1RM primitives, name normalization, tier ladder,
 // bodyweight/age-fair thresholds) — single canonical source shared with the server
@@ -957,9 +959,11 @@ const parseWorkout = async (message, name, sport, knownNames = []) => {
   "program_append":boolean,
   "program_create_request":boolean,
   "is_temp_program_update":boolean,
-  "is_program_revert":boolean
+  "is_program_revert":boolean,
+  "log_correction":{"is_mistake_fix":boolean,"details":string}|null
 }
 Rules:
+- "log_correction": populate when the athlete is CORRECTING data they ALREADY LOGGED — a mistype/misclick ("that was 115 not 155", "I typed the wrong weight", "fat-fingered that"), a wrong past entry ("yesterday's squat should be 225"), a duplicate ("that logged twice"), or a removal ("delete that last entry", "I didn't actually do the dips"). Set is_mistake_fix:true and details to a concise restatement of what needs fixing. When is_mistake_fix is true: leave "exercises" EMPTY, "run_data" and "practice_data" null, and "pr_attempts" EMPTY — the corrected numbers are NOT a new workout; the app's correction flow rewrites the original entry instead. A normal log, a program change, or genuinely new workout info is NOT a correction — leave log_correction null. If one message BOTH logs new work AND corrects an old entry, treat it as a correction (is_mistake_fix:true) so nothing double-logs.
 - "set_details": populate this as an array with ONE ENTRY PER ACTUAL SET PERFORMED, in the order performed, whenever weight and/or reps VARY between sets of the same exercise (ramping/ascending sets, top sets, drop sets, pyramids, etc). Example: "3 sets of 5 at 135/155/175, then 3 sets of 3 at 185/205/225, then 2 sets of 2 at 245/255, then 1 rep at 275" becomes set_details:[{"weight":135,"reps":5},{"weight":155,"reps":5},{"weight":175,"reps":5},{"weight":185,"reps":3},{"weight":205,"reps":3},{"weight":225,"reps":3},{"weight":245,"reps":2},{"weight":255,"reps":2},{"weight":275,"reps":1}]. When set_details is populated, ALSO set "sets" to the total number of sets and "reps"/"weight" to the top (heaviest/last) set's values, so older code that only reads sets/reps/weight still gets a sane summary. If every set of an exercise used the same weight and reps, leave set_details null and just use sets/reps/weight as before — do not populate set_details for uniform sets.
 - Populate "run_data" when the message describes any run, jog, cardio, or running workout. Set run_type to the best match. Calculate pace if distance and time are both given.
 - For interval runs, populate "intervals" array with one entry per repeat type.
@@ -1039,7 +1043,48 @@ Rules:
     try { parsed = await runParse("claude-sonnet-5"); }
     catch { /* keep the Haiku result (or null) and fall through to the default */ }
   }
-  return parsed || {exercises:[],run_data:null,practice_data:null,pain_flags:[],equipment_issues:[],questions:[],pr_attempts:[],session_feel:null,general_notes:message,is_program_update:false,program_append:false,program_create_request:false,is_temp_program_update:false,is_program_revert:false};
+  return parsed || {exercises:[],run_data:null,practice_data:null,pain_flags:[],equipment_issues:[],questions:[],pr_attempts:[],session_feel:null,general_notes:message,is_program_update:false,program_append:false,program_create_request:false,is_temp_program_update:false,is_program_revert:false,log_correction:null};
+};
+
+// ─── LOG CORRECTION RESOLVER ─────────────────────────────────────────────────
+// When parseWorkout flags a correction (log_correction.is_mistake_fix), this pass
+// pinpoints EXACTLY which logged row + exercise the athlete means and returns a
+// surgical edit plan. It sees the athlete's recent rows (with real DB ids) so the
+// fix targets the actual data — the old behavior was an append-only parser that
+// logged the "corrected" numbers as a NEW workout and left the bad row in place.
+// The plan is shown to the athlete for a confirm tap before anything is written
+// (applyCorrection), and it must NEVER guess: found:false routes to manual Edit.
+const resolveLogCorrection = async (message, recentChat, rows) => {
+  const candidates = rows.slice(0,12).filter(r=>r.id).map(r=>({
+    id: r.id,
+    logged_at: r.created_at,
+    athlete_message: (r.raw_message||"").slice(0,200),
+    exercises: (r.parsed_data?.exercises||[]).map(ex=>({
+      name: ex.name, sets: ex.sets, reps: ex.reps, weight: ex.weight, unit: ex.unit,
+      ...(Array.isArray(ex.set_details)&&ex.set_details.length ? {set_details: ex.set_details} : {}),
+    })),
+    ...(r.parsed_data?.pr_attempts?.length ? {pr_attempts: r.parsed_data.pr_attempts} : {}),
+  }));
+  const sys = `You fix mistakes in an athlete's workout log. The athlete says something they previously logged is wrong (mistyped weight/reps, duplicate, entry that shouldn't exist). You get their recent logged entries as JSON rows — each has a unique "id" — plus recent chat for context. Return ONLY valid JSON, no markdown:
+{
+ "found":boolean,
+ "workout_id":string|number|null,
+ "edits":[{"exercise":string,"action":"update"|"remove","new_sets":number|null,"new_reps":number|null,"new_weight":number|null,"new_unit":"lbs"|"kg"|null,"new_set_details":[{"weight":number,"reps":number,"warmup":boolean}]|null}],
+ "summary":string,
+ "reason":string|null
+}
+Rules:
+- Identify the SINGLE row holding the erroneous data — usually the most recent row matching what the athlete describes. Copy its "id" EXACTLY as given.
+- "edits": one entry per exercise to change in that row. "exercise" must match that row's exercise "name" (or a pr_attempts "exercise") character-for-character.
+- action "update": a null field keeps its current value. If the exercise HAS a "set_details" array and any set changes, return the COMPLETE corrected "new_set_details" — every set, in order, preserving any "warmup":true flags — AND set "new_weight" to the corrected top working-set weight.
+- action "remove": deletes that exercise from the row (use for "I didn't actually do X" or duplicated exercises). To wipe a whole duplicated entry, remove every exercise in it.
+- Fix ONLY what the athlete says is wrong. Never reformat, rename, or "improve" anything else.
+- "summary": short human line(s) describing the exact change, e.g. "Strict Press (today): 3×5 top set 155 → 115".
+- If you cannot CONFIDENTLY identify the row or exercise, or the athlete is correcting something that is not a logged workout (their program, profile, a goal), return found:false with a brief "reason". NEVER guess — a wrong edit is worse than asking the athlete to do it by hand.`;
+  const chat = (recentChat||[]).map(m=>`${m.role==="user"?"Athlete":"Coach"}: ${String(m.content||"").slice(0,300)}`).join("\n");
+  const user = `LOGGED ENTRIES (most recent first):\n${JSON.stringify(candidates)}\n\nRECENT CHAT:\n${chat}\n\nAthlete's correction message: ${message}`;
+  const text = await askClaude({cached:sys}, user, 1200, [], "claude-sonnet-5", "log_correction");
+  return JSON.parse(text.replace(/```json|```/g,"").trim());
 };
 
 // athlete_context is a SINGLE upserted row per athlete (UNIQUE(athlete_id)). To give
@@ -1098,6 +1143,8 @@ BANNED PHRASES:
 - "Let's go!" / "Get after it!": BANNED as fillers.
 
 LOGGING IS AUTOMATIC: The app parses and saves every workout the athlete types — the logging happens on its own, and you never need "backend" or "account" access to record anything. NEVER tell the athlete you can't log something, that logging is "handled on the backend," or to contact whoever manages their account. If they say "log this," "make sure to log this," or "record this," they're just sharing the workout — acknowledge it and coach the numbers. Only decline things that are genuinely outside coaching (billing, account changes), never the workout itself.
+
+LOG CORRECTIONS: When the athlete says a PAST logged number was a mistake (mistype, misclick, wrong weight or reps, duplicate entry), the app pulls up the exact entry and shows them a confirm button to apply the fix — including recalculating any PRs or maxes the bad number created. Your job is only to acknowledge briefly and point them to that confirmation ("Pulled it up — tap Apply fix below and I'll set the record straight."). NEVER claim the log is already fixed, never say you changed a number yourself, and never treat the corrected number as a brand-new workout or PR.
 
 FOR NORMAL WORKOUT LOGS respond with one of: "Good work." / "Solid session." / "Numbers are moving." / "Nice." -- then one specific observation. That's it.
 
@@ -2641,43 +2688,6 @@ function PaymentDisclosures({tier, billing, giftApplied, trialDays=7}) {
   );
 }
 
-// Inner form — lives inside <Elements> so it can use the Stripe hooks. Collects the
-// card via PaymentElement and confirms the SetupIntent (trial/$0) or PaymentIntent
-// (real first charge) in-app, no redirect.
-function PayForm({confirmMode, payLabel, onSuccess}) {
-  const stripe = useStripe();
-  const elements = useElements();
-  const [submitting,setSubmitting] = useState(false);
-  const [error,setError] = useState("");
-
-  const submit = async () => {
-    if(!stripe||!elements||submitting) return;
-    setSubmitting(true); setError("");
-    const opts = { elements, confirmParams: { return_url: window.location.href }, redirect: "if_required" };
-    let result;
-    try {
-      result = confirmMode==="payment" ? await stripe.confirmPayment(opts) : await stripe.confirmSetup(opts);
-    } catch(e){ setError("Something went wrong. Try again."); setSubmitting(false); return; }
-    if(result.error){
-      setError(result.error.message || "Payment failed. Check your card details and try again.");
-      setSubmitting(false);
-      return;
-    }
-    onSuccess();
-  };
-
-  return (
-    <div>
-      <PaymentElement options={{layout:"tabs"}}/>
-      {error && <div style={{color:CA.red,fontSize:12,marginTop:10,textAlign:"center"}}>{error}</div>}
-      <button onClick={submit} disabled={!stripe||submitting}
-        style={btn(CA.accent,"#000",{marginTop:14,opacity:(!stripe||submitting)?0.7:1,cursor:(!stripe||submitting)?"not-allowed":"pointer"})}>
-        {submitting ? "Processing..." : payLabel}
-      </button>
-    </div>
-  );
-}
-
 // Payment step: creates the subscription server-side (to get a client secret), shows
 // disclosures + an optional gift-code field, then mounts Stripe Elements.
 function PaymentStep({athleteId, pin, tier, billing, eventCtx, onSuccess}) {
@@ -2802,9 +2812,12 @@ function PaymentStep({athleteId, pin, tier, billing, eventCtx, onSuccess}) {
         </div>
       )}
       {clientSecret && stripeObj && (
-        <Elements stripe={stripeObj} options={{clientSecret, appearance:{theme:"night", variables:{colorPrimary:CA.accent, colorBackground:CA.navy3, colorText:CA.text, borderRadius:"10px"}}}}>
-          <PayForm confirmMode={confirmMode} payLabel={payLabel} onSuccess={onSuccess}/>
-        </Elements>
+        <Suspense fallback={<div style={{color:CA.muted,fontSize:13,textAlign:"center",padding:"20px 0"}}>Loading secure checkout…</div>}>
+          <StripePayBlock stripeObj={stripeObj}
+            options={{clientSecret, appearance:{theme:"night", variables:{colorPrimary:CA.accent, colorBackground:CA.navy3, colorText:CA.text, borderRadius:"10px"}}}}
+            confirmMode={confirmMode} payLabel={payLabel} onSuccess={onSuccess}
+            errColor={CA.red} btnBase={btn(CA.accent,"#000",{marginTop:14})}/>
+        </Suspense>
       )}
       {clientSecret && STRIPE_PK && !stripeObj && !stripeFailed && (
         <div style={{color:CA.muted,fontSize:13,textAlign:"center",padding:"20px 0"}}>Loading secure checkout…</div>
@@ -3795,7 +3808,6 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [input,setInput] = useState("");
   const [loading,setLoading] = useState(false);
   const [videoLoading,setVideoLoading] = useState(false);
-  const [saved,setSaved] = useState(false);
   const [prStamp,setPrStamp] = useState(null);   // {exercise,weight,unit} → "NEW MAX" stamp overlay when a PR lands
   const [workoutHistory,setWorkoutHistory] = useState([]);
   const [historyLoaded,setHistoryLoaded] = useState(false);
@@ -3803,6 +3815,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [movementLabel,setMovementLabel] = useState("");
   const [sessionCheckPending,setSessionCheckPending] = useState(null);
   const [programReplacePending,setProgramReplacePending] = useState(null);
+  // Pending AI log-correction plan awaiting the athlete's confirm tap:
+  // {plan:<resolveLogCorrection result>, targetId:<workouts row id>}
+  const [correctionPending,setCorrectionPending] = useState(null);
   const [showLog,setShowLog] = useState(false);
   const [showSettings,setShowSettings] = useState(false);
   const [showProgram,setShowProgram] = useState(false);
@@ -4019,8 +4034,12 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         if(addReply) setMessages(prev=>[...prev,{role:"assistant",content:reply}]);
         return;
       }
-      await sbInsert("workouts",{athlete_id:updatedAthlete.id,raw_message:msg,bot_reply:reply,parsed_data:parsedFinal});
-      haptic(15); setSaved(true); setTimeout(()=>setSaved(false),3000);
+      // Keep the returned row id: the optimistic history row below carries it, so the
+      // just-logged workout is immediately targetable by the AI correction flow and
+      // the manual Edit modal (which used to error "hasn't finished syncing" on it).
+      const insertedRows = await sbInsert("workouts",{athlete_id:updatedAthlete.id,raw_message:msg,bot_reply:reply,parsed_data:parsedFinal});
+      const insertedId = Array.isArray(insertedRows) ? insertedRows[0]?.id : insertedRows?.id;
+      haptic(15); // silent save confirm — the old header ✓ badge crowded the top bar and is gone
 
       // ── Workout counter + milestone callouts + certified badge ────────────
       // Certification and the callouts key off REAL workouts — the SAME time-grouped
@@ -4141,7 +4160,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       }
 
       if(addReply) setMessages(prev=>[...prev,{role:"assistant",content:reply}]);
-      setWorkoutHistory(prev=>[{raw_message:msg,parsed_data:parsedFinal,created_at:new Date().toISOString()},...prev]);
+      setWorkoutHistory(prev=>[{id:insertedId,raw_message:msg,parsed_data:parsedFinal,created_at:new Date().toISOString()},...prev]);
 
       if(newPRs.length>0){
         // PR propagation: update program weights for each new PR — but only the
@@ -4231,6 +4250,169 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     setLoading(false);
   };
 
+  // ── LOG CORRECTION: recompute a lift's stored maxes after a fix ─────────────
+  // finalizeWorkout only ever ratchets maxes UP, so a corrected-down number leaves
+  // a false PR / manual 1RM stuck (the exact 155-instead-of-115 failure). After the
+  // row rewrite, recompute the athlete's TRUE best for the lift from the corrected
+  // history and clamp: prs rows inflated above it are deleted; a manual 1RM that
+  // came FROM a workout (source "workout") drops to the best actually-performed
+  // single (athlete-declared/manually-set maxes are never touched). Returns
+  // {note, bogusE1RM, trueE1RM} for the athlete-facing summary + program reversal.
+  const recomputeMaxAfterCorrection = async (normName, history) => {
+    const out = {note:"", trueE1RM:0, bogusE1RM:0};
+    try {
+      let bestE = 0, bestSingle = 0;
+      for(const w of history){
+        const pdw = typeof w.parsed_data==="string" ? (()=>{try{return JSON.parse(w.parsed_data)}catch{return {}}})() : (w.parsed_data||{});
+        for(const ex of (pdw.exercises||[])){
+          if(normalizeExName(ex.name||"")!==normName || ex.unit==="bodyweight") continue;
+          const e = bestE1RMForExercise(ex);
+          if(e && e>bestE) bestE = e;
+          for(const s of getExerciseSets(ex)){
+            if(s.reps===1 && s.weight){ const lb=toLbs(s.weight, ex.unit); if(lb>bestSingle) bestSingle=lb; }
+          }
+        }
+        for(const p of (pdw.pr_attempts||[])){
+          if(normalizeExName(p.exercise||"")!==normName || !p.achieved || !p.weight) continue;
+          const lb = toLbs(p.weight, p.unit==="kg"?"kg":"lbs");
+          if((p.reps||1)===1 && lb>bestSingle) bestSingle = lb;
+          const e = epley1RM(lb, p.reps||1);
+          if(e>bestE) bestE = e;
+        }
+      }
+      out.trueE1RM = bestE;
+      const notes = [];
+      // prs: rows whose e1RM exceeds anything in the corrected history were computed
+      // from the bad data — delete them so the false PR disappears everywhere.
+      const prRows = await sbRead("prs",`?athlete_id=eq.${athlete.id}`);
+      for(const r of (Array.isArray(prRows)?prRows:[])){
+        if(normalizeExName(r.exercise||"")!==normName) continue;
+        const e = epley1RM(toLbs(r.weight, r.unit), r.reps||1);
+        if(e > bestE + 0.5){
+          await sbDelete("prs",`?id=eq.${r.id}`);
+          if(e > out.bogusE1RM) out.bogusE1RM = e;   // remember the inflated value for program scale-back
+          notes.push(`cleared the false ${r.exercise} PR (${fmtWeight(r.weight,r.unit)}${(r.reps||1)>1?` x${r.reps}`:""})`);
+        }
+      }
+      const manRows = await sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`);
+      const man = (Array.isArray(manRows)?manRows:[]).find(r=>r.normalized_exercise===normName);
+      if(man && man.source==="workout"){
+        const manLbs = toLbs(man.weight, man.unit);
+        if(manLbs > bestSingle + 0.5){
+          if(bestSingle > 0){
+            await sbUpdate("manual_one_rms", man.id, {weight:Math.round(bestSingle), unit:"lbs", source:"workout", updated_at:new Date().toISOString()});
+            notes.push(`actual 1RM for ${man.exercise} reset to ${Math.round(bestSingle)}lbs`);
+          } else {
+            await sbDelete("manual_one_rms",`?id=eq.${man.id}`);
+            notes.push(`cleared the false actual 1RM for ${man.exercise}`);
+          }
+        }
+      }
+      if(notes.length) out.note = notes.join("; ");
+    } catch(_){ /* best-effort — the row rewrite above is the critical part */ }
+    return out;
+  };
+
+  // Apply (or discard) a confirmed correction plan. Rewrites the target row's
+  // parsed_data in place — the same mechanics as the manual EditWorkoutModal —
+  // then recomputes maxes and, if a PR propagation already pushed the bad number
+  // into program_text, runs the propagation again with the corrected max so the
+  // program scales back. Everything is anchored on the row id the resolver chose
+  // and re-validated here; on ANY failure nothing partial is left behind.
+  const applyCorrection = async (apply) => {
+    const pending = correctionPending;
+    setCorrectionPending(null);
+    if(!pending) return;
+    if(!apply){
+      setMessages(prev=>[...prev,{role:"assistant",content:"Left it alone — nothing changed. If it still needs fixing, tell me what's off or use MY LOG → Edit."}]);
+      return;
+    }
+    setLoading(true);
+    try {
+      const target = workoutHistory.find(w=>String(w.id)===String(pending.targetId));
+      if(!target) throw new Error("target row not in history");
+      const pd = JSON.parse(JSON.stringify(
+        typeof target.parsed_data==="string" ? JSON.parse(target.parsed_data) : (target.parsed_data||{})
+      ));
+      const affected = new Set();
+      let touched = false;
+      for(const ed of (pending.plan.edits||[])){
+        // Exact name first, normalized fallback — same matching the resolver was told to use.
+        let idx = (pd.exercises||[]).findIndex(x=>x.name===ed.exercise);
+        if(idx===-1) idx = (pd.exercises||[]).findIndex(x=>normalizeExName(x.name||"")===normalizeExName(ed.exercise||""));
+        if(idx!==-1){
+          const orig = pd.exercises[idx];
+          affected.add(normalizeExName(orig.name||""));
+          touched = true;
+          if(ed.action==="remove"){ pd.exercises.splice(idx,1); continue; }
+          const upd = {...orig};
+          if(ed.new_sets!=null) upd.sets = ed.new_sets;
+          if(ed.new_reps!=null) upd.reps = ed.new_reps;
+          if(ed.new_weight!=null) upd.weight = ed.new_weight;
+          if(ed.new_unit) upd.unit = ed.new_unit;
+          if(Array.isArray(ed.new_set_details) && ed.new_set_details.length) upd.set_details = ed.new_set_details;
+          // Weight changed but no corrected per-set breakdown supplied → drop the stale
+          // one rather than leave it contradicting the new flat values (same policy as
+          // the manual EditWorkoutModal).
+          else if(ed.new_weight!=null && Array.isArray(orig.set_details) && orig.set_details.length) upd.set_details = null;
+          pd.exercises[idx] = upd;
+          continue;
+        }
+        // Not an exercise entry — the mistake may live in a declared 1RM (pr_attempts).
+        const pidx = (pd.pr_attempts||[]).findIndex(p=>normalizeExName(p.exercise||"")===normalizeExName(ed.exercise||""));
+        if(pidx!==-1){
+          affected.add(normalizeExName(pd.pr_attempts[pidx].exercise||""));
+          touched = true;
+          if(ed.action==="remove") pd.pr_attempts.splice(pidx,1);
+          else if(ed.new_weight!=null) pd.pr_attempts[pidx] = {...pd.pr_attempts[pidx], weight: ed.new_weight};
+        }
+      }
+      if(!touched) throw new Error("no edit matched the row");
+      await sbUpdate("workouts", target.id, {parsed_data:pd});
+      const updatedHistory = workoutHistory.map(w=>String(w.id)===String(target.id)?{...w,parsed_data:pd}:w);
+      setWorkoutHistory(updatedHistory);
+
+      // Max cleanup + (if needed) program scale-back, per corrected lift.
+      const cleanupNotes = [];
+      for(const k of affected){
+        const {note, trueE1RM, bogusE1RM} = await recomputeMaxAfterCorrection(k, updatedHistory);
+        if(note) cleanupNotes.push(note);
+        // If a PR propagation already rewrote program weights off the bad number
+        // (a pr_propagation entry newer than the corrected row naming this lift),
+        // run the propagation again with the corrected max so baselines come back
+        // down. Guarded exactly like the forward path: AI-only, length-checked,
+        // and a no-change answer leaves the program untouched.
+        try {
+          if(trueE1RM > 0 && athlete.program_text){
+            const mods = await sbRead("program_modifications",`?athlete_id=eq.${athlete.id}&modification_type=eq.pr_propagation&order=created_at.desc&limit=5`);
+            const hit = (Array.isArray(mods)?mods:[]).find(m=>
+              new Date(m.created_at) > new Date(target.created_at) &&
+              (m.description||"").toLowerCase().includes(k.split(" ")[0]));
+            if(hit){
+              const exDisplay = (pending.plan.edits.find(e=>normalizeExName(e.exercise||"")===k)||{}).exercise || k;
+              const aiResult = await propagateForPRs(athlete.program_text, [{exercise:exDisplay, old1RM:bogusE1RM||trueE1RM, e1rm:trueE1RM}]);
+              if(aiResult?.changed && aiResult.text!==athlete.program_text){
+                await sbUpdate("athletes",athlete.id,{program_text:aiResult.text});
+                setAthlete(prev=>({...prev,program_text:aiResult.text}));
+                await sbInsert("program_modifications",{
+                  athlete_id:athlete.id, modification_type:"correction_reversal",
+                  description:`Corrected ${exDisplay} max after log fix: ${aiResult.summary}`,
+                  old_value:athlete.program_text?.slice(0,500)||null, new_value:aiResult.text?.slice(0,500)||null,
+                });
+                cleanupNotes.push(`program ${exDisplay} baseline re-set off your real max`);
+              }
+            }
+          }
+        } catch(_){ /* best-effort */ }
+      }
+      haptic(15);
+      setMessages(prev=>[...prev,{role:"assistant",content:`Done — log corrected.\n${pending.plan.summary}${cleanupNotes.length?`\nAlso ${cleanupNotes.join("; ")}.`:""}`}]);
+    } catch(e){
+      setMessages(prev=>[...prev,{role:"assistant",content:"Couldn't apply that fix cleanly, so I changed nothing. Open MY LOG → Edit on the workout to correct it by hand."}]);
+    }
+    setLoading(false);
+  };
+
   // Athlete already has a program and Joe proposed a new/pasted one. We NEVER
   // overwrite an existing program silently — switching needs the athlete's explicit
   // tap here. Replace = swap it in; Keep = discard the proposal, program untouched.
@@ -4265,6 +4447,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     // chose NOT to use the chips. Drop the proposal (never switch without an explicit
     // tap) and process this new message normally.
     if(programReplacePending) setProgramReplacePending(null);
+    // Same rule for a pending log correction: typing instead of tapping = declined.
+    if(correctionPending) setCorrectionPending(null);
 
     // ── Goal collection flow (first chat only) ──────────────────────────────
     if(goalCollectionActive){
@@ -4368,6 +4552,34 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         finalReply = finalReply + "\n\n" + note;
         setMessages(prev=>[...prev,{role:"assistant",content:note}]);
       };
+
+      // ── Log corrections (mistyped / erroneous data in an ALREADY-LOGGED entry).
+      // MUST run before every other branch: the correction message would otherwise
+      // fall through to finalizeWorkout and INSERT the "corrected" numbers as a NEW
+      // workout while the wrong row stays put (the 155-instead-of-115 failure). A
+      // second AI pass pinpoints the exact row+exercise against the athlete's real
+      // logged rows (with ids), and NOTHING writes until the athlete taps Apply fix.
+      // (Quick Log drafts are pure logs by construction — same reason they can never
+      // be classified as programs — so the flag is ignored for them.)
+      if(parsed.log_correction?.is_mistake_fix && !fromQuickLog){
+        if((updatedAthlete.tier||"free")==="free"){
+          followUp("Free tier doesn't store workout history, so there's no saved entry to fix — nothing carried over.");
+          return;
+        }
+        try {
+          const plan = await resolveLogCorrection(msg, newMsgs.slice(-6), workoutHistory);
+          if(plan?.found && plan.workout_id!=null && Array.isArray(plan.edits) && plan.edits.length &&
+             workoutHistory.some(w=>String(w.id)===String(plan.workout_id))){
+            setCorrectionPending({plan, targetId: plan.workout_id});
+            followUp(`Here's the fix:\n\n${plan.summary}\n\nTap “Apply fix” below and I'll set the record straight — any false PR or max from the mistype gets recalculated too. Nothing changes until you tap.`);
+          } else {
+            followUp(`I couldn't safely pin down that entry${plan?.reason?` (${plan.reason.toLowerCase()})`:""}. Open MY LOG → tap Edit on the workout and fix it by hand — takes 30 seconds.`);
+          }
+        } catch(_){
+          followUp("Couldn't line up that fix just now. Open MY LOG → tap Edit on the workout to correct it by hand.");
+        }
+        return; // a correction NEVER creates a new workout row
+      }
 
       // ── Program tab writes (any tier). Three intents: paste-to-save
       // (is_program_update), "add this to my program" (program_append), and "make me a
@@ -4763,7 +4975,6 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           </button>
         )}
         <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
-          {saved&&<div style={{background:"#0a1e0a",border:`1px solid ${CA.green}`,borderRadius:8,padding:"4px 8px",color:CA.green,fontSize:11,fontWeight:600,flexShrink:0}}>✓</div>}
           {(athlete.tier||"free")!=="free"&&(
             <button onClick={()=>{track("screen_view","nav",{screen:"program"});setShowProgram(true);}} title="View or edit your training program"
               style={{background:athlete.temp_program_text?`${CA.amber}15`:athlete.program_text?"#0a0e1e":CA.navy3,border:`1px solid ${athlete.temp_program_text?CA.amber:athlete.program_text?CA.blue:CA.border}`,borderRadius:8,padding:"4px 10px",color:athlete.temp_program_text?CA.amber:athlete.program_text?CA.blue:CA.muted,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
@@ -4825,11 +5036,16 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
                   // default chat text to non-selectable with the callout suppressed,
                   // so enable both explicitly on every bubble.
                   userSelect:"text",WebkitUserSelect:"text",WebkitTouchCallout:"default",cursor:"text"}}>
-                  {m.role==="assistant"?<StreamText text={m.content}/>:m.content}
+                  {/* While the streaming placeholder is still empty, show the typing dots INSIDE
+                      this bubble (instead of a second stacked indicator bubble below). */}
+                  {m.role==="assistant"?(!m.content&&loading&&i===messages.length-1?<div className="ld-dots"><i/><i/><i/></div>:<StreamText text={m.content}/>):m.content}
                 </div>
               </div>
             ))}
-            {(loading||videoLoading)&&(
+            {/* Standalone indicator only when no empty streaming placeholder is already
+                showing the dots (send() pushes one before the reply streams) — otherwise
+                two "J" bubbles stack during the wait. Video review has no placeholder. */}
+            {(videoLoading||(loading&&!(messages[messages.length-1]?.role==="assistant"&&!messages[messages.length-1]?.content)))&&(
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
                 <div style={{width:28,height:28,borderRadius:"50%",background:CA_AVATAR,boxShadow:`0 0 12px ${CA_GLOW}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#fff"}}>J</div>
                 <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:"16px 16px 16px 4px",padding:"12px 16px",display:"flex",alignItems:"center",gap:12}}>
@@ -4857,6 +5073,18 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           <button onClick={()=>confirmSession(true)}
             style={{background:`${CA.accent}20`,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
             New session
+          </button>
+        </div>
+      ):correctionPending?(
+        <div className="no-sb" style={{padding:"0 14px 4px",display:"flex",gap:6,overflowX:"auto",flexShrink:0,alignItems:"center",flexWrap:"nowrap"}}>
+          <span style={{color:CA.muted,fontSize:12,flexShrink:0}}>↑</span>
+          <button onClick={()=>applyCorrection(true)}
+            style={{background:`${CA.accent}20`,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+            Apply fix
+          </button>
+          <button onClick={()=>applyCorrection(false)}
+            style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+            Cancel
           </button>
         </div>
       ):programReplacePending?(
