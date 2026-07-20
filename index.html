@@ -12,11 +12,40 @@
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&family=Playfair+Display:ital,wght@0,700;0,800;0,900;1,600&display=swap" />
+    <!-- Fonts load async (media=print → all on load): the stylesheet fetch no longer
+         blocks first paint on a just-woken radio. display=swap covers the swap-in. -->
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&family=Playfair+Display:ital,wght@0,700;0,800;0,900;1,600&display=swap" media="print" onload="this.media='all'" />
+    <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&family=Playfair+Display:ital,wght@0,700;0,800;0,900;1,600&display=swap" /></noscript>
     <title>WILCO</title>
+    <!-- Critical inline CSS: the app's real styles are injected by React, so without
+         this the page canvas is WHITE until the whole JS bundle parses. Painting the
+         night-gym navy + a skeleton here makes the shell appear instantly; React
+         replaces #root's children on mount. -->
+    <style>
+      html,body{background:#04060c;margin:0}
+      #root{min-height:100vh;background:#04060c}
+      .boot{min-height:100vh;padding:calc(env(safe-area-inset-top,0px) + 18px) 16px 16px;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,sans-serif}
+      .boot-brand{color:#22d3ee;font-size:22px;font-weight:800;letter-spacing:3px;margin-bottom:14px;animation:bootPulse 1.4s ease-in-out infinite}
+      .boot-bar{border-radius:8px;background:linear-gradient(100deg,#0a1226 40%,#12203f 50%,#0a1226 60%);background-size:200% 100%;animation:bootShimmer 1.5s linear infinite}
+      .boot-pills{display:flex;gap:8px;margin-bottom:22px}
+      .boot-pills .boot-bar{height:30px;flex:1;border-radius:9px}
+      .boot-msg{max-width:78%;height:64px;margin-bottom:14px;border-radius:15px 15px 15px 4px;border:1px solid rgba(120,150,210,.14)}
+      .boot-msg.r{margin-left:auto;height:38px;border-radius:15px 15px 4px 15px}
+      @keyframes bootShimmer{to{background-position:-200% 0}}
+      @keyframes bootPulse{0%,100%{opacity:1}50%{opacity:.55}}
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- Boot skeleton: replaced the moment React mounts -->
+      <div class="boot">
+        <div class="boot-brand">WILCO</div>
+        <div class="boot-pills"><div class="boot-bar"></div><div class="boot-bar"></div><div class="boot-bar"></div><div class="boot-bar"></div></div>
+        <div class="boot-bar boot-msg"></div>
+        <div class="boot-bar boot-msg r"></div>
+        <div class="boot-bar boot-msg" style="height:88px"></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
     <script>
       // Service worker is registered ONLY on the canonical production host. Stale

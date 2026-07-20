@@ -1,4 +1,4 @@
-const CACHE = "wilco-v3";
+const CACHE = "wilco-v4";
 const ASSETS = ["/", "/index.html", "/manifest.json", "/icon-192.png", "/icon-512.png"];
 
 // SELF-DESTRUCT on non-canonical origins. A SW installed against an old Vercel
@@ -62,14 +62,20 @@ self.addEventListener("fetch", e => {
     return;
   }
 
-  // Navigations: network-first (fresh deploys), keep the latest shell cached,
-  // fall back to the cached shell offline.
+  // Navigations: stale-while-revalidate. Serving the cached shell INSTANTLY is what
+  // kills the white screen on a cold reopen — no network round-trip gates first
+  // paint. The network fetch still runs in the background and refreshes the cache,
+  // so a new deploy shows up on the NEXT open (one-load lag, standard PWA behavior).
+  // A stale shell stays self-consistent: it references hashed /assets/ URLs that are
+  // themselves cache-first above.
   if (req.mode === "navigate") {
+    const refresh = fetch(req).then(res => {
+      if (res.ok) { const copy = res.clone(); caches.open(CACHE).then(c => c.put("/", copy)); }
+      return res;
+    });
+    e.waitUntil(refresh.catch(() => {}));   // finish the background refresh even after we respond
     e.respondWith(
-      fetch(req).then(res => {
-        if (res.ok) { const copy = res.clone(); caches.open(CACHE).then(c => c.put("/", copy)); }
-        return res;
-      }).catch(() => caches.match("/"))
+      caches.match("/").then(hit => hit || refresh.catch(() => caches.match("/")))
     );
     return;
   }
