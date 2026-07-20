@@ -2655,7 +2655,7 @@ function InstallPrompt({manual, onClose}) {
 // ─── STRIPE PAYMENT ─────────────────────────────────────────────────────────
 // Required pre-purchase disclosures (T&C compliance + Stripe). Rendered ABOVE the
 // confirm button. Branches on the standard 7-day-trial path vs the gift-code path.
-function PaymentDisclosures({tier, billing, giftApplied, trialDays=7}) {
+function PaymentDisclosures({tier, billing, giftApplied, tester=false, trialDays=7}) {
   const priceLabel = PRICE_LABEL[tier]?.[billing] || "";
   const trialChargeDate = fmtDate(Date.now() + trialDays*24*60*60*1000);
   const giftMonthlyChargeDate = (()=>{ const d=new Date(); d.setMonth(d.getMonth()+1); return fmtDate(d); })();
@@ -2667,7 +2667,11 @@ function PaymentDisclosures({tier, billing, giftApplied, trialDays=7}) {
         <span style={{color:CA.muted,fontSize:11,letterSpacing:1}}>{tier.toUpperCase()} · {billing==="annual"?"ANNUAL":"MONTHLY"}</span>
         <span style={{color:CA.accent,fontWeight:700,fontSize:16}}>{priceLabel}</span>
       </div>
-      {!giftApplied ? (
+      {tester ? (
+        <div style={{color:CA.muted2,fontSize:12,lineHeight:1.6}}>
+          Your tester code unlocks <b style={{color:CA.text}}>{tier==="elite"?"Elite":"Pro"}</b> free for as long as your tester access is active — <b style={{color:CA.text}}>you won't be charged</b>. A card is required to activate, but it will not be billed.
+        </div>
+      ) : !giftApplied ? (
         <div style={{color:CA.muted2,fontSize:12,lineHeight:1.6}}>
           Your {trialDays}-day free trial starts today. You will be charged <b style={{color:CA.text}}>{priceLabel}</b> on <b style={{color:CA.text}}>{trialChargeDate}</b> unless you cancel before then.
         </div>
@@ -2700,13 +2704,13 @@ function PaymentStep({athleteId, pin, tier, billing, eventCtx, onSuccess}) {
   const [stripeObj,setStripeObj] = useState(null);
   const [stripeFailed,setStripeFailed] = useState(false);
   const [stripeRetryKey,setStripeRetryKey] = useState(0);
-  // Gift code
+  // Gift / tester code
   const [giftInput,setGiftInput] = useState("");
   const [appliedGift,setAppliedGift] = useState("");
+  const [appliedKind,setAppliedKind] = useState(null); // "gift" | "tester"
   const [giftMsg,setGiftMsg] = useState(null); // {ok, text}
   const [giftChecking,setGiftChecking] = useState(false);
 
-  const isPro = tier==="pro";
   // Event signups get the event's longer trial; the server re-derives this from
   // its own config, so the value here is display-only. Gift codes don't combine
   // with event offers, so the gift field is hidden on the event path.
@@ -2752,7 +2756,8 @@ function PaymentStep({athleteId, pin, tier, billing, eventCtx, onSuccess}) {
   const applyGift = async () => {
     const code = giftInput.trim().toUpperCase();
     if(!code) return;
-    if(!isPro){ setGiftMsg({ok:false,text:"This gift code is valid for Pro plans only."}); return; }
+    // Tier compatibility is decided server-side now (gift codes are Pro-only; tester
+    // codes pair with their own tier), so don't pre-reject here — just send the tier.
     setGiftChecking(true); setGiftMsg(null);
     try {
       const r = await fetch("/api/validate-gift-code",{
@@ -2760,31 +2765,37 @@ function PaymentStep({athleteId, pin, tier, billing, eventCtx, onSuccess}) {
         body:JSON.stringify({athleteId,pin,code,tier})
       });
       const j = await r.json();
-      if(j.valid){ setAppliedGift(code); setGiftMsg({ok:true,text:j.discountLabel||"Gift code applied."}); }
+      if(j.valid){ setAppliedGift(code); setAppliedKind(j.kind||"gift"); setGiftMsg({ok:true,text:j.discountLabel||"Code applied."}); }
       else { setGiftMsg({ok:false,text:j.error||"That code isn't valid."}); }
     } catch(e){ setGiftMsg({ok:false,text:"Couldn't check that code."}); }
     setGiftChecking(false);
   };
-  const removeGift = () => { setAppliedGift(""); setGiftInput(""); setGiftMsg(null); };
+  const removeGift = () => { setAppliedGift(""); setAppliedKind(null); setGiftInput(""); setGiftMsg(null); };
 
-  const payLabel = appliedGift
-    ? (billing==="annual" ? "Pay $135.01 →" : "Start First Month Free →")
-    : `Start ${trialDays}-Day Free Trial →`;
+  const payLabel = appliedKind==="tester"
+    ? "Activate Free Access →"
+    : appliedGift
+      ? (billing==="annual" ? "Pay $135.01 →" : "Start First Month Free →")
+      : `Start ${trialDays}-Day Free Trial →`;
 
   return (
     <div className="fade-up">
       <div style={{color:CA.muted2,fontSize:13,marginBottom:14,lineHeight:1.6}}>
-        {appliedGift ? "Confirm your payment details to activate Pro." : "Add a card to start your free trial. You won't be charged until it ends — cancel anytime."}
+        {appliedKind==="tester" ? `Add a card to activate your free ${tier==="elite"?"Elite":"Pro"} tester access. It won't be charged.`
+          : appliedGift ? "Confirm your payment details to activate Pro."
+          : "Add a card to start your free trial. You won't be charged until it ends — cancel anytime."}
       </div>
 
-      <PaymentDisclosures tier={tier} billing={billing} giftApplied={!!appliedGift} trialDays={trialDays}/>
+      <PaymentDisclosures tier={tier} billing={billing} giftApplied={!!appliedGift} tester={appliedKind==="tester"} trialDays={trialDays}/>
 
-      {/* Gift code — Pro only, never on the event path (offers don't stack) */}
-      {isPro && !eventCtx && (
+      {/* Gift / tester code — hidden only on the event path (offers don't stack).
+          Pro AND Elite show it: gift codes are Pro-only, tester codes pair with
+          their own tier; the server enforces which pairs with what. */}
+      {!eventCtx && (
         <div style={{marginBottom:14}}>
           {!appliedGift ? (
             <>
-              <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>HAVE A GIFT CODE? <span style={{color:CA.muted,fontWeight:400,textTransform:"none",letterSpacing:0}}>(optional)</span></label>
+              <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>HAVE A GIFT OR TESTER CODE? <span style={{color:CA.muted,fontWeight:400,textTransform:"none",letterSpacing:0}}>(optional)</span></label>
               <div style={{display:"flex",gap:8}}>
                 <input value={giftInput} onChange={e=>setGiftInput(e.target.value.toUpperCase())}
                   placeholder="WILCO-XXXXX" style={inpA({textTransform:"uppercase",letterSpacing:2,fontWeight:700})}/>
@@ -7135,9 +7146,16 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
           </>
           )}
 
-          {/* Gift codes — single-use friend codes (on first payment) OR a reusable founder code */}
-        {(currentTier==="pro"||currentTier==="elite")&&(()=>{
-          const codes = Array.isArray(athlete.gift_codes)?athlete.gift_codes:[];
+          {/* Gift codes — single-use friend codes (on first payment) OR a reusable
+              founder code — plus the capped tester codes on the accounts that hold
+              them. Tester codes are data-driven (gift_codes rows with tester:true),
+              never hardcoded here, so they don't ship in the public JS bundle. */}
+        {(()=>{
+          const allCodes = Array.isArray(athlete.gift_codes)?athlete.gift_codes:[];
+          const testerCodes = allCodes.filter(g=>g.tester);
+          const codes = allCodes.filter(g=>!g.tester);
+          const showGift = currentTier==="pro"||currentTier==="elite";
+          if(!showGift && testerCodes.length===0) return null;
           const hasFounder = codes.some(g=>g.unlimited);
           const copyCode = (code)=>{
             if(copiedCode===code) return;              // already showing "Copied!" — ignore until it resets
@@ -7151,6 +7169,25 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
             return <button onClick={()=>copyCode(code)} style={{background:done?CA.accent:"none",border:`1px solid ${done?CA.accent:CA.border}`,color:done?"#000":CA.text,borderRadius:8,padding:"4px 10px",cursor:done?"default":"pointer",fontSize:11,fontWeight:700,transition:"all 0.15s",minWidth:64}}>{done?"Copied!":"Copy"}</button>;
           };
           return (
+          <>
+          {testerCodes.length>0&&(
+          <div style={{marginTop:4,marginBottom:16}}>
+            <div className="setgrp" style={{marginBottom:8}}>TESTER CODES</div>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              <div style={{color:CA.muted2,fontSize:11,marginBottom:2,lineHeight:1.5}}>Give a friend the full app free — they enter the code at checkout and their plan is 100% off for life. 25 uses per code, shared across testers.</div>
+              {testerCodes.map((g,i)=>(
+                <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:CA.navy3,border:`1px solid ${CA.blue}66`,borderRadius:10,padding:"9px 12px"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
+                    <span style={{fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:15,color:CA.accent}}>{g.code}</span>
+                    <span style={{color:CA.muted,fontSize:10,letterSpacing:1,border:`1px solid ${CA.border}`,borderRadius:6,padding:"1px 6px",flexShrink:0}}>{(g.tier||"pro").toUpperCase()}</span>
+                  </div>
+                  {copyBtn(g.code)}
+                </div>
+              ))}
+            </div>
+          </div>
+          )}
+          {showGift&&(
           <div style={{marginTop:4,marginBottom:16}}>
             <div className="setgrp" style={{marginBottom:8}}>{hasFounder?"YOUR FOUNDER GIFT CODE":"GIFT WILCO TO 4 FRIENDS"}</div>
             {codes.length>0 ? (
@@ -7179,6 +7216,8 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
               </div>
             )}
           </div>
+          )}
+          </>
           );
         })()}
 

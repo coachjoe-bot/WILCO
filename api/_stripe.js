@@ -63,6 +63,17 @@ export function tierForPrice(priceId) {
 // Gift coupon — same ID in live and test (we set the id explicitly when mirroring).
 export const GIFT_COUPON_ID = process.env.STRIPE_GIFT_COUPON_ID || "WILCO_GIFT_PRO_MONTH";
 
+// Tester coupons — 100%-off-FOREVER, product-scoped, capped (25 redemptions each).
+// Redeemable in-app through the same code field as gift codes, but they mark the
+// subscription as a friend-tester (excluded from all revenue metrics — see
+// ~/Documents/WILCO-Finance/engine/report-preferences.md). The map keys the live
+// coupon id to the tier it unlocks; a tester code only pairs with its own tier's
+// price. Env overrides let the test-mode mirrors swap in without touching code.
+export const TESTER_COUPONS = {
+  [process.env.STRIPE_TESTER_PRO_COUPON_ID || "WILCO_TESTER_PRO_FOREVER"]: "pro",
+  [process.env.STRIPE_TESTER_ELITE_COUPON_ID || "WILCO_TESTER_ELITE_FOREVER"]: "elite",
+};
+
 // ── In-person event signups (tabling at gyms) ────────────────────────────────
 // Server-side source of truth for event offers. A signup that arrives with a
 // valid, ENABLED eventSource gets that event's longer trial instead of the
@@ -186,15 +197,17 @@ export async function verifyAthlete({ athleteId, pin }) {
 }
 
 // ── Gift / promotion code validation ─────────────────────────────────────────
-// Resolve a typed code to a live, unredeemed WILCO gift promotion code.
-// Returns {valid:true, promotionCodeId, promo} or {valid:false, error}.
+// Resolve a typed code to a live, unredeemed WILCO promotion code. Accepts both
+// friend gift codes (GIFT_COUPON_ID) and the tester codes (TESTER_COUPONS).
+// Returns { valid:true, promotionCodeId, promo, kind:"gift"|"tester", tier } where
+// tier is the tester code's scoped tier (null for gift codes), or { valid:false, error }.
 export async function resolvePromotionCode(stripe, code) {
   const clean = String(code || "").trim().toUpperCase();
-  if (!clean) return { valid: false, error: "Enter a gift code." };
+  if (!clean) return { valid: false, error: "Enter a code." };
   const list = await stripe.promotionCodes.list({ code: clean, limit: 1 });
   const promo = list.data[0];
-  if (!promo) return { valid: false, error: "That gift code isn't valid." };
-  if (!promo.active) return { valid: false, error: "That gift code is no longer active." };
+  if (!promo) return { valid: false, error: "That code isn't valid." };
+  if (!promo.active) return { valid: false, error: "That code is no longer active." };
   // The coupon id can surface as promo.coupon.id (legacy API shape) or nested under
   // promo.promotion.coupon (newer shape, e.g. founder codes minted via the newer API).
   // Accept either so a code links correctly regardless of how it was created.
@@ -202,10 +215,24 @@ export async function resolvePromotionCode(stripe, code) {
     promo.coupon?.id ||
     (typeof promo.promotion?.coupon === "string" ? promo.promotion.coupon : promo.promotion?.coupon?.id) ||
     null;
-  if (couponId !== GIFT_COUPON_ID) return { valid: false, error: "That isn't a WILCO gift code." };
+
+  const testerTier = TESTER_COUPONS[couponId] || null; // "pro" | "elite" | null
+  const isGift = couponId === GIFT_COUPON_ID;
+  if (!testerTier && !isGift) return { valid: false, error: "That isn't a WILCO code." };
+
   if (promo.max_redemptions != null && promo.times_redeemed >= promo.max_redemptions)
-    return { valid: false, error: "That gift code has already been used." };
-  return { valid: true, promotionCodeId: promo.id, promo };
+    return {
+      valid: false,
+      error: testerTier ? "That tester code has been fully redeemed." : "That gift code has already been used.",
+    };
+
+  return {
+    valid: true,
+    promotionCodeId: promo.id,
+    promo,
+    kind: testerTier ? "tester" : "gift",
+    tier: testerTier,
+  };
 }
 
 // Flip the matching entry on the GIFTER's profile to "redeemed" once a friend uses

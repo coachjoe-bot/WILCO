@@ -141,24 +141,41 @@ export default async function handler(req, res) {
       await sbAthletePatch(athlete.id, { stripe_customer_id: customerId });
     }
 
-    // 2. Gift-code path vs trial path (mutually exclusive).
+    // 2. Code path (gift OR tester) vs trial path (mutually exclusive).
     let promotionCodeId = null;
     let giftApplied = false;
+    let testerApplied = false;
     if (giftCode && giftCode.trim()) {
-      if (tier !== "pro") {
-        return res.status(400).json({ error: "This gift code is valid for Pro plans only." });
-      }
-      const owned = Array.isArray(athlete.gift_codes) ? athlete.gift_codes : [];
-      if (owned.some((g) => g.code?.toUpperCase() === giftCode.trim().toUpperCase())) {
-        return res.status(400).json({ error: "You can't redeem your own gift code." });
-      }
-      if (athlete.redeemed_gift_code) {
-        return res.status(400).json({ error: "You've already redeemed a gift code." });
-      }
       const resolved = await resolvePromotionCode(stripe, giftCode);
       if (!resolved.valid) return res.status(400).json({ error: resolved.error });
-      promotionCodeId = resolved.promotionCodeId;
-      giftApplied = true;
+
+      if (resolved.kind === "tester") {
+        // Tester codes are product-scoped: the selected tier must match the code's
+        // tier (WILCO-TESTER-ELITE only pairs with the Elite price, etc.). Testers
+        // are a separate, capped program — exempt from the self-redeem and
+        // one-code-per-athlete guards, and redeeming one does NOT consume the
+        // athlete's gift-redemption slot (redeemed_gift_code stays untouched).
+        if (tier !== resolved.tier) {
+          const tierLabel = resolved.tier === "elite" ? "Elite" : "Pro";
+          return res.status(400).json({ error: `This tester code is for the ${tierLabel} plan.` });
+        }
+        promotionCodeId = resolved.promotionCodeId;
+        testerApplied = true;
+      } else {
+        // Gift code path (unchanged): Pro-only + self-redeem + one-per-athlete guards.
+        if (tier !== "pro") {
+          return res.status(400).json({ error: "This gift code is valid for Pro plans only." });
+        }
+        const owned = Array.isArray(athlete.gift_codes) ? athlete.gift_codes : [];
+        if (owned.some((g) => g.code?.toUpperCase() === giftCode.trim().toUpperCase())) {
+          return res.status(400).json({ error: "You can't redeem your own gift code." });
+        }
+        if (athlete.redeemed_gift_code) {
+          return res.status(400).json({ error: "You've already redeemed a gift code." });
+        }
+        promotionCodeId = resolved.promotionCodeId;
+        giftApplied = true;
+      }
     }
 
     // 3. Create the subscription as incomplete so the client confirms the card.
@@ -173,13 +190,17 @@ export default async function handler(req, res) {
         tier,
         billing: interval,
         ...(athlete.signup_source ? { signup_source: String(athlete.signup_source) } : {}),
+        // Tester marker end-to-end: mirrors the coupon's own metadata convention so
+        // finance can exclude these subs from revenue metrics off the subscription
+        // alone (no need to expand discounts). tier is already stamped above.
+        ...(testerApplied ? { tester_code: "true", purpose: "friend_tester" } : {}),
         // Carried onto the subscription so the invoice.paid webhook can fire a
         // server-side Meta Purchase keyed to the ad click.
         ...adMeta,
       },
     };
-    if (giftApplied) {
-      params.discounts = [{ promotion_code: promotionCodeId }]; // free month replaces the trial
+    if (giftApplied || testerApplied) {
+      params.discounts = [{ promotion_code: promotionCodeId }]; // discount replaces the trial
     } else {
       // Event signups get the event's longer trial (e.g. 30 days at a gym table);
       // everyone else keeps the standard 7. Card is saved either way and auto-charges
@@ -240,6 +261,7 @@ export default async function handler(req, res) {
       trialEnd: epochToISO(subscription.trial_end),
       currentPeriodEnd: epochToISO(subPeriodEnd(subscription)),
       giftApplied,
+      testerApplied,
     });
   } catch (e) {
     console.error("[create-subscription] error:", e.message);
