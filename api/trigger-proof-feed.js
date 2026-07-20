@@ -14,19 +14,19 @@
 // and the "/api/process-deletions" entry in vercel.json. This file's behavior is
 // otherwise unchanged.
 //
-// DISPATCH (proof-feed-v3): the pg_cron per-athlete fanout (2 SQL functions +
-// pg_cron jobs, see supabase/migrations/20260625_proof_feed_v2_cron.sql) existed
-// ONLY because of the old Vercel Hobby 10s duration wall — one invocation could
-// never loop the whole roster. Vercel Pro allows up to 300s, so this single Vercel
-// cron entry (vercel.json, mirrors the old pg_cron athlete-dispatch cadence) now
-// loops every DUE athlete SEQUENTIALLY in one invocation; one athlete's failure is
-// caught per-iteration and logged, never aborting the rest. The pg_cron dispatch
-// functions + jobs are dropped in supabase/migrations/20260704_drop_proof_feed_cron_fanout.sql
-// (NOT applied yet — runs at merge time, see that file's header). The per-id
-// (body.athlete_id) and per-coach (body.coach_id) entry modes below are KEPT as
-// generic single-target modes (still useful for support/debugging or a future
-// re-introduction of fanout at much higher scale) but are no longer load-bearing
-// for the daily schedule.
+// DISPATCH (proof-feed-v3.1): originally a pg_cron per-athlete fanout (2 SQL
+// functions + jobs, see 20260625_proof_feed_v2_cron.sql) that existed only because
+// of the old Vercel Hobby 10s wall. v3 replaced it with ONE Vercel cron invocation
+// that looped every due athlete SEQUENTIALLY — correct, but capped at ~75/run (a
+// multi-second Claude call each vs the 300s wall), so it silently starved the rest
+// past a few hundred active athletes. v3.1 keeps the single cron entry (vercel.json,
+// unchanged "0 14 * * *") but makes that invocation a thin DISPATCHER: it enumerates
+// due athletes + coaches and fans out one bounded-parallel single-target
+// self-invocation each, so every digest generates in its OWN function instance with
+// its OWN duration budget. Ceiling rises from ~75 to thousands of due athletes/day.
+// The per-id (body.athlete_id) and per-coach (body.coach_id) entry modes below are
+// now the LOAD-BEARING fan-out targets again (they were kept for exactly this). The
+// old pg_cron fanout stays dropped (20260704_drop_proof_feed_cron_fanout.sql).
 //
 // TWO ENTRY MODES (spec §12):
 //   1. Scheduler — cron secret header (CRON_SECRET) or Vercel's x-vercel-cron.
@@ -61,8 +61,67 @@ const RESEND_KEY = process.env.RESEND_API_KEY;
 const FROM_EMAIL = process.env.FROM_EMAIL || "WILCO <noreply@trainwilco.com>";
 const APP_URL = process.env.APP_URL || "https://app.trainwilco.com";
 
+// ── Scheduler fan-out (proof-feed-v3.1) ───────────────────────────────────────
+// The daily cron used to loop every due athlete SEQUENTIALLY in one invocation
+// (a multi-second Claude call each) → ~75 athletes before the 300s wall, the rest
+// silently skipped. The cron invocation is now a thin DISPATCHER: it fires one
+// single-target self-invocation per due athlete / coach at bounded concurrency, so
+// each digest is generated in its OWN function instance with its OWN duration
+// budget. Dispatcher wall-clock ≈ ceil(due / FANOUT_CONCURRENCY) × per-child secs,
+// which clears thousands of due athletes/day instead of ~75. Beyond that (tens of
+// thousands active) the next step is a real fire-and-forget queue / pg_cron
+// net.http_post, but this defers the wall well past the current growth horizon.
+const FANOUT_CONCURRENCY = Number(process.env.PROOF_FANOUT_CONCURRENCY) || 25;
+// Self-invocation base. In PRODUCTION, target the stable public alias (APP_URL):
+// it always resolves to the current prod deployment and is never behind Vercel's
+// deployment-protection wall (a raw VERCEL_URL can be, which would 401 the fan-out).
+// In PREVIEW/dev, fan out to the deployment's OWN host so a preview tests itself,
+// not prod. PROOF_ENGINE_URL overrides both if ever needed.
+const SELF_URL = process.env.PROOF_ENGINE_URL
+  || (process.env.VERCEL_ENV === "production" ? APP_URL
+      : (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : APP_URL));
+// Per-child wait ceiling — keeps one wedged child from stalling a whole wave. The
+// child invocation keeps running server-side past this; the dispatcher just stops
+// awaiting it (its digest still lands, worst case counted as a soft failure here).
+const CHILD_TIMEOUT_MS = 180000;
+
 const todayStr = () => new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
 const enc = encodeURIComponent;
+
+// Run `fn` over `items` at bounded concurrency, collecting settled results in order.
+async function mapPooled(items, concurrency, fn) {
+  const out = [];
+  for (let i = 0; i < items.length; i += concurrency) {
+    const settled = await Promise.allSettled(items.slice(i, i + concurrency).map(fn));
+    for (const s of settled) {
+      out.push(s.status === "fulfilled" ? s.value : { ok: false, error: s.reason?.message || String(s.reason) });
+    }
+  }
+  return out;
+}
+
+// One self-invocation into a single-target mode (athlete_id or coach_id). Cron-secret
+// authed so the child enters the single-target branch (never recurses into the
+// dispatcher, which only runs when neither id is present).
+async function selfInvoke(targetBody) {
+  const cronSecret = process.env.CRON_SECRET;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), CHILD_TIMEOUT_MS);
+  try {
+    const r = await fetch(`${SELF_URL}/api/trigger-proof-feed`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${cronSecret}`, "Content-Type": "application/json" },
+      body: JSON.stringify(targetBody),
+      signal: ctrl.signal,
+    });
+    const j = await r.json().catch(() => ({}));
+    return { ...targetBody, status: r.status, ...j };
+  } catch (e) {
+    return { ...targetBody, ok: false, error: e.name === "AbortError" ? `timeout >${CHILD_TIMEOUT_MS}ms` : e.message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // ── Generic digest email (renders intro + sections[] + coach actions) ─────────
 const esc = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -377,12 +436,12 @@ async function fetchBatch(ids) {
 }
 
 // ── MAIN HANDLER ─────────────────────────────────────────────────────────────
-// Vercel Pro: cap this function's execution time. proof-feed-v3 makes the daily
-// scheduler sweep the PRIMARY dispatch path (was a bounded per-id fanout target
-// under the old Hobby 10s wall) — 300s (Vercel's own ceiling) gives one invocation
-// room to loop the whole roster sequentially, each athlete a Claude call + a few
-// DB round-trips.
-export const maxDuration = 300;
+// Vercel Pro GA ceiling (800s). Applies to BOTH roles of this route:
+//  • the dispatcher (bare cron call) — needs room to await ceil(due/CONCURRENCY)
+//    fan-out waves; 800s clears thousands of due athletes/day with wide margin.
+//  • each single-target child (athlete_id / coach_id) — one digest or one coach
+//    report; finishes in seconds, so 800s is a harmless ceiling, not a reservation.
+export const maxDuration = 800;
 
 export default async function handler(req, res) {
   const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
@@ -471,9 +530,9 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, coaches: coaches2 });
     }
 
-    // ── Scheduler sweep — the PRIMARY dispatch path (proof-feed-v3). One Vercel
-    //    cron invocation (vercel.json) loops every due athlete sequentially, in
-    //    order, logging each outcome; one athlete's failure never aborts the rest. ──
+    // ── Scheduler DISPATCHER (proof-feed-v3.1) — the daily cron path. Enumerate
+    //    every DUE athlete (+ never-run bootstrap), then fan out below to bounded-
+    //    parallel single-target self-invocations instead of looping in-process. ──
     const now = new Date().toISOString();
     const due = await sbSelect("athletes", `?next_proof_due_at=lte.${now}&select=*&order=created_at.asc`);
 
@@ -491,30 +550,33 @@ export default async function handler(req, res) {
     const allDue = [...due, ...bootstrap.filter((a) => !due.find((d) => d.id === a.id))]
       .filter((a) => a.proof_enabled !== false && a.last_proof_run_date !== todayStr());
 
-    const batch = await fetchBatch(allDue.map((a) => a.id));
-    for (const athlete of allDue) {
-      try {
-        const outcome = await runAthlete(athlete, batch);
-        results.athletes.push(outcome);
-        console.log(`[proof-feed] ok: ${athlete.name} (${athlete.id}) — ${outcome.type}`);
-      } catch (e) {
-        results.skipped.push({ athlete: athlete.name, error: e.message });
-        console.error(`[proof-feed] FAILED: ${athlete.name} (${athlete.id}) — ${e.message}`);
-      }
+    // ── FAN OUT: one bounded-parallel self-invocation per due athlete ──
+    // Each child hits the body.athlete_id branch above → generates in its own
+    // function instance, its own duration budget. The child re-checks proof_enabled
+    // + the once-per-day cap, so a double-dispatch / retry is an idempotent no-op.
+    // dryRun (cron + {dry_run:true}, no sample ids) is a zero-write smoke test of
+    // this dispatch path: children run the full pipeline and return prose but
+    // persist nothing; coach fan-out is skipped since coach reports can't dry-run.
+    const athleteOutcomes = await mapPooled(allDue, FANOUT_CONCURRENCY,
+      (a) => selfInvoke(dryRun ? { athlete_id: a.id, dry_run: true } : { athlete_id: a.id }));
+    for (const o of athleteOutcomes) {
+      if (o.ok && (o.athlete || o.dry_run)) results.athletes.push(o.athlete || { athlete_id: o.athlete_id });
+      else if (o.skipped) results.skipped.push({ athlete_id: o.athlete_id, reason: "off/already-ran" });
+      else results.skipped.push({ athlete_id: o.athlete_id, error: o.error || `status ${o.status}` });
     }
 
-    // Coach reports — aggregate over each coach's full roster.
-    const coachIds = [...new Set(allDue.map((a) => a.coach_id).filter(Boolean))];
-    if (coachIds.length) {
-      const rosterIdList = coachIds.map((id) => `"${id}"`).join(",");
-      const roster = await sbSelect("athletes", `?coach_id=in.(${rosterIdList})&select=*`);
-      const rosterBatch = await fetchBatch(roster.map((a) => a.id));
-      const coaches = await sbSelect("coaches", `?select=id,name,email,school_id,notification_prefs`);
-      results.coaches = await runCoachReports(roster, rosterBatch, coaches);
+    // Coach reports — one self-invocation per coach whose roster had a due athlete.
+    // Each coach child fetches its own roster + batch and persists its own report.
+    if (!dryRun) {
+      const coachIds = [...new Set(allDue.map((a) => a.coach_id).filter(Boolean))];
+      const coachOutcomes = await mapPooled(coachIds, FANOUT_CONCURRENCY,
+        (coach_id) => selfInvoke({ coach_id }));
+      results.coaches = coachOutcomes.flatMap((o) =>
+        Array.isArray(o.coaches) ? o.coaches : [{ coach: o.coach_id, ok: false, error: o.error || `status ${o.status}` }]);
     }
 
-    console.log(`[proof-feed] sweep complete: ${results.athletes.length} ok, ${results.skipped.length} failed, ${results.coaches.length} coach reports`);
-    return res.status(200).json({ processed: results.athletes.length, ...results });
+    console.log(`[proof-feed] dispatch complete: ${results.athletes.length} ok, ${results.skipped.length} skipped/failed, ${results.coaches.length} coach reports (dispatched ${allDue.length} @ concurrency ${FANOUT_CONCURRENCY}${dryRun ? ", DRY RUN" : ""})`);
+    return res.status(200).json({ processed: results.athletes.length, dispatched: allDue.length, dry_run: dryRun, ...results });
   } catch (err) {
     console.error("[proof-feed] fatal:", err);
     return res.status(500).json({ error: err.message });
