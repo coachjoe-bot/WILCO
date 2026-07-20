@@ -17,14 +17,33 @@ export default async function handler(req, res) {
   try {
     const athlete = await verifyAthlete({ athleteId, pin });
 
-    // Coupon is Pro-restricted — fail fast for Elite so Stripe doesn't reject at charge time.
+    const clean = String(code || "").trim().toUpperCase();
+    const stripe = getStripe();
+
+    // Resolve first — we can't apply the right guards until we know whether this is
+    // a gift code (Pro-only, one-per-athlete) or a tester code (product-scoped, exempt).
+    const result = await resolvePromotionCode(stripe, code);
+    if (!result.valid) return res.status(200).json({ valid: false, error: result.error });
+
+    // ── Tester code: pairs with its own tier only; exempt from the gift guards ──
+    if (result.kind === "tester") {
+      const tierLabel = result.tier === "elite" ? "Elite" : "Pro";
+      if (tier && tier !== result.tier) {
+        return res.status(200).json({ valid: false, error: `This tester code is for the ${tierLabel} plan.` });
+      }
+      return res.status(200).json({
+        valid: true,
+        promotionCodeId: result.promotionCodeId,
+        kind: "tester",
+        tier: result.tier,
+        discountLabel: `${tierLabel} unlocked — tester access, always free`,
+      });
+    }
+
+    // ── Gift code: Pro-only, with self-redeem + one-per-athlete guards ──
     if (tier && tier !== "pro") {
       return res.status(200).json({ valid: false, error: "This gift code is valid for Pro plans only." });
     }
-
-    const clean = String(code || "").trim().toUpperCase();
-
-    // Self-redeem guard: a gifter can't use one of their own codes.
     const owned = Array.isArray(athlete.gift_codes) ? athlete.gift_codes : [];
     if (owned.some((g) => g.code?.toUpperCase() === clean)) {
       return res.status(200).json({ valid: false, error: "You can't redeem your own gift code." });
@@ -33,13 +52,10 @@ export default async function handler(req, res) {
       return res.status(200).json({ valid: false, error: "You've already redeemed a gift code." });
     }
 
-    const stripe = getStripe();
-    const result = await resolvePromotionCode(stripe, code);
-    if (!result.valid) return res.status(200).json({ valid: false, error: result.error });
-
     return res.status(200).json({
       valid: true,
       promotionCodeId: result.promotionCodeId,
+      kind: "gift",
       discountLabel: "First month of Pro free",
     });
   } catch (e) {
