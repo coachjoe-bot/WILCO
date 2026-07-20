@@ -472,6 +472,22 @@ export function computeGritSnapshot(workouts, manualRMs, opts = {}) {
   // Best e1RM per CANONICAL lift from workout history (resolveLift is the single
   // grouping funnel — see the taxonomy header — so this matches the app tabs exactly).
   const byEx = {};
+  // Coach-dashboard scale path (C2): seed the per-lift bests from the athlete's `prs`
+  // rows (one row per exercise, already the all-time best estimated_1rm in lbs —
+  // prs.estimated_1rm was itself epley(bestE1RMForExercise)). ADDITIVE with the
+  // workouts loop below, not a replacement: prs excludes bodyweight lifts (recalc
+  // skips unit==="bodyweight"), so weighted pull-up/dip benchmarks still come from
+  // whatever workouts the caller passes (the coach view passes its recent window;
+  // higher number wins on overlap). The manual_one_rms overlay also still applies.
+  (opts.seedFromPRs || []).forEach((p) => {
+    if (!p.exercise) return;
+    const lift = resolveLift(p.exercise);
+    if (!lift.tracked) return;
+    const e1rm = Number(p.estimated_1rm) || 0;
+    if (!(e1rm > 0)) return;
+    const unit = p.unit === "bodyweight" ? "lbs" : (p.unit || "lbs");
+    if (!byEx[lift.id] || e1rm > byEx[lift.id].e1rm) byEx[lift.id] = { key: lift.id, name: lift.name, e1rm, unit };
+  });
   (workouts || []).forEach((w) => {
     const pd = getPD(w);
     (pd.exercises || []).forEach((ex) => {

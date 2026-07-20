@@ -623,10 +623,16 @@ function SchoolOnboardingForm({onCreated}) {
 // Ownership scoping is still forced server-side (api/data.js read op) — unchanged.
 const COACH_PAGE = 1000;              // rows per request (aligns with PostgREST max)
 const COACH_MAX_ROWS = 50000;         // safety ceiling across all pages
-async function sbReadPaged(table, order = "created_at.desc") {
+// Team-analytics look-back window (C2 scale fix). Every roster-wide analytic reads at
+// most 12 weeks (GroupProgress strength/running) — so the default dashboard load pulls
+// only this window of workouts, not all-time history. All-time facts come from the
+// v_athlete_session_counts rollup (counts/last-active) and `prs` (per-lift bests).
+const COACH_WINDOW_DAYS = 90;
+async function sbReadPaged(table, order = "created_at.desc", filter = "") {
   const rows = [];
+  const pre = filter ? `${filter}&` : "";
   for (let offset = 0; offset < COACH_MAX_ROWS; offset += COACH_PAGE) {
-    const page = await sbRead(table, `?select=*&order=${order},id.desc&limit=${COACH_PAGE}&offset=${offset}`);
+    const page = await sbRead(table, `?${pre}select=*&order=${order},id.desc&limit=${COACH_PAGE}&offset=${offset}`);
     if (!Array.isArray(page) || page.length === 0) break;
     rows.push(...page);
     if (page.length < COACH_PAGE) break;   // short page => last page
@@ -644,8 +650,15 @@ function CoachDashboard({coach,onLogout}) {
   const isMaster = coach.role==="master"||coach.access_code===MASTER_CODE;
   const isAdmin = coach.role==="admin";
   const [athletes,setAthletes] = useState([]);
+  // `workouts` now holds a bounded RECENT WINDOW (WINDOW_DAYS), not all-time history —
+  // enough for every team-analytics view (all look back ≤12wk) without shipping the
+  // whole roster's multi-year log to the browser (C2 scale fix). All-time roster facts
+  // come from `rollup` (the v_athlete_session_counts view); all-time per-lift bests come
+  // from `prs`; a selected athlete's FULL history is lazy-loaded into `selectedWorkouts`.
   const [workouts,setWorkouts] = useState([]);
   const [prs,setPrs] = useState([]);
+  const [rollup,setRollup] = useState({});           // athlete_id -> {session_count, last_workout_at} (all-time, server-aggregated)
+  const [selectedWorkouts,setSelectedWorkouts] = useState(null); // {id, rows} of the selected athlete's FULL history (lazy); null / stale id = loading
   const [allCoaches,setAllCoaches] = useState([]);
   const [loading,setLoading] = useState(true);
   const [activeTab,setActiveTab] = useState("overview"); // graphs-first home (coach-experience-vision §1)
@@ -746,6 +759,23 @@ function CoachDashboard({coach,onLogout}) {
     return ()=>clearInterval(poll);
   },[selected?.id]);
 
+  // Lazy-load the SELECTED athlete's FULL (all-time) history on selection. The roster
+  // load only pulls a recent window, so the detail view — which shows the complete
+  // workout log + all-time progress charts — fetches the full set for THIS one athlete
+  // (bounded to a single roster member, gateway-scoped). null = still loading.
+  useEffect(()=>{
+    if(!selected){ setSelectedWorkouts(null); return; }
+    const id=selected.id; let cancelled=false;
+    setSelectedWorkouts(null); // clear stale rows so the detail view can't flash the prior athlete's history
+    (async()=>{
+      try{
+        const full = await sbReadPaged("workouts","created_at.desc",`athlete_id=eq.${id}`);
+        if(!cancelled) setSelectedWorkouts({id,rows:Array.isArray(full)?full:[]});
+      }catch(e){ if(!cancelled){ console.error("[coach] athlete detail history load failed",e); setSelectedWorkouts({id,rows:[]}); } }
+    })();
+    return ()=>{cancelled=true;};
+  },[selected?.id]);
+
   const loadAll = async () => {
     setLoading(true);
     try {
@@ -756,10 +786,12 @@ function CoachDashboard({coach,onLogout}) {
       // Paged (sbReadPaged) instead of a single capped query: the full scoped history
       // comes back correctly in bounded requests, without the old limit=5000 silently
       // dropping the oldest sessions (which made all-time counts/leaderboards drift).
-      const [dash,w,p] = await Promise.all([
+      const since = new Date(Date.now() - COACH_WINDOW_DAYS*864e5).toISOString();
+      const [dash,w,p,rollupRows] = await Promise.all([
         idApi("coach-dashboard",{coachId:coach.id,pin:coach.pin}),
-        sbReadPaged("workouts"),
-        sbReadPaged("prs"),
+        sbReadPaged("workouts","created_at.desc",`created_at=gte.${since}`), // recent window only (team analytics look back ≤12wk)
+        sbReadPaged("prs"),                                                  // all-time per-lift bests (bounded ~10 rows/athlete)
+        sbRead("v_athlete_session_counts","?select=*"),                      // all-time session totals + last-active, server-aggregated
       ]);
       const a  = dash.athletes||[];
       const c  = dash.coaches||[];
@@ -773,6 +805,8 @@ function CoachDashboard({coach,onLogout}) {
       const ids = filteredAthletes.map(at=>at.id);
       setWorkouts((Array.isArray(w)?w:[]).filter(wk=>ids.includes(wk.athlete_id)));
       setPrs((Array.isArray(p)?p:[]).filter(pr=>ids.includes(pr.athlete_id)));
+      const rmap={}; (Array.isArray(rollupRows)?rollupRows:[]).forEach(r=>{ if(ids.includes(r.athlete_id)) rmap[r.athlete_id]={session_count:r.session_count,last_workout_at:r.last_workout_at}; });
+      setRollup(rmap);
       setAllCoaches(Array.isArray(c)?c:[]);
       setSchool(Array.isArray(s)&&s.length>0?s[0]:null);
       setAllSchools(Array.isArray(sc)?sc:[]);
@@ -913,10 +947,9 @@ function CoachDashboard({coach,onLogout}) {
     setAssignSaving(false);
   };
 
-  const lastActive = (id) => {
-    const ws = workouts.filter(w=>w.athlete_id===id);
-    return ws.length ? ws[0].created_at : null;
-  };
+  // All-time last-workout from the server rollup (not the recent window) — so an
+  // athlete inactive longer than the window still sorts/filters correctly.
+  const lastActive = (id) => rollup[id]?.last_workout_at || null;
 
   const filtered = athletes.filter(a=>{
     if(search&&!a.name.toLowerCase().includes(search.toLowerCase())&&!a.sport.toLowerCase().includes(search.toLowerCase())) return false;
@@ -1059,7 +1092,7 @@ function CoachDashboard({coach,onLogout}) {
                           )}
                           <div style={{flex:1,minWidth:0}}>
                             <div style={{color:CA.text,fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:5}}>{a.name}{a.certified_badge_earned_at&&<span title="WILCO Certified" style={{color:CA.accent,fontSize:10,flexShrink:0}}>✦</span>}</div>
-                            <div style={{color:CA.muted,fontSize:11}}>{a.sport} · {groupIntoSessions(workouts.filter(w=>w.athlete_id===a.id)).length} sessions</div>
+                            <div style={{color:CA.muted,fontSize:11}}>{a.sport} · {rollup[a.id]?.session_count ?? 0} sessions</div>
                           </div>
                           <div style={{textAlign:"right",flexShrink:0}}>
                             {hasPain&&<div style={{color:CA.red,fontSize:9,marginBottom:2}}>⚠ pain</div>}
@@ -1086,9 +1119,12 @@ function CoachDashboard({coach,onLogout}) {
                         ← Athletes
                       </button>
                     )}
+                    {selectedWorkouts?.id!==selected.id?(
+                      <div style={{padding:40,textAlign:"center",color:CA.muted,fontSize:13}}>Loading history…</div>
+                    ):(
                     <AthleteDetail
                       athlete={selected}
-                      workouts={workouts.filter(w=>w.athlete_id===selected.id)}
+                      workouts={selectedWorkouts.rows}
                       prs={prs.filter(p=>p.athlete_id===selected.id)}
                       requests={changeRequests.filter(r=>r.athlete_id===selected.id)}
                       prefill={programPrefill&&programPrefill.athleteId===selected.id?programPrefill:null}
@@ -1113,6 +1149,7 @@ function CoachDashboard({coach,onLogout}) {
                         setSelected(null);
                       }}
                     />
+                    )}
                   </div>
                 )}
                 {!selected&&!isNarrow&&(
@@ -1188,7 +1225,7 @@ function CoachDashboard({coach,onLogout}) {
             {/* ── GROUP STATS TAB ── */}
             {/* ── PROGRESS TAB (group trends) ── */}
             {activeTab==="progress"&&(
-              <GroupProgress athletes={athletes} workouts={workouts} manualRMs={manualRMs}/>
+              <GroupProgress athletes={athletes} workouts={workouts} manualRMs={manualRMs} prs={prs}/>
             )}
 
             {/* ── SETTINGS TAB (notifications) ── */}
@@ -1328,7 +1365,8 @@ function CoachDashboard({coach,onLogout}) {
                 // Most Impressive Lift
                 const impressive = schoolAthletes.filter(a=>a.weight_lbs).map(a=>{
                   let bestRatio=0,bestLift="";
-                  workouts.filter(w=>w.athlete_id===a.id).forEach(w=>(w.parsed_data?.exercises||[]).forEach(ex=>{if(!ex.name||ex.unit==="bodyweight")return;const e=bestE1RMForExercise(ex);if(!e)return;const r=e/a.weight_lbs;if(r>bestRatio){bestRatio=r;bestLift=ex.name;}}));
+                  // All-time bests from `prs` (estimated_1rm stored in lbs), not raw history.
+                  prs.filter(p=>p.athlete_id===a.id).forEach(p=>{if(p.unit==="bodyweight")return;const e=Number(p.estimated_1rm)||0;if(!(e>0))return;const r=e/a.weight_lbs;if(r>bestRatio){bestRatio=r;bestLift=p.exercise;}});
                   return bestRatio>0?{athlete:a,metric:`${bestLift} · ${bestRatio.toFixed(2)}×BW`,ratio:bestRatio}:null;
                 }).filter(Boolean).sort((a,b)=>b.ratio-a.ratio).slice(0,3);
                 // Most Consistent (sessions in last 30d)
@@ -2591,7 +2629,7 @@ function AccountTab({coach,allCoaches,school,athletes,loadAll}){
               );
 }
 
-function GroupProgress({athletes,workouts,manualRMs}){
+function GroupProgress({athletes,workouts,manualRMs,prs=[]}){
   const [tab,setTab] = useState("benchmarks");
   // charge the power cells shortly after the Benchmarks tab shows (mirrors the
   // athlete benchGo gate so the fill animates in its final tier colour)
@@ -2609,14 +2647,19 @@ function GroupProgress({athletes,workouts,manualRMs}){
     const now=Date.now(), WK=7*864e5, WEEKS=12, weekStart=now-WEEKS*WK;
     const wl=(wi)=>new Date(weekStart+wi*WK).toLocaleDateString("en-US",{month:"short",day:"numeric"});
     const pd=(w)=>typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
-    const woByAth={}, manByAth={};
+    const woByAth={}, manByAth={}, prByAth={};
     workouts.forEach(w=>{(woByAth[w.athlete_id]=woByAth[w.athlete_id]||[]).push(w);});
     manualRMs.forEach(m=>{(manByAth[m.athlete_id]=manByAth[m.athlete_id]||[]).push(m);});
+    prs.forEach(p=>{(prByAth[p.athlete_id]=prByAth[p.athlete_id]||[]).push(p);});
 
     // ── BENCHMARKS: aggregate each athlete's Grit snapshot by benchmark lift ──
+    // Seeded from `prs` (all-time per-lift bests) MERGED with the recent workout window
+    // + manual 1RMs (higher wins) — lifetime barbell bests survive the windowing via
+    // prs, while bodyweight benchmarks (weighted pull-ups/dips, absent from prs) still
+    // rank from recent workouts (C2 scale fix).
     const byBench={}; let scoreSum=0, scoreN=0, topTier=-1, rankedAthletes=0;
     athletes.forEach(a=>{
-      let snap; try{ snap=computeGritSnapshot(woByAth[a.id]||[], manByAth[a.id]||[], {bodyweightLbs:a.weight_lbs||a.weight||0, gender:a.gender, age:a.age}); }catch{ snap={rankedLifts:[],strengthScore:0,topTierIdx:-1}; }
+      let snap; try{ snap=computeGritSnapshot(woByAth[a.id]||[], manByAth[a.id]||[], {bodyweightLbs:a.weight_lbs||a.weight||0, gender:a.gender, age:a.age, seedFromPRs:prByAth[a.id]||[]}); }catch{ snap={rankedLifts:[],strengthScore:0,topTierIdx:-1}; }
       if(snap.rankedLifts.length){ rankedAthletes++; scoreSum+=snap.strengthScore; scoreN++; if(snap.topTierIdx>topTier)topTier=snap.topTierIdx; }
       snap.rankedLifts.forEach(l=>{ const bk=getBenchKey(l.key)||l.benchKey; if(!bk)return; const e=(byBench[bk]=byBench[bk]||{name:l.name,tiers:[],e1rms:[]}); e.tiers.push(l.tierIdx); e.e1rms.push(l.e1rm); });
     });
@@ -2649,7 +2692,7 @@ function GroupProgress({athletes,workouts,manualRMs}){
     for(let wi=0;wi<WEEKS;wi++){ const R=runWeeks[wi]; if(!R)continue; const label=wl(wi); if(R.dist)distSeries.push({label,y:Math.round(R.dist*10)/10}); if(R.pace.length)paceSeries.push({label,y:Math.round(R.pace.reduce((a,b)=>a+b,0)/R.pace.length*100)/100}); if(R.hr.length)hrSeries.push({label,y:Math.round(R.hr.reduce((a,b)=>a+b,0)/R.hr.length)}); }
 
     return {benchmarks,avgScore,rankedAthletes,topTier,strength,distSeries,paceSeries,hrSeries};
-  },[athletes,workouts,manualRMs]);
+  },[athletes,workouts,manualRMs,prs]);
 
   const subTab=(t,label)=>(
     <button key={t} onClick={()=>setTab(t)} style={{padding:"10px 16px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?CA.accent:"transparent"}`,color:tab===t?CA.accent:CA.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'"}}>{label}</button>
