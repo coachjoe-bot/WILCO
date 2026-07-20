@@ -12,9 +12,13 @@ import {
 // App.jsx's multi-athlete groupIntoSessions already imported above.
 import {
   groupIntoSessions as pcGroup, compareProgramVsActual, buildOneRMs, aggregateInjuries, totalSetVolume,
-  trueImprovementPRs, classifyTiers, blendAdherenceScore, adherenceBreakdown, buildLiftHistory,
+  trueImprovementPRs, classifyTiers, blendAdherenceScore, adherenceBreakdown,
 } from "./proofcore.js";
-import { computeGritSnapshot, TIER_NAMES, TIER_COLORS, getBenchKey, resolveLift } from "./grit.js";
+import { computeGritSnapshot, TIER_NAMES, TIER_COLORS, getBenchKey } from "./grit.js";
+// Shared team-analytics math (C2): the server endpoint (api/coach-analytics) computes
+// the roster aggregations with THIS module; the client imports weekBounds from it so
+// both cut the identical Mon–Sun week.
+import { weekBounds } from "./coachAnalytics.js";
 // The Morning Brief — deterministic conversational beats (zero tokens to build;
 // Haiku only reacts when the coach free-types). See coach-dashboard-v2-spec §C.
 import { buildMorningBrief, decisionNote, briefWeekKey } from "./coachBrief.js";
@@ -658,6 +662,7 @@ function CoachDashboard({coach,onLogout}) {
   const [workouts,setWorkouts] = useState([]);
   const [prs,setPrs] = useState([]);
   const [rollup,setRollup] = useState({});           // athlete_id -> {session_count, last_workout_at} (all-time, server-aggregated)
+  const [analytics,setAnalytics] = useState(null);   // server-computed team analytics (api/coach-analytics) — null while loading/on error
   const [selectedWorkouts,setSelectedWorkouts] = useState(null); // {id, rows} of the selected athlete's FULL history (lazy); null / stale id = loading
   const [allCoaches,setAllCoaches] = useState([]);
   const [loading,setLoading] = useState(true);
@@ -787,12 +792,22 @@ function CoachDashboard({coach,onLogout}) {
       // comes back correctly in bounded requests, without the old limit=5000 silently
       // dropping the oldest sessions (which made all-time counts/leaderboards drift).
       const since = new Date(Date.now() - COACH_WINDOW_DAYS*864e5).toISOString();
-      const [dash,w,p,rollupRows] = await Promise.all([
+      const [dash,w,p,rollupRows,analyticsRes] = await Promise.all([
         idApi("coach-dashboard",{coachId:coach.id,pin:coach.pin}),
         sbReadPaged("workouts","created_at.desc",`created_at=gte.${since}`), // recent window only (team analytics look back ≤12wk)
         sbReadPaged("prs"),                                                  // all-time per-lift bests (bounded ~10 rows/athlete)
         sbRead("v_athlete_session_counts","?select=*"),                      // all-time session totals + last-active, server-aggregated
+        // Server-computed team analytics (C2 follow-up): strength/running series,
+        // movers, week pain/feel, most-improved — the exact client math run server-
+        // side (src/coachAnalytics.js, prod-verified row-for-row) over the roster's
+        // window, returned as a few KB of summaries. tzOffsetMinutes pins the Mon–Sun
+        // week to THIS coach's wall clock. Non-fatal: null keeps the affected cards
+        // at their empty states rather than blocking the dashboard.
+        fetch("/api/coach-analytics",{method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({auth:getAuth(),coachId:coach.id,pin:coach.pin,tzOffsetMinutes:new Date().getTimezoneOffset()})})
+          .then(r=>r.ok?r.json():null).catch(()=>null),
       ]);
+      setAnalytics(analyticsRes&&!analyticsRes.error?analyticsRes:null);
       const a  = dash.athletes||[];
       const c  = dash.coaches||[];
       const s  = dash.school||[];
@@ -1013,7 +1028,7 @@ function CoachDashboard({coach,onLogout}) {
           <>
             {/* ── OVERVIEW TAB ── */}
             {activeTab==="overview"&&(
-              <CoachOverview athletes={athletes} workouts={workouts} prs={prs} manualRMs={manualRMs} prescriptions={prescriptions} coach={coach}
+              <CoachOverview athletes={athletes} workouts={workouts} prs={prs} manualRMs={manualRMs} prescriptions={prescriptions} coach={coach} analytics={analytics}
                 changeRequests={changeRequests} briefContext={briefContext} parsingIds={parsingIds}
                 onOpenAthlete={(id)=>{const at=athletes.find(a=>a.id===id); if(at){setSelected(at);setActiveTab("athletes");}}}
                 onPrefillProgram={(id,note)=>{const at=athletes.find(a=>a.id===id); if(at){setProgramPrefill({athleteId:id,note});setSelected(at);setActiveTab("athletes");}}}
@@ -1225,7 +1240,7 @@ function CoachDashboard({coach,onLogout}) {
             {/* ── GROUP STATS TAB ── */}
             {/* ── PROGRESS TAB (group trends) ── */}
             {activeTab==="progress"&&(
-              <GroupProgress athletes={athletes} workouts={workouts} manualRMs={manualRMs} prs={prs}/>
+              <GroupProgress athletes={athletes} workouts={workouts} manualRMs={manualRMs} prs={prs} analytics={analytics}/>
             )}
 
             {/* ── SETTINGS TAB (notifications) ── */}
@@ -1352,16 +1367,13 @@ function CoachDashboard({coach,onLogout}) {
                 const d30 = 30*24*60*60*1000;
                 const schoolAthletes = athletes.filter(a=>a.school_id===school.id);
                 if(schoolAthletes.length<2) return null;
-                // Most Improved
-                const improved = schoolAthletes.map(a=>{
-                  const aw=workouts.filter(w=>w.athlete_id===a.id);
-                  const rb={};const pb={};
-                  aw.filter(w=>now-new Date(w.created_at)<=d30).forEach(w=>(w.parsed_data?.exercises||[]).forEach(ex=>{if(!ex.name||ex.unit==="bodyweight")return;const k=normalizeExName(ex.name);const e=bestE1RMForExercise(ex);if(e&&(!rb[k]||e>rb[k]))rb[k]=e;}));
-                  aw.filter(w=>{const age=now-new Date(w.created_at);return age>d30&&age<=d30*2;}).forEach(w=>(w.parsed_data?.exercises||[]).forEach(ex=>{if(!ex.name||ex.unit==="bodyweight")return;const k=normalizeExName(ex.name);const e=bestE1RMForExercise(ex);if(e&&(!pb[k]||e>pb[k]))pb[k]=e;}));
-                  let best=0;
-                  Object.keys(rb).forEach(k=>{if(pb[k]&&pb[k]>0){const p=(rb[k]-pb[k])/pb[k]*100;if(p>best)best=p;}});
-                  return best>0?{athlete:a,metric:`+${Math.round(best)}% est. 1RM`}:null;
-                }).filter(Boolean).sort((a,b)=>parseFloat(b.metric)-parseFloat(a.metric)).slice(0,3);
+                // Most Improved — server-computed 60-day e1RM leaderboard
+                // (api/coach-analytics `mostImproved`, prod-verified identical math);
+                // rejoined to the roster rows here for display. [] while loading.
+                const improved = (analytics?.mostImproved||[]).map(m=>{
+                  const athlete=schoolAthletes.find(a=>a.id===m.athlete_id);
+                  return athlete?{athlete,metric:m.metric}:null;
+                }).filter(Boolean);
                 // Most Impressive Lift
                 const impressive = schoolAthletes.filter(a=>a.weight_lbs).map(a=>{
                   let bestRatio=0,bestLift="";
@@ -1522,19 +1534,10 @@ function CoachDashboard({coach,onLogout}) {
 // from the shared proofcore engine (Phase 0) over the roster data already loaded —
 // zero tokens, no new round-trip. See docs/coach-experience-vision.md §1.
 const DAYMS = 86400000;
-// Fixed Mon–Sun calendar week. Single source of the "this week" window for the
-// whole Overview — every stat card and the briefing share it (no rolling 7d).
-const weekBounds = (ref=Date.now())=>{
-  const d=new Date(ref); d.setHours(0,0,0,0);
-  const todayIdx=(d.getDay()+6)%7;                    // Mon=0 … Sun=6
-  const start=d.getTime()-todayIdx*DAYMS;
-  const days=Array.from({length:7},(_,i)=>{
-    const dd=new Date(start+i*DAYMS);
-    return {t:start+i*DAYMS, l:"MTWTFSS"[i], full:dd.toLocaleDateString("en-US",{weekday:"short"}), d:dd.getDate()};
-  });
-  return {start, end:start+7*DAYMS, days, todayIdx};
-};
-const FEEL_ORDER = [["great","Great",CA.green],["good","Good",CA.blue],["average","OK",CA.amber],["rough","Rough",CA.red]];
+// weekBounds (fixed Mon–Sun calendar week — the single "this week" window every
+// Overview stat shares) now lives in src/coachAnalytics.js, imported at top: the
+// server analytics endpoint must cut the SAME week the client renders, so the one
+// definition is shared (tz-offset-aware there; the client path is byte-identical).
 // prE1RM, trueImprovementPRs, classifyTiers, blendAdherenceScore now live in
 // proofcore (shared with the server Coach's Edition so the two never disagree).
 
@@ -1555,7 +1558,7 @@ function OverviewCard({title,trend,children,readout,tone,style}){
   );
 }
 
-function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthlete,coach,changeRequests,briefContext,onPrefillProgram,onResolveRequest,onContextWritten,parsingIds}){
+function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthlete,coach,changeRequests,briefContext,onPrefillProgram,onResolveRequest,onContextWritten,parsingIds,analytics}){
   const isMobile = useIsMobile();
   const [tip,setTip] = useState(null);
   // one-shot entrance flag: charts render at their empty state on first paint,
@@ -1600,10 +1603,9 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
       const days = wk.days.map((day,i)=> i>todayIdx ? null :
         (wo.some(w=>{const t=new Date(w.created_at).getTime();return t>=day.t&&t<day.t+DAYMS&&(w.parsed_data?.exercises?.length>0||w.parsed_data?.run_data);})?1:0));
       const snap = computeGritSnapshot(wo, manByAth[a.id]||[], {bodyweightLbs:a.weight_lbs||a.weight||0, gender:a.gender, age:a.age});
-      // per-lift e1RM delta this week vs last (for the team strength-movement win)
-      const twL=buildLiftHistory(thisWk), lwL=buildLiftHistory(lastWk);
-      const lifts=Object.entries(twL).map(([lift,entries])=>{ const best=entries.reduce((x,y)=>y.e1rm>x.e1rm?y:x); const lw=lwL[lift]; let delta=null; if(lw){const lb=lw.reduce((x,y)=>y.e1rm>x.e1rm?y:x); delta=best.e1rm-lb.e1rm;} return {lift,deltaVsLastWeek:delta}; });
-      return {a, thisWk, lastWk, adherence, injuries, hasProgram, score, adhB, daysSince, days, snap, lifts};
+      // (the per-lift wk-vs-wk e1RM deltas that used to be computed here now come
+      // server-side as `analytics.movers` — see api/coach-analytics.js)
+      return {a, thisWk, lastWk, adherence, injuries, hasProgram, score, adhB, daysSince, days, snap};
     });
 
     // sessions/day — fixed Mon–Sun; today renders but is EXCLUDED from line + slope
@@ -1624,9 +1626,8 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
     const teamAdh = scored.length?Math.round(scored.reduce((s,r)=>s+r.score,0)/scored.length):null;
     const noProgram = rows.filter(r=>r.score==null).length;
 
-    // session feel this week
-    const feelCounts={great:0,good:0,average:0,rough:0}; let feelTotal=0;
-    workouts.filter(w=>inWin(w,weekAgo)).forEach(w=>{const f=w.parsed_data?.session_feel; if(f&&feelCounts[f]!=null){feelCounts[f]++;feelTotal++;}});
+    // (session-feel distribution: was computed here but never rendered — now served
+    // by api/coach-analytics as `analytics.feel` for a future donut/report)
 
     // volume-load: total working sets across roster, last 4 calendar weeks (current partial)
     const volWeeks=[];
@@ -1650,10 +1651,10 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
       .sort((a,b)=>b.avgTier-a.avgTier);
     const {strengths,weaknesses} = classifyTiers(benchAgg);
 
-    // team strength movement — avg e1RM delta per lift this week (for wins + tooltips)
-    const dlt={};
-    rows.forEach(r=>(r.lifts||[]).forEach(l=>{ if(l.deltaVsLastWeek!=null)(dlt[l.lift]=dlt[l.lift]||[]).push(l.deltaVsLastWeek); }));
-    const movers=Object.entries(dlt).map(([lift,ds])=>({lift,avg:+(ds.reduce((a,b)=>a+b,0)/ds.length).toFixed(1),n:ds.length})).filter(m=>m.avg>0).sort((a,b)=>b.avg-a.avg);
+    // team strength movement — avg e1RM delta per lift this week (for wins + tooltips).
+    // Server-computed (api/coach-analytics, prod-verified identical math); [] while
+    // the analytics call is still in flight, so the win-card entry simply waits.
+    const movers=analytics?.movers||[];
 
     // wins — a MIX of notable stats + personal bests, deduped so it's never the same
     // athlete twice and not always a person.
@@ -1674,7 +1675,7 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
     // roster extras (folded in from the old Group Stats tab): active-by-sport,
     // this-week pain flags, inactive athletes.
     const bySport={}; rows.forEach(r=>{ if(r.thisWk.length>0){ const s=r.a.sport||"—"; bySport[s]=(bySport[s]||0)+1; } });
-    const weekPain=[]; workouts.filter(w=>inWin(w,weekAgo)).forEach(w=>{ const pf=w.parsed_data?.pain_flags; if(pf&&pf.length){ const a=athletes.find(x=>x.id===w.athlete_id); weekPain.push({name:a?.name||"Athlete",areas:pf.map(p=>p.area).join(", "),at:w.created_at}); } });
+    const weekPain=analytics?.weekPain||[]; // server-computed (api/coach-analytics)
     const inactive=rows.filter(r=>r.thisWk.length===0).map(r=>{ const last=(woByAth[r.a.id]||[])[0]||(woByAth[r.a.id]||[]).slice(-1)[0]; const days=last?Math.floor((now-new Date(last.created_at).getTime())/DAYMS):null; return {name:r.a.name, days}; }).sort((a,b)=>(a.days??9999)-(b.days??9999));
 
     // briefing triage — ranked "who needs you today" (injury > quiet > adherence drop).
@@ -1699,7 +1700,7 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
     triage.sort((a,b)=>(a.sev==="crit"?0:1)-(b.sev==="crit"?0:1));
 
     return {rows,dayCounts,dayLabels,todayIdx,trendKnown,firstHalf,lastHalf,activeCount,activePct,teamAdh,noProgram,volWeeks,prWeeks,prThisWk,strengths,weaknesses,wins,notablePRs,movers,bySport,weekPain,inactive,triage};
-  },[athletes,workouts,prs,manualRMs,prescriptions]);
+  },[athletes,workouts,prs,manualRMs,prescriptions,analytics]);
 
   // count-up KPI figures (jump to final under reduced-motion) — declared before the
   // early return so hook order stays stable across renders.
@@ -2629,7 +2630,7 @@ function AccountTab({coach,allCoaches,school,athletes,loadAll}){
               );
 }
 
-function GroupProgress({athletes,workouts,manualRMs,prs=[]}){
+function GroupProgress({athletes,workouts,manualRMs,prs=[],analytics}){
   const [tab,setTab] = useState("benchmarks");
   // charge the power cells shortly after the Benchmarks tab shows (mirrors the
   // athlete benchGo gate so the fill animates in its final tier colour)
@@ -2644,9 +2645,6 @@ function GroupProgress({athletes,workouts,manualRMs,prs=[]}){
     return ()=>{ cancelAnimationFrame(r1); if(r2)cancelAnimationFrame(r2); };
   },[tab]);
   const D = useMemo(()=>{
-    const now=Date.now(), WK=7*864e5, WEEKS=12, weekStart=now-WEEKS*WK;
-    const wl=(wi)=>new Date(weekStart+wi*WK).toLocaleDateString("en-US",{month:"short",day:"numeric"});
-    const pd=(w)=>typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
     const woByAth={}, manByAth={}, prByAth={};
     workouts.forEach(w=>{(woByAth[w.athlete_id]=woByAth[w.athlete_id]||[]).push(w);});
     manualRMs.forEach(m=>{(manByAth[m.athlete_id]=manByAth[m.athlete_id]||[]).push(m);});
@@ -2670,29 +2668,17 @@ function GroupProgress({athletes,workouts,manualRMs,prs=[]}){
     }).sort((a,b)=>b.avgTier-a.avgTier);
     const avgScore=scoreN?Math.round(scoreSum/scoreN):0;
 
-    // ── STRENGTH: weekly team-average e1RM per lift ──
-    const liftData={};
-    athletes.forEach(a=>{ const bw=a.weight_lbs||a.weight||0;
-      (woByAth[a.id]||[]).forEach(w=>{ const t=new Date(w.created_at).getTime(); if(t<weekStart)return; const wi=Math.floor((t-weekStart)/WK);
-        (pd(w).exercises||[]).forEach(ex=>{ if(!ex.name)return; const lift=resolveLift(ex.name); if(!lift.tracked)return; const e=bestE1RMForExercise(ex,bw); if(!e)return;
-          const L=(liftData[lift.id]=liftData[lift.id]||{name:lift.name,key:lift.id,weeks:{}}); const wk=(L.weeks[wi]=L.weeks[wi]||{}); if(!wk[a.id]||e>wk[a.id])wk[a.id]=e; });
-      });
-    });
-    const strength=Object.values(liftData).map(L=>{
-      const points=[]; for(let wi=0;wi<WEEKS;wi++){ const wk=L.weeks[wi]; if(wk){ const vals=Object.values(wk); points.push({label:wl(wi),y:Math.round(vals.reduce((a,b)=>a+b,0)/vals.length),n:vals.length}); } }
-      const best=points.length?Math.max(...points.map(p=>p.y)):0;
-      return {name:L.name,key:L.key,points,best};
-    }).filter(L=>L.points.length>=2).sort((a,b)=>liftTier(a.key)-liftTier(b.key)||b.best-a.best);
-
-    // ── RUNNING: weekly team totals / averages ──
-    const paceToMin=(p)=>{ if(!p)return null; const pts=String(p).split(":"); if(pts.length<2)return null; const m=parseFloat(pts[0]),s=parseFloat(pts[1]); return isNaN(m)||isNaN(s)?null:Math.round((m+s/60)*100)/100; };
-    const runWeeks={};
-    athletes.forEach(a=>{ (woByAth[a.id]||[]).forEach(w=>{ const t=new Date(w.created_at).getTime(); if(t<weekStart)return; const wi=Math.floor((t-weekStart)/WK); const rd=pd(w).run_data; if(!rd)return; const R=(runWeeks[wi]=runWeeks[wi]||{dist:0,pace:[],hr:[]}); const d=rd.distance_miles||rd.distance_km; if(d)R.dist+=d; const pc=paceToMin(rd.pace_per_mile||rd.pace_per_km); if(pc!=null)R.pace.push(pc); if(rd.heart_rate_avg)R.hr.push(rd.heart_rate_avg); }); });
-    const distSeries=[],paceSeries=[],hrSeries=[];
-    for(let wi=0;wi<WEEKS;wi++){ const R=runWeeks[wi]; if(!R)continue; const label=wl(wi); if(R.dist)distSeries.push({label,y:Math.round(R.dist*10)/10}); if(R.pace.length)paceSeries.push({label,y:Math.round(R.pace.reduce((a,b)=>a+b,0)/R.pace.length*100)/100}); if(R.hr.length)hrSeries.push({label,y:Math.round(R.hr.reduce((a,b)=>a+b,0)/R.hr.length)}); }
+    // ── STRENGTH + RUNNING: server-computed (api/coach-analytics) ──
+    // The 12-week team-average e1RM series and weekly running totals now arrive
+    // pre-aggregated (same math, src/coachAnalytics.js, prod-verified row-for-row) —
+    // the browser no longer folds the roster's raw window for these tabs. Empty
+    // arrays while the analytics call is in flight → the tabs' existing "no data
+    // yet" states, which then fill in on arrival.
+    const strength=analytics?.strength||[];
+    const {distSeries=[],paceSeries=[],hrSeries=[]}=analytics?.running||{};
 
     return {benchmarks,avgScore,rankedAthletes,topTier,strength,distSeries,paceSeries,hrSeries};
-  },[athletes,workouts,manualRMs,prs]);
+  },[athletes,workouts,manualRMs,prs,analytics]);
 
   const subTab=(t,label)=>(
     <button key={t} onClick={()=>setTab(t)} style={{padding:"10px 16px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?CA.accent:"transparent"}`,color:tab===t?CA.accent:CA.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'DM Sans'"}}>{label}</button>
