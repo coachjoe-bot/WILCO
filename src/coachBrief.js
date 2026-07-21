@@ -98,7 +98,9 @@ function buildConcernBeat({ t, row, req, dateKey, beatIndex }) {
     // mouth or vice versa.
     const item = Array.isArray(req.items) ? req.items[0] : null;
     const theirWords = req.reason || "";
-    const suggestion = (item && item.suggested_change) || theirWords || "a program change";
+    // Trailing period stripped — the templates close their own sentences, and a
+    // drafted suggestion usually ends with "." already ("…settles.".).
+    const suggestion = ((item && item.suggested_change) || theirWords || "a program change").replace(/\.+$/, "");
     const reason = suggestion; // meta/decisionNote compatibility below
     const drafted = !!(item && item.suggested_change) && theirWords && item.suggested_change !== theirWords;
     const firstName = String(name).split(" ")[0];
