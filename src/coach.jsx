@@ -1991,8 +1991,7 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
                 ))}
               </div>}
           {(D.prThisWk>0||D.notablePRs.length>0)&&(
-            <button onClick={()=>exportWins({newPRs:D.prThisWk,notablePRs:D.notablePRs,activePct:D.activePct,adherenceAvg:D.teamAdh},coach)}
-              style={{marginTop:12,width:"100%",background:CA_BTN,color:"#fff",border:"none",borderRadius:9,padding:10,fontWeight:800,letterSpacing:1,textTransform:"uppercase",fontSize:12,cursor:"pointer",boxShadow:`0 0 14px ${CA_GLOW}`,fontFamily:"'DM Sans'"}}>⤓ Share as image</button>
+            <ShareWinsButton run={()=>exportWins({newPRs:D.prThisWk,notablePRs:D.notablePRs,activePct:D.activePct,adherenceAvg:D.teamAdh},coach)}/>
           )}
         </div>
       </div>
@@ -2085,7 +2084,13 @@ function MorningBrief({D,athletes,changeRequests,coach,briefContext,onOpenAthlet
   const act = async (beat,action)=>{
     if(busy) return;
     if(action.kind==="open_athlete"){ onOpenAthlete&&onOpenAthlete(beat.athleteId); return; }
-    if(action.kind==="share_wins"){ exportWins({newPRs:D.prThisWk,notablePRs:D.notablePRs},coach); setOutcomes(o=>({...o,[beat.id]:"Shared ✓"})); return; }
+    if(action.kind==="share_wins"){
+      exportWins({newPRs:D.prThisWk,notablePRs:D.notablePRs},coach).then((r)=>{
+        const chip = r==="shared" ? "Sent — check your Photos ✓" : r==="downloaded" ? "Saved ✓" : r==="canceled" ? null : r==="failed" ? null : "Shared ✓";
+        if(chip) setOutcomes(o=>({...o,[beat.id]:chip}));
+      });
+      return;
+    }
     if(action.kind==="done"){ setOutcomes(o=>({...o,[beat.id]:"Done ✓"})); return; }
     setBusy(true);
     try{
@@ -2340,20 +2345,81 @@ async function exportWins(team, coach, school){
     led(foot,2);
     x.fillStyle=CA.steel; x.font='400 28px "DM Sans"'; x.fillText("trainwilco.com",M,foot+52);
     x.fillStyle=CA.faint; x.font=MONO; setLS("2px"); x.textAlign="right"; x.fillText("POWERED BY WILCO",W-M,foot+50); x.textAlign="left"; setLS("0px");
-    // Mobile-first save: the old bare `<a download>` click silently no-ops on iOS
-    // Safari / installed PWAs — the coach tapped Share and nothing happened. The
-    // Web Share API hands the PNG to the native share sheet ("Save Image" drops it
-    // straight into Photos); desktop keeps the plain download. AbortError = the
-    // coach closed the sheet on purpose — not a failure, don't double-fire.
+    // Mobile-first save. Returns an outcome string so the button can tell the
+    // coach what actually happened instead of appearing to do nothing:
+    //   "shared"     — native share sheet confirmed (Save Image → Photos)
+    //   "canceled"   — coach dismissed the sheet on purpose
+    //   "preview"    — fallback overlay shown (press & hold the image to save)
+    //   "downloaded" — desktop file download
+    //   "failed"     — render/export error
+    // Order of attack on touch devices: Web Share with the PNG file (the sheet
+    // previews the image and Save Image drops it straight into Photos). If iOS
+    // refuses (lost tap-activation, older Safari, share unsupported), fall back
+    // to a full-screen overlay of the image — press-and-hold → Add to Photos
+    // always works. The bare `<a download>` click this replaced silently no-ops
+    // in installed PWAs, which read as "nothing happened."
     const blob = await new Promise((res)=>cv.toBlob(res,"image/png"));
     const file = blob ? new File([blob],"wilco-wins.png",{type:"image/png"}) : null;
     if(file && navigator.canShare && navigator.canShare({files:[file]})){
-      try{ await navigator.share({files:[file],title:"WILCO — Wins This Week"}); return; }
-      catch(err){ if(err?.name==="AbortError") return; /* else fall through to download */ }
+      try{ await navigator.share({files:[file],title:"WILCO — Wins This Week"}); return "shared"; }
+      catch(err){ if(err?.name==="AbortError") return "canceled"; /* else fall through */ }
     }
+    const coarse = typeof matchMedia==="function" && matchMedia("(pointer:coarse)").matches;
+    if(coarse){ showWinsOverlay(cv.toDataURL("image/png")); return "preview"; }
     const a=document.createElement("a"); a.href=cv.toDataURL("image/png"); a.download="wilco-wins.png";
     document.body.appendChild(a); a.click(); a.remove();
-  }catch(e){ console.error("wins export failed",e); }
+    return "downloaded";
+  }catch(e){ console.error("wins export failed",e); return "failed"; }
+}
+
+// Full-screen fallback viewer for the Wins image on touch devices where the
+// share sheet couldn't open: iOS saves any long-pressed <img> via "Add to
+// Photos", so showing the rendered PNG big + saying so always gives the coach a
+// working path. Plain DOM (not React) — ephemeral, self-removing, zero state.
+function showWinsOverlay(dataUrl){
+  const ov=document.createElement("div");
+  ov.style.cssText="position:fixed;inset:0;z-index:99999;background:rgba(2,4,10,0.94);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:20px;";
+  const img=document.createElement("img");
+  img.src=dataUrl; img.alt="WILCO — Wins This Week";
+  img.style.cssText="max-width:min(86vw,420px);max-height:70vh;border-radius:14px;box-shadow:0 8px 48px rgba(58,123,255,0.35);";
+  const cap=document.createElement("div");
+  cap.textContent="Press and hold the image, then tap “Add to Photos.”";
+  cap.style.cssText=`color:${CA.text};font-family:'DM Sans',sans-serif;font-size:14px;text-align:center;max-width:320px;line-height:1.5;`;
+  const done=document.createElement("button");
+  done.textContent="Done";
+  done.style.cssText=`background:${CA_BTN};color:#fff;border:none;border-radius:10px;padding:10px 26px;font-weight:800;letter-spacing:1px;text-transform:uppercase;font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif;`;
+  done.onclick=()=>ov.remove();
+  ov.appendChild(img); ov.appendChild(cap); ov.appendChild(done);
+  document.body.appendChild(ov);
+}
+
+// Share-button label feedback: maps an exportWins outcome to what the button
+// should say for a few seconds (empty string = no change, e.g. user-canceled).
+const shareOutcomeLabel = (r) =>
+  r==="shared" ? "Sent — check your Photos ✓"
+  : r==="downloaded" ? "Saved ✓"
+  : r==="preview" ? "" /* overlay is its own feedback */
+  : r==="failed" ? "Couldn't share — try again"
+  : "";
+
+// The Share-as-image button, with outcome feedback baked in: instead of the tap
+// appearing to do nothing, the label flips to what happened ("Sent — check your
+// Photos ✓" / "Saved ✓") for a few seconds, then returns to normal.
+function ShareWinsButton({run}){
+  const [msg,setMsg] = useState("");
+  const [busy,setBusy] = useState(false);
+  return (
+    <button disabled={busy} onClick={async()=>{
+      if(busy) return;
+      setBusy(true);
+      const r = await run();
+      setBusy(false);
+      const label = shareOutcomeLabel(r);
+      if(label){ setMsg(label); setTimeout(()=>setMsg(""),4000); }
+    }} style={{marginTop:12,width:"100%",background:CA_BTN,color:"#fff",border:"none",borderRadius:9,padding:10,fontWeight:800,letterSpacing:1,textTransform:"uppercase",fontSize:12,cursor:"pointer",boxShadow:`0 0 14px ${CA_GLOW}`,fontFamily:"'DM Sans'",opacity:busy?0.7:1}}>
+      {msg || "⤓ Share as image"}
+    </button>
+  );
 }
 
 function CoachCheckin({digest, team, coach, onRead}){
@@ -2545,7 +2611,7 @@ function CoachEdition({digest, athletes, coach, school, onBack, onRead}){
                 <div style={{flex:1,minWidth:0}}><span style={{color:CA.text,fontWeight:650,fontSize:13}}>{p.athlete}</span> <span style={{color:CA.muted,fontSize:12.5}}>{p.exercise} {fmtWeight(p.weight,p.unit)}{p.gain?` — +${p.gain} lbs e1RM`:""}</span></div>
               </div>
             ))}
-            <button onClick={()=>exportWins(team,coach,school)} style={{marginTop:12,width:"100%",background:CA_BTN,color:"#fff",border:"none",borderRadius:9,padding:10,fontWeight:800,letterSpacing:1,textTransform:"uppercase",fontSize:12,cursor:"pointer",boxShadow:`0 0 14px ${CA_GLOW}`,fontFamily:"'DM Sans'"}}>⤓ Share as image</button>
+            <ShareWinsButton run={()=>exportWins(team,coach,school)}/>
           </div>
         )}
         <CoachCheckin digest={digest} team={team} coach={coach} onRead={onRead}/>
