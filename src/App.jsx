@@ -2232,7 +2232,9 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
         const r = await askClaude(
           system,
           `Digest flags: ${JSON.stringify(c.flags||{})}\n\nCheck-in so far:\n${soFar}\n\nThe question you just asked: "${q.text}"\nTheir answer: "${msg}"`,
-          170,[],"claude-sonnet-5","joebot_chat"
+          // 320, not 170: the reaction is up to 4 sentences AND weaves in the next
+          // question, which at 170 got cut off mid-word ("running on f[umes]").
+          320,[],"claude-sonnet-5","joebot_chat"
         );
         return (r&&r.trim())?r.trim():"";
       }catch(_){ return ""; }
@@ -2243,13 +2245,16 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
     setLoading(false);
     if(reaction===NONE || reaction.includes(NONE)) reaction = "";
 
-    // Coach-loop-in offer: an injury-kind answer that reports ACTIVE pain, on a
-    // coach-locked program, for an athlete who has a coach. Joe's normal reaction
-    // (eased volume, exercise swaps, etc.) shows first; this is a follow-up
-    // interstitial, never a replacement for it. Only one offer per check-in
-    // session, and it never auto-files — the athlete must tap "Send to coach".
+    // Coach-loop-in offer: an injury-kind answer that reports ACTIVE pain, for an
+    // athlete who has a coach. Gated on coach_id ONLY (not program_locked) — a
+    // school athlete's coach owns the training relationship whether or not the
+    // program is technically locked, and the whole point is the coach hearing
+    // about a health issue that should reshape the work. Joe's normal reaction
+    // (eased volume, exercise swaps) shows first; this is a follow-up interstitial,
+    // never a replacement for it. One offer per check-in, and it never auto-files —
+    // the athlete must tap "Send to coach".
     const offerCoach = q.kind==="injury" && !offeredCoachRef.current
-      && !!athlete.coach_id && !!athlete.program_locked && reportsActivePain(msg);
+      && !!athlete.coach_id && reportsActivePain(msg);
     if(offerCoach){
       offeredCoachRef.current = true;
       if(reaction) setMessages(prev=>[...prev,{role:"assistant",content:reaction}]);
