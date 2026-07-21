@@ -31,21 +31,75 @@
       .boot-pills .boot-bar{height:30px;flex:1;border-radius:9px}
       .boot-msg{max-width:78%;height:64px;margin-bottom:14px;border-radius:15px 15px 15px 4px;border:1px solid rgba(120,150,210,.14)}
       .boot-msg.r{margin-left:auto;height:38px;border-radius:15px 15px 4px 15px}
+      /* Coach-shaped skeleton: a headline bar + a stack of card outlines, echoing the
+         coach dashboard's layout instead of the athlete chat shape. */
+      .boot-head{height:34px;border-radius:8px;margin-bottom:20px}
+      .boot-cards{display:flex;flex-direction:column;gap:12px}
+      .boot-card{height:72px;border-radius:14px;border:1px solid rgba(120,150,210,.14)}
+      /* Neutral splash: no persisted session (or an expired one) is about to land on
+         the login screen, not a dashboard — so this shows ONLY the wordmark on the
+         night ground, nothing that promises content that isn't coming. */
+      .boot-splash{min-height:100vh;display:flex;align-items:center;justify-content:center}
+      .boot-splash .boot-brand{margin:0}
       @keyframes bootShimmer{to{background-position:-200% 0}}
       @keyframes bootPulse{0%,100%{opacity:1}50%{opacity:.55}}
     </style>
   </head>
   <body>
-    <div id="root">
-      <!-- Boot skeleton: replaced the moment React mounts -->
-      <div class="boot">
-        <div class="boot-brand">WILCO</div>
-        <div class="boot-pills"><div class="boot-bar"></div><div class="boot-bar"></div><div class="boot-bar"></div><div class="boot-bar"></div></div>
-        <div class="boot-bar boot-msg"></div>
-        <div class="boot-bar boot-msg r"></div>
-        <div class="boot-bar boot-msg" style="height:88px"></div>
-      </div>
-    </div>
+    <div id="root"></div>
+    <script>
+      // Boot skeleton gate: runs synchronously before React (and before first paint,
+      // since it's inline and #root has no content yet), so the very first thing a
+      // reopen shows already matches where the app is actually headed.
+      //
+      // Without this, EVERY cold load — including a logged-OUT user about to see the
+      // Athlete/Coach Login home screen — got the athlete chat-shaped skeleton (stat
+      // pills + chat bubbles), a fake dashboard promise the boot then yanked away.
+      //
+      // Mirrors the exact persisted-session read + expiry check src/App.jsx uses to
+      // restore a session on boot (AUTH_SESSION_KEY="wilco_auth_v1", restoreAuthSession()):
+      // a rolling 3h-inactivity trust window AND an unexpired token, both required, or
+      // the session is treated as gone. Keep these two in sync if that logic changes.
+      (function () {
+        var root = document.getElementById("root");
+        var SPLASH = '<div class="boot boot-splash"><div class="boot-brand">WILCO</div></div>';
+        try {
+          var AUTH_KEY = "wilco_auth_v1";
+          var raw = localStorage.getItem(AUTH_KEY);
+          var s = raw ? JSON.parse(raw) : null;
+          var tokenExpMs = 0;
+          if (s && s.token) {
+            var parts = String(s.token).split(".");
+            tokenExpMs = parts.length >= 4 ? (Number(parts[3]) || 0) : 0;
+          }
+          var now = Date.now();
+          var valid = !!(s && s.token && s.record && now <= (s.trustedUntil || 0) && now <= tokenExpMs);
+          if (valid && s.role === "athlete") {
+            root.innerHTML =
+              '<div class="boot">' +
+                '<div class="boot-brand">WILCO</div>' +
+                '<div class="boot-pills"><div class="boot-bar"></div><div class="boot-bar"></div><div class="boot-bar"></div><div class="boot-bar"></div></div>' +
+                '<div class="boot-bar boot-msg"></div>' +
+                '<div class="boot-bar boot-msg r"></div>' +
+                '<div class="boot-bar boot-msg" style="height:88px"></div>' +
+              '</div>';
+          } else if (valid && s.role === "coach") {
+            root.innerHTML =
+              '<div class="boot">' +
+                '<div class="boot-brand">WILCO</div>' +
+                '<div class="boot-bar boot-head"></div>' +
+                '<div class="boot-cards"><div class="boot-bar boot-card"></div><div class="boot-bar boot-card"></div><div class="boot-bar boot-card"></div></div>' +
+              '</div>';
+          } else {
+            root.innerHTML = SPLASH;
+          }
+        } catch (e) {
+          // localStorage unavailable (private mode, disabled, etc.) — fail to the
+          // neutral splash rather than assume a session that can't be verified.
+          root.innerHTML = SPLASH;
+        }
+      })();
+    </script>
     <script type="module" src="/src/main.jsx"></script>
     <script>
       // Service worker is registered ONLY on the canonical production host. Stale
