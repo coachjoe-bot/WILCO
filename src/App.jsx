@@ -481,6 +481,75 @@ function installErrorReporting(){
   });
 }
 
+// ─── STALE-CHUNK SELF-HEAL ────────────────────────────────────────────────────
+// Since the 2026-07-20 code split, a client holding an old page (a tab left open,
+// or the PWA resumed from cache) can ask for a lazy chunk whose hashed filename no
+// longer exists after a deploy. The import rejects with "Importing a module script
+// failed" and, because it happens inside a render, takes the whole tree down (a real
+// coach hit this on prod 2026-07-21). The cure is a reload onto the new build — but
+// a BARE reload does not work here: sw.js answers navigations from the cached shell
+// first, so the reload would re-serve the same old index.html and the same dead
+// chunk names. So we drop the cached shell, then reload, which forces the SW's
+// network path and lands the athlete on the current build.
+const CHUNK_RELOAD_KEY = "wilco_chunk_reload_at";
+const CHUNK_RELOAD_COOLDOWN_MS = 60000;
+const CHUNK_ERROR_RE = /Importing a module script failed|Failed to fetch dynamically imported module|error loading dynamically imported module/i;
+
+function isChunkLoadError(error){
+  const msg = error && error.message ? error.message : String(error||"");
+  return CHUNK_ERROR_RE.test(msg);
+}
+
+// One auto-reload per cooldown per tab. If the chunk is still missing after the
+// reload (genuinely 404, or the network is lying to us) the stamp is fresh, this
+// returns false, and the caller falls back to the manual RELOAD screen — a broken
+// deploy must never put an athlete in a reload loop. No sessionStorage (private
+// mode) means no guard, so we don't auto-reload at all. Offline is excluded too:
+// purging the shell with no network to replace it would cost the offline open.
+function armStaleChunkReload(){
+  if(typeof navigator!=="undefined" && navigator.onLine===false) return false;
+  try{
+    const last = Number(sessionStorage.getItem(CHUNK_RELOAD_KEY) || 0);
+    if(last && Date.now()-last < CHUNK_RELOAD_COOLDOWN_MS) return false;
+    sessionStorage.setItem(CHUNK_RELOAD_KEY, String(Date.now()));
+    return true;
+  }catch{ return false; }
+}
+
+// Drop the cached app shell from every SW cache, then reload. Capped by a timer so
+// a slow/hostile CacheStorage can't strand the athlete on a dead screen — a reload
+// onto a stale shell is still better than no reload.
+function reloadForStaleChunk(){
+  let fired = false;
+  const go = ()=>{ if(fired) return; fired = true; try{ window.location.reload(); }catch{} };
+  setTimeout(go, 1500);
+  (async ()=>{
+    if(typeof caches==="undefined") return;
+    const keys = await caches.keys();
+    await Promise.all(keys.map(async k=>{
+      const c = await caches.open(k);
+      await Promise.all([c.delete("/"), c.delete("/index.html")]);
+    }));
+  })().then(go, go);
+}
+
+// Vite fires vite:preloadError when a dynamic import's preload 404s — this catches
+// the stale chunk BEFORE it reaches a render, so the athlete gets a reload instead
+// of a crash screen. preventDefault() stops Vite rethrowing; we own it from here.
+// The ErrorBoundary below runs the same two calls for the crash that slips past.
+if(typeof window!=="undefined"){
+  window.addEventListener("vite:preloadError",(event)=>{
+    try{ event.preventDefault(); }catch{}
+    const willReload = armStaleChunkReload();
+    reportError("nav", event?.payload || new Error("vite:preloadError"), {
+      error_type: "chunk_preload_error",
+      component: "vite:preloadError",
+      meta: { auto_reload: willReload },
+    });
+    if(willReload) reloadForStaleChunk();
+  });
+}
+
 // ─── ENGAGEMENT TRACKING (Phase 2) ────────────────────────────────────────────
 // Best-effort, BATCHED capture of a curated allowlist of engagement events
 // (app_open, sessions, key actions, key screen views) to usage_events via
@@ -2429,22 +2498,43 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
 // permanent white screen with no URL bar to refresh. This catches it, logs a
 // fatal error_event, and gives the athlete a reload button.
 class ErrorBoundary extends Component {
-  constructor(props){ super(props); this.state = { crashed:false }; }
-  static getDerivedStateFromError(){ return { crashed:true }; }
+  constructor(props){ super(props); this.state = { crashed:false, chunk:false, reloading:false }; }
+  static getDerivedStateFromError(error){ return { crashed:true, chunk:isChunkLoadError(error) }; }
   componentDidCatch(error, info){
+    if(this._handled) return;   // StrictMode invokes boundaries twice in dev
+    this._handled = true;
+    // A dead lazy chunk means the athlete is on a build that no longer exists —
+    // self-heal onto the current one instead of making them find the button. When
+    // the cooldown says we already tried, fall through to the manual screen.
+    const chunk = isChunkLoadError(error);
+    const willReload = chunk && armStaleChunkReload();
     reportError("nav", error, {
-      severity: "fatal",
-      error_type: "render_crash",
+      severity: willReload ? "error" : "fatal",
+      error_type: chunk ? "chunk_load_error" : "render_crash",
       component: info?.componentStack?.split("\n").find(l=>l.trim())?.trim().slice(0,120) || null,
+      meta: chunk ? { auto_reload: willReload } : undefined,
     });
+    if(willReload){ this.setState({ reloading:true }); reloadForStaleChunk(); }
   }
   render(){
     if(this.state.crashed){
+      // Reload already in flight: no alarming copy for a screen that's about to
+      // vanish — just the mark and a line saying what's happening.
+      if(this.state.reloading){
+        return (
+          <div style={{minHeight:"100vh",background:CA.navy,color:CA.text,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,textAlign:"center",fontFamily:"'DM Sans',sans-serif"}}>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:44,color:CA.accent,letterSpacing:5,lineHeight:1}}>WILCO</div>
+            <div style={{marginTop:14,fontSize:15,color:CA.muted2}}>Updating to the latest version...</div>
+          </div>
+        );
+      }
       return (
         <div style={{minHeight:"100vh",background:CA.navy,color:CA.text,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,textAlign:"center",fontFamily:"'DM Sans',sans-serif"}}>
           <div style={{fontFamily:"'Bebas Neue'",fontSize:44,color:CA.accent,letterSpacing:5,lineHeight:1}}>WILCO</div>
-          <div style={{marginTop:14,fontSize:15,color:CA.muted2}}>Something broke on our end. Your logs are safe.</div>
-          <button onClick={()=>window.location.reload()} style={{marginTop:22,background:CA.accent,color:CA.navy,border:"none",borderRadius:12,padding:"14px 34px",fontWeight:700,fontSize:16,cursor:"pointer",fontFamily:"'Bebas Neue'",letterSpacing:2}}>RELOAD</button>
+          <div style={{marginTop:14,fontSize:15,color:CA.muted2}}>
+            {this.state.chunk ? "A new version of WILCO is ready. Reload to get it." : "Something broke on our end. Your logs are safe."}
+          </div>
+          <button onClick={()=>this.state.chunk?reloadForStaleChunk():window.location.reload()} style={{marginTop:22,background:CA.accent,color:CA.navy,border:"none",borderRadius:12,padding:"14px 34px",fontWeight:700,fontSize:16,cursor:"pointer",fontFamily:"'Bebas Neue'",letterSpacing:2}}>RELOAD</button>
         </div>
       );
     }
