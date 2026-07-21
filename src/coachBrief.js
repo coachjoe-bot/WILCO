@@ -374,7 +374,7 @@ export function buildMorningBrief({ D, athletes = [], changeRequests = [], clear
   const openingTemplates = concernCount > 0
     ? [
         `Morning, Coach. ${prThisWk} true PR${plural(prThisWk)} this week and ${activeCount} of ${roster} have trained. ${concernCount} thing${plural(concernCount)} I'd get in front of today.`,
-        `${activeCount} of ${roster} trained this week, ${prThisWk} PR${plural(prThisWk)} banked. ${concernCount} thing${plural(concernCount)} need your eyes today.`,
+        `${activeCount} of ${roster} trained this week, ${prThisWk} PR${plural(prThisWk)} banked. ${concernCount} thing${plural(concernCount)} to check on today.`,
         `Quick rundown: ${prThisWk} true PR${plural(prThisWk)}, ${activePct}% of the roster active. ${concernCount} spot${plural(concernCount)} worth a look today.`,
       ]
     : [
@@ -418,7 +418,7 @@ export function buildMorningBrief({ D, athletes = [], changeRequests = [], clear
 
   // Headline for the collapsed card.
   const headline = concernCount > 0
-    ? `${concernCount} need${concernCount === 1 ? "s" : ""} you today · ${prThisWk} PR${plural(prThisWk)} · ${trend.tag}`
+    ? `${concernCount} athlete${concernCount === 1 ? " needs" : "s need"} your attention · ${prThisWk} PR${plural(prThisWk)} · ${trend.tag}`
     : `All caught up · ${prThisWk} PR${plural(prThisWk)} · ${trend.tag}`;
 
   return { headline, beats };

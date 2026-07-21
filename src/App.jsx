@@ -1629,7 +1629,7 @@ export function RunCard({runData, feel, palette=CA}) {
 // (iOS Safari tab that isn't installed to the home screen) pushSupported() is
 // false and every push surface simply hides itself.
 const PUSH_PROMPT_KEY = "wilco_push_prompt_answered";
-const pushSupported = () =>
+export const pushSupported = () =>
   typeof window!=="undefined" && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
 
 const pushApi = async (payload) => {
@@ -6393,7 +6393,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                   </div>
                   <div className="htube"><div className="hfill" style={{"--tc":TIER_COLORS[tierIdx],"--tb":tierIdx/(TIER_NAMES.length-1),"--pct":fillPct}}/></div>
                   <div style={{fontFamily:"ui-monospace,Menlo,monospace",fontSize:8.5,color:CA.faint,marginTop:5,letterSpacing:0.3}}>
-                    {isTop ? "TRULY INCREDIBLE 🏆" : `${toNext} LBS TO ${TIER_NAMES[tierIdx+1]}`}<span style={{color:CA.steel}}>{"  ·  "+bwSub}</span>
+                    {isTop ? "TRULY INCREDIBLE 🏆" : `${toNext} ${toNext===1?"LB":"LBS"} TO ${TIER_NAMES[tierIdx+1]}`}<span style={{color:CA.steel}}>{"  ·  "+bwSub}</span>
                   </div>
                 </div>
               );
