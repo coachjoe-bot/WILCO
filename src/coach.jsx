@@ -2086,7 +2086,9 @@ function MorningBrief({D,athletes,changeRequests,coach,briefContext,onOpenAthlet
     if(action.kind==="open_athlete"){ onOpenAthlete&&onOpenAthlete(beat.athleteId); return; }
     if(action.kind==="share_wins"){
       exportWins({newPRs:D.prThisWk,notablePRs:D.notablePRs},coach).then((r)=>{
-        const chip = r==="shared" ? "Sent — check your Photos ✓" : r==="downloaded" ? "Saved ✓" : r==="canceled" ? null : r==="failed" ? null : "Shared ✓";
+        // Never claim "Shared" unless navigator.share actually resolved — WILCO
+        // can't share on the coach's behalf, and it isn't a messaging app.
+        const chip = r==="shared" ? "Sent — check your Photos ✓" : r==="downloaded" ? "Saved ✓" : r==="preview" ? "Image ready ✓" : null;
         if(chip) setOutcomes(o=>({...o,[beat.id]:chip}));
       });
       return;
@@ -2271,9 +2273,17 @@ function TierBar({name,tier,avgTier,color}){
 }
 
 // Client-side canvas export of the Wins block — no dependency, no server function.
-// A standalone "night gym" report card (1080x1350, 4:5): near-black ground, blue-to-
-// cyan LED strips, huge Bebas figures with plain-English labels so a parent/AD reading
-// it on a white phone background gets it instantly. ASCII only, no emoji.
+// A standalone report card (1080x1350, 4:5): flat near-black ground, a crisp diagonal
+// accent cut + faint outlined jersey-numeral watermark standing in for the old radial
+// glow, huge Bebas figures with plain-English labels so a parent/AD reading it on a
+// white phone background gets it instantly. ASCII only, no emoji.
+//
+// Honest-wins gate (founder requirement — never brag about a mediocre number):
+//   PRs        printed only if newPRs > 0
+//   attendance printed only if activePct    >= 70
+//   adherence  printed only if adherenceAvg >= 75
+// If none of those clear the bar, the hero slot falls back to a plain headline
+// and the shout-outs carry the graphic — never a weak stat dressed up as a win.
 async function exportWins(team, coach, school){
   try{
     const W=1080,H=1350,M=84;
@@ -2287,23 +2297,46 @@ async function exportWins(team, coach, school){
     const cv=document.createElement("canvas"); cv.width=W; cv.height=H;
     const x=cv.getContext("2d");
     const setLS=(v)=>{ try{ x.letterSpacing=v; }catch(_){} };
-    // ground
+
+    // flat ground — no wash, no vignette; negative space does the work now
     x.fillStyle=CA.navy; x.fillRect(0,0,W,H);
-    // radial blue glow, top-center
-    const glow=x.createRadialGradient(W/2,-120,60,W/2,-120,780);
-    glow.addColorStop(0,"rgba(58,123,255,0.22)"); glow.addColorStop(1,"rgba(58,123,255,0)");
-    x.fillStyle=glow; x.fillRect(0,0,W,560);
-    // faint grid
-    x.strokeStyle="rgba(58,123,255,0.05)"; x.lineWidth=1;
-    for(let gx=0;gx<=W;gx+=44){ x.beginPath(); x.moveTo(gx+0.5,0); x.lineTo(gx+0.5,H); x.stroke(); }
-    for(let gy=0;gy<=H;gy+=44){ x.beginPath(); x.moveTo(0,gy+0.5); x.lineTo(W,gy+0.5); x.stroke(); }
-    // signature LED strip (blue -> cyan, soft glow)
-    const led=(yy,h=3)=>{ const g=x.createLinearGradient(M,0,W-M,0); g.addColorStop(0,CA.accent); g.addColorStop(1,CA.cyan); x.save(); x.shadowColor=CA.cyan; x.shadowBlur=18; x.fillStyle=g; x.fillRect(M,yy,W-2*M,h); x.restore(); };
-    led(176);
+
+    // gate the hero stats before drawing anything so layout + fallback headline
+    // both key off the same qualifying list
+    const stats=[];
+    if(team.newPRs>0) stats.push({n:String(team.newPRs),l:team.newPRs===1?"PERSONAL RECORD SET":"PERSONAL RECORDS SET"});
+    if(team.activePct!=null && team.activePct>=70) stats.push({n:`${team.activePct}%`,l:"OF THE SQUAD TRAINED"});
+    if(team.adherenceAvg!=null && team.adherenceAvg>=75) stats.push({n:`${team.adherenceAvg}%`,l:"PROGRAM ADHERENCE"});
+    const hero=stats.slice(0,3);
+
+    // signature move: a crisp diagonal accent cut in the top-right corner —
+    // flat tint + one 2px edge, zero blur — replacing the old radial glow
+    x.save();
+    x.beginPath(); x.moveTo(W,0); x.lineTo(W,340); x.lineTo(W-340,0); x.closePath();
+    x.fillStyle="rgba(58,123,255,0.05)"; x.fill();
+    x.strokeStyle=`${CA.accent}66`; x.lineWidth=2;
+    x.beginPath(); x.moveTo(W-340,0); x.lineTo(W,340); x.stroke();
+    x.restore();
+
+    // large outlined "jersey numeral" watermark — echoes the headline stat (or
+    // just the W mark if nothing qualified) as a near-invisible background
+    // texture instead of a glow. Stroke only, very low alpha.
+    x.save();
+    x.font='700 560px "Bebas Neue"'; x.textAlign="right"; x.textBaseline="alphabetic";
+    x.strokeStyle="rgba(58,123,255,0.07)"; x.lineWidth=1.5;
+    x.strokeText(hero[0]?hero[0].n.replace("%",""):"W", W-M, 1210);
+    x.restore();
+    x.textAlign="left";
+
+    // thin 1px accent rule (gradient, no shadow) — used for every divider
+    const rule=(yy,h=1,alpha=0.4)=>{ const g=x.createLinearGradient(M,0,W-M,0); g.addColorStop(0,CA.accent); g.addColorStop(1,CA.cyan); x.save(); x.globalAlpha=alpha; x.fillStyle=g; x.fillRect(M,yy,W-2*M,h); x.restore(); };
+
     // wordmark + mono kicker
     x.textBaseline="alphabetic";
     x.fillStyle=CA.led; x.font='700 90px "Bebas Neue"'; setLS("4px"); x.fillText("WILCO",M,270); setLS("0px");
     x.fillStyle=CA.cyan; x.font=MONO; setLS("3px"); x.fillText("WEEKLY TEAM REPORT",M+4,306); setLS("0px");
+    rule(330,2,0.9);
+
     // plain-English title + date range
     const teamName=String(school?.name||coach?.name||"THE TEAM").toUpperCase();
     const title=`${teamName} - WINS THIS WEEK`;
@@ -2312,23 +2345,35 @@ async function exportWins(team, coach, school){
     const now=new Date(), start=new Date(now); start.setDate(now.getDate()-6);
     const md=(d)=>d.toLocaleDateString("en-US",{month:"short",day:"numeric"}).toUpperCase();
     x.fillStyle=CA.muted; x.font='400 28px "DM Sans"'; x.fillText(`${md(start)} - ${md(now)}, ${now.getFullYear()}`,M,440);
-    // hero stats (whatever the export already receives; no new plumbing)
-    const stats=[{n:String(team.newPRs||0),l:"PERSONAL RECORDS SET"}];
-    if(team.activePct!=null) stats.push({n:`${team.activePct}%`,l:"OF THE SQUAD TRAINED"});
-    if(team.adherenceAvg!=null) stats.push({n:`${team.adherenceAvg}%`,l:"PROGRAM ADHERENCE"});
-    const hero=stats.slice(0,3);
+
     let y=572;
-    hero.forEach(s=>{
-      x.save(); x.shadowColor=CA.cyan; x.shadowBlur=22; x.fillStyle=CA.led; x.font='700 112px "Bebas Neue"'; x.fillText(s.n,M,y); x.restore();
-      x.fillStyle=CA.cyan; x.font=MONO; setLS("2px"); x.fillText(s.l,M+6,y+40); setLS("0px");
-      y+=150;
-    });
+    if(hero.length){
+      // crisp Bebas figures, zero shadowBlur; a numbered mono tag + short accent
+      // tick under each number carries the "graphic" hierarchy the glow used to
+      hero.forEach((s,i)=>{
+        x.fillStyle=CA.faint; x.font=MONO; setLS("1px"); x.fillText(`0${i+1}`,M,y-58); setLS("0px");
+        x.fillStyle=CA.led; x.font='700 112px "Bebas Neue"'; x.fillText(s.n,M,y);
+        const nw=x.measureText(s.n).width;
+        x.strokeStyle=CA.accent; x.lineWidth=3; x.beginPath(); x.moveTo(M,y+14); x.lineTo(M+Math.min(nw,120),y+14); x.stroke();
+        x.fillStyle=CA.cyan; x.font=MONO; setLS("2px"); x.fillText(s.l,M+6,y+46); setLS("0px");
+        y+=150;
+      });
+    } else {
+      // Nothing cleared the bar this week — no weak stat gets printed. The
+      // shout-outs (if any) carry the graphic instead.
+      x.fillStyle=CA.cyan; x.font=MONO; setLS("2px"); x.fillText("NO STAT LINE THIS WEEK",M,y-40); setLS("0px");
+      x.fillStyle=CA.led; x.font='700 78px "Bebas Neue"'; x.fillText("THIS WEEK'S WORK",M,y+38);
+      x.fillText("IS IN THE BANK.",M,y+120);
+      y+=190;
+    }
+
     // shout-outs (Bebas name + DM Sans line) — only as many as fit above the footer
     const foot=1244;
     const shoutTop=y+18;
     const maxLines=Math.max(0,Math.floor((foot-60-(shoutTop+30))/56));
     const shouts=(team.notablePRs||[]).slice(0,Math.min(3,maxLines));
     if(shouts.length){
+      rule(shoutTop-24,1,0.25);
       x.fillStyle=CA.faint; x.font=MONO; setLS("2px"); x.fillText("SHOUT-OUTS",M,shoutTop); setLS("0px");
       const shortName=(full)=>{ const p=String(full||"").trim().split(/\s+/); return (p.length<2?(p[0]||""):`${p[0]} ${p[p.length-1][0]}.`).toUpperCase(); };
       let sy=shoutTop+52;
@@ -2342,7 +2387,7 @@ async function exportWins(team, coach, school){
       });
     }
     // footer
-    led(foot,2);
+    rule(foot,2,0.9);
     x.fillStyle=CA.steel; x.font='400 28px "DM Sans"'; x.fillText("trainwilco.com",M,foot+52);
     x.fillStyle=CA.faint; x.font=MONO; setLS("2px"); x.textAlign="right"; x.fillText("POWERED BY WILCO",W-M,foot+50); x.textAlign="left"; setLS("0px");
     // Mobile-first save. Returns an outcome string so the button can tell the
