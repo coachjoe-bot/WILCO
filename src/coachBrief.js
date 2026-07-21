@@ -90,17 +90,34 @@ function buildConcernBeat({ t, row, req, dateKey, beatIndex }) {
 
   // Pending change request wins the merge — quote it, flag='request'.
   if (req) {
-    const reason = req.reason || (Array.isArray(req.items) && req.items[0] && req.items[0].suggested_change) || "a program change";
+    // Requests are AI-authored: Joe drafts the concrete suggested change
+    // (items[0].suggested_change) and the athlete only confirms sending it;
+    // req.reason carries the athlete's own words as context. Legacy rows predate
+    // that split (suggestion === reason, both the athlete's raw text) — those
+    // keep the athlete-voiced template so we never put athlete words in Joe's
+    // mouth or vice versa.
     const item = Array.isArray(req.items) ? req.items[0] : null;
-    const itemNote = item && item.lift && item.suggested_change && item.suggested_change !== reason ? ` (${item.lift}: ${item.suggested_change})` : "";
+    const theirWords = req.reason || "";
+    // Trailing period stripped — the templates close their own sentences, and a
+    // drafted suggestion usually ends with "." already ("…settles.".).
+    const suggestion = ((item && item.suggested_change) || theirWords || "a program change").replace(/\.+$/, "");
+    const reason = suggestion; // meta/decisionNote compatibility below
+    const drafted = !!(item && item.suggested_change) && theirWords && item.suggested_change !== theirWords;
+    const firstName = String(name).split(" ")[0];
+    const context = drafted ? ` It came from ${firstName} saying: "${theirWords.length > 160 ? theirWords.slice(0, 157) + "…" : theirWords}"` : "";
+    const liftNote = item && item.lift && drafted ? ` (${item.lift})` : "";
     // Keep the underlying signal (injury area / quiet days) in meta so the question
     // bank and decisionNote can still cite it even though the request took over.
     const inj = row && row.injuries;
     const area = (inj && (((inj.recurring || [])[0] || {}).area || (inj.active || [])[0])) || null;
-    const templates = [
-      `${name} asked for a change: "${reason}"${itemNote}.`,
-      `There's a pending request from ${name}: "${reason}"${itemNote}.`,
-      `${name} flagged this in their program: "${reason}"${itemNote}.`,
+    const templates = drafted ? [
+      `Coach Joe drafted a change for ${name}'s program${liftNote}: "${suggestion}".${context}`,
+      `There's a change request waiting on ${name}${liftNote} — Joe suggests: "${suggestion}".${context}`,
+      `Joe flagged ${name}'s program${liftNote}: "${suggestion}".${context}`,
+    ] : [
+      `${name} asked for a change: "${suggestion}".`,
+      `There's a pending request from ${name}: "${suggestion}".`,
+      `${name} flagged this in their program: "${suggestion}".`,
     ];
     const prose = pick(templates, dateKey, beatIndex);
     return {
