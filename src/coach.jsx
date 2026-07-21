@@ -5,7 +5,7 @@
 // the dynamic import means the cycle App→coach→App is resolved at load time.
 import { useState, useEffect, useRef, useMemo } from "react";
 import {
-  CA, CA_BTN, CA_GLOW, GS, LineChart, MASTER_CODE, RunCard, SUPABASE_KEY, SUPABASE_URL, askClaude, bestE1RMForExercise, btn, cleanerName, daysBetween, disablePush, displayForKey, enablePush, epley1RM, fmtDate, fmtDateRelative, fmtDateShort, fmtWeight, formatSetDetails, getAuth, getExerciseSets, getPushSubscription, groupIntoSessions, haptic, idApi, inpA, isRealSession, liftTier, normalizeExName, sbDelete, sbInsert, sbRead, sbUpdate, sbUpdateWhere, sbUpsert, toLbs, track, useIsMobile
+  CA, CA_BTN, CA_GLOW, GS, LineChart, MASTER_CODE, RunCard, SUPABASE_KEY, SUPABASE_URL, askClaude, bestE1RMForExercise, btn, cleanerName, daysBetween, disablePush, displayForKey, enablePush, epley1RM, fmtDate, fmtDateRelative, fmtDateShort, fmtWeight, formatSetDetails, getAuth, getExerciseSets, getPushSubscription, groupIntoSessions, haptic, idApi, inpA, isRealSession, liftTier, normalizeExName, pushSupported, sbDelete, sbInsert, sbRead, sbUpdate, sbUpdateWhere, sbUpsert, toLbs, track, useIsMobile
 } from "./App.jsx";
 // Shared deterministic engine (Phase 0 extraction) — per-athlete session/adherence
 // math, computed live client-side for the Overview. Aliased to avoid colliding with
@@ -1265,13 +1265,16 @@ function CoachDashboard({coach,onLogout}) {
                     <span style={{fontSize:10.5,letterSpacing:1.4,textTransform:"uppercase",color:CA.accent,fontWeight:700}}>Notifications</span>
                     <span style={{height:1,background:CA.border,flex:1}}/>
                   </div>
-                  <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,padding:"14px 16px",marginBottom:14,display:"flex",alignItems:"center",gap:14}}>
+                  {/* Same rule as every athlete push surface: on platforms without
+                      Web Push (e.g. iOS Safari not installed to the home screen)
+                      the card hides instead of offering an Enable that can't work. */}
+                  {pushSupported()&&<div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,padding:"14px 16px",marginBottom:14,display:"flex",alignItems:"center",gap:14}}>
                     <div style={{flex:1}}>
                       <div style={{fontWeight:700,fontSize:13.5,color:CA.text}}>Push notifications on this device</div>
                       <div style={{color:CA.muted,fontSize:12,marginTop:2}}>{pushOn?"On — you'll get the alerts you've toggled below.":"Turn on to get alerts on this device."}</div>
                     </div>
                     <button onClick={togglePush} disabled={pushBusy} style={{background:pushOn?"transparent":CA_BTN,color:pushOn?CA.muted:"#fff",border:`1px solid ${pushOn?CA.border:CA.accent}`,boxShadow:pushOn?"none":`0 4px 16px ${CA_GLOW}`,borderRadius:9,padding:"8px 16px",fontWeight:700,fontSize:12.5,cursor:"pointer",fontFamily:"'DM Sans'",opacity:pushBusy?0.6:1}}>{pushBusy?"…":pushOn?"Turn off":"Enable"}</button>
-                  </div>
+                  </div>}
                   <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,overflow:"hidden"}}>
                     <Row title="Athlete injury / pain" desc="When an athlete flags pain in a session." pkey="injury"/>
                     <Row title="Big PR" desc="Only real improvements on ranked lifts — never a first-time baseline." pkey="big_pr"/>
@@ -1664,7 +1667,10 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
       personalWins.push({icon:"🏆",title:(athletes.find(a=>a.id===p.athlete_id)||{}).name||"Athlete",detail:`${p.exercise} ${fmtWeight(p.weight,p.unit)} — +${Math.round(p.gain)} lbs e1RM`}); }
     const statWins=[];
     if(prThisWk>0) statWins.push({icon:"🔥",title:`${prThisWk} true PR${prThisWk!==1?"s":""}`,detail:"across the roster this week"});
-    if(movers[0]) statWins.push({icon:"📈",title:`${movers[0].lift} +${movers[0].avg} lbs`,detail:`team avg e1RM${movers[0].n>1?` · ${movers[0].n} athletes`:""}`});
+    // displayForKey: movers carry the NORMALIZED lift name ("bench press") — map it
+    // to its canonical display form so the win card matches the Title Case every
+    // other surface uses.
+    if(movers[0]) statWins.push({icon:"📈",title:`${displayForKey(movers[0].lift,movers[0].lift.replace(/\b[a-z]/g,c=>c.toUpperCase()))} +${movers[0].avg} lbs`,detail:`team avg e1RM${movers[0].n>1?` · ${movers[0].n} athletes`:""}`});
     if(teamAdh!=null&&teamAdh>=80) statWins.push({icon:"✅",title:`${teamAdh}% adherence`,detail:"team on plan this week"});
     if(activePct>=80) statWins.push({icon:"⚡",title:`${activePct}% active`,detail:`${activeCount} of ${athletes.length} training this week`});
     // interleave stat / personal so it reads varied
@@ -1819,7 +1825,7 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
                   <span style={{fontSize:11,fontWeight:800,letterSpacing:.8,textTransform:"uppercase",color:CA.cyan}}>{first} · {day.full} {day.d}</span>
                   <button onClick={()=>setDayPick(null)} style={{border:"none",background:"transparent",color:CA.muted,fontSize:14,cursor:"pointer",lineHeight:1}}>✕</button>
                 </div>
-                {exs.length===0&&runs.length===0&&<div style={{fontSize:12,color:CA.muted}}>Logged, but no parsed exercises on this one.</div>}
+                {exs.length===0&&runs.length===0&&<div style={{fontSize:12,color:CA.muted}}>Logged, but no exercise details on this one.</div>}
                 {exs.slice(0,7).map((ex,i)=>(
                   <div key={i} style={{display:"flex",justifyContent:"space-between",gap:8,fontSize:12,padding:"3px 0"}}>
                     <span style={{color:CA.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ex.name}</span>
@@ -1905,10 +1911,15 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
         </OverviewCard>
 
         {/* Team volume — full-width band */}
+        {/* Judge the trend on the last COMPLETE week until this week is mostly
+            logged (Sat+) — the partial current week otherwise reads as a red
+            "working sets ▼" every Mon–Wed no matter how healthy the block is.
+            The chart still plots the partial week honestly; only the verdict
+            waits for enough of the week to exist. */}
         <OverviewCard style={span(6)} title="Team volume · 4 wk"
-          trend={{dir:D.volWeeks[3]>=D.volWeeks[0]?"up":"down",txt:"working sets"}}
-          readout={D.volWeeks[3]>D.volWeeks[0]*1.5?"Sharp jump vs 4 weeks ago — watch load spikes.":"Gradual, inside a safe band."}
-          tone={D.volWeeks[3]>D.volWeeks[0]*1.5?{k:"warn",t:"Watch"}:{k:"good",t:"Healthy"}}>
+          trend={{dir:(D.todayIdx>=5?D.volWeeks[3]:D.volWeeks[2])>=D.volWeeks[0]?"up":"down",txt:"working sets"}}
+          readout={(D.todayIdx>=5?D.volWeeks[3]:D.volWeeks[2])>D.volWeeks[0]*1.5?"Sharp jump vs 4 weeks ago — watch load spikes.":"Gradual, inside a safe band."}
+          tone={(D.todayIdx>=5?D.volWeeks[3]:D.volWeeks[2])>D.volWeeks[0]*1.5?{k:"warn",t:"Watch"}:{k:"good",t:"Healthy"}}>
           <ChartBox h={80}>{w=>{
             const px=i=>6+(w-12)*(i/(D.volWeeks.length-1)), py=v=>70-60*(v/volMax);
             const pts=D.volWeeks.map((v,i)=>`${px(i)},${py(v)}`).join(" ");
@@ -2959,7 +2970,14 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
               <div style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,padding:16}}>
                 <div style={{color:CA.blue,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:10}}>TOP PRs</div>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-                  {[...prs].sort((a,b)=>liftTier(normalizeExName(a.exercise))-liftTier(normalizeExName(b.exercise)) || (b.estimated_1rm||b.weight||0)-(a.estimated_1rm||a.weight||0)).slice(0,6).map((p,i)=>(
+                  {(()=>{
+                    // One card per lift — an athlete's PR history has several rows for
+                    // the same exercise, and without collapsing to the best one a single
+                    // lift can fill multiple "top" slots (Back Squat 140 AND 130).
+                    const best=new Map();
+                    prs.forEach(p=>{const k=normalizeExName(p.exercise);const cur=best.get(k);if(!cur||((p.estimated_1rm||p.weight||0)>(cur.estimated_1rm||cur.weight||0)))best.set(k,p);});
+                    return [...best.values()].sort((a,b)=>liftTier(normalizeExName(a.exercise))-liftTier(normalizeExName(b.exercise)) || (b.estimated_1rm||b.weight||0)-(a.estimated_1rm||a.weight||0)).slice(0,6);
+                  })().map((p,i)=>(
                     <div key={i} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:8,padding:"8px 12px"}}>
                       <div style={{color:CA.text,fontSize:12,fontWeight:600}}>{p.exercise}</div>
                       <div style={{color:CA.blue,fontSize:13,fontWeight:700}}>{fmtWeight(p.weight,p.unit)}</div>
