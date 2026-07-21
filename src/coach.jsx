@@ -1617,6 +1617,12 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
         const cand={lift,spanDays,e1rm:top.e1rm,weight:top.weight,reps:top.reps};
         if(!best||cand.spanDays>best.spanDays||(cand.spanDays===best.spanDays&&cand.e1rm>best.e1rm)) best=cand;
       });
+      // TRIAGE gate: repeating a working weight for a few sessions is normal
+      // programming, not a coach concern — without a duration floor the triage
+      // flagged most of a healthy roster ("8 athletes need your attention").
+      // Only a streak that has held ≥14 days earns a triage slot; the digests'
+      // lighter has_plateau (any 3 flat entries) is unchanged.
+      if(best && best.spanDays < 14) return null;
       return best;
     };
 
