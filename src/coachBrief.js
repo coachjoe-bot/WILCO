@@ -28,7 +28,7 @@
  * @property {string} prose
  * @property {string} [athleteId]
  * @property {string} [athleteName]
- * @property {'injury'|'quiet'|'adherence'|'request'} [flag]
+ * @property {'injury'|'quiet'|'adherence'|'plateau'|'request'} [flag]
  * @property {Action[]} actions
  * @property {{id:string,text:string,chips:string[]}} [question]
  * @property {Object} [meta] Extra context (area/days/score/…) so decisionNote() can
@@ -86,7 +86,7 @@ const OPEN_ATHLETE_ACTION = (athleteId) => ({ id: "open", kind: "open_athlete", 
 function buildConcernBeat({ t, row, req, dateKey, beatIndex }) {
   const name = t.name;
   const athleteId = t.id;
-  const baseFlag = t.kind === "Injury" ? "injury" : t.kind === "Quiet" ? "quiet" : "adherence";
+  const baseFlag = t.kind === "Injury" ? "injury" : t.kind === "Quiet" ? "quiet" : t.kind === "Adherence" ? "adherence" : "plateau";
 
   // Pending change request wins the merge — quote it, flag='request'.
   if (req) {
@@ -199,30 +199,67 @@ function buildConcernBeat({ t, row, req, dateKey, beatIndex }) {
     };
   }
 
-  // adherence
-  const score = row ? row.score : null;
-  const thisWkCount = row ? row.thisWk.length : 0;
-  const presDays = row ? (row.a.training_days_per_week || (row.adherence && row.adherence.presDays) || null) : null;
-  const sessionsCite = presDays ? `${thisWkCount} of ${presDays} prescribed days` : `${thisWkCount} session${plural(thisWkCount)}`;
-  const gapLift = row && row.adherence && Array.isArray(row.adherence.byLift) ? row.adherence.byLift[0] : null;
-  const liftNote = gapLift && gapLift.volumeGapPct >= 15 ? ` Biggest gap: ${gapLift.lift} (${gapLift.volumeGapPct}% under).` : "";
-  const templates = [
-    `${name} hit ${sessionsCite} this week (${score}% adherence).${liftNote}`,
-    `${name}'s adherence is slipping — ${score}% this week, ${sessionsCite}.${liftNote}`,
-    `${score}% adherence for ${name} this week (${sessionsCite}).${liftNote}`,
+  if (baseFlag === "adherence") {
+    const score = row ? row.score : null;
+    const thisWkCount = row ? row.thisWk.length : 0;
+    const presDays = row ? (row.a.training_days_per_week || (row.adherence && row.adherence.presDays) || null) : null;
+    const sessionsCite = presDays ? `${thisWkCount} of ${presDays} prescribed days` : `${thisWkCount} session${plural(thisWkCount)}`;
+    const gapLift = row && row.adherence && Array.isArray(row.adherence.byLift) ? row.adherence.byLift[0] : null;
+    const liftNote = gapLift && gapLift.volumeGapPct >= 15 ? ` Biggest gap: ${gapLift.lift} (${gapLift.volumeGapPct}% under).` : "";
+    const templates = [
+      `${name} hit ${sessionsCite} this week (${score}% adherence).${liftNote}`,
+      `${name}'s adherence is slipping — ${score}% this week, ${sessionsCite}.${liftNote}`,
+      `${score}% adherence for ${name} this week (${sessionsCite}).${liftNote}`,
+    ];
+    const prose = pick(templates, dateKey, beatIndex);
+    return {
+      id: `concern:${athleteId}:adherence`,
+      kind: "concern",
+      prose,
+      athleteId,
+      athleteName: name,
+      flag: "adherence",
+      meta: { score, sessionsCite },
+      actions: [
+        { id: "handled", kind: "decision", label: "I'll handle it", payload: { decision: "handled" } },
+        { id: "trim", kind: "prefill_program", label: "Trim their week", payload: { suggestion: `Trim the week down — they hit ${sessionsCite}. Cut a day or drop accessory volume before touching the main lifts.` } },
+        { id: "dismiss", kind: "decision", label: "Not a concern", payload: { decision: "dismiss" } },
+        OPEN_ATHLETE_ACTION(athleteId),
+      ],
+    };
+  }
+
+  // plateau — row.plateau is computed live in CoachOverview's D memo (same
+  // last-3-entries e1RM-flat math as the Proof Feed digest's has_plateau), picking
+  // the longest-stuck lift when an athlete has more than one flagged.
+  const pl = row && row.plateau;
+  const lift = pl ? pl.lift : "a lift";
+  const stuck = !!pl && pl.spanDays >= 10;
+  const wks = pl ? Math.max(1, Math.round(pl.spanDays / 7)) : null;
+  const durationTxt = stuck ? (wks >= 4 ? `${Math.round(wks / 4)} month${plural(Math.round(wks / 4))}` : `~${wks} week${plural(wks)}`) : "the last 3 sessions";
+  const loadTxt = pl ? `${pl.weight}x${pl.reps}` : "current numbers";
+  const stuckTemplates = [
+    `${name}'s ${lift} has been parked at ${loadTxt} for ${durationTxt} — that's a programming call, not an effort problem.`,
+    `${lift} is stuck for ${name} — ${durationTxt} at ${loadTxt}. Worth changing the stimulus before you change the athlete.`,
+    `${name}'s ${lift} hasn't moved in ${durationTxt} (still ${loadTxt}). Time for a deload or a rep-range swap.`,
   ];
-  const prose = pick(templates, dateKey, beatIndex);
+  const freshTemplates = [
+    `${name}'s ${lift} has gone flat across ${durationTxt}, still ${loadTxt} — early, but worth watching.`,
+    `${lift} looks flat for ${name} over ${durationTxt} (${loadTxt}). Not urgent yet, keep an eye on it.`,
+    `${name}'s ${lift} e1RM hasn't budged across ${durationTxt} — ${loadTxt}. Might be noise, might not.`,
+  ];
+  const prose = pick(stuck ? stuckTemplates : freshTemplates, dateKey, beatIndex);
   return {
-    id: `concern:${athleteId}:adherence`,
+    id: `concern:${athleteId}:plateau`,
     kind: "concern",
     prose,
     athleteId,
     athleteName: name,
-    flag: "adherence",
-    meta: { score, sessionsCite },
+    flag: "plateau",
+    meta: { lift, spanDays: pl ? pl.spanDays : null, weight: pl ? pl.weight : null, reps: pl ? pl.reps : null },
     actions: [
+      { id: "prefill", kind: "prefill_program", label: "Draft the change", payload: { suggestion: `${lift}: plateaued at ${loadTxt} for ${durationTxt} — change the rep range, add a deload, or swap the variation.` } },
       { id: "handled", kind: "decision", label: "I'll handle it", payload: { decision: "handled" } },
-      { id: "trim", kind: "prefill_program", label: "Trim their week", payload: { suggestion: `Trim the week down — they hit ${sessionsCite}. Cut a day or drop accessory volume before touching the main lifts.` } },
       { id: "dismiss", kind: "decision", label: "Not a concern", payload: { decision: "dismiss" } },
       OPEN_ATHLETE_ACTION(athleteId),
     ],
@@ -363,8 +400,10 @@ export function buildMorningBrief({ D, athletes = [], changeRequests = [], clear
   const rowsById = {};
   (D.rows || []).forEach((r) => { rowsById[r.a.id] = { ...r, __inactive: D.inactive || [] }; });
 
-  // Rank triage: injury > quiet > adherence (D.triage is only crit-before-warn).
-  const kindOrder = { Injury: 0, Quiet: 1, Adherence: 2 };
+  // Rank triage: injury > quiet > adherence > plateau (D.triage is only
+  // crit-before-warn; plateau is intentionally last — a stall is a slower-burn
+  // concern than someone hurt, gone dark, or falling off program).
+  const kindOrder = { Injury: 0, Quiet: 1, Adherence: 2, Plateau: 3 };
   const triage = [...(D.triage || [])].sort((a, b) => (kindOrder[a.kind] ?? 9) - (kindOrder[b.kind] ?? 9));
 
   const pendingReqByAthlete = {};
@@ -375,7 +414,7 @@ export function buildMorningBrief({ D, athletes = [], changeRequests = [], clear
   const concernBeats = [];
   let bi = 1;
   for (const t of triage) {
-    const baseFlag = t.kind === "Injury" ? "injury" : t.kind === "Quiet" ? "quiet" : "adherence";
+    const baseFlag = t.kind === "Injury" ? "injury" : t.kind === "Quiet" ? "quiet" : t.kind === "Adherence" ? "adherence" : "plateau";
     if (cleared.has(`${t.id}:${baseFlag}`)) continue;
     const row = rowsById[t.id] || null;
     const req = pendingReqByAthlete[t.id] || null;
@@ -463,6 +502,7 @@ export function decisionNote(beat, actionId, freeText) {
   if (flag === "injury") detail = `${meta.area || "injury"} flagged`;
   else if (flag === "quiet") detail = meta.days != null ? `quiet ${meta.days}d` : "quiet";
   else if (flag === "adherence") detail = meta.score != null ? `adherence ${meta.score}%` : "adherence";
+  else if (flag === "plateau") detail = meta.lift ? `${meta.lift} plateau` : "plateau";
   else if (flag === "request") detail = "program request";
   else detail = beat.kind || "note";
 
