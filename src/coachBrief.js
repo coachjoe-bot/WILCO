@@ -433,10 +433,14 @@ export function buildMorningBrief({ D, athletes = [], changeRequests = [], clear
     });
   }
 
-  // Headline for the collapsed card.
+  // Headline for the collapsed card. A PR-flavored trend tag folds INTO the PR
+  // count ("4 PRs rolling in"), never alongside it ("4 PRs · PRs rolling in").
+  const prTail = /\bprs?\b/i.test(trend.tag)
+    ? (prThisWk > 0 ? trend.tag.replace(/\bPRs?\b/i, `${prThisWk} PR${plural(prThisWk)}`) : trend.tag)
+    : `${prThisWk} PR${plural(prThisWk)} · ${trend.tag}`;
   const headline = concernCount > 0
-    ? `${concernCount} athlete${concernCount === 1 ? " needs" : "s need"} your attention · ${prThisWk} PR${plural(prThisWk)} · ${trend.tag}`
-    : `All caught up · ${prThisWk} PR${plural(prThisWk)} · ${trend.tag}`;
+    ? `${concernCount} athlete${concernCount === 1 ? " needs" : "s need"} your attention · ${prTail}`
+    : `All caught up · ${prTail}`;
 
   return { headline, beats };
 }
