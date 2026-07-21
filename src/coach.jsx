@@ -80,6 +80,13 @@ body{background:${CA.navy};}
 /* split-flap headline flip-in (copy of athlete aFlap) */
 @keyframes cFlap{0%{transform:rotateX(-90deg);opacity:0;}60%{transform:rotateX(8deg);opacity:1;}100%{transform:rotateX(0);opacity:1;}}
 .c-flap{display:inline-block;transform-origin:top;backface-visibility:hidden;animation:cFlap .5s ease both;}
+/* Edition-open LED sweep: the masthead rule draws in left-to-right with a
+   travelling glow, once, on mount (the Coach's Edition's answer to the
+   athlete Proof Feed's envelope-open reveal). Single play, not a loop. */
+@keyframes cSweep{0%{transform:scaleX(0);opacity:.5;}70%{opacity:1;}100%{transform:scaleX(1);opacity:1;}}
+.c-sweep{transform-origin:left;animation:cSweep .65s cubic-bezier(.2,.7,.2,1) both;}
+@keyframes cSweepDot{0%{left:0;opacity:0;}8%{opacity:1;}92%{opacity:1;}100%{left:100%;opacity:0;}}
+.c-sweep-dot{position:absolute;top:50%;width:10px;height:10px;margin:-5px 0 0 -5px;border-radius:50%;background:${CA.cyan};box-shadow:0 0 12px 3px ${CA.cyan};animation:cSweepDot .75s cubic-bezier(.2,.7,.2,1) both;}
 /* faint cyan scanline overlay (edition page) */
 .coach-scan::after{content:"";position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,transparent 0 3px,rgba(55,230,255,.028) 3px 4px);z-index:8;}
 /* POWER CELL — the athlete benchmark battery tube, verbatim (GSA .htube/.hfill),
@@ -93,9 +100,10 @@ body{background:${CA.navy};}
 @keyframes cLive{0%,100%{opacity:1;box-shadow:0 0 6px ${CA.cyan};}50%{opacity:.35;box-shadow:0 0 2px ${CA.cyan};}}
 .c-live{animation:cLive 1.8s ease-in-out infinite;}
 @media (prefers-reduced-motion: reduce){
-  .c-up,.c-rise,.c-draw,.a-draw,.c-fade,.c-flap,.c-live{animation:none!important;transform:none!important;opacity:1!important;}
+  .c-up,.c-rise,.c-draw,.a-draw,.c-fade,.c-flap,.c-live,.c-sweep{animation:none!important;transform:none!important;opacity:1!important;}
   .hcell.go .hfill{transform:scaleX(var(--pct,0))!important;}
   .c-draw,.a-draw{stroke-dasharray:none!important;}
+  .c-sweep-dot{display:none!important;}
 }
 `;
 
@@ -2470,7 +2478,14 @@ function ShareWinsButton({run}){
 function CoachCheckin({digest, team, coach, onRead}){
   const c = digest.content_json||{};
   const questions = c.questions||[];
-  const [msgs,setMsgs] = useState(()=>questions.length?[{role:"wilco",text:questions[0].text}]:[]);
+  // Only seed the opening question bubble when the check-in hasn't already been
+  // completed (content_json.checkin_done). Previously this always showed
+  // questions[0] regardless of `done`, so reopening an already-answered edition
+  // (or a canned digest saved with checkin_done:true) rendered one orphan
+  // question with the answer UI hidden below (gated on !done) — a chip with no
+  // way to answer, followed immediately by the "That's the edition" done line.
+  // Mirrors ProofChatModal's alreadyDone-gated phase init on the athlete side.
+  const [msgs,setMsgs] = useState(()=>(!c.checkin_done && questions.length)?[{role:"wilco",text:questions[0].text}]:[]);
   const [qi,setQi] = useState(0);
   const [answers,setAnswers] = useState({});
   const [input,setInput] = useState("");
@@ -2599,11 +2614,18 @@ function CoachEdition({digest, athletes, coach, school, onBack, onRead}){
   const isMonthly = digest.digest_type==="monthly_coach";
   const railCells = team?[["Roster",team.n],["Active",`${team.activePct}%`],["Adherence",team.adherenceAvg!=null?`${team.adherenceAvg}%`:"—"],["True PRs",team.newPRs]]:[];
   const toneOf = (s)=> /FOCUS/i.test(s.label)?"focus": s.flag==="warn"?"warn":"plain";
+  // Edition-open reveal: the masthead plays its own entrance (split-flap title +
+  // LED sweep rule below), then everything under it cascades in on a shared
+  // stagger clock — the coach-side answer to the athlete Proof Feed's envelope
+  // reveal. Reuses the existing GSC .c-up/.c-sweep primitives (already
+  // reduced-motion-safe) rather than inventing a parallel motion system.
+  let revealStep = 0;
+  const reveal = () => ({animationDelay:`${(revealStep++)*65}ms`});
   return (
     <div style={{maxWidth:720}}>
       <button onClick={onBack} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:12,marginBottom:14}}>← Back to Reports</button>
       <div className="coach-scan" style={{position:"relative",overflow:"hidden",background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:"18px 20px"}}>
-        <div style={{borderBottom:`2px solid ${CA.line2}`,paddingBottom:12,marginBottom:14,textAlign:"center"}}>
+        <div style={{paddingBottom:12,marginBottom:14,textAlign:"center"}}>
           <div style={{fontFamily:EDITION_MAST,fontWeight:700,fontSize:30,color:EDITION_HEAD,letterSpacing:-0.5,lineHeight:1}}>
             {`The Coach's Edition${isMonthly?" · Monthly":""}`.split(" ").map((w,i)=><span key={i} className="c-flap" style={{animationDelay:`${i*60}ms`,marginRight:7}}>{w}</span>)}
           </div>
@@ -2611,10 +2633,15 @@ function CoachEdition({digest, athletes, coach, school, onBack, onRead}){
             <span className="c-live" style={{width:6,height:6,borderRadius:"50%",background:CA.cyan,display:"inline-block",flexShrink:0}}/>
             <span>{coach?.name||"Coach"} · {new Date(digest.generated_at||Date.now()).toLocaleDateString("en-US",{month:"long",day:"numeric"})}{team?` · ${team.n} Athletes`:""}{edNo?` · No. ${edNo}`:""}</span>
           </div>
+          {/* LED sweep — the masthead rule draws in left-to-right with a travelling
+              glow dot, once, mirroring the athlete envelope's reveal feel. */}
+          <div className="c-sweep" style={{position:"relative",height:2,marginTop:12,borderRadius:1,background:`linear-gradient(90deg, ${CA.accent}, ${CA.cyan})`,boxShadow:`0 0 8px ${CA.cyan}77`}}>
+            <span className="c-sweep-dot"/>
+          </div>
         </div>
-        {c.intro&&<div style={{fontFamily:EDITION_SERIF,fontSize:16,color:EDITION_BODY,fontStyle:"italic",marginBottom:14,textAlign:"center"}}>{c.intro}</div>}
+        {c.intro&&<div className="c-up" style={{...reveal(),fontFamily:EDITION_SERIF,fontSize:16,color:EDITION_BODY,fontStyle:"italic",marginBottom:14,textAlign:"center"}}>{c.intro}</div>}
         {team&&(
-          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:1,background:CA.line2,border:`1px solid ${CA.line2}`,borderRadius:10,overflow:"hidden",marginBottom:16}}>
+          <div className="c-up" style={{...reveal(),display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:1,background:CA.line2,border:`1px solid ${CA.line2}`,borderRadius:10,overflow:"hidden",marginBottom:16}}>
             {railCells.map(([k,v],i)=>(
               <div key={i} style={{background:CA.navy3,padding:"10px 12px"}}>
                 <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:9.5,letterSpacing:1.5,textTransform:"uppercase",color:CA.faint}}>{k}</div>
@@ -2634,21 +2661,21 @@ function CoachEdition({digest, athletes, coach, school, onBack, onRead}){
             ? {fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:10,letterSpacing:1.5,textTransform:"uppercase",color:labelColor,marginBottom:6}
             : {fontFamily:"'Bebas Neue'",fontSize:13,letterSpacing:1.5,color:labelColor,marginBottom:6};
           return (
-            <div key={i} style={{...box,padding:"12px 14px",marginBottom:9}}>
+            <div key={i} className="c-up" style={{...box,...reveal(),padding:"12px 14px",marginBottom:9}}>
               <div style={labelStyle}>{s.label}</div>
               <div style={{color:EDITION_BODY,fontSize:13.5,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{s.body}</div>
             </div>
           );
         })}
         {team&&((team.strengths&&team.strengths.length)||(team.weaknesses&&team.weaknesses.length))&&(
-          <div style={{background:CA.navy3,border:`1px solid ${CA.line2}`,borderRadius:10,padding:14,marginTop:6}}>
+          <div className="c-up" style={{...reveal(),background:CA.navy3,border:`1px solid ${CA.line2}`,borderRadius:10,padding:14,marginTop:6}}>
             <div style={{fontFamily:"'Bebas Neue'",fontSize:13,letterSpacing:1.5,color:CA.muted2,marginBottom:8}}>PROGRAM STRENGTHS &amp; WEAKNESSES</div>
             {(team.strengths||[]).map((s,i)=><TierBar key={"s"+i} name={s.name} tier={s.tierName} avgTier={s.avgTier} color={CA.green}/>)}
             {(team.weaknesses||[]).map((s,i)=><TierBar key={"w"+i} name={s.name} tier={s.tierName} avgTier={s.avgTier} color={CA.red}/>)}
           </div>
         )}
         {team&&team.notablePRs&&team.notablePRs.length>0&&(
-          <div style={{background:`${CA.accent}14`,border:`1px solid ${CA.accent}44`,borderRadius:10,padding:14,marginTop:12}}>
+          <div className="c-up" style={{...reveal(),background:`${CA.accent}14`,border:`1px solid ${CA.accent}44`,borderRadius:10,padding:14,marginTop:12}}>
             <div style={{fontFamily:"'Bebas Neue'",fontSize:13,letterSpacing:1.5,color:CA.accent,marginBottom:8}}>WINS TO SHARE</div>
             {team.notablePRs.slice(0,5).map((p,i,arr)=>(
               <div key={i} style={{display:"flex",alignItems:"center",gap:9,padding:"6px 0",borderBottom:i<arr.length-1?`1px solid ${CA.border}80`:"none"}}>
@@ -2659,7 +2686,9 @@ function CoachEdition({digest, athletes, coach, school, onBack, onRead}){
             <ShareWinsButton run={()=>exportWins(team,coach,school)}/>
           </div>
         )}
-        <CoachCheckin digest={digest} team={team} coach={coach} onRead={onRead}/>
+        <div className="c-up" style={reveal()}>
+          <CoachCheckin digest={digest} team={team} coach={coach} onRead={onRead}/>
+        </div>
       </div>
     </div>
   );
@@ -2737,7 +2766,23 @@ function AccountTab({coach,allCoaches,school,athletes,loadAll}){
 
                   <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:14,padding:20,marginBottom:16}}>
                     <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2,marginBottom:14}}>COACHES</div>
-                    {schoolCoachesList.length===0?<div style={{color:CA.muted,fontSize:13,marginBottom:12}}>No coaches added yet.</div>:schoolCoachesList.map(c=>{
+                    {/* The signed-in admin was previously invisible here — the list only
+                        ever mapped schoolCoachesList, which filters role!=="admin" (that
+                        filter exists so the ADD-COACH seat count/limit only counts
+                        assistant coaches, not the account owner) — so Coach Reed's own
+                        access code lived nowhere in the UI. Show self first, pinned,
+                        with no Remove button. */}
+                    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:`1px solid ${CA.border}`}}>
+                      <div>
+                        <div style={{color:CA.text,fontWeight:600,fontSize:13,display:"flex",alignItems:"center",gap:7}}>
+                          {coach.name}
+                          <span style={{background:`${CA.accent}22`,border:`1px solid ${CA.accent}55`,color:CA.accent,borderRadius:5,padding:"1px 6px",fontSize:9.5,fontWeight:700,letterSpacing:0.5}}>YOU</span>
+                          <span style={{color:CA.muted,fontSize:10.5,fontWeight:600,letterSpacing:0.5}}>{coach.role==="admin"?"ADMIN / AD":(coach.role||"COACH").toUpperCase()}</span>
+                        </div>
+                        <div style={{color:CA.muted,fontSize:11}}>{coach.email} · Code: {coach.access_code}{coach.access_code&&codeBtn(coach.access_code)} · {athletes.filter(a=>a.coach_id===coach.id).length} athlete{athletes.filter(a=>a.coach_id===coach.id).length!==1?"s":""}</div>
+                      </div>
+                    </div>
+                    {schoolCoachesList.length===0?<div style={{color:CA.muted,fontSize:13,margin:"12px 0"}}>No assistant coaches added yet.</div>:schoolCoachesList.map(c=>{
                       const athCount=athletes.filter(a=>a.coach_id===c.id).length;
                       return(
                         <div key={c.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:`1px solid ${CA.border}`}}>
