@@ -104,6 +104,8 @@ export const pushupParse = {
  *   blockStripeJs — abort requests to js.stripe.com (exercises the checkout failure state)
  *   subscriptionDelayMs — latency for /api/create-subscription so "Loading secure
  *                         checkout…" is reliably observable (default 300)
+ *   giftResult — response for /api/validate-gift-code (default: the classic
+ *                one-free-month gift code). Shape mirrors api/validate-gift-code.js.
  */
 export async function mockApi(page, options = {}) {
   const {
@@ -112,6 +114,13 @@ export async function mockApi(page, options = {}) {
     chatReply = "Solid work. Keep stacking sessions.",
     blockStripeJs = false,
     subscriptionDelayMs = 300,
+    giftResult = {
+      valid: true,
+      promotionCodeId: "promo_smoketest",
+      kind: "gift",
+      discountLabel: "First month of Pro free",
+      terms: { freeForever: false, freeMonths: 0, amountOff: 1499, percentOff: 0, repeating: false, forever: false },
+    },
   } = options;
 
   const calls = [];
@@ -226,6 +235,14 @@ export async function mockApi(page, options = {}) {
     // the 7-day-trial path). PaymentStep only needs these two fields to proceed
     // to the Stripe.js mount.
     return route.fulfill(json({ clientSecret: "seti_smoketest_secret_smoketest", mode: "setup" }));
+  });
+
+  // ── /api/validate-gift-code — the Apply-code step ──────────────────────────
+  // Real endpoint resolves the code against Stripe and returns the coupon's terms;
+  // the disclosure copy is built from them, so specs can hand it any offer shape.
+  await page.route("**/api/validate-gift-code", async (route) => {
+    record(route);
+    return route.fulfill(json(giftResult));
   });
 
   // ── External hosts: keep the suite deterministic offline ───────────────────

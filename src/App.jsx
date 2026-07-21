@@ -69,6 +69,13 @@ const PRICE_LABEL = {
   pro:   { monthly: "$14.99/month", annual: "$150.00/year" },
   elite: { monthly: "$99.99/month", annual: "$1,000.00/year" },
 };
+// Same prices in cents — the payment disclosure does real math against a discount
+// (a code's amount_off, say) instead of hardcoding one offer's arithmetic.
+const PRICE_CENTS = {
+  pro:   { monthly: 1499, annual: 15000 },
+  elite: { monthly: 9999, annual: 100000 },
+};
+const usd = (cents) => `$${(cents / 100).toFixed(2)}`;
 
 const SPORTS = ["Football","Basketball","Volleyball","Soccer","Baseball","Archery","Olympic Weightlifting","Running","General Fitness"];
 
@@ -2748,12 +2755,24 @@ function InstallPrompt({manual, onClose}) {
 // ─── STRIPE PAYMENT ─────────────────────────────────────────────────────────
 // Required pre-purchase disclosures (T&C compliance + Stripe). Rendered ABOVE the
 // confirm button. Branches on the standard 7-day-trial path vs the gift-code path.
-function PaymentDisclosures({tier, billing, giftApplied, tester=false, trialDays=7}) {
+function PaymentDisclosures({tier, billing, giftApplied, giftTerms=null, tester=false, trialDays=7}) {
   const priceLabel = PRICE_LABEL[tier]?.[billing] || "";
   const trialChargeDate = fmtDate(Date.now() + trialDays*24*60*60*1000);
-  const giftMonthlyChargeDate = (()=>{ const d=new Date(); d.setMonth(d.getMonth()+1); return fmtDate(d); })();
+  // Free months come from the code itself (1 for the classic gift, 3 for the event
+  // prize), so the first-charge date is the end of the free run, not always +1 month.
+  const freeMonths = Math.max(1, giftTerms?.freeMonths || 1);
+  const giftMonthlyChargeDate = (()=>{ const d=new Date(); d.setMonth(d.getMonth()+freeMonths); return fmtDate(d); })();
   const giftAnnualRenewDate  = (()=>{ const d=new Date(); d.setFullYear(d.getFullYear()+1); return fmtDate(d); })();
   const renewWord = billing==="annual" ? "year" : "month";
+  // $0 today when the discount covers the whole first invoice (the classic gift code
+  // is $14.99 off a $14.99 plan); anything left over is charged now and said so.
+  const fullCents = PRICE_CENTS[tier]?.[billing] || 0;
+  const chargeNow = Math.max(0, fullCents - (giftTerms?.amountOff || 0));
+  // A forever discount keeps applying, so the renewal is the discounted amount —
+  // not the list price the plan header shows.
+  const laterLabel = giftTerms?.forever && giftTerms.amountOff > 0
+    ? `${usd(chargeNow)}/${renewWord}` : priceLabel;
+  const nextChargeDate = billing==="annual" ? giftAnnualRenewDate : giftMonthlyChargeDate;
   return (
     <div style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:10,padding:"12px 14px",marginBottom:14}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
@@ -2770,9 +2789,13 @@ function PaymentDisclosures({tier, billing, giftApplied, tester=false, trialDays
         </div>
       ) : (
         <div style={{color:CA.muted2,fontSize:12,lineHeight:1.6}}>
-          {billing==="annual"
-            ? <>Your gift code takes $14.99 off today, so you'll be charged <b style={{color:CA.text}}>$135.01</b> now, then <b style={{color:CA.text}}>{priceLabel}</b> on <b style={{color:CA.text}}>{giftAnnualRenewDate}</b>.</>
-            : <>Your first month of Pro is free. You will be charged <b style={{color:CA.text}}>{priceLabel}</b> on <b style={{color:CA.text}}>{giftMonthlyChargeDate}</b> unless you cancel before then.</>}
+          {giftTerms?.freeForever
+            ? <>Your code makes <b style={{color:CA.text}}>{tier==="elite"?"Elite":"Pro"}</b> free for as long as it stays active — <b style={{color:CA.text}}>you won't be charged</b>. A card is required to activate.</>
+            : (giftTerms?.amountOff > 0 && chargeNow > 0)
+            ? <>Your code takes <b style={{color:CA.text}}>{usd(giftTerms.amountOff)}</b> off{giftTerms.forever?<> every {renewWord}</>:" today"}, so you'll be charged <b style={{color:CA.text}}>{usd(chargeNow)}</b> now, then <b style={{color:CA.text}}>{laterLabel}</b> on <b style={{color:CA.text}}>{nextChargeDate}</b>.</>
+            : billing==="annual"
+            ? <>Your code covers your first {renewWord} — <b style={{color:CA.text}}>no charge today</b>. You will be charged <b style={{color:CA.text}}>{laterLabel}</b> on <b style={{color:CA.text}}>{nextChargeDate}</b> unless you cancel before then.</>
+            : <>Your first {freeMonths>1?<b style={{color:CA.text}}>{freeMonths} months</b>:"month"} of Pro {freeMonths>1?"are":"is"} free. You will be charged <b style={{color:CA.text}}>{laterLabel}</b> on <b style={{color:CA.text}}>{nextChargeDate}</b> unless you cancel before then.</>}
         </div>
       )}
       <div style={{color:CA.muted,fontSize:11,lineHeight:1.6,marginTop:8}}>
@@ -2801,6 +2824,7 @@ function PaymentStep({athleteId, pin, tier, billing, eventCtx, onSuccess}) {
   const [giftInput,setGiftInput] = useState("");
   const [appliedGift,setAppliedGift] = useState("");
   const [appliedKind,setAppliedKind] = useState(null); // "gift" | "tester"
+  const [giftTerms,setGiftTerms] = useState(null);     // coupon terms → disclosure copy
   const [giftMsg,setGiftMsg] = useState(null); // {ok, text}
   const [giftChecking,setGiftChecking] = useState(false);
 
@@ -2855,20 +2879,24 @@ function PaymentStep({athleteId, pin, tier, billing, eventCtx, onSuccess}) {
     try {
       const r = await fetch("/api/validate-gift-code",{
         method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({athleteId,pin,code,tier})
+        body:JSON.stringify({athleteId,pin,code,tier,billing})
       });
       const j = await r.json();
-      if(j.valid){ setAppliedGift(code); setAppliedKind(j.kind||"gift"); setGiftMsg({ok:true,text:j.discountLabel||"Code applied."}); }
+      if(j.valid){ setAppliedGift(code); setAppliedKind(j.kind||"gift"); setGiftTerms(j.terms||null); setGiftMsg({ok:true,text:j.discountLabel||"Code applied."}); }
       else { setGiftMsg({ok:false,text:j.error||"That code isn't valid."}); }
     } catch(e){ setGiftMsg({ok:false,text:"Couldn't check that code."}); }
     setGiftChecking(false);
   };
-  const removeGift = () => { setAppliedGift(""); setAppliedKind(null); setGiftInput(""); setGiftMsg(null); };
+  const removeGift = () => { setAppliedGift(""); setAppliedKind(null); setGiftTerms(null); setGiftInput(""); setGiftMsg(null); };
 
+  const giftFreeMonths = Math.max(1, giftTerms?.freeMonths || 1);
   const payLabel = appliedKind==="tester"
     ? "Activate Free Access →"
     : appliedGift
-      ? (billing==="annual" ? "Pay $135.01 →" : "Start First Month Free →")
+      ? (giftTerms?.freeForever ? "Activate Free Access →"
+        : billing==="annual" ? `Pay ${usd(Math.max(0,(PRICE_CENTS[tier]?.annual||0)-(giftTerms?.amountOff||0)))} →`
+        : giftFreeMonths>1 ? `Start ${giftFreeMonths} Months Free →`
+        : "Start First Month Free →")
       : `Start ${trialDays}-Day Free Trial →`;
 
   return (
@@ -2879,7 +2907,7 @@ function PaymentStep({athleteId, pin, tier, billing, eventCtx, onSuccess}) {
           : "Add a card to start your free trial. You won't be charged until it ends — cancel anytime."}
       </div>
 
-      <PaymentDisclosures tier={tier} billing={billing} giftApplied={!!appliedGift} tester={appliedKind==="tester"} trialDays={trialDays}/>
+      <PaymentDisclosures tier={tier} billing={billing} giftApplied={!!appliedGift} giftTerms={giftTerms} tester={appliedKind==="tester"} trialDays={trialDays}/>
 
       {/* Gift / tester code — hidden only on the event path (offers don't stack).
           Pro AND Elite show it: gift codes are Pro-only, tester codes pair with
