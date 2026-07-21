@@ -2081,9 +2081,21 @@ function ProofLetter({intro, sections, flags, label, dateStr}) {
 // Haiku extraction over the answers and persists: hard facts -> tables (weight,
 // goals, height/ask flags), soft notes -> bounded athlete_context, and an optional
 // injury-protective program tweak. Backward-compatible with legacy digests.
+// Conservative "reports active pain" check for a check-in's injury-kind answer —
+// used only as the trigger for offering to loop the coach in (spec: prefer the
+// Haiku extraction where available; this per-question keyword gate covers the
+// moment right after the athlete answers, before that extraction ever runs).
+// Requires a pain WORD and a body AREA so "all good" / "just tired" never fires.
+const PAIN_WORDS = /\b(pain|hurts?|hurting|sore|soreness|ache[sd]?|aching|tweak(?:ed)?|overworked|banged\s*up|flare[ds]?)\b/i;
+const BODY_AREAS = /\b(knees?|shoulders?|back|hips?|ankles?|elbows?|wrists?|neck|hamstrings?|quads?|calv?es|groin|feet|foot|achilles|shins?|glutes?|spine|hands?|thumbs?|fingers?|toes?|traps?|lats?|biceps?|triceps?|forearms?|rotator\s*cuff)\b/i;
+function reportsActivePain(text){
+  const t = String(text||"");
+  return PAIN_WORDS.test(t) && BODY_AREAS.test(t);
+}
+
 function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead, workoutHistory}) {
   const alreadyDone = !!(digest?.content_json?.checkin_done);
-  const [phase, setPhase] = useState(alreadyDone ? "done" : "report"); // report | dialogue | acting | done
+  const [phase, setPhase] = useState(alreadyDone ? "done" : "report"); // report | dialogue | coach-offer | acting | done
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -2094,8 +2106,11 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
   const [editingProgram, setEditingProgram] = useState(false);   // athlete is typing a question / change request into the card
   const [programEditText, setProgramEditText] = useState("");
   const [programRevising, setProgramRevising] = useState(false);
+  const [coachOfferPending, setCoachOfferPending] = useState(null); // {painMsg, reaction, hasNext, nextIdx, nextQ, willOfferDeeper, newAnswers}
+  const [coachOfferSending, setCoachOfferSending] = useState(false);
   const bottomRef = useRef(null);
   const followedUpRef = useRef(new Set()); // question ids that already got their one follow-up
+  const offeredCoachRef = useRef(false);   // only ONE "send coach a request" offer per check-in session
 
   const c = digest?.content_json || {};
   const isMonthly = digest?.digest_type === "monthly";
@@ -2228,6 +2243,23 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
     setLoading(false);
     if(reaction===NONE || reaction.includes(NONE)) reaction = "";
 
+    // Coach-loop-in offer: an injury-kind answer that reports ACTIVE pain, on a
+    // coach-locked program, for an athlete who has a coach. Joe's normal reaction
+    // (eased volume, exercise swaps, etc.) shows first; this is a follow-up
+    // interstitial, never a replacement for it. Only one offer per check-in
+    // session, and it never auto-files — the athlete must tap "Send to coach".
+    const offerCoach = q.kind==="injury" && !offeredCoachRef.current
+      && !!athlete.coach_id && !!athlete.program_locked && reportsActivePain(msg);
+    if(offerCoach){
+      offeredCoachRef.current = true;
+      if(reaction) setMessages(prev=>[...prev,{role:"assistant",content:reaction}]);
+      const area = (msg.match(BODY_AREAS)||[])[0] || "that";
+      setMessages(prev=>[...prev,{role:"assistant",content:`Want me to send Coach a request to adjust your program for that ${area.toLowerCase()}?`}]);
+      setCoachOfferPending({painMsg:msg, reaction, hasNext, nextIdx, nextQ, willOfferDeeper, newAnswers});
+      setPhase("coach-offer");
+      return;
+    }
+
     if(hasNext){
       setAskedIdx(nextIdx);
       // The reply is either "reaction + next question" or just the next question;
@@ -2242,6 +2274,62 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
       if(reaction) setMessages(prev=>[...prev,{role:"assistant",content:reaction}]);
       await finish(newAnswers);
     }
+  };
+
+  // Resume question progression after the coach-offer interstitial resolves —
+  // exactly the same branching sendMessage would have done, just deferred.
+  const resumeAfterCoachOffer = async (pending) => {
+    const {hasNext, nextIdx, nextQ, willOfferDeeper, newAnswers} = pending;
+    if(hasNext){
+      setAskedIdx(nextIdx);
+      setMessages(prev=>[...prev,{role:"assistant",content:nextQ.text}]);
+      setPhase("dialogue");
+    } else if(willOfferDeeper){
+      setMessages(prev=>[...prev,{role:"assistant",content:"That's the short version. Want to go deeper, or wrap it here?"}]);
+      setPhase("deeper-offer");
+    } else {
+      await finish(newAnswers);
+    }
+  };
+
+  // Athlete tapped "Send to coach" / "No thanks" on the pain-offer interstitial.
+  // Reuses the exact drafting + filing pattern the main chat's locked-program
+  // branch uses (change_request_draft Haiku call -> program_change_requests insert).
+  const resolveCoachOffer = async (sendIt) => {
+    const pending = coachOfferPending;
+    setCoachOfferPending(null);
+    if(!pending){ setPhase("dialogue"); return; }
+    if(!sendIt){
+      setMessages(prev=>[...prev,{role:"assistant",content:"No problem — I'll leave it as-is. Keep me posted if it changes."}]);
+      await resumeAfterCoachOffer(pending);
+      return;
+    }
+    setCoachOfferSending(true);
+    try{
+      let draft = null;
+      try{
+        const dj = await askClaude(
+          `An athlete reported pain/discomfort during their check-in and agreed to let their coach know, so the coach can decide on a program change. Author the change request their human coach will read. Return ONLY valid JSON, no markdown:\n{"suggested_change":string,"lift":string|null}\nsuggested_change: ONE concrete, actionable sentence in a coach's voice — what to adjust and why — max 140 chars, no preamble. lift: the main exercise/movement pattern involved, or null.`,
+          `Athlete: ${athlete.name}\nTheir check-in answer: "${pending.painMsg}"\n${pending.reaction?`Coach Joe's own reaction during the check-in: "${pending.reaction}"\n`:""}Current program (first 800 chars):\n${(athlete.program_text||"").slice(0,800)}`,
+          200,[],"claude-haiku-4-5","change_request_draft"
+        );
+        draft = JSON.parse(String(dj).replace(/```json|```/g,"").trim());
+      }catch(_){ /* AI unavailable — fall back to the athlete's own words below */ }
+      const suggestion = String(draft?.suggested_change||"").trim() || pending.painMsg.slice(0,140);
+      await sbInsert("program_change_requests",{
+        athlete_id: athlete.id,
+        coach_id: athlete.coach_id || null,
+        items: [{lift: draft?.lift||null, suggested_change: suggestion.slice(0,500)}],
+        reason: pending.painMsg.slice(0,1000),
+        source: "pain",
+      });
+      try{track("change_request_sent","ai");}catch(_){}
+      setMessages(prev=>[...prev,{role:"assistant",content:"📨 Sent — your coach will see it on their dashboard with your reasoning."}]);
+    }catch(_){
+      setMessages(prev=>[...prev,{role:"assistant",content:"Couldn't send that just now — bring it up with your coach directly whenever you can."}]);
+    }
+    setCoachOfferSending(false);
+    await resumeAfterCoachOffer(pending);
   };
 
   const goDeeper = () => {
@@ -2473,6 +2561,20 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
             <button onClick={goDeeper} style={{flex:1,background:CA.accent,color:"#000",border:"none",borderRadius:10,padding:"11px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14,cursor:"pointer"}}>Go deeper →</button>
             <button onClick={()=>finish(answers)} style={{flex:1,background:"transparent",color:CA.muted,border:`1px solid ${CA.border}`,borderRadius:10,padding:"11px",cursor:"pointer",fontSize:13}}>Wrap it here</button>
           </div>
+        )}
+
+        {phase==="coach-offer"&&!loading&&(
+          coachOfferSending ? (
+            <div style={{display:"flex",alignItems:"center",gap:6,padding:"8px 2px",color:CA.muted2,fontSize:12}}>
+              {[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:CA.muted,animation:"pulse 1.2s ease-in-out infinite",animationDelay:`${i*0.2}s`}}/>)}
+              <span style={{marginLeft:4}}>Sending to your coach…</span>
+            </div>
+          ) : (
+            <div style={{display:"flex",gap:8,marginTop:4}}>
+              <button onClick={()=>resolveCoachOffer(true)} style={{flex:1,background:CA.accent,color:"#000",border:"none",borderRadius:10,padding:"11px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,fontSize:14,cursor:"pointer"}}>Send to coach</button>
+              <button onClick={()=>resolveCoachOffer(false)} style={{flex:1,background:"transparent",color:CA.muted,border:`1px solid ${CA.border}`,borderRadius:10,padding:"11px",cursor:"pointer",fontSize:13}}>No thanks</button>
+            </div>
+          )
         )}
 
         {phase==="done"&&!loading&&(
