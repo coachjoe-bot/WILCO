@@ -2340,7 +2340,19 @@ async function exportWins(team, coach, school){
     led(foot,2);
     x.fillStyle=CA.steel; x.font='400 28px "DM Sans"'; x.fillText("trainwilco.com",M,foot+52);
     x.fillStyle=CA.faint; x.font=MONO; setLS("2px"); x.textAlign="right"; x.fillText("POWERED BY WILCO",W-M,foot+50); x.textAlign="left"; setLS("0px");
-    const a=document.createElement("a"); a.href=cv.toDataURL("image/png"); a.download="wilco-wins.png"; a.click();
+    // Mobile-first save: the old bare `<a download>` click silently no-ops on iOS
+    // Safari / installed PWAs — the coach tapped Share and nothing happened. The
+    // Web Share API hands the PNG to the native share sheet ("Save Image" drops it
+    // straight into Photos); desktop keeps the plain download. AbortError = the
+    // coach closed the sheet on purpose — not a failure, don't double-fire.
+    const blob = await new Promise((res)=>cv.toBlob(res,"image/png"));
+    const file = blob ? new File([blob],"wilco-wins.png",{type:"image/png"}) : null;
+    if(file && navigator.canShare && navigator.canShare({files:[file]})){
+      try{ await navigator.share({files:[file],title:"WILCO — Wins This Week"}); return; }
+      catch(err){ if(err?.name==="AbortError") return; /* else fall through to download */ }
+    }
+    const a=document.createElement("a"); a.href=cv.toDataURL("image/png"); a.download="wilco-wins.png";
+    document.body.appendChild(a); a.click(); a.remove();
   }catch(e){ console.error("wins export failed",e); }
 }
 
