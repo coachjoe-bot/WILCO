@@ -12,7 +12,7 @@ import {
 // App.jsx's multi-athlete groupIntoSessions already imported above.
 import {
   groupIntoSessions as pcGroup, compareProgramVsActual, buildOneRMs, aggregateInjuries, totalSetVolume,
-  trueImprovementPRs, classifyTiers, blendAdherenceScore, adherenceBreakdown,
+  trueImprovementPRs, classifyTiers, blendAdherenceScore, adherenceBreakdown, getPD,
 } from "./proofcore.js";
 import { computeGritSnapshot, TIER_NAMES, TIER_COLORS, getBenchKey } from "./grit.js";
 // Shared team-analytics math (C2): the server endpoint (api/coach-analytics) computes
@@ -1604,7 +1604,7 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
       const daysSince = lastAt?Math.floor((now-lastAt)/DAYMS):null;
       // per-day logged flags for the heatmap — fixed Mon..Sun; days after today = null (future)
       const days = wk.days.map((day,i)=> i>todayIdx ? null :
-        (wo.some(w=>{const t=new Date(w.created_at).getTime();return t>=day.t&&t<day.t+DAYMS&&(w.parsed_data?.exercises?.length>0||w.parsed_data?.run_data);})?1:0));
+        (wo.some(w=>{const t=new Date(w.created_at).getTime();if(t<day.t||t>=day.t+DAYMS)return false;const p=getPD(w);return (p.exercises?.length>0||p.run_data);})?1:0));
       const snap = computeGritSnapshot(wo, manByAth[a.id]||[], {bodyweightLbs:a.weight_lbs||a.weight||0, gender:a.gender, age:a.age});
       // (the per-lift wk-vs-wk e1RM deltas that used to be computed here now come
       // server-side as `analytics.movers` — see api/coach-analytics.js)
@@ -1807,12 +1807,15 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
             const day = D.dayLabels[dayPick.di];
             if(!r||!day) return null;
             const first = r.a.name.split(" ")[0];
-            // entries logged inside that calendar day, across the week's sessions
+            // entries logged inside that calendar day, across the week's sessions.
+            // getPD (proofcore) instead of raw parsed_data reads: legacy rows can
+            // carry parsed_data as a JSON STRING, and the unguarded access made the
+            // panel claim "no exercise details" for a day that clearly had them.
             const entries = r.thisWk.flat().filter(w=>{const t=new Date(w.created_at).getTime();return t>=day.t&&t<day.t+DAYMS;});
-            const exs = entries.flatMap(w=>w.parsed_data?.exercises||[]);
-            const runs = entries.map(w=>w.parsed_data?.run_data).filter(Boolean);
-            const feel = entries.map(w=>w.parsed_data?.session_feel).find(Boolean);
-            const pains = entries.flatMap(w=>w.parsed_data?.pain_flags||[]);
+            const exs = entries.flatMap(w=>getPD(w).exercises||[]);
+            const runs = entries.map(w=>getPD(w).run_data).filter(Boolean);
+            const feel = entries.map(w=>getPD(w).session_feel).find(Boolean);
+            const pains = entries.flatMap(w=>getPD(w).pain_flags||[]);
             const exLine = (ex)=>{
               const sets = getExerciseSets(ex); const working = sets.some(s=>!s.warmup)?sets.filter(s=>!s.warmup):sets;
               const reps = working.reduce((m,s)=>Math.max(m,s.reps||0),0)||ex.reps||0;
