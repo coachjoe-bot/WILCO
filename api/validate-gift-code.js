@@ -2,7 +2,10 @@
 // confirm, so the UI can show adjusted terms (or a clear inline error). The code
 // is re-validated in create-subscription; never trust the client's "valid" claim.
 
-import { applyCors, verifyAthlete, getStripe, resolvePromotionCode } from "./_stripe.js";
+import {
+  applyCors, verifyAthlete, getStripe, resolvePromotionCode,
+  describeCoupon, couponTerms, codeIsAnnualSafe,
+} from "./_stripe.js";
 
 // Vercel Pro: cap this function's execution time. Was implicitly the Hobby 10s
 // wall; 15s gives external Stripe/email/DB calls room without paying for idle time.
@@ -12,7 +15,7 @@ export default async function handler(req, res) {
   if (applyCors(req, res)) return;
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { athleteId, pin, code, tier } = req.body || {};
+  const { athleteId, pin, code, tier, billing } = req.body || {};
 
   try {
     const athlete = await verifyAthlete({ athleteId, pin });
@@ -51,12 +54,19 @@ export default async function handler(req, res) {
     if (athlete.redeemed_gift_code) {
       return res.status(200).json({ valid: false, error: "You've already redeemed a gift code." });
     }
+    // Mirrors the same guard in create-subscription — catch it here so the athlete
+    // sees it on Apply rather than after filling in a card.
+    if (billing === "annual" && !codeIsAnnualSafe(result.coupon)) {
+      return res.status(200).json({ valid: false, error: "This code applies to the monthly plan." });
+    }
 
     return res.status(200).json({
       valid: true,
       promotionCodeId: result.promotionCodeId,
       kind: "gift",
-      discountLabel: "First month of Pro free",
+      discountLabel: describeCoupon(result.coupon),
+      // Terms drive the payment disclosure copy on the client.
+      terms: couponTerms(result.coupon),
     });
   } catch (e) {
     // Auth/validation errors carry a status; business "invalid" returns 200 above.

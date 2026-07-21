@@ -63,6 +63,20 @@ export function tierForPrice(priceId) {
 // Gift coupon — same ID in live and test (we set the id explicitly when mirroring).
 export const GIFT_COUPON_ID = process.env.STRIPE_GIFT_COUPON_ID || "WILCO_GIFT_PRO_MONTH";
 
+// Other Pro discount coupons that redeem through the SAME path as a friend gift:
+// Pro-only, one per athlete, and the holder stays a normal customer in the revenue
+// metrics (unlike a tester code) — they just carry a discount for a while. Add a
+// coupon here whenever one is minted in Stripe, or the code is rejected in-app as
+// "That isn't a WILCO code" no matter how valid Stripe thinks it is.
+//   grip-test champ — event prize, 100% off for 3 months, capped at 2 redemptions
+//   founding free / $5 — founding cohort, forever discounts, capped in Stripe
+export const GIFT_COUPON_IDS = new Set([
+  GIFT_COUPON_ID,
+  process.env.STRIPE_GRIP_TEST_COUPON_ID || "WILCO_GRIP_TEST_CHAMP_3MO",
+  process.env.STRIPE_FOUNDING_FREE_COUPON_ID || "WILCO_FOUNDING_FREE_FOREVER",
+  process.env.STRIPE_FOUNDING_5_COUPON_ID || "WILCO_FOUNDING_5_FOREVER",
+]);
+
 // Tester coupons — 100%-off-FOREVER, product-scoped, capped (25 redemptions each).
 // Redeemable in-app through the same code field as gift codes, but they mark the
 // subscription as a friend-tester (excluded from all revenue metrics — see
@@ -198,9 +212,11 @@ export async function verifyAthlete({ athleteId, pin }) {
 
 // ── Gift / promotion code validation ─────────────────────────────────────────
 // Resolve a typed code to a live, unredeemed WILCO promotion code. Accepts both
-// friend gift codes (GIFT_COUPON_ID) and the tester codes (TESTER_COUPONS).
-// Returns { valid:true, promotionCodeId, promo, kind:"gift"|"tester", tier } where
-// tier is the tester code's scoped tier (null for gift codes), or { valid:false, error }.
+// friend gift + other Pro discount codes (GIFT_COUPON_IDS) and testers (TESTER_COUPONS).
+// Returns { valid:true, promotionCodeId, promo, coupon, kind:"gift"|"tester", tier }
+// where tier is the tester code's scoped tier (null for gift codes), or
+// { valid:false, error }. The coupon is fetched so callers can describe the actual
+// terms — a gift code is no longer always "one free month".
 export async function resolvePromotionCode(stripe, code) {
   const clean = String(code || "").trim().toUpperCase();
   if (!clean) return { valid: false, error: "Enter a code." };
@@ -217,7 +233,7 @@ export async function resolvePromotionCode(stripe, code) {
     null;
 
   const testerTier = TESTER_COUPONS[couponId] || null; // "pro" | "elite" | null
-  const isGift = couponId === GIFT_COUPON_ID;
+  const isGift = GIFT_COUPON_IDS.has(couponId);
   if (!testerTier && !isGift) return { valid: false, error: "That isn't a WILCO code." };
 
   if (promo.max_redemptions != null && promo.times_redeemed >= promo.max_redemptions)
@@ -226,14 +242,64 @@ export async function resolvePromotionCode(stripe, code) {
       error: testerTier ? "That tester code has been fully redeemed." : "That gift code has already been used.",
     };
 
+  // Terms live on the coupon, not the promotion code, and the newer API shape
+  // returns it as a bare id — retrieve it so the caller can label the offer.
+  let coupon = null;
+  try { coupon = await stripe.coupons.retrieve(couponId); } catch { /* label falls back */ }
+
   return {
     valid: true,
     promotionCodeId: promo.id,
     promo,
+    coupon,
     kind: testerTier ? "tester" : "gift",
     tier: testerTier,
   };
 }
+
+// Machine-readable terms for a coupon. The client needs these to write an accurate
+// auto-renew disclosure (what's free, for how long, what gets charged and when) —
+// it used to assume every code was the one-month gift, which is now wrong.
+//   freeForever  — 100% off with no end (tester-style)
+//   freeMonths   — fully-free months at the start (0 when it's only a partial discount)
+//   amountOff    — cents off each discounted invoice (0 for percent-based)
+//   repeating    — discount spans a fixed number of months (see annual guard below)
+export function couponTerms(coupon) {
+  if (!coupon) return { freeForever: false, freeMonths: 0, amountOff: 0, percentOff: 0, repeating: false, forever: false };
+  const repeating = coupon.duration === "repeating";
+  const months = repeating ? coupon.duration_in_months || 1 : 1;
+  const full = coupon.percent_off === 100;
+  return {
+    freeForever: full && coupon.duration === "forever",
+    freeMonths: full && coupon.duration !== "forever" ? months : 0,
+    amountOff: coupon.amount_off || 0,
+    percentOff: coupon.percent_off || 0,
+    repeating,
+    forever: coupon.duration === "forever",
+  };
+}
+
+// Human terms for a coupon, shown at the Apply-code step ("First 3 months of Pro
+// free"). Derived from the coupon itself so a new offer never inherits another's
+// copy — the 3-month event prize and the founding discounts all read correctly.
+export function describeCoupon(coupon, tierLabel = "Pro") {
+  const t = couponTerms(coupon);
+  if (!coupon) return `${tierLabel} discount applied`;
+  const span = coupon.duration === "forever" ? "every month"
+    : t.repeating && coupon.duration_in_months > 1 ? `for ${coupon.duration_in_months} months`
+    : "your first month";
+  if (t.freeForever) return `${tierLabel} free, always`;
+  if (t.freeMonths > 1) return `First ${t.freeMonths} months of ${tierLabel} free`;
+  if (t.freeMonths === 1) return `First month of ${tierLabel} free`;
+  if (t.percentOff) return `${t.percentOff}% off ${span}`;
+  if (t.amountOff) return `$${(t.amountOff / 100).toFixed(2)} off ${span}`;
+  return `${tierLabel} discount applied`;
+}
+
+// A month-scoped discount on the ANNUAL price is a trap: Stripe applies a
+// "repeating, 3 months" coupon to the whole yearly invoice, so a 3-months-free
+// prize would silently hand over a free YEAR. Month-scoped codes are monthly-only.
+export const codeIsAnnualSafe = (coupon) => !couponTerms(coupon).repeating;
 
 // Flip the matching entry on the GIFTER's profile to "redeemed" once a friend uses
 // their code. The gifter is found via the promotion code's metadata.

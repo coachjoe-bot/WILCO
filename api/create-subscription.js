@@ -11,6 +11,7 @@ import {
   getStripe,
   priceFor,
   resolvePromotionCode,
+  codeIsAnnualSafe,
   markGiftRedeemed,
   sbAthletePatch,
   epochToISO,
@@ -172,6 +173,9 @@ export default async function handler(req, res) {
         }
         if (athlete.redeemed_gift_code) {
           return res.status(400).json({ error: "You've already redeemed a gift code." });
+        }
+        if (interval === "annual" && !codeIsAnnualSafe(resolved.coupon)) {
+          return res.status(400).json({ error: "This code applies to the monthly plan." });
         }
         promotionCodeId = resolved.promotionCodeId;
         giftApplied = true;
