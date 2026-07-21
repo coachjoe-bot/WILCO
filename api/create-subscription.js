@@ -101,27 +101,44 @@ export default async function handler(req, res) {
     //    The reliable signal for "finished checkout" is a saved payment method:
     //    Stripe only sets default_payment_method once the SetupIntent/PaymentIntent
     //    confirms (save_default_payment_method: "on_subscription"). So block only a
-    //    live sub that has a card on file; cancel any other lingering sub and cleanly
-    //    recreate below with the current selection (never orphaning a subscription).
+    //    live sub that has a card on file.
+    //
+    //    The stale attempt is NOT canceled here. Whether it can be REUSED is decided
+    //    after the code resolves (step 2b): Stripe burns a promotion code's
+    //    redemption slot the moment a subscription is created with it and never
+    //    returns the slot — not on cancel, not on discount removal (verified
+    //    empirically 2026-07-21). Cancel-and-recreate therefore consumes a capped
+    //    code (per-friend gifts max 1, event prizes max 2) on the athlete's own
+    //    retry. The expands mirror what the create call asks for, so a reused sub
+    //    hands back a client secret the same way a fresh one does.
+    let prevSub = null;
     if (athlete.stripe_subscription_id) {
       try {
-        const prev = await stripe.subscriptions.retrieve(athlete.stripe_subscription_id);
-        if (prev) {
-          const live = ["trialing", "active", "past_due"].includes(prev.status);
-          const completed = !!prev.default_payment_method; // card saved = checkout done
-          if (live && completed) {
-            return res
-              .status(400)
-              .json({ error: "You already have an active subscription. Manage it in Settings." });
-          }
-          if (prev.status !== "canceled" && prev.status !== "incomplete_expired") {
-            await stripe.subscriptions.cancel(prev.id).catch(() => {});
-          }
-        }
+        prevSub = await stripe.subscriptions.retrieve(athlete.stripe_subscription_id, {
+          expand: ["discounts", "latest_invoice.payment_intent", "pending_setup_intent"],
+        });
       } catch (_) {
         /* subscription not found / already gone — fine, continue */
       }
     }
+    if (prevSub) {
+      const live = ["trialing", "active", "past_due"].includes(prevSub.status);
+      const completed = !!prevSub.default_payment_method; // card saved = checkout done
+      if (live && completed) {
+        return res
+          .status(400)
+          .json({ error: "You already have an active subscription. Manage it in Settings." });
+      }
+    }
+    // Promotion codes the athlete's own unfinished attempt already redeemed. A slot
+    // counted against one of these is the athlete's own, so a fully-redeemed code
+    // must still validate for them — reusing the sub doesn't consume another slot.
+    const heldPromoIds = new Set(
+      (prevSub?.discounts || [])
+        .map((d) => (typeof d === "string" ? null
+          : typeof d.promotion_code === "string" ? d.promotion_code : d.promotion_code?.id))
+        .filter(Boolean)
+    );
 
     // 1. Customer — reuse if present, else create and persist immediately so a
     //    retried payment step doesn't create a duplicate customer.
@@ -146,9 +163,13 @@ export default async function handler(req, res) {
     let promotionCodeId = null;
     let giftApplied = false;
     let testerApplied = false;
+    let capExhausted = false; // cap full, athlete vouched only by their own held slot
     if (giftCode && giftCode.trim()) {
-      const resolved = await resolvePromotionCode(stripe, giftCode);
+      const resolved = await resolvePromotionCode(stripe, giftCode, { heldPromoIds });
       if (!resolved.valid) return res.status(400).json({ error: resolved.error });
+      capExhausted =
+        resolved.promo.max_redemptions != null &&
+        resolved.promo.times_redeemed >= resolved.promo.max_redemptions;
 
       if (resolved.kind === "tester") {
         // Tester codes are product-scoped: the selected tier must match the code's
@@ -171,7 +192,11 @@ export default async function handler(req, res) {
         if (owned.some((g) => g.code?.toUpperCase() === giftCode.trim().toUpperCase())) {
           return res.status(400).json({ error: "You can't redeem your own gift code." });
         }
-        if (athlete.redeemed_gift_code) {
+        // Same code = the athlete retrying their OWN in-flight redemption (it's
+        // stamped at sub creation, before the card confirms — see step 6), which
+        // must not lock them out of finishing checkout. A different code is a real
+        // second redemption and stays blocked.
+        if (athlete.redeemed_gift_code && athlete.redeemed_gift_code !== giftCode.trim().toUpperCase()) {
           return res.status(400).json({ error: "You've already redeemed a gift code." });
         }
         if (interval === "annual" && !codeIsAnnualSafe(resolved.coupon)) {
@@ -182,38 +207,80 @@ export default async function handler(req, res) {
       }
     }
 
-    // 3. Create the subscription as incomplete so the client confirms the card.
-    const params = {
-      customer: customerId,
-      items: [{ price: priceId }],
-      payment_behavior: "default_incomplete",
-      payment_settings: { save_default_payment_method: "on_subscription" },
-      expand: ["latest_invoice.payment_intent", "pending_setup_intent"],
-      metadata: {
-        athlete_id: String(athlete.id),
-        tier,
-        billing: interval,
-        ...(athlete.signup_source ? { signup_source: String(athlete.signup_source) } : {}),
-        // Tester marker end-to-end: mirrors the coupon's own metadata convention so
-        // finance can exclude these subs from revenue metrics off the subscription
-        // alone (no need to expand discounts). tier is already stamped above.
-        ...(testerApplied ? { tester_code: "true", purpose: "friend_tester" } : {}),
-        // Carried onto the subscription so the invoice.paid webhook can fire a
-        // server-side Meta Purchase keyed to the ad click.
-        ...adMeta,
-      },
-    };
-    if (giftApplied || testerApplied) {
-      params.discounts = [{ promotion_code: promotionCodeId }]; // discount replaces the trial
-    } else {
-      // Event signups get the event's longer trial (e.g. 30 days at a gym table);
-      // everyone else keeps the standard 7. Card is saved either way and auto-charges
-      // at trial end; no card by then → the subscription cancels itself.
-      params.trial_period_days = event ? event.trialDays : 7;
-      params.trial_settings = { end_behavior: { missing_payment_method: "cancel" } };
+    // 2b. Reuse the athlete's own in-flight attempt when it matches this request.
+    //     This endpoint re-runs freely (refresh, back-and-forth, Stripe.js retry),
+    //     and recreating a code-bearing subscription burns a promo redemption that
+    //     Stripe never refunds — on a capped code, the athlete's own retry could
+    //     exhaust the cap and lock out the other legitimate holders. Same price +
+    //     same promo set + still confirmable → hand back the existing client secret.
+    //     (A $0-first-invoice sub sits at status "active" with no card — that's the
+    //     normal pre-confirm state for 100%-off codes, so "active" is reusable here;
+    //     the completed guard above already screened out real card-on-file subs.)
+    let subscription = null;
+    let reused = false;
+    if (prevSub && ["incomplete", "trialing", "active"].includes(prevSub.status)) {
+      const samePrice = prevSub.items?.data?.[0]?.price?.id === priceId;
+      const samePromos = promotionCodeId
+        ? heldPromoIds.size === 1 && heldPromoIds.has(promotionCodeId)
+        : heldPromoIds.size === 0;
+      const confirmable = !!(
+        prevSub.pending_setup_intent?.client_secret ||
+        prevSub.latest_invoice?.payment_intent?.client_secret
+      );
+      if (samePrice && samePromos && confirmable) {
+        subscription = prevSub;
+        reused = true;
+      }
     }
 
-    const subscription = await stripe.subscriptions.create(params);
+    if (!reused && promotionCodeId && capExhausted) {
+      // The only redemption(s) left on this code belong to the athlete's own prior
+      // attempt, but that attempt can't be reused (price changed, or it expired).
+      // Creating a new sub would be hard-rejected by Stripe ("used up"), so refuse
+      // with the plain truth instead of a 500.
+      return res.status(400).json({ error: "That code has already been used." });
+    }
+
+    if (!reused) {
+      // The stale attempt can't serve this request — retire it, then recreate with
+      // the current selection (never orphaning a subscription).
+      if (prevSub && prevSub.status !== "canceled" && prevSub.status !== "incomplete_expired") {
+        await stripe.subscriptions.cancel(prevSub.id).catch(() => {});
+      }
+
+      // 3. Create the subscription as incomplete so the client confirms the card.
+      const params = {
+        customer: customerId,
+        items: [{ price: priceId }],
+        payment_behavior: "default_incomplete",
+        payment_settings: { save_default_payment_method: "on_subscription" },
+        expand: ["latest_invoice.payment_intent", "pending_setup_intent"],
+        metadata: {
+          athlete_id: String(athlete.id),
+          tier,
+          billing: interval,
+          ...(athlete.signup_source ? { signup_source: String(athlete.signup_source) } : {}),
+          // Tester marker end-to-end: mirrors the coupon's own metadata convention so
+          // finance can exclude these subs from revenue metrics off the subscription
+          // alone (no need to expand discounts). tier is already stamped above.
+          ...(testerApplied ? { tester_code: "true", purpose: "friend_tester" } : {}),
+          // Carried onto the subscription so the invoice.paid webhook can fire a
+          // server-side Meta Purchase keyed to the ad click.
+          ...adMeta,
+        },
+      };
+      if (giftApplied || testerApplied) {
+        params.discounts = [{ promotion_code: promotionCodeId }]; // discount replaces the trial
+      } else {
+        // Event signups get the event's longer trial (e.g. 30 days at a gym table);
+        // everyone else keeps the standard 7. Card is saved either way and auto-charges
+        // at trial end; no card by then → the subscription cancels itself.
+        params.trial_period_days = event ? event.trialDays : 7;
+        params.trial_settings = { end_behavior: { missing_payment_method: "cancel" } };
+      }
+
+      subscription = await stripe.subscriptions.create(params);
+    }
 
     // 4. What must the client confirm?
     //    Trial / $0 first invoice → SetupIntent. Real first charge → PaymentIntent.
@@ -247,7 +314,9 @@ export default async function handler(req, res) {
     });
 
     // 6. Mark the gifter's code redeemed (best-effort) and record on the redeemer.
-    if (giftApplied && promotionCodeId) {
+    //    Skipped on reuse — the original creation already ran this, and re-running
+    //    would double-count the tally on unlimited founder codes.
+    if (!reused && giftApplied && promotionCodeId) {
       try {
         await markGiftRedeemed(stripe, promotionCodeId, athlete);
         await sbAthletePatch(athlete.id, { redeemed_gift_code: giftCode.trim().toUpperCase() });

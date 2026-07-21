@@ -217,13 +217,25 @@ export async function verifyAthlete({ athleteId, pin }) {
 // where tier is the tester code's scoped tier (null for gift codes), or
 // { valid:false, error }. The coupon is fetched so callers can describe the actual
 // terms — a gift code is no longer always "one free month".
-export async function resolvePromotionCode(stripe, code) {
+// opts.heldPromoIds — promotion-code ids already redeemed by the caller's own
+// unfinished subscription attempt. Stripe burns a redemption slot at sub creation
+// and never returns it (not on cancel, not on discount removal — verified
+// 2026-07-21), so on a capped code the athlete's own retry occupies a slot. A
+// held code must keep validating for them or their retry locks them out.
+export async function resolvePromotionCode(stripe, code, { heldPromoIds } = {}) {
   const clean = String(code || "").trim().toUpperCase();
   if (!clean) return { valid: false, error: "Enter a code." };
   const list = await stripe.promotionCodes.list({ code: clean, limit: 1 });
   const promo = list.data[0];
   if (!promo) return { valid: false, error: "That code isn't valid." };
-  if (!promo.active) return { valid: false, error: "That code is no longer active." };
+  // Stripe flips `active` to false BY ITSELF the moment max_redemptions is hit, so
+  // "inactive because the caller's own attempt filled the cap" must fall through to
+  // the held-slot carve-out below — only a manual deactivation is a hard stop here.
+  const capFull = promo.max_redemptions != null && promo.times_redeemed >= promo.max_redemptions;
+  const heldByCaller = !!(heldPromoIds && heldPromoIds.has(promo.id));
+  if (!promo.active && !(capFull && heldByCaller)) {
+    return { valid: false, error: "That code is no longer active." };
+  }
   // The coupon id can surface as promo.coupon.id (legacy API shape) or nested under
   // promo.promotion.coupon (newer shape, e.g. founder codes minted via the newer API).
   // Accept either so a code links correctly regardless of how it was created.
@@ -236,7 +248,7 @@ export async function resolvePromotionCode(stripe, code) {
   const isGift = GIFT_COUPON_IDS.has(couponId);
   if (!testerTier && !isGift) return { valid: false, error: "That isn't a WILCO code." };
 
-  if (promo.max_redemptions != null && promo.times_redeemed >= promo.max_redemptions)
+  if (capFull && !heldByCaller)
     return {
       valid: false,
       error: testerTier ? "That tester code has been fully redeemed." : "That gift code has already been used.",

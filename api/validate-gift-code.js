@@ -23,9 +23,30 @@ export default async function handler(req, res) {
     const clean = String(code || "").trim().toUpperCase();
     const stripe = getStripe();
 
+    // Codes the athlete's own UNFINISHED checkout attempt already redeemed (Stripe
+    // burns the slot at sub creation, never refunds it). Those slots are theirs, so
+    // a fully-redeemed code they hold must still validate — mirrors the reuse logic
+    // in create-subscription. A completed sub doesn't vouch: that redemption is done.
+    let heldPromoIds;
+    if (athlete.stripe_subscription_id) {
+      try {
+        const prev = await stripe.subscriptions.retrieve(athlete.stripe_subscription_id, {
+          expand: ["discounts"],
+        });
+        if (!prev.default_payment_method) {
+          heldPromoIds = new Set(
+            (prev.discounts || [])
+              .map((d) => (typeof d === "string" ? null
+                : typeof d.promotion_code === "string" ? d.promotion_code : d.promotion_code?.id))
+              .filter(Boolean)
+          );
+        }
+      } catch { /* sub gone — no held slots */ }
+    }
+
     // Resolve first — we can't apply the right guards until we know whether this is
     // a gift code (Pro-only, one-per-athlete) or a tester code (product-scoped, exempt).
-    const result = await resolvePromotionCode(stripe, code);
+    const result = await resolvePromotionCode(stripe, code, { heldPromoIds });
     if (!result.valid) return res.status(200).json({ valid: false, error: result.error });
 
     // ── Tester code: pairs with its own tier only; exempt from the gift guards ──
@@ -51,7 +72,9 @@ export default async function handler(req, res) {
     if (owned.some((g) => g.code?.toUpperCase() === clean)) {
       return res.status(200).json({ valid: false, error: "You can't redeem your own gift code." });
     }
-    if (athlete.redeemed_gift_code) {
+    // Same code = the athlete retrying their own in-flight redemption (stamped at
+    // sub creation, before the card confirms) — matches create-subscription.
+    if (athlete.redeemed_gift_code && athlete.redeemed_gift_code !== clean) {
       return res.status(200).json({ valid: false, error: "You've already redeemed a gift code." });
     }
     // Mirrors the same guard in create-subscription — catch it here so the athlete
