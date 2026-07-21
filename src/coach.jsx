@@ -13,6 +13,7 @@ import {
 import {
   groupIntoSessions as pcGroup, compareProgramVsActual, buildOneRMs, aggregateInjuries, totalSetVolume,
   trueImprovementPRs, classifyTiers, blendAdherenceScore, adherenceBreakdown, getPD,
+  buildLiftHistory, detectPlateaus,
 } from "./proofcore.js";
 import { computeGritSnapshot, TIER_NAMES, TIER_COLORS, getBenchKey } from "./grit.js";
 // Shared team-analytics math (C2): the server endpoint (api/coach-analytics) computes
@@ -1593,6 +1594,32 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
     const weekAgo=wk.start, twoWk=wk.start-7*DAYMS;
     const todayIdx = wk.todayIdx;
 
+    // plateau lookup — flags with the SAME last-3-entries e1RM-flat trigger the
+    // Proof Feed digest uses for has_plateau (src/proofcore.js detectPlateaus), run
+    // live over an athlete's full session history so the dashboard agrees with
+    // Reports' PLT badge. For the human-facing duration we then walk backward from
+    // the most recent entry as long as e1RM stays within that same 2.5 lb band —
+    // the true length of the flat streak, not just the 3-entry window that tripped
+    // the flag — so "stuck ~4 weeks" reflects real timestamps, never a guess. Picks
+    // the longest-stuck lift when more than one is flagged (tie-break: heavier
+    // e1RM) so the surfaced lift is the one a coach would actually act on.
+    const athletePlateau=(wo)=>{
+      const hist = buildLiftHistory(pcGroup(wo||[]));
+      const flagged = detectPlateaus(hist);
+      if(!flagged.length) return null;
+      let best=null;
+      flagged.forEach(lift=>{
+        const entries=hist[lift];
+        const top=entries[entries.length-1];
+        let start=entries.length-1;
+        while(start>0 && Math.abs(entries[start-1].e1rm-top.e1rm)<=2.5) start--;
+        const spanDays=Math.floor((new Date(top.date).getTime()-new Date(entries[start].date).getTime())/DAYMS);
+        const cand={lift,spanDays,e1rm:top.e1rm,weight:top.weight,reps:top.reps};
+        if(!best||cand.spanDays>best.spanDays||(cand.spanDays===best.spanDays&&cand.e1rm>best.e1rm)) best=cand;
+      });
+      return best;
+    };
+
     const rows = athletes.map(a=>{
       const wo = woByAth[a.id]||[];
       const thisWk = pcGroup(wo.filter(w=>inWin(w,weekAgo,wk.end)));
@@ -1616,7 +1643,8 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
       const snap = computeGritSnapshot(wo, manByAth[a.id]||[], {bodyweightLbs:a.weight_lbs||a.weight||0, gender:a.gender, age:a.age});
       // (the per-lift wk-vs-wk e1RM deltas that used to be computed here now come
       // server-side as `analytics.movers` — see api/coach-analytics.js)
-      return {a, thisWk, lastWk, adherence, injuries, hasProgram, score, adhB, daysSince, days, snap};
+      const plateau = athletePlateau(wo);
+      return {a, thisWk, lastWk, adherence, injuries, hasProgram, score, adhB, daysSince, days, snap, plateau};
     });
 
     // sessions/day — fixed Mon–Sun; today renders but is EXCLUDED from line + slope
@@ -1692,10 +1720,13 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
     const weekPain=analytics?.weekPain||[]; // server-computed (api/coach-analytics)
     const inactive=rows.filter(r=>r.thisWk.length===0).map(r=>{ const last=(woByAth[r.a.id]||[])[0]||(woByAth[r.a.id]||[]).slice(-1)[0]; const days=last?Math.floor((now-new Date(last.created_at).getTime())/DAYMS):null; return {name:r.a.name, days}; }).sort((a,b)=>(a.days??9999)-(b.days??9999));
 
-    // briefing triage — ranked "who needs you today" (injury > quiet > adherence drop).
-    // Quiet is days-since-last-session (window-independent — a fixed Mon–Sun week
-    // would flag every weekend trainer on Monday morning otherwise); adherence
-    // waits until Thursday so pro-rated early-week scores don't cry wolf.
+    // briefing triage — ranked "who needs you today" (injury > quiet > adherence drop
+    // > plateau). Quiet is days-since-last-session (window-independent — a fixed
+    // Mon–Sun week would flag every weekend trainer on Monday morning otherwise);
+    // adherence waits until Thursday so pro-rated early-week scores don't cry wolf.
+    // Plateau is last in priority — a stall is a slower-burn concern than someone
+    // hurt, gone dark, or actively falling off program, and each athlete only ever
+    // carries ONE triage entry (first match wins).
     const triage=[];
     rows.forEach(r=>{
       const inj=r.injuries;
@@ -1709,6 +1740,12 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
         let why="";
         if(b){ const parts=[["skipping prescribed lifts",b.E],["cutting sets short",b.V],...(b.W!=null?[["working lighter than prescribed",b.W]]:[])].sort((x,y)=>x[1]-y[1]); why=` — ${parts[0][0]}`; }
         triage.push({id:r.a.id,sev:"warn",kind:"Adherence",name:r.a.name,what:`adherence slipping (${r.score}%)${why}`});
+      } else if(r.plateau){
+        const pl=r.plateau;
+        const stuck=pl.spanDays>=10;
+        const wks=Math.max(1,Math.round(pl.spanDays/7));
+        const when=stuck?`stuck ~${wks} week${wks===1?"":"s"}`:"flat across last 3 sessions";
+        triage.push({id:r.a.id,sev:"warn",kind:"Plateau",name:r.a.name,what:`${pl.lift} ${when} (${pl.weight}x${pl.reps})`});
       }
     });
     triage.sort((a,b)=>(a.sev==="crit"?0:1)-(b.sev==="crit"?0:1));
