@@ -3832,6 +3832,11 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // Pending AI log-correction plan awaiting the athlete's confirm tap:
   // {plan:<resolveLogCorrection result>, targetId:<workouts row id>}
   const [correctionPending,setCorrectionPending] = useState(null);
+  // Pending coach change-request Joe drafted for a LOCKED program, awaiting the
+  // athlete's explicit Send-to-coach tap: {suggestion, lift, source, athleteMsg}.
+  // Joe authors the suggestion — the athlete only confirms; nothing is filed
+  // until they tap Send.
+  const [changeRequestPending,setChangeRequestPending] = useState(null);
   const [showLog,setShowLog] = useState(false);
   const [showSettings,setShowSettings] = useState(false);
   const [showProgram,setShowProgram] = useState(false);
@@ -4456,6 +4461,32 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     }
   };
 
+  // Send (or drop) the change request Joe drafted for a coach-locked program.
+  // Only an explicit Send tap writes to the coach's inbox — declining (or typing
+  // instead of tapping, handled in send()) files nothing at all.
+  const confirmChangeRequest = async (sendIt) => {
+    const pending = changeRequestPending;
+    setChangeRequestPending(null);
+    if(!pending) return;
+    if(!sendIt){
+      setMessages(prev=>[...prev,{role:"assistant",content:"No problem — I won't send it. Your program stays as-is; bring it up with your coach whenever you're ready."}]);
+      return;
+    }
+    try {
+      await sbInsert("program_change_requests",{
+        athlete_id: athlete.id,
+        coach_id: athlete.coach_id || null,
+        items: [{lift: pending.lift||null, suggested_change: pending.suggestion.slice(0,500)}],
+        reason: pending.athleteMsg.slice(0,1000),
+        source: pending.source,
+      });
+      try{track("change_request_sent","ai");}catch(_){}
+      setMessages(prev=>[...prev,{role:"assistant",content:"📨 Sent. Your coach will see it on their dashboard with your reasoning — they make the final call."}]);
+    } catch(e){
+      setMessages(prev=>[...prev,{role:"assistant",content:"Couldn't send that one — try again in a bit, or bring it up with your coach directly."}]);
+    }
+  };
+
   // `overrideText` lets Quick Log submit a prepared message directly — the click
   // handler passes an event object (not a string), which safely falls back to `input`.
   const send = async (overrideText) => {
@@ -4472,6 +4503,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     if(programReplacePending) setProgramReplacePending(null);
     // Same rule for a pending log correction: typing instead of tapping = declined.
     if(correctionPending) setCorrectionPending(null);
+    // And for a drafted coach change-request: typing = don't send.
+    if(changeRequestPending) setChangeRequestPending(null);
 
     // ── Goal collection flow (first chat only) ──────────────────────────────
     if(goalCollectionActive){
@@ -4613,17 +4646,26 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       const wantsProgramWrite = parsed.is_program_update || parsed.program_append || parsed.program_create_request;
       const hasProgram = !!(updatedAthlete.program_text && updatedAthlete.program_text.trim());
       if(wantsProgramWrite && updatedAthlete.program_locked){
-        // Coach-locked: never touch it. File a change request to the coach's inbox
-        // and tell the athlete what to raise (coach-experience-vision §4).
+        // Coach-locked: never touch it — and never silently file the athlete's raw
+        // words as a "request" either. Joe AUTHORS the concrete suggested change
+        // (athletes never write the suggestion themselves), the athlete confirms
+        // with an explicit tap (Send to coach / Don't send — same chip pattern as
+        // correctionPending/programReplacePending), and only then does it land in
+        // the coach's inbox (coach-experience-vision §4). Nothing writes on decline.
         try {
-          await sbInsert("program_change_requests",{
-            athlete_id: athlete.id,
-            coach_id: athlete.coach_id || null,
-            items: [{suggested_change: msg.slice(0,500)}],
-            reason: msg.slice(0,1000),
-            source: "feedback",
-          });
-          followUp("🔒 Your coach has your program locked, so I didn't change it — but I've flagged this for them. Next time you talk to your coach, bring up that you'd like to adjust your program and why.");
+          let draft = null;
+          try {
+            const dj = await askClaude(
+              `An athlete on a coach-locked training program asked their AI coach for a program change. Author the change request their human coach will read. Return ONLY valid JSON:\n{"suggested_change":string,"lift":string|null,"source":"pain"|"plateau"|"pr"|"feedback"}\nsuggested_change: ONE concrete, actionable sentence in a coach's voice — what to change and until/unless what — max 140 chars, no preamble. lift: the main exercise involved, or null. source: "pain" if discomfort/injury drove the ask, "plateau" if a stall did, "pr" if a new max should update loading, else "feedback".`,
+              `Athlete: ${athlete.name}\nTheir message: "${msg}"\nCurrent program (first 800 chars):\n${(updatedAthlete.program_text||"").slice(0,800)}`,
+              200,[],"claude-haiku-4-5","change_request_draft"
+            );
+            draft = JSON.parse(dj.replace(/```json|```/g,"").trim());
+          } catch(_){ /* AI unavailable — fall back to the athlete's own words below */ }
+          const suggestion = String(draft?.suggested_change||"").trim() || msg.slice(0,140);
+          const source = ["pain","plateau","pr","feedback"].includes(draft?.source) ? draft.source : "feedback";
+          setChangeRequestPending({suggestion, lift: draft?.lift||null, source, athleteMsg: msg});
+          followUp(`🔒 Your coach has your program locked, so I can't change it myself — but I can send them a request. Here's what I'd ask for:\n\n"${suggestion}"\n\nWant me to send that to your coach?`);
         } catch(e){}
       } else if(parsed.program_append && !fromQuickLog){
         // "add this to my program tab" — additive. Merge onto the existing program
@@ -5098,6 +5140,18 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           <button onClick={()=>confirmSession(true)}
             style={{background:`${CA.accent}20`,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
             New session
+          </button>
+        </div>
+      ):changeRequestPending?(
+        <div className="no-sb" style={{padding:"0 14px 4px",display:"flex",gap:6,overflowX:"auto",flexShrink:0,alignItems:"center",flexWrap:"nowrap"}}>
+          <span style={{color:CA.muted,fontSize:12,flexShrink:0}}>↑</span>
+          <button onClick={()=>confirmChangeRequest(true)}
+            style={{background:`${CA.accent}20`,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+            Send to coach
+          </button>
+          <button onClick={()=>confirmChangeRequest(false)}
+            style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+            Don't send
           </button>
         </div>
       ):correctionPending?(
