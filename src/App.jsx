@@ -9,6 +9,9 @@ import { loadStripe } from "@stripe/stripe-js/pure";
 // card form is the only consumer and most sessions never reach checkout.
 const StripePayBlock = lazy(()=>import("./payform.jsx"));
 import { ConsentFlow, LEGAL_VERSION } from "./legal.jsx";
+// Quick Log draft persistence — the rules that let an athlete close the sheet mid-workout
+// and pick it back up (expiry window, staleness check, clear-on-send).
+import { qlLoad, qlSave, qlClear } from "./quicklog.js";
 // Grit strength-ranking module (e1RM primitives, name normalization, tier ladder,
 // bodyweight/age-fair thresholds) — single canonical source shared with the server
 // Proof Feed engine (api/_grit.js re-exports this file's server-safe subset).
@@ -3835,6 +3838,15 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [showProgress,setShowProgress] = useState(false);
   const [showQuickLog,setShowQuickLog] = useState(false);
   const quickLogPending = useRef(false); // the pending/next send() is a Quick Log draft — a pure workout log that must never write program_text
+  const [quickLogParked,setQuickLogParked] = useState(false); // an unfinished Quick Log draft is waiting — surfaced on the nav button
+  // Re-read whenever the sheet closes (draft just parked) or history moves (they logged, so
+  // any parked draft is spent or stale). Mirrors the sheet's own resume conditions exactly —
+  // qlLoad's expiry/staleness rules, history actually loaded, and a program still on file —
+  // so the button can never advertise a draft the sheet would then refuse to resume.
+  useEffect(()=>{
+    if(!athlete?.id || !historyLoaded || !(athlete.temp_program_text||athlete.program_text)){ setQuickLogParked(false); return; }
+    setQuickLogParked(!!qlLoad(athlete.id, workoutHistory));
+  },[athlete?.id, athlete?.program_text, athlete?.temp_program_text, historyLoaded, workoutHistory, showQuickLog]);
   const [showProfileCompletion,setShowProfileCompletion] = useState(false);
   const [profileBannerDismissed,setProfileBannerDismissed] = useState(()=>{
     try{return!!localStorage.getItem(`wilco_profile_banner_${initialAthlete.id}`);}catch{return false;}
@@ -4977,12 +4989,14 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           );
         })()}
         {/* Row 2: nav — Quick Log owns the left slot; marginRight:auto keeps the
-            right-side group pinned right even when Quick Log is hidden (free tier). */}
+            right-side group pinned right even when Quick Log is hidden (free tier).
+            Quick Log's label carries its state: an unfinished workout is visible from the
+            chat screen without opening anything, which is what makes closing it safe. */}
         <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:8}}>
         {(athlete.tier||"free")!=="free"&&(
-          <button onClick={()=>{track("screen_view","nav",{screen:"quick_log"});setShowQuickLog(true);}} title="Prefill today's workout log"
+          <button onClick={()=>{track("screen_view","nav",{screen:"quick_log"});setShowQuickLog(true);}} title={quickLogParked?"Pick up the workout you started":"Prefill today's workout log"}
             style={{flex:1,minWidth:0,marginRight:"auto",background:CA_BTN,boxShadow:`0 0 10px ${CA_GLOW}`,border:"none",color:"#02040c",borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1,display:"flex",alignItems:"center",justifyContent:"center",gap:4,whiteSpace:"nowrap"}}>
-            ⚡ QUICK LOG
+            {quickLogParked?"⚡ RESUME LOG":"⚡ QUICK LOG"}
           </button>
         )}
         <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
@@ -5262,6 +5276,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         <QuickLogSheet
           athlete={athlete}
           workoutHistory={workoutHistory}
+          historyLoaded={historyLoaded}
           messages={messages}
           goals={athleteGoals}
           contextNotes={athleteContext}
@@ -5529,7 +5544,7 @@ Rules:
 - If the instruction is NOT about editing this draft (a coaching question, chit-chat), return the current draft EXACTLY unchanged.
 - Output ONLY the log text. No commentary, no markdown.`;
 
-function QuickLogSheet({athlete, workoutHistory, messages, goals, contextNotes, onClose, onAddProgram, onSend}) {
+function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals, contextNotes, onClose, onAddProgram, onSend}) {
   const hasProgram = !!(athlete.temp_program_text||athlete.program_text);
   const [draft,setDraft] = useState("");
   const [notes,setNotes] = useState(""); // Joe's focus note — read-only reference, never sent; AI-rebuilt ONLY on a day change
@@ -5539,6 +5554,7 @@ function QuickLogSheet({athlete, workoutHistory, messages, goals, contextNotes, 
   const [editBusy,setEditBusy] = useState(false);
   const [editErr,setEditErr] = useState("");
   const [undoStack,setUndoStack] = useState([]);
+  const [resumed,setResumed] = useState(false); // drives the "picked up where you left off" banner
   const ctxRef = useRef(null);
 
   const todayStr = () => new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"});
@@ -5564,7 +5580,49 @@ function QuickLogSheet({athlete, workoutHistory, messages, goals, contextNotes, 
       }
     }catch(e){ setPhase("error"); }
   };
-  useEffect(()=>{ if(hasProgram) generate(); },[]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Boot: pick up the parked draft, or draft today from scratch. Deliberately waits for the
+  // athlete's history to land rather than deciding on mount — the staleness stamp is
+  // computed FROM that history, so a draft checked against an empty list reads as stale and
+  // gets silently redrafted over. That window is exactly when someone opens the app to
+  // resume a workout, so it's the one moment this must not get wrong.
+  const booted = useRef(false);
+  useEffect(()=>{
+    if(!hasProgram || booted.current || !historyLoaded) return;
+    booted.current = true;
+    const parked = qlLoad(athlete.id, workoutHistory);
+    if(parked){
+      setDraft(parked.draft); setNotes(parked.notes); setUndoStack(parked.undoStack);
+      setResumed(true); setPhase("ready");
+    } else generate();
+  },[historyLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Throw the parked draft away and redraft today from the program. The escape hatch for
+  // a resumed draft the athlete no longer wants (wrong day, changed their mind) — without
+  // it a stale draft is a trap, since generate() otherwise only ever runs on mount.
+  const startFresh = () => {
+    qlClear(athlete.id);
+    setResumed(false); setUndoStack([]); setNotes(""); setDraft("");
+    generate();
+  };
+
+  // Park the draft as it changes so a close — or an iOS kill — mid-workout keeps it.
+  useEffect(()=>{
+    if(phase!=="ready") return;
+    const flush = () => qlSave(athlete.id, workoutHistory, {draft,notes,undoStack});
+    const t = setTimeout(flush, 400); // debounced: this runs per keystroke in the textarea
+    // Backgrounding the PWA (music, camera, screen lock between sets) can kill it outright,
+    // and iOS won't run the pending timer first — flush on the way out.
+    const onHide = () => { if(document.visibilityState==="hidden") flush(); };
+    document.addEventListener("visibilitychange", onHide);
+    return ()=>{ clearTimeout(t); document.removeEventListener("visibilitychange", onHide); };
+  },[draft,notes,undoStack,phase]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Closing is a save point, so flush synchronously — the debounce above may not have
+  // fired yet and unmounting kills its timer.
+  const closeSheet = () => {
+    if(phase==="ready") qlSave(athlete.id, workoutHistory, {draft,notes,undoStack});
+    onClose();
+  };
 
   const applyInstruction = async () => {
     const ins = instruction.trim();
@@ -5603,7 +5661,10 @@ function QuickLogSheet({athlete, workoutHistory, messages, goals, contextNotes, 
   };
 
   const dayLabel = (draft.split("\n")[0]||"").trim();
-  const canSend = phase==="ready" && !!draft.trim() && !editBusy;
+  // There's a workout worth keeping. Unlike canSend this stays true mid-edit — the close
+  // button must not flicker back to a plain "Close" while Joe is applying a change.
+  const hasWork = phase==="ready" && !!draft.trim();
+  const canSend = hasWork && !editBusy;
 
   return (
     <div className="cyber" style={{position:"fixed",inset:0,display:"flex",flexDirection:"column",zIndex:400,maxWidth:600,margin:"0 auto"}}>
@@ -5614,7 +5675,9 @@ function QuickLogSheet({athlete, workoutHistory, messages, goals, contextNotes, 
           <div style={{background:`${CA.blue}22`,border:`1px solid ${CA.blue}`,borderRadius:4,padding:"2px 8px",color:CA.blue,fontSize:10,fontWeight:700,letterSpacing:1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{dayLabel.toUpperCase()}</div>
         )}
         <div style={{flex:1}}/>
-        <button onClick={onClose} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"4px 12px",cursor:"pointer",fontSize:12,flexShrink:0}}>✕ Close</button>
+        {/* "Save & Close" is doing teaching work, not decoration: it's the one place the
+            athlete is told their workout survives closing, at the moment they're deciding. */}
+        <button onClick={closeSheet} style={{background:"none",border:`1px solid ${hasWork?CA.blue:CA.border}`,color:hasWork?CA.blue:CA.muted,borderRadius:8,padding:"4px 12px",cursor:"pointer",fontSize:12,flexShrink:0,whiteSpace:"nowrap"}}>{hasWork?"✕ Save & Close":"✕ Close"}</button>
       </div>
 
       {phase==="noprogram"?(
@@ -5639,6 +5702,17 @@ function QuickLogSheet({athlete, workoutHistory, messages, goals, contextNotes, 
           {phase==="rest"&&(
             <div style={{background:`${CA.blue}12`,border:`1px solid ${CA.blue}50`,borderRadius:10,padding:"10px 14px",color:CA.muted2,fontSize:12,lineHeight:1.6}}>
               Your program says today's a rest day, so there's nothing to prep. Trained anyway? Tell Joe below — "I did day 2", "did some arms and cardio" — and I'll draft it.
+            </div>
+          )}
+          {/* Proof the memory worked. Telling someone their draft saves is a claim; showing
+              them the workout they left is what earns the trust to close it mid-session. */}
+          {resumed&&phase==="ready"&&(
+            <div style={{flexShrink:0,background:`${CA.blue}12`,border:`1px solid ${CA.blue}50`,borderRadius:10,padding:"9px 12px",display:"flex",alignItems:"center",gap:10}}>
+              <div style={{minWidth:0,flex:1}}>
+                <div style={{color:CA.blue,fontSize:9,fontWeight:700,letterSpacing:1.5,marginBottom:3}}>PICKED UP WHERE YOU LEFT OFF</div>
+                <div style={{color:CA.muted2,fontSize:12,lineHeight:1.5}}>Your edits are still here. Keep going.</div>
+              </div>
+              <button onClick={startFresh} style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,flexShrink:0,whiteSpace:"nowrap"}}>↻ Start fresh</button>
             </div>
           )}
           {notes&&phase==="ready"&&(
@@ -5692,7 +5766,10 @@ function QuickLogSheet({athlete, workoutHistory, messages, goals, contextNotes, 
           </div>
           {/* No safe-area bottom margin — reclaimed app-wide on purpose (47941e6);
               re-adding it here renders as a dead navy band under this button. */}
-          <button onClick={()=>onSend(draft.replace(/\s*[@+]\s*_{2,}/g,"").trim())} disabled={!canSend}
+          {/* Drop the parked copy BEFORE handing the draft off. Once it's logged, resuming it
+              would show the athlete a workout they already sent and invite a double-log —
+              the one way draft memory could actually corrupt their history. */}
+          <button onClick={()=>{qlClear(athlete.id);onSend(draft.replace(/\s*[@+]\s*_{2,}/g,"").trim());}} disabled={!canSend}
             style={{background:canSend?CA.accent:CA.navy3,color:canSend?"#000":CA.muted,border:`1px solid ${canSend?CA.accent:CA.border}`,borderRadius:12,padding:"14px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:16,cursor:canSend?"pointer":"not-allowed"}}>
             SEND TO CHAT →
           </button>
