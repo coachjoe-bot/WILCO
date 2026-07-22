@@ -953,7 +953,16 @@ export const askClaude = async (system, user, maxTokens=600, images=[], model="c
     reportError("ai", netErr, { error_type:"network", component:"askClaude", meta:{ feature } });
     throw netErr;
   }
-  const d = await r.json();
+  // Guard the parse: infrastructure failures (Vercel 5xx/timeout pages, gateway
+  // errors) return HTML, and r.json() on that surfaced a raw
+  // "SyntaxError: Unexpected token '<'" verbatim in chat. Throw a clean error
+  // instead; JSON responses (success AND our server's own {error} bodies) keep
+  // flowing through the exact same path as before.
+  const ct = r.headers.get("content-type")||"";
+  if(!ct.includes("application/json")) throw new Error(`AI unavailable (${r.status})`);
+  let d;
+  try{ d = await r.json(); }
+  catch(_){ throw new Error(`AI unavailable (${r.status})`); }
   if(d.error) throw new Error(typeof d.error==="string"?d.error:d.error.message);
   return d.content?.[0]?.text||"";
 };
@@ -1276,7 +1285,11 @@ SPORT PRIORITIES (apply the athlete's sport from the session context):
 ${Object.entries(JOEBOT_SPORTS).map(([k,v])=>`- ${k}: ${v}`).join("\n")}`;
 
 const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athleteGoals=[], athleteContext=null, onDelta=null) => {
-  const hist = history.slice(-6).map(m=>`${m.role==="user"?athlete.name:"Coach Joe"}: ${m.content}`).join("\n");
+  // Both call sites pass `history` already ending with the current message, and
+  // the current message is appended again explicitly in userMsg below — so the
+  // window must EXCLUDE the last element or every prompt carries the athlete's
+  // message twice (a verbatim duplicate of up to a whole pasted program).
+  const hist = history.slice(-7,-1).map(m=>`${m.role==="user"?athlete.name:"Coach Joe"}: ${m.content}`).join("\n");
 
   // Improved history context with explicit dates so bot can answer "what did I do Monday" etc.
   let pastContext = "";
@@ -4159,11 +4172,35 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
 
   useEffect(()=>{bottomRef.current?.scrollIntoView({behavior:"smooth"});},[messages,loading,videoLoading]);
 
+  // Persist the day's transcript — debounced. This effect used to stringify and
+  // write the FULL transcript on every messages change, i.e. once per streamed
+  // token batch; for a long day that's megabytes of synchronous main-thread
+  // string churn per reply. The pending transcript rides in a ref so the hide/
+  // pagehide/unmount flushes below always write the latest state (same
+  // eviction-safety pattern as the Quick Log draft park).
+  const chatPersistRef = useRef(null);
+  const chatPersistFlush = () => {
+    if(chatPersistRef.current===null) return;
+    try{localStorage.setItem(chatStorageKey,JSON.stringify(chatPersistRef.current));}catch(_){}
+    chatPersistRef.current = null;
+  };
   useEffect(()=>{
-    if(historyLoaded&&messages.length>0){
-      try{localStorage.setItem(chatStorageKey,JSON.stringify(messages));}catch(_){}
-    }
+    if(!(historyLoaded&&messages.length>0)) return;
+    chatPersistRef.current = messages;
+    const t = setTimeout(chatPersistFlush, 300);
+    // Backgrounding/killing the PWA mid-debounce must not lose the tail of the
+    // transcript — flush on the way out (iOS won't run the pending timer first).
+    const onHide = () => { if(document.visibilityState==="hidden") chatPersistFlush(); };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", chatPersistFlush);
+    return ()=>{
+      clearTimeout(t);
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", chatPersistFlush);
+    };
   },[messages,historyLoaded]);
+  // Unmount (logout) is also a save point — the cleanup above only cancels.
+  useEffect(()=>chatPersistFlush,[]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(()=>{
     // Prune stale per-day chat caches: every day leaves a wilco_chat_<id>_<date>
@@ -4342,13 +4379,20 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           newCount = Math.max(prevCount, groupIntoSessions([newRow, ...workoutHistory]).length);
         }
         const badgeAlreadyEarned = !!updatedAthlete.certified_badge_earned_at;
-        const badgeUpdates = {total_sessions_logged:newCount};
+        // Most messages land in an EXISTING 3-hour session bucket, so the count is
+        // usually unchanged — only write (and only re-render) when it actually moved
+        // or a badge timestamp is being stamped. Byte-identical outcomes, one fewer
+        // authenticated gateway round trip on the common path.
+        const badgeUpdates = {};
+        if(newCount!==prevCount) badgeUpdates.total_sessions_logged=newCount;
         // Stamp the "earned" timestamp the first time real workouts reach 100. We never
         // clear it (it's a keepsake of when they earned it) — the badge's VISIBILITY is
         // gated live on the count>=100 in the header, so it recomputes for everyone.
         if(newCount>=100 && !badgeAlreadyEarned) badgeUpdates.certified_badge_earned_at=new Date().toISOString();
-        await sbUpdate("athletes",updatedAthlete.id,badgeUpdates);
-        setAthlete(prev=>({...prev,total_sessions_logged:newCount,...(badgeUpdates.certified_badge_earned_at?{certified_badge_earned_at:badgeUpdates.certified_badge_earned_at}:{})}));
+        if(Object.keys(badgeUpdates).length){
+          await sbUpdate("athletes",updatedAthlete.id,badgeUpdates);
+          setAthlete(prev=>({...prev,...badgeUpdates}));
+        }
         // Fire a callout only when THIS workout crosses a milestone (prev < M <= new).
         const MILESTONES=[10,25,50,100,250,500,1000];
         const crossed=MILESTONES.filter(m=>prevCount<m && newCount>=m).sort((a,b)=>b-a)[0];
@@ -4382,6 +4426,11 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           existingManual.forEach(m=>{ manualMap[m.normalized_exercise]=m; });
         }
 
+        // Collect the new prs rows and insert them in ONE gateway call after the
+        // loop (api/data.js validates insert payloads row-by-row, so arrays are
+        // supported) — a first session with N lifts used to cost N sequential
+        // authenticated round trips before PR propagation/ack could even start.
+        const prInsertRows = [];
         for(const ex of (parsed.exercises||[])){
           if(!ex.name||ex.unit==="bodyweight") continue;
           const exE1RM = bestE1RMForExercise(ex);
@@ -4394,9 +4443,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           }, {weight:ex.weight??0, reps:ex.reps||1});
           const prE1RM = prMap[k] ? epley1RM(toLbs(prMap[k].weight, prMap[k].unit), prMap[k].reps||1) : 0;
           if(!prMap[k]){
-            await sbInsert("prs",{athlete_id:updatedAthlete.id,exercise:ex.name,weight:topSet.weight,reps:topSet.reps||1,estimated_1rm:exE1RM,unit:ex.unit||"lbs"});
+            prInsertRows.push({athlete_id:updatedAthlete.id,exercise:ex.name,weight:topSet.weight,reps:topSet.reps||1,estimated_1rm:exE1RM,unit:ex.unit||"lbs"});
           } else if(exE1RM > prE1RM){
-            await sbInsert("prs",{athlete_id:updatedAthlete.id,exercise:ex.name,weight:topSet.weight,reps:topSet.reps||1,estimated_1rm:exE1RM,unit:ex.unit||"lbs"});
+            prInsertRows.push({athlete_id:updatedAthlete.id,exercise:ex.name,weight:topSet.weight,reps:topSet.reps||1,estimated_1rm:exE1RM,unit:ex.unit||"lbs"});
             // Only let the estimate drive program-text propagation when there's no manual (actual) 1RM
             // for this lift — a manual 1RM is authoritative and should only change via an explicit attempt.
             if(!manualMap[k]){
@@ -4404,6 +4453,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             }
           }
         }
+        if(prInsertRows.length) await sbInsert("prs",prInsertRows);
 
         // Manual (actual, non-estimated) 1RM — set via chat declaration or an achieved true single.
         const oneRMAttempts = (parsed.pr_attempts||[]).filter(p=>p.reps===1 && p.achieved && p.exercise && p.weight);
@@ -4898,19 +4948,41 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // a broken stream must never leave a blank reply.
       setMessages(prev=>[...prev,{role:"assistant",content:""}]);
       let firstDelta = true;
-      const applyDelta = (chunk)=>{
-        if(firstDelta){ firstDelta = false; setLoading(false); } // hide the typing dot once text starts
+      // SSE chunks arrive far faster than frames render (~100-400 per reply); a
+      // setState per chunk meant a full React commit + transcript persist per
+      // token burst. Buffer chunks and flush once per animation frame — the text
+      // still appears the moment it can be painted, just without the redundant
+      // commits in between.
+      let deltaBuf = "";
+      let deltaRaf = null;
+      const flushDelta = ()=>{
+        deltaRaf = null;
+        if(!deltaBuf) return;
+        const chunk = deltaBuf; deltaBuf = "";
         setMessages(prev=>{
           const u=[...prev]; const last=u[u.length-1];
           if(last && last.role==="assistant") u[u.length-1]={role:"assistant",content:(last.content||"")+chunk};
           return u;
         });
       };
+      const applyDelta = (chunk)=>{
+        if(firstDelta){ firstDelta = false; setLoading(false); } // hide the typing dot once text starts
+        deltaBuf += chunk;
+        if(deltaRaf==null) deltaRaf = requestAnimationFrame(flushDelta);
+      };
       let reply="";
       try {
         reply = await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext,applyDelta);
       } catch(_streamErr){ /* fall through to the one-shot call below */ }
-      if(!reply || !reply.trim()){
+      // Stream over (success or death): cancel any queued frame so a late flush
+      // can't race the settle/fallback writes below, then settle the bubble.
+      if(deltaRaf!=null){ cancelAnimationFrame(deltaRaf); deltaRaf = null; }
+      deltaBuf = "";
+      if(reply && reply.trim()){
+        // Settle on the stream's full text — guarantees the tail chunk that was
+        // still buffered when the stream closed is never dropped.
+        setMessages(prev=>{ const u=[...prev]; const last=u[u.length-1]; if(last && last.role==="assistant") u[u.length-1]={role:"assistant",content:reply}; return u; });
+      } else {
         reply = await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext);
         setMessages(prev=>{ const u=[...prev]; const last=u[u.length-1]; if(last && last.role==="assistant") u[u.length-1]={role:"assistant",content:reply}; return u; });
       }
@@ -5147,7 +5219,18 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       await finalizeWorkout(parsed,msg,finalReply,updatedAthlete,false,false);
     } catch(e){
       console.error("JoBot error:",e);
-      setMessages(prev=>[...prev,{role:"assistant",content:`Hit a snag. Try again. (${e?.message||"unknown error"})`}]);
+      const errText = `Hit a snag. Try again. (${e?.message||"unknown error"})`;
+      // A stream+fallback double failure leaves the empty assistant placeholder
+      // (appended before streaming started) as the last message — fill it with
+      // the error instead of stranding a permanently blank Joe bubble that then
+      // persists into the localStorage transcript.
+      setMessages(prev=>{
+        const last = prev[prev.length-1];
+        if(last && last.role==="assistant" && !last.content){
+          const u=[...prev]; u[u.length-1]={role:"assistant",content:errText}; return u;
+        }
+        return [...prev,{role:"assistant",content:errText}];
+      });
     }
     setLoading(false);
   };
