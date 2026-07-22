@@ -59,7 +59,11 @@ export function pushPayload({ title, body, url = "/", type }) {
 // Send one push to one subscription row. Returns "sent", "pruned", or "failed".
 // 404/410 from the push service mean the subscription is dead — delete the row.
 // Any other failure is logged and swallowed so one bad device can't break a batch.
-export async function sendTo(sub, payload) {
+// `table` is where the row came from: athlete devices live in push_subscriptions
+// (the default), coach devices in coach_push_subscriptions — the prune must
+// target the row's OWN table (it used to hard-code the athlete table, so dead
+// coach endpoints were never actually deleted and got retried forever).
+export async function sendTo(sub, payload, table = "push_subscriptions") {
   try {
     await webpush.sendNotification(
       { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
@@ -69,7 +73,7 @@ export async function sendTo(sub, payload) {
   } catch (e) {
     const code = e && e.statusCode;
     if (code === 404 || code === 410) {
-      try { await sbDelete("push_subscriptions", `?id=eq.${encodeURIComponent(sub.id)}`); } catch { /* prune is best-effort */ }
+      try { await sbDelete(table, `?id=eq.${encodeURIComponent(sub.id)}`); } catch { /* prune is best-effort */ }
       return "pruned";
     }
     console.error(`[push] send failed (${code || "network"}) for sub ${sub.id}:`, e?.message);

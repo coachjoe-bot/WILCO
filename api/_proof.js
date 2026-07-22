@@ -30,26 +30,6 @@ export {
   trueImprovementPRs, prE1RM,
 };
 
-export const formatSessionForAI = (group) => {
-  const date = new Date(group[0].created_at).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
-  const exercises = group.flatMap((e) => getPD(e).exercises || []);
-  const runData = group.map((e) => getPD(e).run_data).find(Boolean);
-  const painFlags = group.flatMap((e) => getPD(e).pain_flags || []);
-  const feel = group.map((e) => getPD(e).session_feel).find(Boolean);
-  if (runData) {
-    const parts = [
-      runData.run_type || "run",
-      runData.distance_miles ? `${runData.distance_miles}mi` : runData.distance_km ? `${runData.distance_km}km` : "",
-      runData.duration_minutes ? `${runData.duration_minutes}min` : "",
-    ].filter(Boolean);
-    return `${date}: RUN — ${parts.join(" ")}${painFlags.length ? ` | PAIN: ${painFlags.map((p) => p.area).join(", ")}` : ""}`;
-  }
-  const exStr = exercises.map((e) =>
-    `${e.name}${e.weight ? ` ${e.weight}${e.unit === "kg" ? "kg" : "lbs"}` : ""}${e.sets && e.reps ? ` ${e.sets}x${e.reps}` : ""}`
-  ).join(", ");
-  return `${date}: ${exStr || "general training"}${feel ? ` | feel: ${feel}` : ""}${painFlags.length ? ` | PAIN: ${painFlags.map((p) => p.area).join(", ")}` : ""}`;
-};
-
 // ─── PROGRAM PARSE (§6) ───────────────────────────────────────────────────────
 export const hashProgram = (text) =>
   crypto.createHash("sha256").update(String(text || "")).digest("hex");
@@ -226,7 +206,9 @@ You are writing this week's Proof Feed digest. Return ONLY JSON with these keys 
 
 Adapt to WHATEVER program the athlete runs — do not assume a long, multi-week periodized block. Many athletes run a single week, a 4-week block, or even a one-day plan. Only talk about "the block" / block context when the brief actually shows a multi-week structure; for short or simple programs, keep it about the lifts that moved, consistency vs the days they intended to train, and the stated goal. The weekly check-in cadence is the same regardless of program length.`;
 
-  const user = `BRIEF (JSON):\n${JSON.stringify({ ...brief, volume: v ? { ...v, note: volNote } : null, volumeTrend: vt ? { ...vt, note: volumeTrendNote } : null, rank: r ? { ...r, note: rankNote } : null, painTrend: pt ? { ...pt, note: painTrendNote } : null }, null, 1)}`;
+  // Compact JSON (no pretty-print): same keys/values, ~10-20% fewer input tokens
+  // per generation call — pure prompt-formatting, the model contract is unchanged.
+  const user = `BRIEF (JSON):\n${JSON.stringify({ ...brief, volume: v ? { ...v, note: volNote } : null, volumeTrend: vt ? { ...vt, note: volumeTrendNote } : null, rank: r ? { ...r, note: rankNote } : null, painTrend: pt ? { ...pt, note: painTrendNote } : null })}`;
 
   const raw = await deps.askClaudeServer({ system, user, maxTokens: 1400, feature: "proof_weekly", attribution: deps.attribution });
   const obj = parseJsonLoose(raw) || {};
@@ -283,7 +265,7 @@ This is the MONTHLY layer that rides on top of the athlete's weekly digest (alre
 - goal_pacing: pace toward targets across the whole month/block.
 Keep each to 1-3 punchy sentences. New information only.`;
 
-  const user = `BRIEF (JSON):\n${JSON.stringify(brief, null, 1)}\n\nWEEKLY ALREADY COVERS (do not repeat): ${weekly.contentJson.sections.map((s) => s.label).join(", ")}`;
+  const user = `BRIEF (JSON):\n${JSON.stringify(brief)}\n\nWEEKLY ALREADY COVERS (do not repeat): ${weekly.contentJson.sections.map((s) => s.label).join(", ")}`;
 
   const raw = await deps.askClaudeServer({ system, user, maxTokens: 900, feature: "proof_monthly", attribution: deps.attribution });
   const obj = parseJsonLoose(raw) || {};
@@ -359,7 +341,7 @@ Return ONLY JSON with these keys (string or null — null when there's nothing r
 - team_focus: REQUIRED. End on ONE clear directive for the team this ${isMonthly ? "block" : "week"} (a programming move tied to the weak spot or the momentum), plus the handful of named individual actions worth taking. Aspire forward — an injury or a quiet athlete shapes HOW, but the headline is where the team goes next.
 ${ctx ? `\nWHAT THE COACH TOLD YOU (weigh this heavily — season, goals, how they're holding up):\n${ctx}` : ``}`;
 
-  const user = `TEAM READ (JSON):\n${JSON.stringify(modelTeam, null, 1)}`;
+  const user = `TEAM READ (JSON):\n${JSON.stringify(modelTeam)}`;
   const raw = await deps.askClaudeServer({ system, user, maxTokens: isMonthly ? 1500 : 1200, feature: "proof_coach", attribution: deps.attribution });
   const obj = parseJsonLoose(raw) || {};
 
