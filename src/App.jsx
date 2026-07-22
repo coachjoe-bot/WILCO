@@ -4426,6 +4426,11 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           existingManual.forEach(m=>{ manualMap[m.normalized_exercise]=m; });
         }
 
+        // Collect the new prs rows and insert them in ONE gateway call after the
+        // loop (api/data.js validates insert payloads row-by-row, so arrays are
+        // supported) — a first session with N lifts used to cost N sequential
+        // authenticated round trips before PR propagation/ack could even start.
+        const prInsertRows = [];
         for(const ex of (parsed.exercises||[])){
           if(!ex.name||ex.unit==="bodyweight") continue;
           const exE1RM = bestE1RMForExercise(ex);
@@ -4438,9 +4443,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           }, {weight:ex.weight??0, reps:ex.reps||1});
           const prE1RM = prMap[k] ? epley1RM(toLbs(prMap[k].weight, prMap[k].unit), prMap[k].reps||1) : 0;
           if(!prMap[k]){
-            await sbInsert("prs",{athlete_id:updatedAthlete.id,exercise:ex.name,weight:topSet.weight,reps:topSet.reps||1,estimated_1rm:exE1RM,unit:ex.unit||"lbs"});
+            prInsertRows.push({athlete_id:updatedAthlete.id,exercise:ex.name,weight:topSet.weight,reps:topSet.reps||1,estimated_1rm:exE1RM,unit:ex.unit||"lbs"});
           } else if(exE1RM > prE1RM){
-            await sbInsert("prs",{athlete_id:updatedAthlete.id,exercise:ex.name,weight:topSet.weight,reps:topSet.reps||1,estimated_1rm:exE1RM,unit:ex.unit||"lbs"});
+            prInsertRows.push({athlete_id:updatedAthlete.id,exercise:ex.name,weight:topSet.weight,reps:topSet.reps||1,estimated_1rm:exE1RM,unit:ex.unit||"lbs"});
             // Only let the estimate drive program-text propagation when there's no manual (actual) 1RM
             // for this lift — a manual 1RM is authoritative and should only change via an explicit attempt.
             if(!manualMap[k]){
@@ -4448,6 +4453,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             }
           }
         }
+        if(prInsertRows.length) await sbInsert("prs",prInsertRows);
 
         // Manual (actual, non-estimated) 1RM — set via chat declaration or an achieved true single.
         const oneRMAttempts = (parsed.pr_attempts||[]).filter(p=>p.reps===1 && p.achieved && p.exercise && p.weight);
