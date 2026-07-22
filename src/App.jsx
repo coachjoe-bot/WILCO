@@ -953,7 +953,16 @@ export const askClaude = async (system, user, maxTokens=600, images=[], model="c
     reportError("ai", netErr, { error_type:"network", component:"askClaude", meta:{ feature } });
     throw netErr;
   }
-  const d = await r.json();
+  // Guard the parse: infrastructure failures (Vercel 5xx/timeout pages, gateway
+  // errors) return HTML, and r.json() on that surfaced a raw
+  // "SyntaxError: Unexpected token '<'" verbatim in chat. Throw a clean error
+  // instead; JSON responses (success AND our server's own {error} bodies) keep
+  // flowing through the exact same path as before.
+  const ct = r.headers.get("content-type")||"";
+  if(!ct.includes("application/json")) throw new Error(`AI unavailable (${r.status})`);
+  let d;
+  try{ d = await r.json(); }
+  catch(_){ throw new Error(`AI unavailable (${r.status})`); }
   if(d.error) throw new Error(typeof d.error==="string"?d.error:d.error.message);
   return d.content?.[0]?.text||"";
 };
@@ -5151,7 +5160,18 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       await finalizeWorkout(parsed,msg,finalReply,updatedAthlete,false,false);
     } catch(e){
       console.error("JoBot error:",e);
-      setMessages(prev=>[...prev,{role:"assistant",content:`Hit a snag. Try again. (${e?.message||"unknown error"})`}]);
+      const errText = `Hit a snag. Try again. (${e?.message||"unknown error"})`;
+      // A stream+fallback double failure leaves the empty assistant placeholder
+      // (appended before streaming started) as the last message — fill it with
+      // the error instead of stranding a permanently blank Joe bubble that then
+      // persists into the localStorage transcript.
+      setMessages(prev=>{
+        const last = prev[prev.length-1];
+        if(last && last.role==="assistant" && !last.content){
+          const u=[...prev]; u[u.length-1]={role:"assistant",content:errText}; return u;
+        }
+        return [...prev,{role:"assistant",content:errText}];
+      });
     }
     setLoading(false);
   };
