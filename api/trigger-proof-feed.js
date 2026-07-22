@@ -175,11 +175,14 @@ const sendEmail = async (to, subject, html) => {
 // last_feed_push_at — so the two features can never clobber each other's timers).
 async function sendFeedPush(athlete, digest, windowType) {
   try {
-    const stateRows = await sbSelect("athlete_nudge_state", `?athlete_id=eq.${enc(athlete.id)}&select=last_feed_push_at`);
+    // Cap-state and subscription reads are independent — one parallel wave, with
+    // the early-return checks unchanged after it.
+    const [stateRows, subs] = await Promise.all([
+      sbSelect("athlete_nudge_state", `?athlete_id=eq.${enc(athlete.id)}&select=last_feed_push_at`),
+      sbSelect("push_subscriptions", `?athlete_id=eq.${enc(athlete.id)}&select=*`),
+    ]);
     const lastPush = stateRows[0]?.last_feed_push_at;
     if (lastPush && new Date(lastPush).toDateString() === new Date().toDateString()) return; // already pushed today
-
-    const subs = await sbSelect("push_subscriptions", `?athlete_id=eq.${enc(athlete.id)}&select=*`);
     if (subs.length === 0) return;
 
     // Kept deliberately simple (Will's call): call out new PRs when there are any,
@@ -262,20 +265,20 @@ async function runAthlete(athlete, batch, { dryRun = false } = {}) {
   // workouts so an old, very active athlete's history can't blow up the request.
   // The client's own Progress screen caps similarly (limit=100 on the read); 300
   // gives the rank snapshot more runway server-side without being unbounded.
-  let fullWorkouts = [], fullManual = [];
-  try {
-    [fullWorkouts, fullManual] = await Promise.all([
+  // The prior-entry lookup (rank-movement diff anchor) is independent of the
+  // history fetch, so all three selects run in ONE parallel wave — same per-group
+  // error handling as before (a failed pair falls back to [], a failed lookup to
+  // null), one fewer serial DB round trip per digest child.
+  const [[fullWorkouts, fullManual], previousEntryAt] = await Promise.all([
+    Promise.all([
       sbSelect("workouts", `?athlete_id=eq.${enc(athlete.id)}&select=created_at,parsed_data&order=created_at.desc&limit=300`),
       sbSelect("manual_one_rms", `?athlete_id=eq.${enc(athlete.id)}&select=exercise,normalized_exercise,weight,unit`),
-    ]);
-  } catch (e) { console.error("[proof-feed] full-history fetch failed:", e.message); }
-
-  // Find this athlete's most recent PRIOR entry (before today) to diff rank against.
-  let previousEntryAt = null;
-  try {
-    const prior = await sbSelect("proof_digests", `?athlete_id=eq.${enc(athlete.id)}&digest_type=in.(weekly,monthly)&select=created_at&order=created_at.desc&limit=1`);
-    previousEntryAt = prior[0]?.created_at || null;
-  } catch (e) { console.error("[proof-feed] prior-entry lookup failed:", e.message); }
+    ]).catch((e) => { console.error("[proof-feed] full-history fetch failed:", e.message); return [[], []]; }),
+    // Find this athlete's most recent PRIOR entry (before today) to diff rank against.
+    sbSelect("proof_digests", `?athlete_id=eq.${enc(athlete.id)}&digest_type=in.(weekly,monthly)&select=created_at&order=created_at.desc&limit=1`)
+      .then((prior) => prior[0]?.created_at || null)
+      .catch((e) => { console.error("[proof-feed] prior-entry lookup failed:", e.message); return null; }),
+  ]);
 
   const b = briefFor(athlete, batch, windowType, fullWorkouts, fullManual, previousEntryAt);
 
@@ -408,7 +411,7 @@ async function runCoachReports(allAthletes, batch, coaches, opts = {}) {
           if (subs.length) {
             ensureVapid();
             const payload = pushPayload({ title: "WILCO", body: `Your ${type === "monthly_coach" ? "monthly recap" : "Coach's Edition"} is ready.`, url: "/", type: "coach_digest" });
-            for (const s of subs) { try { await sendTo(s, payload); } catch { /* per-device best-effort */ } }
+            for (const s of subs) { try { await sendTo(s, payload, "coach_push_subscriptions"); } catch { /* per-device best-effort */ } }
           }
         }
       } catch (e) { /* push best-effort — never fail the report on it */ }
@@ -533,11 +536,16 @@ export default async function handler(req, res) {
     // ── Scheduler DISPATCHER (proof-feed-v3.1) — the daily cron path. Enumerate
     //    every DUE athlete (+ never-run bootstrap), then fan out below to bounded-
     //    parallel single-target self-invocations instead of looping in-process. ──
+    // The dispatcher only enumerates: it needs id (fan-out target), coach_id
+    // (coach fan-out), and proof_enabled + last_proof_run_date (the filter below).
+    // Full rows (program_text alone is multi-KB) are re-fetched by each child in
+    // its own single-target invocation, so select=* here was pure waste.
+    const DISPATCH_COLS = "select=id,coach_id,proof_enabled,last_proof_run_date";
     const now = new Date().toISOString();
-    const due = await sbSelect("athletes", `?next_proof_due_at=lte.${now}&select=*&order=created_at.asc`);
+    const due = await sbSelect("athletes", `?next_proof_due_at=lte.${now}&${DISPATCH_COLS}&order=created_at.asc`);
 
     // Bootstrap: never-run athletes with a session ≥7 days old.
-    const neverRun = await sbSelect("athletes", `?next_proof_due_at=is.null&select=*`);
+    const neverRun = await sbSelect("athletes", `?next_proof_due_at=is.null&${DISPATCH_COLS}`);
     let bootstrap = [];
     if (neverRun.length) {
       const ids = neverRun.map((a) => `"${a.id}"`).join(",");

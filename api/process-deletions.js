@@ -121,6 +121,24 @@ async function runDeletions() {
     }
   }
 
+  // ── rate_limits janitor (piggybacks on this daily cron) ─────────────────────
+  // rateLimit()/authThrottle() in api/_supa.js insert a rate_limits row on every
+  // AI proxy call, telemetry batch, and login attempt, but nothing ever deleted
+  // old rows (only per-key resets on successful login), so the table grew
+  // forever — and every windowed rate-limit check scans it in the hot path of
+  // every AI call. All windows in use are 15-60 minutes; 25h keeps a full day of
+  // slack beyond the longest window, so sweeping older rows can never change a
+  // rate-limit decision. Best-effort: a failed sweep never blocks the deletion
+  // queue and simply retries tomorrow.
+  try {
+    const cutoff = new Date(Date.now() - 25 * 3600 * 1000).toISOString();
+    await sbDelete("rate_limits", `?created_at=lt.${enc(cutoff)}`);
+    summary.rate_limits_swept = true;
+  } catch (e) {
+    console.error("[process-deletions] rate_limits sweep failed:", e.message);
+    summary.rate_limits_swept = false;
+  }
+
   console.log("[process-deletions] done —", JSON.stringify(summary));
   return summary;
 }

@@ -74,10 +74,21 @@ async function runNudges(res) {
   const idList = athleteIds.map((id) => `"${id}"`).join(",");
 
   // Most recent workout per athlete (single query, then reduced client-side —
-  // PostgREST has no native "latest per group," and this table is small enough).
+  // PostgREST has no native "latest per group"). BOUNDED to the last 31 days:
+  // unbounded, this query ships every subscribed athlete's entire history and
+  // PostgREST silently truncates at its max-rows cap (1000), which would make an
+  // athlete whose newest row fell past the cap read as never-logged and fire a
+  // premature nudge. An athlete absent from a 31-day window is by definition 30+
+  // days stale — exactly what lastWorkout=null already means to the stage logic
+  // below — so bounding preserves who gets nudged while fixing the truncation
+  // class. (Deliberately NOT v_athlete_session_counts: that view counts REAL
+  // sessions only, but this cron's clock has always reset on ANY workouts row —
+  // chat messages included — and switching semantics would start nudging
+  // athletes who talk to Joe without logging.)
+  const NUDGE_WINDOW_DAYS = 31; // must stay > STAGE_30_DAYS
   const recentWorkouts = await sbSelect(
     "workouts",
-    `?athlete_id=in.(${idList})&select=athlete_id,created_at&order=created_at.desc`
+    `?athlete_id=in.(${idList})&created_at=gte.${enc(daysAgo(NUDGE_WINDOW_DAYS))}&select=athlete_id,created_at&order=created_at.desc`
   );
   const lastWorkoutAt = {};
   for (const w of recentWorkouts) {
@@ -92,7 +103,7 @@ async function runNudges(res) {
 
   let nudged14 = 0, nudged30 = 0, pruned = 0;
   for (const [athleteId, rows] of Object.entries(byAthlete)) {
-    const lastWorkout = lastWorkoutAt[athleteId] || null; // null = never logged a workout at all
+    const lastWorkout = lastWorkoutAt[athleteId] || null; // null = no workout row in NUDGE_WINDOW_DAYS (never logged, or 31+ days quiet — both past every stage cutoff)
     const state = stateByAthlete[athleteId] || null;
 
     // If the athlete's last workout is NEWER than what we have stamped as the
@@ -248,7 +259,7 @@ export default async function handler(req, res) {
       let sent = 0;
       let pruned = 0;
       for (const sub of rows) {
-        const outcome = await sendTo(sub, payload);
+        const outcome = await sendTo(sub, payload, subTable); // prune from the caller's own table (coach rows live in coach_push_subscriptions)
         if (outcome === "sent") sent++;
         if (outcome === "pruned") pruned++;
       }
