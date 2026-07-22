@@ -3157,7 +3157,10 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
       setProgramSaved(true);
       setTimeout(()=>setProgramSaved(false),3000);
       const edited = staged&&staged.suggestion!==staged.originalSuggestion;
-      if(staged?.requestId&&staged.origin==="request"){
+      // Resolve on ANY requestId — a request staged via the Morning Brief hand-off
+      // (origin "brief") is still the same pending row and must not stay pending
+      // after its change is saved.
+      if(staged?.requestId){
         onResolveRequest&&onResolveRequest({id:staged.requestId}, edited?"edited":"applied");
       }
       onLogDecision&&onLogDecision(`${athlete.name} program change → coach: ${edited?"edited & applied":"applied"}`.slice(0,200), {kind:"decision",source:staged?.origin==="request"?"request_card":"morning_brief",athlete_id:athlete.id,action:"apply",flag:staged?.source||null});
