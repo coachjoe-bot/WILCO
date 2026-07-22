@@ -1276,7 +1276,11 @@ SPORT PRIORITIES (apply the athlete's sport from the session context):
 ${Object.entries(JOEBOT_SPORTS).map(([k,v])=>`- ${k}: ${v}`).join("\n")}`;
 
 const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athleteGoals=[], athleteContext=null, onDelta=null) => {
-  const hist = history.slice(-6).map(m=>`${m.role==="user"?athlete.name:"Coach Joe"}: ${m.content}`).join("\n");
+  // Both call sites pass `history` already ending with the current message, and
+  // the current message is appended again explicitly in userMsg below — so the
+  // window must EXCLUDE the last element or every prompt carries the athlete's
+  // message twice (a verbatim duplicate of up to a whole pasted program).
+  const hist = history.slice(-7,-1).map(m=>`${m.role==="user"?athlete.name:"Coach Joe"}: ${m.content}`).join("\n");
 
   // Improved history context with explicit dates so bot can answer "what did I do Monday" etc.
   let pastContext = "";
