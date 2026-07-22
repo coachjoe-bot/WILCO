@@ -4379,13 +4379,20 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           newCount = Math.max(prevCount, groupIntoSessions([newRow, ...workoutHistory]).length);
         }
         const badgeAlreadyEarned = !!updatedAthlete.certified_badge_earned_at;
-        const badgeUpdates = {total_sessions_logged:newCount};
+        // Most messages land in an EXISTING 3-hour session bucket, so the count is
+        // usually unchanged — only write (and only re-render) when it actually moved
+        // or a badge timestamp is being stamped. Byte-identical outcomes, one fewer
+        // authenticated gateway round trip on the common path.
+        const badgeUpdates = {};
+        if(newCount!==prevCount) badgeUpdates.total_sessions_logged=newCount;
         // Stamp the "earned" timestamp the first time real workouts reach 100. We never
         // clear it (it's a keepsake of when they earned it) — the badge's VISIBILITY is
         // gated live on the count>=100 in the header, so it recomputes for everyone.
         if(newCount>=100 && !badgeAlreadyEarned) badgeUpdates.certified_badge_earned_at=new Date().toISOString();
-        await sbUpdate("athletes",updatedAthlete.id,badgeUpdates);
-        setAthlete(prev=>({...prev,total_sessions_logged:newCount,...(badgeUpdates.certified_badge_earned_at?{certified_badge_earned_at:badgeUpdates.certified_badge_earned_at}:{})}));
+        if(Object.keys(badgeUpdates).length){
+          await sbUpdate("athletes",updatedAthlete.id,badgeUpdates);
+          setAthlete(prev=>({...prev,...badgeUpdates}));
+        }
         // Fire a callout only when THIS workout crosses a milestone (prev < M <= new).
         const MILESTONES=[10,25,50,100,250,500,1000];
         const crossed=MILESTONES.filter(m=>prevCount<m && newCount>=m).sort((a,b)=>b-a)[0];
