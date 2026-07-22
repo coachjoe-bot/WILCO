@@ -5239,7 +5239,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           <div style={{flex:1,minWidth:0,color:CA.muted,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{athlete.name}</div>
           {/* Tier badge — athlete world holds the accent electric-blue (TIERS.color stays
               gold for the coach side / pricing; we repoint just this render). */}
-          {(()=>{const t=TIERS[athlete.tier||"free"];const bc=CA.accent;return(<span style={{flexShrink:0,background:`${bc}22`,border:`1px solid ${bc}`,borderRadius:4,padding:"1px 6px",color:bc,fontSize:9,fontWeight:700,letterSpacing:1}}>{t.badge}</span>);})()}
+          {(()=>{const t=TIERS[athlete.tier||"free"]||{badge:athlete.tier==="school"?"SCHOOL":String(athlete.tier||"FREE").toUpperCase()};const bc=CA.accent;return(<span style={{flexShrink:0,background:`${bc}22`,border:`1px solid ${bc}`,borderRadius:4,padding:"1px 6px",color:bc,fontSize:9,fontWeight:700,letterSpacing:1}}>{t.badge}</span>);})()}
           {(athlete.total_sessions_logged||0)>=100&&(()=>{const cnt=athlete.total_sessions_logged||0;const tier=cnt>=1000?"×4":cnt>=500?"×3":cnt>=250?"×2":"";return<span title="WILCO Certified — 100+ workouts logged" style={{flexShrink:0,background:`${CA.accent}22`,border:`1px solid ${CA.accent}`,borderRadius:4,padding:"1px 6px",color:CA.accent,fontSize:9,fontWeight:700,letterSpacing:1}}>✦ CERTIFIED{tier?` ${tier}`:""}</span>;})()}
         </div>
         {/* Row 1.5: streak charge-chain — this week's training as a row of links,

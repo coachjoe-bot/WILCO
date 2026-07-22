@@ -1125,7 +1125,7 @@ function CoachDashboard({coach,onLogout}) {
                             {hasPain&&<div style={{color:CA.red,fontSize:9,marginBottom:2}}>⚠ pain</div>}
                             <div style={{display:"flex",alignItems:"center",gap:4,justifyContent:"flex-end"}}>
                               <div style={{width:7,height:7,borderRadius:"50%",background:dot}}/>
-                              <div style={{color:CA.muted,fontSize:10}}>{d===null?"never":d===0?"today":`${d}d ago`}</div>
+                              <div style={{color:CA.muted,fontSize:10}}>{d===null?"never":d<=0?"today":`${d}d ago`}</div>
                             </div>
                           </div>
                         </div>
@@ -2245,8 +2245,10 @@ function MorningBrief({D,athletes,changeRequests,coach,briefContext,onOpenAthlet
             <span style={{width:3,alignSelf:"stretch",borderRadius:3,flexShrink:0,background:isNarration?`${CA.accent}66`:b.kind==="wins"?CA.accent:b.kind==="question"?CA.blue:flagColor(b)}}/>
             <div style={{flex:1,minWidth:0,background:isNarration?"transparent":CA.navy2,border:isNarration?"none":`1px solid ${CA.border}`,borderRadius:12,padding:isNarration?"2px 0":"12px 14px"}}>
               {b.athleteName&&<div style={{fontSize:9.5,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:flagColor(b),marginBottom:4}}>{b.flag==="request"?"Change request":b.flag} · {b.athleteName}</div>}
-              <div style={{color:CA.text,fontSize:13.5,lineHeight:1.55}}>{b.prose}</div>
-              {b.question&&<div style={{color:CA.muted2,fontSize:13,marginTop:6,fontStyle:"italic"}}>{b.question.text}</div>}
+              {/* Question beats carry the same string in prose and question.text —
+                  render only the italic question line so it doesn't print twice. */}
+              {b.kind!=="question"&&<div style={{color:CA.text,fontSize:13.5,lineHeight:1.55}}>{b.prose}</div>}
+              {b.question&&<div style={{color:CA.muted2,fontSize:13,marginTop:b.kind==="question"?0:6,fontStyle:"italic"}}>{b.question.text}</div>}
               {(qMsgs[b.id]||[]).map((m,mi)=>(
                 <div key={mi} style={{marginTop:8,display:"flex",justifyContent:m.role==="coach"?"flex-end":"flex-start"}}>
                   <div style={{maxWidth:"85%",background:m.role==="coach"?`${CA.accent}22`:CA.navy3,border:`1px solid ${m.role==="coach"?`${CA.accent}55`:CA.border}`,borderRadius:10,padding:"7px 11px",fontSize:12.5,color:CA.text}}>{m.text}</div>
