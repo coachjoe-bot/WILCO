@@ -6,7 +6,7 @@
 
 import bcrypt from "bcryptjs";
 import { randomInt } from "node:crypto";
-import { rateLimit, clientIp } from "./_supa.js";
+import { rateLimit, clientIp, escapeLike } from "./_supa.js";
 
 // Escape user-supplied text before interpolating into email HTML.
 const esc = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -63,7 +63,8 @@ export default async function handler(req, res) {
     if (type === "athlete") {
       if (!name) return res.status(400).json({ error: "name is required for athlete recovery" });
 
-      const url = `${SUPABASE_URL}/rest/v1/athletes?name=ilike.${encodeURIComponent(name.trim())}&email=eq.${encodeURIComponent(email.trim().toLowerCase())}&select=id,name`;
+      // escapeLike: the name is user input headed into an ilike pattern (see _supa.js).
+      const url = `${SUPABASE_URL}/rest/v1/athletes?name=ilike.${encodeURIComponent(escapeLike(name.trim()))}&email=eq.${encodeURIComponent(email.trim().toLowerCase())}&select=id,name`;
       const r = await fetch(url, { headers: sbHeaders });
       const rows = await r.json();
 

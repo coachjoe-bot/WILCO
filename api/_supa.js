@@ -144,6 +144,15 @@ export function pin4(v) {
   return s;
 }
 
+// Escape LIKE/ILIKE pattern characters in user-supplied text before it is
+// interpolated into a PostgREST `ilike.` filter. Without this, name="%" (or "_")
+// matches EVERY row — turning a single login attempt into a PIN check against the
+// whole table. `*` is included because PostgREST rewrites `*` to `%` in like/ilike
+// patterns, so a bare `*` is the same wildcard through that door; `\*` survives as
+// a literal either way. Normal names (letters, spaces, hyphens, apostrophes,
+// periods) contain none of these characters and are passed through unchanged.
+export const escapeLike = (s) => String(s).replace(/[\\%_*]/g, (m) => "\\" + m);
+
 export function clientIp(req) {
   const xff = req.headers["x-forwarded-for"];
   if (typeof xff === "string" && xff.length) return xff.split(",")[0].trim();

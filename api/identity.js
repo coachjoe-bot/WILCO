@@ -13,9 +13,9 @@
 //   coach-athlete-fields { coachId, pin, athleteId }     -> { fields } | { fields:null }
 
 import {
-  applyCors, httpErr, str, pin4, clientIp, stripPin,
+  applyCors, httpErr, str, pin4, clientIp, stripPin, escapeLike,
   sbSelect, sbWrite, rateLimit, rateLimitReset, verifyPin, hashPin,
-  authCaller, mintSessionToken, logError, logEvents,
+  authCaller, authThrottle, mintSessionToken, logError, logEvents,
 } from "./_supa.js";
 import { EVENT_SOURCES } from "./_stripe.js";
 // Telemetry ingestion moved to api/telemetry.js (Vercel Pro lifted the fn cap). These
@@ -77,6 +77,20 @@ async function authCoach(coachId, pin) {
   return me;
 }
 
+// Brute-force guard around authCoach, mirroring api/data.js: pre-check the IP's
+// recent FAILED attempts (refusing — and skipping bcrypt — once locked), record
+// this attempt only if auth fails. Successful requests record nothing, so the
+// dashboard's 30s poll and every legit load are never throttled.
+async function authCoachThrottled(req, coachId, pin) {
+  const recordAuthFail = await authThrottle(`identity-authfail:${clientIp(req)}`);
+  try {
+    return await authCoach(coachId, pin);
+  } catch (e) {
+    if (e.status === 401) await recordAuthFail();
+    throw e;
+  }
+}
+
 // ── athlete-login ─────────────────────────────────────────────────────────────
 async function athleteLogin(req, res, body) {
   const name = str(body.name, { max: 100, name: "Name" });
@@ -85,13 +99,17 @@ async function athleteLogin(req, res, body) {
   await rateLimit(key, { max: 5, windowMin: 15 });
 
   // PINs are bcrypt-hashed, so we can't filter by them — match by name, then compare.
-  const byName = await sbSelect("athletes", `?name=ilike.${enc(name)}&select=*`);
-  for (const a of byName) {
-    if (await verifyPin(pin, a.pin)) {
-      await rateLimitReset(key);
-      // token: signed session credential so subsequent gateway calls skip bcrypt.
-      return res.status(200).json({ athlete: stripPin(a), token: mintSessionToken("athlete", a.id) }); // never send the hash to the browser
-    }
+  // escapeLike: the name is user input headed into an ilike pattern (see _supa.js).
+  const byName = await sbSelect("athletes", `?name=ilike.${enc(escapeLike(name))}&select=*`);
+  // bcrypt compares run in parallel — wall time is ~one compare instead of N. The
+  // first matching index wins, same row the old sequential loop would have picked.
+  const compared = await Promise.all(byName.map((a) => verifyPin(pin, a.pin)));
+  const hit = compared.indexOf(true);
+  if (hit !== -1) {
+    const a = byName[hit];
+    await rateLimitReset(key);
+    // token: signed session credential so subsequent gateway calls skip bcrypt.
+    return res.status(200).json({ athlete: stripPin(a), token: mintSessionToken("athlete", a.id) }); // never send the hash to the browser
   }
   return res.status(200).json({ athlete: null, reason: byName.length ? "wrong_pin" : "not_found" });
 }
@@ -102,11 +120,14 @@ async function coachLogin(req, res, body) {
   // Key on IP so an attacker is capped across ALL pins (defends the 4-digit space).
   await rateLimit(`coach-login:${clientIp(req)}`, { max: 10, windowMin: 15 });
   // Hashed PINs can't be queried — pull coaches that have a PIN set and compare.
+  // bcrypt compares run in parallel (wall time ~one compare instead of one per
+  // coach); first matching index wins, same as the old sequential loop.
   const coaches = await sbSelect("coaches", `?pin=not.is.null&select=*`);
-  for (const c of coaches) {
-    if (await verifyPin(pin, c.pin)) {
-      return res.status(200).json({ coach: stripPin(c), token: mintSessionToken("coach", c.id) });
-    }
+  const compared = await Promise.all(coaches.map((c) => verifyPin(pin, c.pin)));
+  const hit = compared.indexOf(true);
+  if (hit !== -1) {
+    const c = coaches[hit];
+    return res.status(200).json({ coach: stripPin(c), token: mintSessionToken("coach", c.id) });
   }
   return res.status(200).json({ coach: null });
 }
@@ -114,6 +135,10 @@ async function coachLogin(req, res, body) {
 // ── resolve-coach-code (setup + signup school resolution) ────────────────────
 async function resolveCoachCode(req, res, body) {
   const code = str(body.code, { max: 40, name: "Access code" }).toUpperCase();
+  // Access codes are short/guessable — cap enumeration per IP. Legit traffic is one
+  // call per competitive signup (step 4) + one per coach first-time setup submit,
+  // so 30/15min never touches real users.
+  await rateLimit(`resolve-coach-code:${clientIp(req)}`, { max: 30, windowMin: 15 });
   const found = await sbSelect(
     "coaches",
     `?access_code=eq.${enc(code)}&select=id,school_id,name,role,coach_number,pin`
@@ -129,7 +154,12 @@ async function resolveCoachCode(req, res, body) {
 // ── check-athlete-name (signup duplicate check) ──────────────────────────────
 async function checkAthleteName(req, res, body) {
   const name = str(body.name, { max: 100, name: "Name" });
-  const found = await sbSelect("athletes", `?name=ilike.${enc(name)}&select=id`);
+  // Anti-enumeration cap. Legit traffic is one call per signup name submit (plus
+  // retries on a taken name); 60/15min per IP leaves headroom for a whole team
+  // signing up behind one gym/school NAT while still killing bulk scraping.
+  await rateLimit(`check-athlete-name:${clientIp(req)}`, { max: 60, windowMin: 15 });
+  // escapeLike: wildcards in the name would otherwise probe substrings of every row.
+  const found = await sbSelect("athletes", `?name=ilike.${enc(escapeLike(name))}&select=id`);
   return res.status(200).json({ exists: found.length > 0 });
 }
 
@@ -137,17 +167,23 @@ async function checkAthleteName(req, res, body) {
 async function getAthlete(req, res, body) {
   const id = str(body.athleteId, { max: 64, name: "athleteId" });
   const pin = pin4(body.pin);
+  // Brute-force guard (failure-only, mirroring api/data.js): without it a known
+  // athlete id could walk the whole 10,000-PIN space here, bypassing the
+  // athlete-login rate limit. The boot-time refresh sends the right PIN, succeeds,
+  // records nothing — real users never accumulate failures.
+  const recordAuthFail = await authThrottle(`identity-authfail:${clientIp(req)}`);
   const found = await sbSelect("athletes", `?id=eq.${enc(id)}&select=*`);
   const a = found[0];
   if (a && (await verifyPin(pin, a.pin))) {
     return res.status(200).json({ athlete: stripPin(a), token: mintSessionToken("athlete", a.id) });
   }
+  await recordAuthFail();
   return res.status(200).json({ athlete: null });
 }
 
 // ── coach-dashboard (role-scoped bulk read) ──────────────────────────────────
 async function coachDashboard(req, res, body) {
-  const me = await authCoach(body.coachId, body.pin);
+  const me = await authCoachThrottled(req, body.coachId, body.pin);
   const isMaster = me.role === "master";
   const isAdmin = me.role === "admin";
 
@@ -196,6 +232,14 @@ async function createAthleteAction(req, res, body) {
   const name = str(a.name, { max: 100, name: "Name" });
   const email = str(a.email, { max: 200, name: "Email" });
   await rateLimit(`create-athlete:${clientIp(req)}`, { max: 10, windowMin: 60 });
+
+  // Server-side duplicate-name re-check. The client checks at wizard step 1, but a
+  // race (two devices), a back-navigation minutes later, or a direct API call can
+  // still land here with a taken name — and athlete-login disambiguates same-name
+  // rows by PIN alone, so a colliding PIN would shadow another account. Same
+  // message the step-1 check shows, surfaced via the client's setErr(e.message).
+  const dupes = await sbSelect("athletes", `?name=ilike.${enc(escapeLike(name))}&select=id`);
+  if (dupes.length) throw httpErr(409, "That name is already registered. Go to Athlete Login instead.");
 
   const row = { name, email: email.toLowerCase(), pin: await hashPin(pin) };
   for (const k of ATHLETE_FIELDS) if (a[k] !== undefined) row[k] = a[k];
@@ -246,7 +290,7 @@ async function setCoachPinAction(req, res, body) {
 
 // ── coach-athlete-fields (dashboard polling one athlete's program) ───────────
 async function coachAthleteFields(req, res, body) {
-  const me = await authCoach(body.coachId, body.pin);
+  const me = await authCoachThrottled(req, body.coachId, body.pin);
   const athleteId = str(body.athleteId, { max: 64, name: "athleteId" });
   const rows = await sbSelect(
     "athletes",
