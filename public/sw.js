@@ -1,5 +1,14 @@
 const CACHE = "wilco-v4";
-const ASSETS = ["/", "/index.html", "/manifest.json", "/icon-192.png", "/icon-512.png"];
+const ASSETS = [
+  "/", "/index.html", "/manifest.json", "/icon-192.png", "/icon-512.png",
+  // Self-hosted fonts (latin subsets only — the ones every screen actually uses;
+  // other subsets are cached on demand by the misc handler below). Precaching
+  // them means fonts render offline from the very first installed open.
+  "/fonts/bebas-neue-latin.woff2",
+  "/fonts/dm-sans-latin.woff2",
+  "/fonts/playfair-display-latin.woff2",
+  "/fonts/playfair-display-italic-latin.woff2",
+];
 
 // SELF-DESTRUCT on non-canonical origins. A SW installed against an old Vercel
 // alias (e.g. fortis-ten.vercel.app) keeps serving cached code and phoning home
@@ -34,9 +43,64 @@ self.addEventListener("install", e => {
 self.addEventListener("activate", e => {
   e.waitUntil(caches.keys().then(keys =>
     Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
-  ));
+  ).then(() => pruneStaleAssets()));
   self.clients.claim();
 });
+
+// ─── STALE-ASSET PRUNING ──────────────────────────────────────────────────────
+// /assets/ entries are cache-first forever and the cache name never changes per
+// deploy, so without pruning every deploy leaks its full set of dead hashed
+// chunks into CacheStorage permanently (raising iOS storage-pressure eviction
+// risk, where Safari drops the WHOLE cache — shell included). The build emits
+// /asset-manifest.json (see vite.config.js) listing the current deploy's hashed
+// files; anything cached under /assets/ that isn't in it is a dead old chunk.
+//
+// Deletion is TWO-PHASE with a 24h grace period: an entry missing from the
+// manifest is only stamped on first sighting and deleted on a later prune ≥24h
+// after that stamp. That protects a client that opened mid-deploy and is still
+// RUNNING the previous build (its lazy chunks stay cached for the rest of that
+// session and day). Known limit: a session left open across 24h+ AND overlapping
+// two deploys can lose a not-yet-loaded lazy chunk from the cache — the existing
+// stale-chunk self-heal (purge + one guarded reload) already covers exactly that
+// path. Only /assets/ paths are ever considered: the shell ("/", "/index.html"),
+// icons, manifest, and /fonts/ can never be evicted here.
+const PRUNE_INDEX_KEY = "/__wilco-prune-index__";
+const PRUNE_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000;   // run at most every 6h
+const PRUNE_GRACE_MS = 24 * 60 * 60 * 1000;          // missing-for-24h before delete
+
+async function pruneStaleAssets() {
+  try {
+    const cache = await caches.open(CACHE);
+    let idx = { lastRun: 0, missing: {} };
+    try {
+      const hit = await cache.match(PRUNE_INDEX_KEY);
+      if (hit) idx = await hit.json();
+    } catch (_) { /* corrupt index → start fresh */ }
+    const now = Date.now();
+    if (now - (idx.lastRun || 0) < PRUNE_MIN_INTERVAL_MS) return;
+
+    const res = await fetch("/asset-manifest.json", { cache: "no-store" });
+    if (!res.ok) return;
+    const manifest = await res.json();
+    const live = new Set(Array.isArray(manifest && manifest.assets) ? manifest.assets : []);
+    if (live.size === 0) return;   // empty/bad manifest → never prune on bad data
+
+    const keys = await cache.keys();
+    const missing = {};
+    for (const req of keys) {
+      const path = new URL(req.url).pathname;
+      if (!path.startsWith("/assets/")) continue;   // shell/icons/fonts are untouchable
+      if (live.has(path)) continue;
+      const firstSeen = (idx.missing && idx.missing[path]) || now;
+      if (now - firstSeen >= PRUNE_GRACE_MS) await cache.delete(req);
+      else missing[path] = firstSeen;
+    }
+    await cache.put(PRUNE_INDEX_KEY, new Response(
+      JSON.stringify({ lastRun: now, missing }),
+      { headers: { "Content-Type": "application/json" } }
+    ));
+  } catch (_) { /* pruning is best-effort; never break the SW */ }
+}
 
 // Offline strategy: the app shell alone isn't enough — index.html references a
 // HASHED bundle under /assets/, so unless those files are cached too, an offline
@@ -73,7 +137,10 @@ self.addEventListener("fetch", e => {
       if (res.ok) { const copy = res.clone(); caches.open(CACHE).then(c => c.put("/", copy)); }
       return res;
     });
-    e.waitUntil(refresh.catch(() => {}));   // finish the background refresh even after we respond
+    // Finish the background refresh even after we respond, then prune dead hashed
+    // assets (throttled internally; runs AFTER the refresh so the cached shell is
+    // current-deploy before anything is considered for deletion).
+    e.waitUntil(refresh.catch(() => {}).then(() => pruneStaleAssets()));
     e.respondWith(
       caches.match("/").then(hit => hit || refresh.catch(() => caches.match("/")))
     );
