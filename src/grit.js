@@ -104,6 +104,18 @@ const MOD_PHRASES = [
   "underhand", "overhand", "single arm", "single leg", "behind the neck",
 ];
 
+// Precompiled per-phrase regexes (normalizeExName used to build these with
+// `new RegExp` on EVERY call — ~10 allocations per name, on the hottest string
+// path shared by the app tabs, QuickLog, coach dashboard, and the proof cron).
+// `test` is deliberately NON-global: a reused /g/ regex carries lastIndex state
+// across calls, so .test() on one would silently skip matches. `strip` is global,
+// which is safe to share — String.replace with a /g/ regex ignores lastIndex.
+const MOD_PHRASE_RES = MOD_PHRASES.map((m) => ({
+  phrase: m,
+  test: new RegExp("\\b" + m + "\\b"),
+  strip: new RegExp("\\b" + m + "\\b", "g"),
+}));
+
 // Unambiguous sub-phrase synonyms, applied after modifiers are extracted so one
 // entry covers every grip/arm variant of the phrase. Keep TRUE synonyms only.
 const PHRASE_SYNONYMS = [
@@ -159,9 +171,8 @@ export const normalizeExName = (name) => {
     .replace(/\bone[ -](arm|leg)\b/g, "single $1")
     .replace(/\bsingle[ -](arm|leg)\b/g, "single $1");
   const mods = [];
-  for (const m of MOD_PHRASES) {
-    const re = new RegExp("\\b" + m + "\\b", "g");
-    if (re.test(n)) { mods.push(m); n = n.replace(re, " "); }
+  for (const { phrase, test, strip } of MOD_PHRASE_RES) {
+    if (test.test(n)) { mods.push(phrase); n = n.replace(strip, " "); }
   }
   n = n.replace(/\s+/g, " ").trim();
   for (const [re, out] of PHRASE_SYNONYMS) n = n.replace(re, out);
@@ -423,7 +434,29 @@ export const getBenchKey = (normalized) => {
 // normalizeExName → alias-collapse → canonical descriptor. See the taxonomy header
 // above for the contract. `observedName` (optional) is the raw name as logged, used
 // only as the display fallback for lifts with no canonical entry.
+// Memo cache: raw name → frozen resolved descriptor. Exercise names repeat
+// massively (an athlete has ~10-40 distinct names across hundreds of resolveLift
+// calls per ProgressModal open / proof-cron athlete), so a hit replaces ~40 regex
+// ops with one Map lookup. Only the (rawName, no-observedName) shape is cached —
+// observedName changes the display fallback, so those rare calls compute fresh.
+// Results are frozen so a caller can't mutate the shared cached object. Bounded:
+// cleared wholesale past MAX (simpler than LRU; real vocabularies never get there).
+const RESOLVE_CACHE = new Map();
+const RESOLVE_CACHE_MAX = 2000;
+
 export const resolveLift = (rawName, observedName) => {
+  if (observedName === undefined) {
+    const hit = RESOLVE_CACHE.get(rawName);
+    if (hit) return hit;
+    if (RESOLVE_CACHE.size >= RESOLVE_CACHE_MAX) RESOLVE_CACHE.clear();
+    const out = Object.freeze(resolveLiftUncached(rawName, undefined));
+    RESOLVE_CACHE.set(rawName, out);
+    return out;
+  }
+  return resolveLiftUncached(rawName, observedName);
+};
+
+const resolveLiftUncached = (rawName, observedName) => {
   const norm = normalizeExName(rawName);
   const isJunk = !norm || LIFT_JUNK.has(norm) || norm.length < 2;
   if (isJunk) return { id: norm, name: observedName || rawName || "", benchKey: null, bwLoaded: false, tracked: false };
