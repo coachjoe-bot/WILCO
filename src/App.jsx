@@ -767,6 +767,12 @@ export const daysBetween = (date) => {
   return Math.round((nowMid - thenMid) / (1000*60*60*24));
 };
 
+// YYYY-MM-DD for the LOCAL calendar day. Never build this from toISOString() —
+// that's UTC, so from ~8pm ET onward it already reads TOMORROW and disagrees with
+// every local date label sitting next to it (an evening log got stamped +1 day).
+export const localISODate = (d = new Date()) =>
+  `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+
 export const fmtDate = (d) => new Date(d).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
 export const fmtDateShort = (d) => new Date(d).toLocaleDateString("en-US",{month:"short",day:"numeric"});
 // "Today" / "Yesterday" / "N days ago" for recent entries; falls back to the full date.
@@ -1090,7 +1096,7 @@ Rules:
   const nowD = new Date();
   const todayLabel = nowD.toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"});
   const known = knownNames.length ? `\nKNOWN EXERCISE NAMES (reuse the exact spelling when it's the same movement — see NAME REUSE rule): ${knownNames.join(" | ")}` : "";
-  const user = `Athlete: ${name} (${sport})\nTODAY'S DATE: ${todayLabel} (${nowD.toISOString().slice(0,10)}). The athlete is logging this right now — only set log_date if they explicitly say the session was on a past day.${known}\nMessage: ${message}`;
+  const user = `Athlete: ${name} (${sport})\nTODAY'S DATE: ${todayLabel} (${localISODate(nowD)}). The athlete is logging this right now — only set log_date if they explicitly say the session was on a past day.${known}\nMessage: ${message}`;
   const runParse = async (model) => {
     // The entire rulebook above is static — cache it (highest-volume call in the app).
     // max_tokens must be big enough to hold the WHOLE JSON: the schema forces ~25
@@ -3483,7 +3489,7 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>BIRTHDAY</label>
           <input type="date" value={data.birthday}
             onChange={e=>setD("birthday",e.target.value)}
-            max={new Date().toISOString().split("T")[0]}
+            max={localISODate()}
             style={inpA({colorScheme:"dark"})}/>
         </div>
       </>}
@@ -7000,7 +7006,7 @@ function ProfileCompletionModal({athlete, onClose, onSave}) {
         </div>
         <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
 
-          {needsBirthday&&<div style={{marginBottom:16}}>{label("BIRTHDAY")}<input type="date" value={data.birthday} onChange={e=>setD("birthday",e.target.value)} max={new Date().toISOString().split("T")[0]} style={inpA({colorScheme:"dark"})}/></div>}
+          {needsBirthday&&<div style={{marginBottom:16}}>{label("BIRTHDAY")}<input type="date" value={data.birthday} onChange={e=>setD("birthday",e.target.value)} max={localISODate()} style={inpA({colorScheme:"dark"})}/></div>}
 
           {needsPhysical&&<>
             <div style={{marginBottom:16}}>{label("HEIGHT")}
