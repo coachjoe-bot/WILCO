@@ -760,6 +760,9 @@ function CoachDashboard({coach,onLogout}) {
     const selectedId = selected.id;
     const poll = setInterval(async ()=>{
       try {
+        // Backgrounded tabs skip the fetch entirely — 2 serverless invocations/min
+        // per hidden coach tab otherwise, for a sync nobody is looking at.
+        if(typeof document!=="undefined"&&document.visibilityState==="hidden") return;
         const _r = await idApi("coach-athlete-fields",{coachId:coach.id,pin:coach.pin,athleteId:selectedId});
         const fresh = _r.fields ? [_r.fields] : [];
         if(fresh.length>0){
@@ -769,7 +772,14 @@ function CoachDashboard({coach,onLogout}) {
             if(prev.program_text===program_text&&prev.program_locked===program_locked&&prev.temp_program_text===temp_program_text) return prev;
             return {...prev,program_text,program_locked,temp_program_text};
           });
-          setAthletes(prev=>prev.map(a=>a.id===selectedId?{...a,program_text,program_locked,temp_program_text}:a));
+          // Same no-change guard as setSelected: an unconditional map() minted a
+          // new array reference every 30s, re-rendering the whole dashboard and
+          // re-firing the on-demand-parse effect (sha256 sweep) each tick.
+          setAthletes(prev=>{
+            const row = prev.find(a=>a.id===selectedId);
+            if(!row||(row.program_text===program_text&&row.program_locked===program_locked&&row.temp_program_text===temp_program_text)) return prev;
+            return prev.map(a=>a.id===selectedId?{...a,program_text,program_locked,temp_program_text}:a);
+          });
         }
       } catch(e){}
     },30000);
