@@ -4172,11 +4172,35 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
 
   useEffect(()=>{bottomRef.current?.scrollIntoView({behavior:"smooth"});},[messages,loading,videoLoading]);
 
+  // Persist the day's transcript — debounced. This effect used to stringify and
+  // write the FULL transcript on every messages change, i.e. once per streamed
+  // token batch; for a long day that's megabytes of synchronous main-thread
+  // string churn per reply. The pending transcript rides in a ref so the hide/
+  // pagehide/unmount flushes below always write the latest state (same
+  // eviction-safety pattern as the Quick Log draft park).
+  const chatPersistRef = useRef(null);
+  const chatPersistFlush = () => {
+    if(chatPersistRef.current===null) return;
+    try{localStorage.setItem(chatStorageKey,JSON.stringify(chatPersistRef.current));}catch(_){}
+    chatPersistRef.current = null;
+  };
   useEffect(()=>{
-    if(historyLoaded&&messages.length>0){
-      try{localStorage.setItem(chatStorageKey,JSON.stringify(messages));}catch(_){}
-    }
+    if(!(historyLoaded&&messages.length>0)) return;
+    chatPersistRef.current = messages;
+    const t = setTimeout(chatPersistFlush, 300);
+    // Backgrounding/killing the PWA mid-debounce must not lose the tail of the
+    // transcript — flush on the way out (iOS won't run the pending timer first).
+    const onHide = () => { if(document.visibilityState==="hidden") chatPersistFlush(); };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", chatPersistFlush);
+    return ()=>{
+      clearTimeout(t);
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", chatPersistFlush);
+    };
   },[messages,historyLoaded]);
+  // Unmount (logout) is also a save point — the cleanup above only cancels.
+  useEffect(()=>chatPersistFlush,[]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(()=>{
     // Prune stale per-day chat caches: every day leaves a wilco_chat_<id>_<date>
@@ -4911,19 +4935,41 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // a broken stream must never leave a blank reply.
       setMessages(prev=>[...prev,{role:"assistant",content:""}]);
       let firstDelta = true;
-      const applyDelta = (chunk)=>{
-        if(firstDelta){ firstDelta = false; setLoading(false); } // hide the typing dot once text starts
+      // SSE chunks arrive far faster than frames render (~100-400 per reply); a
+      // setState per chunk meant a full React commit + transcript persist per
+      // token burst. Buffer chunks and flush once per animation frame — the text
+      // still appears the moment it can be painted, just without the redundant
+      // commits in between.
+      let deltaBuf = "";
+      let deltaRaf = null;
+      const flushDelta = ()=>{
+        deltaRaf = null;
+        if(!deltaBuf) return;
+        const chunk = deltaBuf; deltaBuf = "";
         setMessages(prev=>{
           const u=[...prev]; const last=u[u.length-1];
           if(last && last.role==="assistant") u[u.length-1]={role:"assistant",content:(last.content||"")+chunk};
           return u;
         });
       };
+      const applyDelta = (chunk)=>{
+        if(firstDelta){ firstDelta = false; setLoading(false); } // hide the typing dot once text starts
+        deltaBuf += chunk;
+        if(deltaRaf==null) deltaRaf = requestAnimationFrame(flushDelta);
+      };
       let reply="";
       try {
         reply = await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext,applyDelta);
       } catch(_streamErr){ /* fall through to the one-shot call below */ }
-      if(!reply || !reply.trim()){
+      // Stream over (success or death): cancel any queued frame so a late flush
+      // can't race the settle/fallback writes below, then settle the bubble.
+      if(deltaRaf!=null){ cancelAnimationFrame(deltaRaf); deltaRaf = null; }
+      deltaBuf = "";
+      if(reply && reply.trim()){
+        // Settle on the stream's full text — guarantees the tail chunk that was
+        // still buffered when the stream closed is never dropped.
+        setMessages(prev=>{ const u=[...prev]; const last=u[u.length-1]; if(last && last.role==="assistant") u[u.length-1]={role:"assistant",content:reply}; return u; });
+      } else {
         reply = await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext);
         setMessages(prev=>{ const u=[...prev]; const last=u[u.length-1]; if(last && last.role==="assistant") u[u.length-1]={role:"assistant",content:reply}; return u; });
       }
