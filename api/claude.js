@@ -103,16 +103,33 @@ const FEATURES = new Set([
 // Snapshot the segmentation fields AT CALL TIME so cost stays correctly attributed
 // even if the athlete later changes tier/school, and the future coach dashboard can
 // scope by a single indexed column. Returns null on any failure (caller swallows).
+//
+// Module-scope TTL cache: this read runs on EVERY AI call purely for ledger
+// attribution, and the snapshot is "at call time" by design with rare tier/school
+// changes — a short TTL is well within the accepted drift tolerance. Warm Fluid
+// Compute instances skip the Supabase round trip entirely. Keyed by role:id so
+// nothing can leak across users (athlete/coach ids live in different tables, so
+// the role prefix also prevents cross-table collisions). Errors are never cached.
+const SNAP_TTL_MS = 60_000;
+const snapCache = new Map(); // `${role}:${id}` -> { at, snap }
 async function loadSnapshot(caller) {
+  const cacheKey = `${caller.role}:${caller.id}`;
+  const hit = snapCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < SNAP_TTL_MS) return hit.snap;
+  let snap;
   if (caller.role === "athlete") {
     const rows = await sbSelect("athletes", `?id=eq.${enc(caller.id)}&select=tier,school_id,coach_id`);
-    return rows[0] || null;
-  }
-  if (caller.role === "coach") {
+    snap = rows[0] || null;
+  } else if (caller.role === "coach") {
     const rows = await sbSelect("coaches", `?id=eq.${enc(caller.id)}&select=school_id`);
-    return rows[0] || null;
+    snap = rows[0] || null;
+  } else {
+    return null;
   }
-  return null;
+  // Crude growth bound for very long-lived instances; far above real user counts.
+  if (snapCache.size > 1000) snapCache.clear();
+  snapCache.set(cacheKey, { at: Date.now(), snap });
+  return snap;
 }
 
 async function logUsage({ caller, feature, model, data, status, latency_ms, snapP }) {
@@ -238,8 +255,17 @@ export default async function handler(req, res) {
       });
       const usage = { input_tokens: null, output_tokens: null, cache_read_input_tokens: null, cache_creation_input_tokens: null };
       let resolvedModel = model, aborted = false;
-      req.on("close", () => { aborted = true; });
       const reader = upstream.body.getReader();
+      // Cancel the upstream Anthropic stream the MOMENT the client disconnects —
+      // reader.cancel() makes the pending reader.read() resolve {done:true}, so the
+      // pump loop exits immediately instead of waiting for the next upstream chunk.
+      // Stops paying for output tokens on abandoned replies and frees the function
+      // seconds earlier. Completed streams are unaffected: by the time this fires
+      // on a normal close, the loop has already exited on its own `done`.
+      req.on("close", () => {
+        aborted = true;
+        try { reader.cancel().catch(() => {}); } catch {}
+      });
       const decoder = new TextDecoder();
       let buf = "";
       try {

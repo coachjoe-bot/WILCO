@@ -123,10 +123,22 @@ export function randomGiftCode() {
 // ── Supabase (service key) ───────────────────────────────────────────────────
 const SB_URL =
   process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
+// Service key ONLY — never the anon key. The old chain fell back to
+// VITE_SUPABASE_KEY (the PUBLIC anon key shipped in the browser bundle), so if
+// SUPABASE_SERVICE_KEY were ever renamed/unset the Stripe webhook's athlete
+// reads/patches would silently run as RLS-denied anon and tier grants would stop
+// with no error anywhere. Chain now matches _supa.js's service-key candidates
+// (prod sets SUPABASE_SERVICE_KEY); a missing key fails LOUDLY per request below.
 const SB_SERVICE_KEY =
-  process.env.SUPABASE_SERVICE_KEY || process.env.VITE_SUPABASE_KEY || process.env.SUPABASE_KEY;
+  process.env.SUPABASE_SERVICE_KEY ||
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_KEY;
 
 function sbHeaders() {
+  // Throw here (per call) rather than at module scope so importing this shared
+  // helper for Stripe-only paths still works, but any Supabase read/write on a
+  // misconfigured deploy errors visibly instead of silently doing nothing.
+  if (!SB_SERVICE_KEY) throw new Error("Missing SUPABASE_SERVICE_KEY (Supabase service key)");
   return {
     "Content-Type": "application/json",
     apikey: SB_SERVICE_KEY,
