@@ -23,6 +23,9 @@ import { weekBounds } from "./coachAnalytics.js";
 // The Morning Brief — deterministic conversational beats (zero tokens to build;
 // Haiku only reacts when the coach free-types). See coach-dashboard-v2-spec §C.
 import { buildMorningBrief, decisionNote, briefWeekKey } from "./coachBrief.js";
+// Staged program-edit loop: pure line-diff + placement lookup + merge-safety
+// guard backing the AthleteDetail "review & apply" flow below.
+import { lineDiff, diffStats, findPlacement, mergeGuard } from "./programDiff.js";
 
 // ─── ON-DEMAND PROGRAM PARSE ──────────────────────────────────────────────────
 // The proof cron parses programs only on each athlete's weekly run, so a program
@@ -687,7 +690,7 @@ function CoachDashboard({coach,onLogout}) {
   const [prescriptions,setPrescriptions] = useState([]); // program_prescriptions (parsed programs) — Overview adherence
   const [changeRequests,setChangeRequests] = useState([]); // program_change_requests — locked-program inbox
   const [briefContext,setBriefContext] = useState([]);     // coach_context — Morning Brief suppression + notes
-  const [programPrefill,setProgramPrefill] = useState(null); // {athleteId, note} — brief "Draft the change" deep-link
+  const [programPrefill,setProgramPrefill] = useState(null); // {athleteId, note, flag, requestId, reason, autoApply, edit} — brief hand-off into the staged program editor
   const [parsingIds,setParsingIds] = useState(()=>new Set()); // programs being parsed on demand right now
   const parseAttempted = useRef(new Set());                 // one attempt per athlete per session
   const [notifPrefs,setNotifPrefs] = useState(coach.notification_prefs||{injury:true,big_pr:true,inactive:true,digest:true});
@@ -1040,7 +1043,7 @@ function CoachDashboard({coach,onLogout}) {
               <CoachOverview athletes={athletes} workouts={workouts} prs={prs} manualRMs={manualRMs} prescriptions={prescriptions} coach={coach} analytics={analytics}
                 changeRequests={changeRequests} briefContext={briefContext} parsingIds={parsingIds}
                 onOpenAthlete={(id)=>{const at=athletes.find(a=>a.id===id); if(at){setSelected(at);setActiveTab("athletes");}}}
-                onPrefillProgram={(id,note)=>{const at=athletes.find(a=>a.id===id); if(at){setProgramPrefill({athleteId:id,note});setSelected(at);setActiveTab("athletes");}}}
+                onPrefillProgram={(id,payload)=>{const at=athletes.find(a=>a.id===id); if(at){setProgramPrefill({athleteId:id,...payload});setSelected(at);setActiveTab("athletes");}}}
                 onResolveRequest={async (requestId,status)=>{
                   await sbUpdate("program_change_requests",requestId,{status,resolved_at:new Date().toISOString()});
                   setChangeRequests(prev=>prev.filter(r=>r.id!==requestId));
@@ -1153,6 +1156,12 @@ function CoachDashboard({coach,onLogout}) {
                       requests={changeRequests.filter(r=>r.athlete_id===selected.id)}
                       prefill={programPrefill&&programPrefill.athleteId===selected.id?programPrefill:null}
                       onPrefillConsumed={()=>setProgramPrefill(null)}
+                      coachContext={briefContext}
+                      onLogDecision={async (note,meta)=>{
+                        const row={coach_id:coach.id, note, meta, is_long_term:false};
+                        try{ await sbInsert("coach_context",row); }catch(e){ console.error("log decision",e); }
+                        setBriefContext(prev=>[{...row,created_at:new Date().toISOString()},...prev]);
+                      }}
                       onResolveRequest={async (req,status)=>{
                         await sbUpdate("program_change_requests",req.id,{status,resolved_at:new Date().toISOString()});
                         setChangeRequests(prev=>prev.filter(r=>r.id!==req.id));
@@ -2149,16 +2158,29 @@ function MorningBrief({D,athletes,changeRequests,coach,briefContext,onOpenAthlet
     if(action.kind==="done"){ setOutcomes(o=>({...o,[beat.id]:"Done ✓"})); return; }
     setBusy(true);
     try{
-      if(action.kind==="resolve_request"&&action.payload?.resolution!=="edit"){
-        await onResolveRequest(action.payload.requestId, action.payload.resolution);
+      const isResolve = action.kind==="resolve_request";
+      const resolution = action.payload?.resolution;
+      // Only "Skip" resolves the request instantly now. "Apply" and "Edit" both
+      // hand off to the staged program editor (AthleteDetail) so the coach always
+      // reviews the actual line diff before anything writes to the program — no
+      // more instant-apply from the brief.
+      if(isResolve&&resolution==="skipped"){
+        await onResolveRequest(action.payload.requestId, resolution);
       }
-      // "Edit" on a request and "Draft the change" both hand off to the program
-      // editor with the suggestion prefilled — the coach stays the author.
-      const handsOff = action.kind==="prefill_program"||(action.kind==="resolve_request"&&action.payload?.resolution==="edit");
+      const handsOff = action.kind==="prefill_program"||(isResolve&&(resolution==="applied"||resolution==="edit"));
       await writeContext(decisionNote(beat,action.id), {kind:"decision",source:"morning_brief",athlete_id:beat.athleteId||null,flag:beat.meta?.baseFlag||beat.flag||null,action:action.id,week});
-      setOutcomes(o=>({...o,[beat.id]:`${action.label} ✓`}));
+      setOutcomes(o=>({...o,[beat.id]:handsOff?"Opened in editor ✓":`${action.label} ✓`}));
       try{track("brief_decision","coach_dashboard");}catch(e){}
-      if(handsOff) onPrefillProgram&&onPrefillProgram(beat.athleteId, action.payload?.suggestion||beat.meta?.reason||beat.prose);
+      if(handsOff){
+        onPrefillProgram&&onPrefillProgram(beat.athleteId,{
+          note: action.payload?.suggestion||beat.meta?.reason||beat.prose,
+          flag: isResolve?"request":(beat.meta?.baseFlag||beat.flag||null),
+          requestId: isResolve?action.payload?.requestId:null,
+          reason: isResolve?(beat.meta?.theirWords||null):null,
+          autoApply: isResolve?resolution==="applied":false,
+          edit: isResolve?resolution==="edit":false,
+        });
+      }
     }catch(e){ console.error("brief action",e); }
     setBusy(false);
   };
@@ -2169,16 +2191,20 @@ function MorningBrief({D,athletes,changeRequests,coach,briefContext,onOpenAthlet
     setQMsgs(m=>({...m,[beat.id]:[...(m[beat.id]||[]),{role:"coach",text:t}]}));
     setBusy(true);
     try{
+      // Ground the reaction/ask-back in what the coach already told WILCO this
+      // (and recent) weeks — so it doesn't re-ask something already answered.
+      const recentNotes=(briefContext||[]).slice(0,5).map(r=>r.note).filter(Boolean);
+      const contextBlock=recentNotes.length?`\nCoach's recent context:\n${recentNotes.map(n=>`- ${n}`).join("\n")}`:"";
       if(!viaChip&&isAskingBack(t)){
         // Coach asked back — answer briefly, stay on the question. (Haiku, ~250 tok)
-        const sys=`You are WILCO, a strength coach's AI assistant, mid morning-brief. Answer the coach's question directly in 1-2 sentences, grounded in the team read, then stop. Team read: ${D.activeCount}/${athletes.length} trained this week, ${D.prThisWk} true PRs, team adherence ${D.teamAdh??"n/a"}%.`;
+        const sys=`You are WILCO, a strength coach's AI assistant, mid morning-brief. Answer the coach's question directly in 1-2 sentences, grounded in the team read, then stop. Team read: ${D.activeCount}/${athletes.length} trained this week, ${D.prThisWk} true PRs, team adherence ${D.teamAdh??"n/a"}%.${contextBlock}`;
         const reply=await askClaude(sys,`You asked them: "${beat.question.text}"\nThe coach replied: "${t}"`,250,[],"claude-haiku-4-5","coach_brief");
         setQMsgs(m=>({...m,[beat.id]:[...(m[beat.id]||[]),{role:"wilco",text:reply||"Your call either way."}]}));
         setBusy(false); return;
       }
       if(!viaChip){
         // One-sentence reaction before moving on (Haiku, ~160 tok) — chips skip AI entirely.
-        const sys=`You are WILCO, a strength coach's AI assistant. React to the coach's answer in ONE short, direct sentence — acknowledge it and note one concrete implication if there is one. No follow-up question. Team: ${D.activeCount}/${athletes.length} trained this week, adherence ${D.teamAdh??"n/a"}%.`;
+        const sys=`You are WILCO, a strength coach's AI assistant. React to the coach's answer in ONE short, direct sentence — acknowledge it and note one concrete implication if there is one. No follow-up question. Team: ${D.activeCount}/${athletes.length} trained this week, adherence ${D.teamAdh??"n/a"}%.${contextBlock}`;
         const reply=await askClaude(sys,`Q: "${beat.question.text}"\nCoach: "${t}"`,160,[],"claude-haiku-4-5","coach_brief");
         if(reply) setQMsgs(m=>({...m,[beat.id]:[...(m[beat.id]||[]),{role:"wilco",text:reply}]}));
       }
@@ -2992,8 +3018,31 @@ function GroupProgress({athletes,workouts,manualRMs,prs=[],analytics}){
   );
 }
 
+// Collapse long runs of untouched lines in a diff for display — keeps the review
+// overlay scannable on a 40-line program without hiding real changes. Purely
+// presentational (not exported/tested — programDiff.js owns the data-shape fns).
+function collapseDiffForDisplay(diff){
+  const out=[]; let i=0;
+  while(i<diff.length){
+    if(diff[i].type==="same"){
+      let j=i; while(j<diff.length&&diff[j].type==="same") j++;
+      const runLen=j-i;
+      if(runLen>4){
+        for(let k=i;k<i+2;k++) out.push(diff[k]);
+        out.push({type:"gap"});
+        for(let k=j-2;k<j;k++) out.push(diff[k]);
+      } else {
+        for(let k=i;k<j;k++) out.push(diff[k]);
+      }
+      i=j;
+    } else { out.push(diff[i]); i++; }
+  }
+  return out;
+}
+
 // ─── ATHLETE DETAIL (Coach Dashboard) ────────────────────────────────────────
-function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProgramSave,onAthleteDelete,prefill,onPrefillConsumed}) {
+function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProgramSave,onAthleteDelete,prefill,onPrefillConsumed,coachContext=[],onLogDecision}) {
+  const isMobile = useIsMobile();
   const [tab,setTab] = useState("overview");
   const [programText,setProgramText] = useState(athlete.program_text||"");
   const [programLocked,setProgramLocked] = useState(!!athlete.program_locked);
@@ -3003,6 +3052,12 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
   const [photoProcessing,setPhotoProcessing] = useState(false);
   const [confirmDelete,setConfirmDelete] = useState(false);
   const programPhotoRef = useRef(null);
+  // ── staged program edit (replaces the old "# From today's brief" note append) ──
+  // staged: null | {origin:'request'|'brief', requestId, athleteWords, suggestion,
+  //   originalSuggestion, lift, current, why, source, placement, editing, createdAt}
+  // mergeState: null | 'running' | {merged,diff,stats} | {error}
+  const [staged,setStaged] = useState(null);
+  const [mergeState,setMergeState] = useState(null);
 
   const handleDelete = async () => {
     try {
@@ -3014,13 +3069,128 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
   };
 
   useEffect(()=>{ setProgramText(athlete.program_text||""); },[athlete.id,athlete.program_text]);
-  // Morning Brief "Draft the change" deep-link: open the Program tab with the
-  // suggestion appended to the DRAFT (nothing saves until the coach hits save).
+
+  // Ask Claude to merge ONE requested change into the full program text, then run
+  // it through mergeGuard before ever showing/saving anything. Accepts an explicit
+  // staged object so a caller (stageFromRequest/the prefill effect) can auto-run
+  // this immediately after creating the staged state, without waiting on React's
+  // async setState to land first.
+  const runMerge = async (stagedArg) => {
+    const s = stagedArg||staged;
+    if(!s) return;
+    setMergeState("running");
+    try{
+      const base = programText||athlete.program_text||"";
+      const contextLines = (coachContext||[])
+        .filter(r=>r.is_long_term||r.meta?.athlete_id===athlete.id)
+        .slice(0,8)
+        .map(r=>r.note)
+        .filter(Boolean);
+      const sys = `You are applying ONE change to a strength program for the coach who owns it. Return ONLY the complete updated program text — no preamble, no markdown fences, no commentary. Rules: make ONLY the change the request requires; every other line must be preserved character-for-character (headers, spacing, notes, comments); keep the program's existing formatting conventions; if the change names a lift not in the program, add it under the most sensible day; never invent numbers you weren't given — carry over the existing sets/reps/loading unless the request changes them.`;
+      const parts = [`CURRENT PROGRAM:\n${base}`, `\nREQUESTED CHANGE: ${s.suggestion}`];
+      if(s.placement) parts.push(`\nTARGET: ${s.placement.dayLabel||"unspecified day"} — currently "${s.placement.currentLine}"`);
+      if(s.athleteWords) parts.push(`\nATHLETE'S OWN WORDS: "${s.athleteWords}"`);
+      if(contextLines.length) parts.push(`\nCOACH'S RECENT CONTEXT (may inform exercise selection):\n${contextLines.map(n=>`- ${n}`).join("\n")}`);
+      const raw = await askClaude(sys, parts.join("\n"), 4000, [], "claude-sonnet-5", "program_apply_change");
+      const guard = mergeGuard(base, raw);
+      if(!guard.ok){ setMergeState({error:guard.reason}); return; }
+      const diff = lineDiff(base, guard.text);
+      setMergeState({merged:guard.text, diff, stats:diffStats(diff)});
+    }catch(e){
+      console.error("runMerge",e);
+      setMergeState({error:"Something went wrong drafting that change. Try again."});
+    }
+  };
+
+  // Stage a pending change request for review. autoApply runs the merge right
+  // away (card's "Review & apply"); otherwise the coach opens straight into edit
+  // mode (card's "Edit") so they can rewrite the suggestion before drafting it.
+  const stageFromRequest = (r,{autoApply}) => {
+    const item = Array.isArray(r.items)?r.items[0]:null;
+    const suggestion = item?.suggested_change||r.reason||"Requested a program change";
+    const lift = item?.lift||null;
+    const base = programText||athlete.program_text||"";
+    const placement = findPlacement(base,lift)||(item?.current?findPlacement(base,item.current):null);
+    setTab("program");
+    const next = {
+      origin:"request", requestId:r.id, athleteWords:r.reason||null,
+      suggestion, originalSuggestion:suggestion, lift, current:item?.current||null, why:item?.why||null,
+      source:r.source||"request", placement, editing:!autoApply, createdAt:r.created_at,
+    };
+    setStaged(next);
+    setMergeState(null);
+    if(autoApply) runMerge(next);
+  };
+
+  const skipRequest = (r) => {
+    onResolveRequest&&onResolveRequest(r,"skipped");
+    onLogDecision&&onLogDecision(`${athlete.name} program request → coach: skip`.slice(0,200), {kind:"decision",source:"request_card",athlete_id:athlete.id,action:"skip",flag:r.source||null});
+  };
+
+  const dismissStaged = () => {
+    if(staged?.requestId&&staged.origin==="request"){
+      onResolveRequest&&onResolveRequest({id:staged.requestId},"skipped");
+      onLogDecision&&onLogDecision(`${athlete.name} program request → coach: skip`.slice(0,200), {kind:"decision",source:"request_card",athlete_id:athlete.id,action:"skip",flag:staged.source||null});
+    }
+    setStaged(null);
+    setMergeState(null);
+  };
+
+  // Merge failure escape hatch — keeps the OLD append-a-comment workflow alive so
+  // a Claude hiccup never blocks the coach from getting the note into the program.
+  const insertAsNote = () => {
+    setProgramText(t=>`${(t||athlete.program_text||"").trimEnd()}\n\n# From today's brief — edit into the program, then delete this note:\n# ${staged?.suggestion||""}`);
+    setStaged(null);
+    setMergeState(null);
+  };
+
+  const backToStaged = () => setMergeState(null);
+
+  const saveMerge = async () => {
+    if(!mergeState||mergeState==="running"||mergeState.error) return;
+    const merged = mergeState.merged;
+    setProgramSaving(true);
+    setProgramError("");
+    try {
+      await onProgramSave(merged);
+      setProgramText(merged);
+      setProgramSaved(true);
+      setTimeout(()=>setProgramSaved(false),3000);
+      const edited = staged&&staged.suggestion!==staged.originalSuggestion;
+      if(staged?.requestId&&staged.origin==="request"){
+        onResolveRequest&&onResolveRequest({id:staged.requestId}, edited?"edited":"applied");
+      }
+      onLogDecision&&onLogDecision(`${athlete.name} program change → coach: ${edited?"edited & applied":"applied"}`.slice(0,200), {kind:"decision",source:staged?.origin==="request"?"request_card":"morning_brief",athlete_id:athlete.id,action:"apply",flag:staged?.source||null});
+      setStaged(null);
+      setMergeState(null);
+    } catch(e){
+      setProgramError("Save failed — " + (e?.message||"check your connection and try again."));
+    }
+    setProgramSaving(false);
+  };
+
+  // Morning Brief hand-off (Apply/Edit on a request, or "Draft the change" on an
+  // injury/plateau beat): opens the Program tab into the SAME staged review flow
+  // the request card uses — nothing writes to the program until the coach
+  // reviews the diff and hits Save.
   useEffect(()=>{
     if(!prefill||prefill.athleteId!==athlete.id) return;
     setTab("program");
-    setProgramText(t=>`${(t||athlete.program_text||"").trimEnd()}\n\n# From today's brief — edit into the program, then delete this note:\n# ${prefill.note}`);
+    const base = programText||athlete.program_text||"";
+    // Injury/plateau suggestions sometimes lead with "Lift: ..." — pull it out so
+    // placement lookup has something to search for even with no request row.
+    const liftMatch = String(prefill.note||"").match(/^\s*([^:]{2,40}):/);
+    const lift = liftMatch?liftMatch[1].trim():null;
+    const placement = lift?findPlacement(base,lift):null;
+    const next = {
+      origin:"brief", requestId:prefill.requestId||null, athleteWords:prefill.reason||null,
+      suggestion:prefill.note, originalSuggestion:prefill.note, lift, current:null, why:null,
+      source:prefill.flag||"feedback", placement, editing:!!prefill.edit, createdAt:null,
+    };
+    setStaged(next);
+    setMergeState(null);
     onPrefillConsumed&&onPrefillConsumed();
+    if(prefill.autoApply) runMerge(next);
   },[prefill,athlete.id]);
 
   const handleProgramSave = async () => {
@@ -3130,9 +3300,9 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
                 {drafted&&<div style={{color:CA.muted,fontSize:11.5,lineHeight:1.5,marginTop:4}}>In their words: “{r.reason.length>200?r.reason.slice(0,197)+"…":r.reason}”</div>}
                 <div style={{color:CA.dim||CA.muted,fontSize:11,margin:"5px 0 10px"}}>{drafted?"Drafted by Coach Joe · ":""}Filed {fmtDateRelative?fmtDateRelative(r.created_at):new Date(r.created_at).toLocaleDateString()} · {r.source}</div>
                 <div style={{display:"flex",gap:6}}>
-                  <button onClick={()=>onResolveRequest&&onResolveRequest(r,"applied")} style={{background:CA.accent,color:"#fff",border:"none",borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Mark applied</button>
-                  <button onClick={()=>{setTab("program");}} style={{background:"transparent",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Edit program</button>
-                  <button onClick={()=>onResolveRequest&&onResolveRequest(r,"skipped")} style={{background:"transparent",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Skip</button>
+                  <button onClick={()=>stageFromRequest(r,{autoApply:true})} style={{background:CA.accent,color:"#fff",border:"none",borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Review & apply</button>
+                  <button onClick={()=>stageFromRequest(r,{autoApply:false})} style={{background:"transparent",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Edit</button>
+                  <button onClick={()=>skipRequest(r)} style={{background:"transparent",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Skip</button>
                 </div>
               </div>
             );})}
@@ -3415,6 +3585,50 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
         {/* ── PROGRAM TAB ── */}
         {tab==="program"&&(
           <div>
+            {/* ── Staged program change (request card / brief hand-off) ── */}
+            {staged&&(
+              <div style={{border:`1px solid ${CA.accent}55`,background:`${CA.accent}0d`,borderRadius:12,padding:14,marginBottom:16}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+                  <span style={{fontFamily:"'Bebas Neue'",fontSize:14,color:CA.accent,letterSpacing:1}}>SUGGESTED CHANGE · {String(staged.source||"feedback").toUpperCase()}</span>
+                  <span style={{marginLeft:"auto",fontSize:10.5,color:CA.muted}}>
+                    {athlete.name}{staged.origin==="request"&&staged.createdAt?` · ${fmtDateRelative?fmtDateRelative(staged.createdAt):new Date(staged.createdAt).toLocaleDateString()}`:""}
+                  </span>
+                </div>
+                {staged.editing ? (
+                  <textarea value={staged.suggestion} onChange={e=>setStaged(s=>({...s,suggestion:e.target.value}))} rows={3}
+                    style={{width:"100%",background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:8,padding:"9px 11px",color:CA.text,fontSize:13,outline:"none",resize:"vertical",lineHeight:1.55,fontFamily:"'DM Sans'",marginBottom:8}}/>
+                ) : (
+                  <div style={{color:CA.text,fontSize:13.5,lineHeight:1.55,marginBottom:8}}>{staged.suggestion}</div>
+                )}
+                {staged.athleteWords&&(
+                  <div style={{color:CA.muted,fontSize:11.5,lineHeight:1.5,marginBottom:6}}>In their words: "{staged.athleteWords.length>200?staged.athleteWords.slice(0,197)+"…":staged.athleteWords}"</div>
+                )}
+                <div style={{color:CA.muted2,fontSize:11.5,marginBottom:staged.why?6:8}}>
+                  {staged.placement ? `Slot: ${staged.placement.dayLabel||"unlabeled day"} — replaces "${staged.placement.currentLine}"` : "Placement: Joe will slot it where it fits"}
+                </div>
+                {staged.why&&<div style={{color:CA.muted,fontSize:11,marginBottom:8,fontStyle:"italic"}}>{staged.why}</div>}
+                {mergeState&&typeof mergeState==="object"&&mergeState.error&&(
+                  <div style={{background:`${CA.red}12`,border:`1px solid ${CA.red}44`,borderRadius:8,padding:"9px 11px",marginBottom:10}}>
+                    <div style={{color:CA.red,fontSize:12,marginBottom:6}}>⚠ {mergeState.error}</div>
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={()=>runMerge()} style={{background:"transparent",border:`1px solid ${CA.red}55`,color:CA.red,borderRadius:6,padding:"5px 11px",fontSize:11.5,cursor:"pointer"}}>Try again</button>
+                      <button onClick={insertAsNote} style={{background:"transparent",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:6,padding:"5px 11px",fontSize:11.5,cursor:"pointer"}}>Insert as note instead</button>
+                    </div>
+                  </div>
+                )}
+                <div style={{display:"flex",gap:6}}>
+                  <button onClick={()=>runMerge()} disabled={mergeState==="running"}
+                    style={{background:CA.accent,color:"#fff",border:"none",borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:mergeState==="running"?"wait":"pointer",fontFamily:"'DM Sans'",opacity:mergeState==="running"?0.7:1}}>
+                    {mergeState==="running"?"Drafting…":"Apply"}
+                  </button>
+                  <button onClick={()=>setStaged(s=>({...s,editing:!s.editing}))} style={{background:"transparent",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>
+                    {staged.editing?"Done editing":"Edit"}
+                  </button>
+                  <button onClick={dismissStaged} style={{background:"transparent",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"6px 13px",fontSize:11.5,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>Dismiss</button>
+                </div>
+              </div>
+            )}
+
             {/* Temp program banner */}
             {athlete.temp_program_text&&(
               <div style={{background:`${CA.accent}12`,border:`1px solid ${CA.accent}50`,borderRadius:12,padding:14,marginBottom:16}}>
@@ -3470,6 +3684,38 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
           </div>
         )}
       </div>
+
+      {/* ── Diff review overlay — the coach's one gate before anything saves ── */}
+      {mergeState&&typeof mergeState==="object"&&mergeState.merged&&(
+        <div style={{position:"fixed",inset:0,background:CA.navy,zIndex:400,overflowY:"auto",padding:isMobile?"calc(14px + env(safe-area-inset-top, 0px)) 14px 40px":"28px"}}>
+          <div style={{maxWidth:720,margin:"0 auto"}}>
+            <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:10,marginBottom:14}}>
+              <div>
+                <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:CA.cyan,letterSpacing:1.5}}>REVIEW CHANGE</div>
+                <div style={{color:CA.muted,fontSize:11.5}}>{athlete.name}</div>
+              </div>
+              <button onClick={backToStaged} style={{border:`1px solid ${CA.border}`,background:"transparent",color:CA.muted2,borderRadius:8,padding:"6px 14px",fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"'DM Sans'"}}>✕</button>
+            </div>
+            <div style={{color:CA.muted,fontSize:12,marginBottom:12}}>
+              {mergeState.stats.added+mergeState.stats.removed} line{mergeState.stats.added+mergeState.stats.removed!==1?"s":""} change · {mergeState.stats.unchanged} untouched
+            </div>
+            <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:"12px 14px",fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:12.5,lineHeight:1.7,marginBottom:16,overflowX:"auto"}}>
+              {collapseDiffForDisplay(mergeState.diff).map((d,i)=>
+                d.type==="gap"
+                  ? <div key={i} style={{color:CA.muted,textAlign:"center",padding:"4px 0"}}>· · ·</div>
+                  : <div key={i} style={{whiteSpace:"pre-wrap",color:d.type==="del"?CA.red:d.type==="add"?CA.accent:CA.muted2,textDecoration:d.type==="del"?"line-through":"none",opacity:d.type==="same"?0.65:1}}>{d.text||" "}</div>
+              )}
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={backToStaged} style={{flex:1,background:"transparent",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:10,padding:"12px",cursor:"pointer",fontSize:14}}>Back</button>
+              <button onClick={saveMerge} disabled={programSaving}
+                style={{flex:2,background:CA_BTN,boxShadow:`0 4px 16px ${CA_GLOW}`,border:"none",color:"#fff",borderRadius:10,padding:"12px",cursor:programSaving?"wait":"pointer",fontSize:14,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,opacity:programSaving?0.7:1}}>
+                {programSaving?"Saving...":"Save program →"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
