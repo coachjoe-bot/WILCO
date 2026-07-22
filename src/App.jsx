@@ -15,6 +15,7 @@ import { qlLoad, qlSave, qlClear } from "./quicklog.js";
 // Coach change-request drafting/filing — single source of truth for the rule set
 // governing when Joe offers to loop the human coach in (see file header).
 import { draftChangeRequest, fileChangeRequest, flagToSource } from "./changeRequest.js";
+import { lineDiff, findPlacement, mergeGuard } from "./programDiff.js";
 // Grit strength-ranking module (e1RM primitives, name normalization, tier ladder,
 // bodyweight/age-fair thresholds) — single canonical source shared with the server
 // Proof Feed engine (api/_grit.js re-exports this file's server-safe subset).
@@ -4064,6 +4065,14 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // Joe authors the suggestion — the athlete only confirms; nothing is filed
   // until they tap Send.
   const [changeRequestPending,setChangeRequestPending] = useState(null);
+  // Pending athlete-side SELF-APPLY staged change (unlocked program): Joe drafts the
+  // change, the athlete Applies/Edits/Skips, a surgical AI merge proposes the full
+  // updated program text, the athlete reviews a compact diff, then explicitly saves.
+  // {phase:"offer"|"editing"|"applying"|"review", suggestion, lift, current, why,
+  //  source, athleteMsg, merged?, addedLines?, removedLines?} — see the COACH REQUEST
+  // RULE SET comment in changeRequest.js for when this fires vs. changeRequestPending.
+  const [selfChangePending,setSelfChangePending] = useState(null);
+  const [selfChangeEditText,setSelfChangeEditText] = useState(""); // inline editor draft, phase "editing" only
   // One chat offer per flag (pain/plateau/equipment) per session — mirrors the check-in's
   // offeredCoachRef, keyed by flag since chat can surface more than one topic in a session.
   const coachFlagOfferedRef = useRef({});
@@ -4710,6 +4719,88 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     }
   };
 
+  // ── Athlete-side self-apply staged change (unlocked program) ──────────────────
+  // Same surgical AI merge the coach uses (coach.jsx runMerge), copied verbatim
+  // apart from the system prompt's "athlete who owns it" wording, so a bad/
+  // truncated/over-eager rewrite is rejected by mergeGuard exactly the same way on
+  // both sides. Nothing ever writes to program_text until the athlete taps Save.
+  const runSelfMerge = async (pendingArg) => {
+    const p = pendingArg || selfChangePending;
+    if(!p) return;
+    setSelfChangePending({...p, phase:"applying"});
+    try {
+      const base = athlete.program_text || "";
+      const placement = findPlacement(base, p.lift);
+      const sys = `You are applying ONE change to a strength program for the athlete who owns it. Return ONLY the complete updated program text — no preamble, no markdown fences, no commentary. Rules: make ONLY the change the request requires; every other line must be preserved character-for-character (headers, spacing, notes, comments); keep the program's existing formatting conventions; if the change names a lift not in the program, add it under the most sensible day; never invent numbers you weren't given — carry over the existing sets/reps/loading unless the request changes them.`;
+      const parts = [`CURRENT PROGRAM:\n${base}`, `\nREQUESTED CHANGE: ${p.suggestion}`];
+      if(placement) parts.push(`\nTARGET: ${placement.dayLabel||"unspecified day"} — currently "${placement.currentLine}"`);
+      parts.push(`\nATHLETE'S OWN WORDS: "${p.athleteMsg}"`);
+      const raw = await askClaude(sys, parts.join("\n"), 4000, [], "claude-sonnet-5", "program_apply_change");
+      const guard = mergeGuard(base, raw);
+      if(!guard.ok){
+        setSelfChangePending(null);
+        setMessages(prev=>[...prev,{role:"assistant",content:"Couldn't make that change cleanly — tell me exactly what you want different and I'll take another run at it."}]);
+        return;
+      }
+      const diff = lineDiff(base, guard.text);
+      const dels = diff.filter(d=>d.type==="del").map(d=>d.text);
+      const adds = diff.filter(d=>d.type==="add").map(d=>d.text);
+      const allLines = [...dels.map(l=>`− ${l}`), ...adds.map(l=>`+ ${l}`)];
+      const CAP = 12;
+      const shown = allLines.slice(0,CAP);
+      const extra = allLines.length - shown.length;
+      const diffText = shown.join("\n") + (extra>0?`\n…and ${extra} more lines`:"");
+      setSelfChangePending({...p, phase:"review", merged:guard.text, addedLines:adds.length, removedLines:dels.length});
+      setMessages(prev=>[...prev,{role:"assistant",content:`Here's the exact change — everything else stays put:\n\n${diffText}\n\nLock it in?`}]);
+    } catch(e){
+      setSelfChangePending(null);
+      setMessages(prev=>[...prev,{role:"assistant",content:"Couldn't make that change cleanly — tell me exactly what you want different and I'll take another run at it."}]);
+    }
+  };
+
+  const leaveSelfChange = () => {
+    setSelfChangePending(null);
+    setMessages(prev=>[...prev,{role:"assistant",content:"Left alone. Say the word if it starts costing you sessions."}]);
+  };
+
+  const editSelfChange = () => {
+    setSelfChangeEditText(selfChangePending?.suggestion||"");
+    setSelfChangePending(prev=>prev?{...prev,phase:"editing"}:prev);
+  };
+
+  const cancelSelfChangeEdit = () => {
+    setSelfChangePending(prev=>prev?{...prev,phase:"offer"}:prev); // original suggestion was never overwritten
+  };
+
+  const applySelfChangeEdit = () => {
+    const edited = selfChangeEditText.trim();
+    if(!edited || !selfChangePending) return;
+    const next = {...selfChangePending, suggestion:edited};
+    runSelfMerge(next);
+  };
+
+  const backSelfChangeReview = () => {
+    setSelfChangePending(prev=>prev?{...prev,phase:"offer",merged:null}:prev);
+  };
+
+  // Explicit save — mirrors the program_append branch's state-update pattern
+  // (sbUpdate + local athlete state), just via functional setState since this
+  // handler lives outside send()'s updatedAthlete closure (same reason
+  // confirmProgramReplace above does it this way too).
+  const saveSelfChange = async () => {
+    const pending = selfChangePending;
+    if(!pending || !pending.merged) return;
+    try {
+      await sbUpdate("athletes",athlete.id,{program_text:pending.merged});
+      setAthlete(prev=>({...prev,program_text:pending.merged}));
+      try{ track("self_change_applied","ai"); }catch(_){}
+      setSelfChangePending(null);
+      setMessages(prev=>[...prev,{role:"assistant",content:"Done — program's updated. It'll be there next session."}]);
+    } catch(e){
+      setMessages(prev=>[...prev,{role:"assistant",content:"Couldn't save that — try again in a sec."}]);
+    }
+  };
+
   // `overrideText` lets Quick Log submit a prepared message directly — the click
   // handler passes an event object (not a string), which safely falls back to `input`.
   const send = async (overrideText) => {
@@ -4728,6 +4819,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     if(correctionPending) setCorrectionPending(null);
     // And for a drafted coach change-request: typing = don't send.
     if(changeRequestPending) setChangeRequestPending(null);
+    // Same for a pending athlete-side self-apply change: typing instead of tapping
+    // a chip cancels whatever phase it was in.
+    if(selfChangePending) setSelfChangePending(null);
 
     // ── Goal collection flow (first chat only) ──────────────────────────────
     if(goalCollectionActive){
@@ -4932,18 +5026,26 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         } catch(e){}
       }
 
-      // Coach-request offers (pain / plateau / equipment) — additive, never touches the
-      // program-write branches above. Skips entirely if the locked-program branch just
-      // above already offered a change request for THIS message (wantsProgramWrite &&
-      // locked). Pain offers regardless of lock (the coach should hear about pain even
-      // if Joe can adapt the program himself); plateau/equipment only when locked (Joe
-      // edits directly otherwise). One offer per flag per session, and never stacked on
-      // top of another pending confirm chip already showing.
+      // Coach-request / self-change offers (pain / plateau / equipment) — additive,
+      // never touches the program-write branches above. Skips entirely if the
+      // locked-program branch just above already offered a change request for THIS
+      // message (wantsProgramWrite && locked). Exactly one of the two branches below
+      // can fire per message — full routing table lives in the COACH REQUEST RULE SET
+      // comment in changeRequest.js:
+      //   locked program            → coach request (any flag)
+      //   unlocked + coached + pain → coach request (coach should hear about pain
+      //                               even though Joe COULD adapt the program himself)
+      //   everything else unlocked  → athlete self-apply staged offer (plateau/
+      //   (plateau/equipment any-    equipment for anyone, pain for an uncoached
+      //    one, pain if uncoached)   athlete)
+      // One offer per flag per session (coachFlagOfferedRef, shared across both
+      // branches), and never stacked on top of another pending confirm chip.
       const lockedBranchFired = wantsProgramWrite && updatedAthlete.program_locked;
+      const noOtherOfferPending = !changeRequestPending && !programReplacePending && !correctionPending && !selfChangePending;
       if(!lockedBranchFired && parsed.coach_flag && updatedAthlete.coach_id
          && (parsed.coach_flag==="pain" || updatedAthlete.program_locked)
          && !coachFlagOfferedRef.current[parsed.coach_flag]
-         && !changeRequestPending && !programReplacePending && !correctionPending){
+         && noOtherOfferPending){
         coachFlagOfferedRef.current[parsed.coach_flag] = true;
         try {
           const draft = await draftChangeRequest({athlete: updatedAthlete, message: msg, programText: updatedAthlete.program_text||"", sourceHint: flagToSource(parsed.coach_flag), askClaude});
@@ -4953,6 +5055,21 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             : parsed.coach_flag==="plateau"
             ? `You've been stuck there long enough that it's worth a program change, and your coach has your program locked. Here's what I'd ask for:\n\n"${draft.suggestion}"\n\nWant me to send it?`
             : `If that equipment keeps being a problem, the fix belongs in the program. Here's the request I'd send your coach:\n\n"${draft.suggestion}"\n\nWant me to send it?`;
+          followUp(offerCopy);
+        } catch(e){}
+      } else if(!lockedBranchFired && hasProgram && !updatedAthlete.program_locked && parsed.coach_flag
+         && !coachFlagOfferedRef.current[parsed.coach_flag]
+         && noOtherOfferPending
+         && !(parsed.coach_flag==="pain" && updatedAthlete.coach_id)){
+        coachFlagOfferedRef.current[parsed.coach_flag] = true;
+        try {
+          const draft = await draftChangeRequest({athlete: updatedAthlete, message: msg, programText: updatedAthlete.program_text||"", sourceHint: flagToSource(parsed.coach_flag), askClaude});
+          setSelfChangePending({phase:"offer", suggestion: draft.suggestion, lift: draft.lift, current: draft.current, why: draft.why, source: draft.source, athleteMsg: msg});
+          const offerCopy = parsed.coach_flag==="pain"
+            ? `That's not something to train through blind. Here's what I'd change in your program:\n\n"${draft.suggestion}"\n\nWant me to make that change?`
+            : parsed.coach_flag==="plateau"
+            ? `That stall is a programming problem, not an effort problem. Here's the fix I'd make:\n\n"${draft.suggestion}"\n\nWant me to make that change?`
+            : `If the gear keeps being a problem, the program should stop asking for it. Here's what I'd change:\n\n"${draft.suggestion}"\n\nWant me to make that change?`;
           followUp(offerCopy);
         } catch(e){}
       }
@@ -5420,6 +5537,53 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             Keep current
           </button>
         </div>
+      ):selfChangePending?(
+        selfChangePending.phase==="editing"?(
+          <div style={{padding:"0 14px 8px",display:"flex",flexDirection:"column",gap:6,flexShrink:0}}>
+            <textarea value={selfChangeEditText} onChange={e=>setSelfChangeEditText(e.target.value)} rows={3} autoFocus
+              style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,padding:"10px 12px",color:CA.text,fontSize:13,outline:"none",resize:"none",lineHeight:1.5,fontFamily:"'DM Sans'"}}/>
+            <div style={{display:"flex",gap:6}}>
+              <button onClick={applySelfChangeEdit}
+                style={{background:`${CA.accent}20`,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap"}}>
+                Apply this
+              </button>
+              <button onClick={cancelSelfChangeEdit}
+                style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap"}}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        ):selfChangePending.phase==="review"?(
+          <div className="no-sb" style={{padding:"0 14px 4px",display:"flex",gap:6,overflowX:"auto",flexShrink:0,alignItems:"center",flexWrap:"nowrap"}}>
+            <span style={{color:CA.muted,fontSize:12,flexShrink:0}}>↑</span>
+            <button onClick={saveSelfChange}
+              style={{background:`${CA.accent}20`,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+              Save it
+            </button>
+            <button onClick={backSelfChangeReview}
+              style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+              Back
+            </button>
+          </div>
+        ):(
+          <div className="no-sb" style={{padding:"0 14px 4px",display:"flex",gap:6,overflowX:"auto",flexShrink:0,alignItems:"center",flexWrap:"nowrap"}}>
+            <span style={{color:CA.muted,fontSize:12,flexShrink:0}}>↑</span>
+            <button onClick={()=>runSelfMerge(selfChangePending)} disabled={selfChangePending.phase==="applying"}
+              style={{background:`${CA.accent}20`,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:20,padding:"7px 18px",cursor:selfChangePending.phase==="applying"?"default":"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0,opacity:selfChangePending.phase==="applying"?0.6:1}}>
+              {selfChangePending.phase==="applying"?"Making the change…":"Make the change"}
+            </button>
+            {selfChangePending.phase!=="applying"&&(<>
+              <button onClick={editSelfChange}
+                style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+                Edit it first
+              </button>
+              <button onClick={leaveSelfChange}
+                style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+                Leave it
+              </button>
+            </>)}
+          </div>
+        )
       ):(
         <div style={{padding:"0 0 5px",overflow:"hidden",flexShrink:0,WebkitMaskImage:"linear-gradient(90deg,transparent,#000 5%,#000 95%,transparent)",maskImage:"linear-gradient(90deg,transparent,#000 5%,#000 95%,transparent)"}}>
           <div className="a-ticker" style={{alignItems:"center"}}>

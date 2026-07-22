@@ -1,19 +1,28 @@
 // ─── COACH REQUEST RULE SET ──────────────────────────────────────────────────
-// Single source of truth for WHEN Joe offers to send the athlete's human coach a
-// structured program-change request. Both call sites (weekly check-in pain
+// Single source of truth for WHEN Joe offers a structured program-change — either
+// to the athlete's human coach, or (App.jsx AthleteView self-apply flow) staged
+// for the athlete to apply themselves. Both call sites (weekly check-in pain
 // question, main chat) route through draftChangeRequest/fileChangeRequest below
-// so the rule and the copy never drift apart.
+// so the rule and the copy never drift apart. Full routing table:
 //
-// - Pain reported by a COACHED athlete (coach_id set): offer regardless of
-//   program lock — the coach should hear about pain even if Joe can adapt the
+// - Program LOCKED by a coach: always a coach request (any flag — pain, plateau,
+//   equipment, or an explicit program-change ask). Joe can't touch a locked
+//   program, so the coach has to.
+// - Program UNLOCKED + athlete has a coach (coach_id set) + PAIN: still a coach
+//   request. The coach should hear about pain even though Joe could adapt the
 //   program himself right now.
-// - Plateau or recurring equipment problems: offer ONLY when the program is
-//   coach-locked. Unlocked → Joe just edits the program directly instead.
-// - Explicit program-change ask while the program is locked: always offer.
-// - One offer per topic per session. The athlete always confirms (Send to
-//   coach / Don't send) before anything is filed. WILCO never free-messages
-//   the coach on the athlete's behalf — every request is structured
-//   (lift/current/suggested_change/why), never raw chat text.
+// - Everything else with the program UNLOCKED (plateau or equipment for anyone,
+//   or pain for an UNCOACHED athlete): Joe stages the change himself and the
+//   athlete applies it — draft → Apply/Edit/Skip → surgical AI merge → diff
+//   review → explicit save (App.jsx selfChangePending; same merge/guard code
+//   path as the coach-side edit in coach.jsx, via programDiff.js).
+// - Explicit program-change ask while the program is locked: always a coach
+//   request (covered by the first rule above).
+// - One offer per topic per session either way. The athlete always confirms via
+//   an explicit tap (Send to coach / Don't send, or Make the change / Edit it
+//   first / Leave it) before anything is filed or saved. WILCO never
+//   free-messages the coach on the athlete's behalf — every coach request is
+//   structured (lift/current/suggested_change/why), never raw chat text.
 
 export const CR_SOURCES = ["pain","plateau","pr","feedback"];
 
