@@ -310,6 +310,22 @@ export default async function handler(req, res) {
             // admin → coaches within their own school.
             ownFilter = `&school_id=eq.${enc(sid)}`;
             assertRows((r) => String(r.school_id) === String(sid));
+            // Seat limit (schools.max_coaches) is what the school tier bills for —
+            // enforce it server-side, not just in the Account tab UI. Count matches
+            // the client's atLimit gate (non-admin rows), minus soft-removed seats
+            // (access_code REMOVED_*) so the server is never STRICTER than the UI —
+            // the happy path can't hit this, keeping the change invisible.
+            if (body.op === "insert" || body.op === "upsert") {
+              const school = (await sbSelect("schools", `?id=eq.${enc(sid)}&select=max_coaches`))[0];
+              const maxCoaches = school?.max_coaches || 3;
+              const seated = (await sbSelect("coaches", `?school_id=eq.${enc(sid)}&select=id,role,access_code`))
+                .filter((c) => c.role !== "admin" && !String(c.access_code || "").startsWith("REMOVED_"))
+                .length;
+              const adding = writeRows().filter((r) => r && r.role !== "admin").length;
+              if (seated + adding > maxCoaches) {
+                throw httpErr(403, `Coach limit reached for your plan (${maxCoaches} max).`);
+              }
+            }
           }
         } else if (table === "athletes") {
           // admin → any athlete in their school; coach → only their own roster.
