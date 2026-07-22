@@ -1750,6 +1750,17 @@ export const getPushSubscription = async () => {
   try{ const reg = await navigator.serviceWorker.ready; return await reg.pushManager.getSubscription(); }catch{ return null; }
 };
 
+// A13: is this browser's subscription registered under the CALLER's own account?
+// A browser subscription alone proves nothing about WHO it's registered to —
+// athlete and coach rows live in separate tables, so a shared device can show a
+// coach "On" while their table has no row and pushes never arrive.
+export const getPushStatusForCaller = async () => {
+  const sub = await getPushSubscription();
+  if(!sub) return false;
+  try{ const d = await pushApi({action:"status", endpoint: sub.endpoint}); return !!d.registered; }
+  catch{ return true; } // can't verify right now — fall back to the old browser-only signal
+};
+
 // Subscribe this browser (asks for permission if needed — call from a user
 // gesture) and register it server-side under the logged-in athlete.
 export async function enablePush(){

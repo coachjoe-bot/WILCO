@@ -258,6 +258,16 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
+    // A13: does THIS browser's endpoint exist in the CALLER's own table? The coach
+    // Settings toggle used to seed from the browser subscription alone — on any
+    // device where an athlete had enabled push, a coach saw "On" while
+    // coach_push_subscriptions had no row and digest pushes never arrived.
+    if (body.action === "status") {
+      const endpoint = str(body.endpoint, { max: 1000, name: "endpoint" });
+      const rows = await sbSelect(subTable, `?endpoint=eq.${enc(endpoint)}&${ownCol}=eq.${enc(caller.id)}&select=id`);
+      return res.status(200).json({ registered: rows.length > 0 });
+    }
+
     if (body.action === "unsubscribe") {
       const endpoint = str(body.endpoint, { max: 1000, name: "endpoint" });
       // Scoped to the caller: you can only ever delete your own subscription row.

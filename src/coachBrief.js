@@ -276,15 +276,29 @@ function buildConcernBeat({ t, row, req, dateKey, beatIndex }) {
 // ── trend beat — pick ONE signal by priority ──────────────────────────────────
 function buildTrendBeat(D, dateKey, beatIndex) {
   const vw = Array.isArray(D.volWeeks) && D.volWeeks.length === 4 ? D.volWeeks : [0, 0, 0, 0];
-  const spike = vw[0] > 0 && vw[3] > vw[0] * 1.5;
-  const pct = vw[0] > 0 ? Math.round(((vw[3] - vw[0]) / vw[0]) * 100) : null;
+  // A21: mirror the Team Volume card's rule — until the week is mostly logged
+  // (Sat+, todayIdx>=5), judge the last COMPLETE week (vw[2]) rather than the
+  // partial current one. Mon–Wed totals are always small, so grading vw[3] early
+  // either hid a genuine spike or printed "flat and healthy" off two days of
+  // data — the same signal graded two contradictory ways on one screen.
+  const todayIdx = typeof D.todayIdx === "number" ? D.todayIdx : 6;
+  const useCurrent = todayIdx >= 5;
+  const judged = useCurrent ? vw[3] : vw[2];
+  const spike = vw[0] > 0 && judged > vw[0] * 1.5;
+  const pct = vw[0] > 0 ? Math.round(((judged - vw[0]) / vw[0]) * 100) : null;
 
   if (spike) {
-    const templates = [
-      `Team volume's up ${pct}% over four weeks — worth keeping an eye on the load.`,
-      `Volume's climbing fast, ${pct}% over the last month. Watch for overreaching.`,
-      `Four-week volume trend is up ${pct}% — good sign, just don't let it run away from you.`,
-    ];
+    const templates = useCurrent
+      ? [
+          `Team volume's up ${pct}% over four weeks — worth keeping an eye on the load.`,
+          `Volume's climbing fast, ${pct}% over the last month. Watch for overreaching.`,
+          `Four-week volume trend is up ${pct}% — good sign, just don't let it run away from you.`,
+        ]
+      : [
+          `Last week's volume ran ${pct}% over the month's start — worth keeping an eye on the load.`,
+          `Volume had climbed ${pct}% by last week. Watch for overreaching.`,
+          `Last complete week came in ${pct}% over four weeks ago — good sign, just don't let it run away from you.`,
+        ];
     return { text: pick(templates, dateKey, beatIndex), tag: "volume climbing" };
   }
   if (D.teamAdh != null && D.teamAdh < 60) {
@@ -312,7 +326,10 @@ function buildTrendBeat(D, dateKey, beatIndex) {
 }
 
 // ── question bank — deterministic, rotated by dateKey, max 2/day ─────────────
-function buildQuestionBeats(concernBeats, dateKey) {
+// answeredIds (A18): question ids already answered this week (coach_context rows
+// stamped with meta.question_id) — skipped, so the bank rotates to the NEXT
+// generator instead of re-asking the same question every single day.
+function buildQuestionBeats(concernBeats, dateKey, answeredIds = new Set()) {
   const byFlag = {};
   for (const b of concernBeats) {
     const f = b.meta && b.meta.baseFlag ? b.meta.baseFlag : b.flag;
@@ -349,13 +366,19 @@ function buildQuestionBeats(concernBeats, dateKey) {
       };
     },
     fallback: () => {
+      // Per-template ids so an answered fallback rotates to the next one instead
+      // of the whole bank going quiet (or repeating) for the week.
       const templates = [
-        { text: "What's the main goal for this block?", chips: ["Strength", "Hypertrophy", "Peaking / competition", "Just consistency"] },
-        { text: "Where's the team at in the season right now?", chips: ["Off-season", "Pre-season", "In-season", "Post-season"] },
-        { text: "How's the team responding to the current program?", chips: ["Fresh, ready for more", "Holding up well", "Getting tired", "Beat up"] },
+        { id: "fallback:goal", text: "What's the main goal for this block?", chips: ["Strength", "Hypertrophy", "Peaking / competition", "Just consistency"] },
+        { id: "fallback:season", text: "Where's the team at in the season right now?", chips: ["Off-season", "Pre-season", "In-season", "Post-season"] },
+        { id: "fallback:response", text: "How's the team responding to the current program?", chips: ["Fresh, ready for more", "Holding up well", "Getting tired", "Beat up"] },
       ];
-      const t = pick(templates, dateKey, 900);
-      return { id: "fallback", text: t.text, chips: t.chips };
+      const start = hashStr(dateKey) % templates.length;
+      for (let i = 0; i < templates.length; i++) {
+        const t = templates[(start + i) % templates.length];
+        if (!answeredIds.has(t.id)) return t;
+      }
+      return null; // every fallback answered this week — say nothing rather than repeat
     },
   };
 
@@ -368,7 +391,7 @@ function buildQuestionBeats(concernBeats, dateKey) {
   for (const k of rotated) {
     if (picked.length >= 2) break;
     const q = gens[k]();
-    if (q && !seenIds.has(q.id)) { picked.push(q); seenIds.add(q.id); }
+    if (q && !answeredIds.has(q.id) && !seenIds.has(q.id)) { picked.push(q); seenIds.add(q.id); }
   }
   return picked.map((q, i) => ({
     id: `question:${i}:${q.id}`,
@@ -389,7 +412,7 @@ function buildQuestionBeats(concernBeats, dateKey) {
  * @param {string} args.dateKey "YYYY-MM-DD" local date — the sole source of phrasing variance.
  * @returns {{headline:string, beats:Beat[]}}
  */
-export function buildMorningBrief({ D, athletes = [], changeRequests = [], cleared = new Set(), dateKey }) {
+export function buildMorningBrief({ D, athletes = [], changeRequests = [], cleared = new Set(), dateKey, answeredQuestionIds = new Set() }) {
   const roster = athletes.length || (D && D.rows ? D.rows.length : 0);
   const beats = [];
 
@@ -458,8 +481,8 @@ export function buildMorningBrief({ D, athletes = [], changeRequests = [], clear
   const trend = buildTrendBeat(D, dateKey, 500);
   beats.push({ id: "trend", kind: "trend", prose: trend.text, actions: [] });
 
-  // Question beat(s) — max 2/day.
-  beats.push(...buildQuestionBeats(concernBeats, dateKey));
+  // Question beat(s) — max 2/day, minus anything already answered this week (A18).
+  beats.push(...buildQuestionBeats(concernBeats, dateKey, answeredQuestionIds));
 
   // Wins beat — always last, only if there's something to show.
   const wins = D.wins || [];

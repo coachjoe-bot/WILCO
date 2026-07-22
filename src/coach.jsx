@@ -5,7 +5,7 @@
 // the dynamic import means the cycle App→coach→App is resolved at load time.
 import { useState, useEffect, useRef, useMemo } from "react";
 import {
-  CA, CA_BTN, CA_GLOW, GS, LineChart, MASTER_CODE, RunCard, SUPABASE_KEY, SUPABASE_URL, askClaude, bestE1RMForExercise, btn, cleanerName, daysBetween, disablePush, displayForKey, enablePush, epley1RM, fmtDate, fmtDateRelative, fmtDateShort, fmtWeight, formatSetDetails, getAuth, getExerciseSets, getPushSubscription, groupIntoSessions, haptic, idApi, inpA, isRealSession, liftTier, normalizeExName, pushSupported, sbDelete, sbInsert, sbRead, sbUpdate, sbUpdateWhere, sbUpsert, toLbs, track, useIsMobile
+  CA, CA_BTN, CA_GLOW, GS, LineChart, MASTER_CODE, RunCard, SUPABASE_KEY, SUPABASE_URL, askClaude, bestE1RMForExercise, btn, cleanerName, daysBetween, disablePush, displayForKey, enablePush, epley1RM, fmtDate, fmtDateRelative, fmtDateShort, fmtWeight, formatSetDetails, getAuth, getExerciseSets, getPushStatusForCaller, getPushSubscription, groupIntoSessions, haptic, idApi, inpA, isRealSession, liftTier, normalizeExName, pushSupported, sbDelete, sbInsert, sbRead, sbUpdate, sbUpdateWhere, sbUpsert, toLbs, track, useIsMobile
 } from "./App.jsx";
 // Shared deterministic engine (Phase 0 extraction) — per-athlete session/adherence
 // math, computed live client-side for the Overview. Aliased to avoid colliding with
@@ -15,7 +15,7 @@ import {
   trueImprovementPRs, classifyTiers, blendAdherenceScore, adherenceBreakdown, getPD,
   buildLiftHistory, detectPlateaus,
 } from "./proofcore.js";
-import { computeGritSnapshot, TIER_NAMES, TIER_COLORS, getBenchKey } from "./grit.js";
+import { computeGritSnapshot, TIER_NAMES, TIER_COLORS, getBenchKey, resolveLift } from "./grit.js";
 // Shared team-analytics math (C2): the server endpoint (api/coach-analytics) computes
 // the roster aggregations with THIS module; the client imports weekBounds from it so
 // both cut the identical Mon–Sun week.
@@ -696,7 +696,9 @@ function CoachDashboard({coach,onLogout}) {
   const [notifPrefs,setNotifPrefs] = useState(coach.notification_prefs||{injury:true,big_pr:true,inactive:true,digest:true});
   const [pushOn,setPushOn] = useState(false);
   const [pushBusy,setPushBusy] = useState(false);
-  useEffect(()=>{ (async()=>{ try{ setPushOn(!!(await getPushSubscription())); }catch{} })(); },[]);
+  // A13: check the coach's OWN registration (coach_push_subscriptions), not just
+  // the browser subscription — which could belong to an athlete on a shared device.
+  useEffect(()=>{ (async()=>{ try{ setPushOn(await getPushStatusForCaller()); }catch{} })(); },[]);
   const savePref = async (key,val)=>{ const next={...notifPrefs,[key]:val}; setNotifPrefs(next); try{ await sbUpdate("coaches",coach.id,{notification_prefs:next}); }catch(e){ console.error("pref save",e); } };
   const togglePush = async ()=>{ setPushBusy(true); try{ if(pushOn){ await disablePush(); setPushOn(false); } else { await enablePush(); setPushOn(true); } }catch(e){ console.error("push toggle",e); } setPushBusy(false); };
   const [reportFilter,setReportFilter] = useState("all"); // "all" | "weekly" | "monthly"
@@ -1010,7 +1012,10 @@ function CoachDashboard({coach,onLogout}) {
 
   const filtered = useMemo(()=>athletes.filter(a=>{
     if(search&&!a.name.toLowerCase().includes(search.toLowerCase())&&!a.sport.toLowerCase().includes(search.toLowerCase())) return false;
-    if(filterPain&&!painMap.get(a.id)?.anyPain) return false;
+    // A15: use the badge's unresolved-pain predicate — filtering "Pain flags" used
+    // to list athletes whose pain was already marked resolved, unbadged, so the
+    // filter looked broken. Filter and ⚠ badge now always agree.
+    if(filterPain&&!painMap.get(a.id)?.unresolvedPain) return false;
     if(filterInactive){
       const d = daysBetween(lastActive(a.id));
       if(d!==null&&d<=7) return false;
@@ -1071,7 +1076,7 @@ function CoachDashboard({coach,onLogout}) {
           <>
             {/* ── OVERVIEW TAB ── */}
             {activeTab==="overview"&&(
-              <CoachOverview athletes={athletes} workouts={workouts} prs={prs} manualRMs={manualRMs} prescriptions={prescriptions} coach={coach} analytics={analytics}
+              <CoachOverview athletes={athletes} workouts={workouts} prs={prs} manualRMs={manualRMs} prescriptions={prescriptions} coach={coach} school={school} analytics={analytics}
                 changeRequests={changeRequests} briefContext={briefContext} parsingIds={parsingIds}
                 onOpenAthlete={(id)=>{const at=athletes.find(a=>a.id===id); if(at){setSelected(at);setActiveTab("athletes");}}}
                 onPrefillProgram={(id,payload)=>{const at=athletes.find(a=>a.id===id); if(at){setProgramPrefill({athleteId:id,...payload});setSelected(at);setActiveTab("athletes");}}}
@@ -1340,7 +1345,13 @@ function CoachDashboard({coach,onLogout}) {
               // Team-aggregate coach reports vs per-athlete digests.
               const teamReports = allDigests.filter(d=>d.digest_type==="weekly_coach"||d.digest_type==="monthly_coach");
               const displayDigests = allDigests.filter(d=>d.digest_type==="weekly"||d.digest_type==="monthly");
-              const latestTeamReport = teamReports[0]||null; // ordered desc by generated_at
+              // A25: the monthly recap used to vanish the moment the next weekly landed
+              // (only teamReports[0] got a card) — render BOTH newest types. A5: the cron
+              // keeps edition history now, so everything older gets a Past Editions strip.
+              const latestWeeklyTeam = teamReports.find(d=>d.digest_type==="weekly_coach")||null;
+              const latestMonthlyTeam = teamReports.find(d=>d.digest_type==="monthly_coach")||null;
+              const currentTeam = [latestWeeklyTeam,latestMonthlyTeam].filter(Boolean);
+              const pastEditions = teamReports.filter(d=>d!==latestWeeklyTeam&&d!==latestMonthlyTeam).slice(0,10);
 
               let filtered = displayDigests;
               if(reportFilter==="weekly") filtered = filtered.filter(d=>d.digest_type==="weekly");
@@ -1467,19 +1478,42 @@ function CoachDashboard({coach,onLogout}) {
                       </div>
                     </div>
                   )}
-                  {/* Team aggregate report (Coach Joe's read on the whole roster) */}
-                  {latestTeamReport&&(
-                    <button onClick={()=>setSelectedDigest(latestTeamReport)} style={{width:"100%",background:CA.navy2,border:`1px solid ${CA.accent}40`,borderRadius:14,padding:16,textAlign:"left",cursor:"pointer",display:"block",marginBottom:16}}>
+                  {/* Team aggregate reports (Coach Joe's read on the whole roster) —
+                      newest weekly AND newest monthly both get a card (A25). */}
+                  {currentTeam.map(tr=>{
+                    const isM = tr.digest_type==="monthly_coach";
+                    const mLabel = (tr.generated_at||tr.created_at) ? new Date(tr.generated_at||tr.created_at).toLocaleDateString("en-US",{month:"long"}) : "";
+                    return (
+                    <button key={tr.id} onClick={()=>setSelectedDigest(tr)} style={{width:"100%",background:CA.navy2,border:`1px solid ${CA.accent}40`,borderRadius:14,padding:16,textAlign:"left",cursor:"pointer",display:"block",marginBottom:12}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                        <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>TEAM REPORT</div>
+                        <div style={{color:isM?CA.blue:CA.accent,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>{isM?`MONTHLY RECAP${mLabel?` · ${mLabel.toUpperCase()}`:""}`:"THIS WEEK'S EDITION"}</div>
                         <div style={{display:"flex",gap:6}}>
-                          {latestTeamReport.has_pain&&<div style={{background:CA.red+"1A",border:"1px solid "+CA.red+"4D",borderRadius:4,padding:"2px 6px",color:CA.red,fontSize:10}}>INJURIES</div>}
-                          {latestTeamReport.has_missed&&<div style={{background:`${CA.navy3}`,border:`1px solid ${CA.border}`,borderRadius:4,padding:"2px 6px",color:CA.muted,fontSize:10}}>AT-RISK</div>}
+                          {tr.has_pain&&<div style={{background:CA.red+"1A",border:"1px solid "+CA.red+"4D",borderRadius:4,padding:"2px 6px",color:CA.red,fontSize:10}}>INJURIES</div>}
+                          {tr.has_missed&&<div style={{background:`${CA.navy3}`,border:`1px solid ${CA.border}`,borderRadius:4,padding:"2px 6px",color:CA.muted,fontSize:10}}>AT-RISK</div>}
                         </div>
                       </div>
-                      {latestTeamReport.content_json?.intro&&<div style={{color:CA.text,fontSize:13,lineHeight:1.6,marginBottom:8}}>{latestTeamReport.content_json.intro}</div>}
-                      <div style={{color:CA.accent,fontSize:12,fontWeight:700,letterSpacing:1}}>OPEN REPORT →</div>
+                      {tr.content_json?.intro&&<div style={{color:CA.text,fontSize:13,lineHeight:1.6,marginBottom:8}}>{tr.content_json.intro}</div>}
+                      <div style={{color:isM?CA.blue:CA.accent,fontSize:12,fontWeight:700,letterSpacing:1}}>OPEN REPORT →</div>
                     </button>
+                    );
+                  })}
+                  {/* A5: past editions — the archive the cron used to destroy every cycle */}
+                  {pastEditions.length>0&&(
+                    <div style={{marginBottom:16}}>
+                      <div style={{color:CA.muted,fontSize:10,letterSpacing:2,fontWeight:700,marginBottom:6}}>PAST EDITIONS</div>
+                      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                        {pastEditions.map(pe=>{
+                          const no = Number(pe.content_json?.edition_no);
+                          const when = (pe.generated_at||pe.created_at) ? new Date(pe.generated_at||pe.created_at).toLocaleDateString("en-US",{month:"short",day:"numeric"}) : "";
+                          return (
+                            <button key={pe.id} onClick={()=>setSelectedDigest(pe)}
+                              style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:8,padding:"6px 12px",cursor:"pointer",color:CA.muted2,fontSize:11.5}}>
+                              {no?`No. ${no}`:pe.digest_type==="monthly_coach"?"Monthly":"Weekly"}{when?` · ${when}`:""}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
                   )}
                   {/* Filters */}
                   <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:14}}>
@@ -1609,7 +1643,7 @@ function OverviewCard({title,trend,children,readout,tone,style}){
   );
 }
 
-function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthlete,coach,changeRequests,briefContext,onPrefillProgram,onResolveRequest,onContextWritten,parsingIds,analytics}){
+function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthlete,coach,school,changeRequests,briefContext,onPrefillProgram,onResolveRequest,onContextWritten,parsingIds,analytics}){
   const isMobile = useIsMobile();
   const [tip,setTip] = useState(null);
   // one-shot entrance flag: charts render at their empty state on first paint,
@@ -1838,7 +1872,7 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
   return (
     <div>
       {/* ── The Morning Brief — proof-feed-style daily conversation ── */}
-      <MorningBrief D={D} athletes={athletes} changeRequests={changeRequests||[]} coach={coach} briefContext={briefContext||[]}
+      <MorningBrief D={D} athletes={athletes} changeRequests={changeRequests||[]} coach={coach} school={school} briefContext={briefContext||[]}
         onOpenAthlete={onOpenAthlete} onPrefillProgram={onPrefillProgram} onResolveRequest={onResolveRequest} onContextWritten={onContextWritten}/>
 
       {secLabel("Team Health")}
@@ -2082,8 +2116,9 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
                   </div>
                 ))}
               </div>}
+          {/* A20: pass school so the PNG headlines the program, not the coach's name */}
           {(D.prThisWk>0||D.notablePRs.length>0)&&(
-            <ShareWinsButton run={()=>exportWins({newPRs:D.prThisWk,notablePRs:D.notablePRs,activePct:D.activePct,adherenceAvg:D.teamAdh},coach)}/>
+            <ShareWinsButton run={()=>exportWins({newPRs:D.prThisWk,notablePRs:D.notablePRs,activePct:D.activePct,adherenceAvg:D.teamAdh},coach,school)}/>
           )}
         </div>
       </div>
@@ -2143,7 +2178,7 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
 // only when the coach free-types. Every action writes a coach_context row, which
 // (a) suppresses that flag for the rest of the ISO week and (b) flows into next
 // week's Coach's Edition prompt via generateCoach — the follow-through loop.
-function MorningBrief({D,athletes,changeRequests,coach,briefContext,onOpenAthlete,onPrefillProgram,onResolveRequest,onContextWritten}){
+function MorningBrief({D,athletes,changeRequests,coach,school,briefContext,onOpenAthlete,onPrefillProgram,onResolveRequest,onContextWritten}){
   const isMobile = useIsMobile();
   const [open,setOpen] = useState(false);
   const [brief,setBrief] = useState(null);      // snapshot while open — beats don't vanish mid-conversation
@@ -2161,8 +2196,15 @@ function MorningBrief({D,athletes,changeRequests,coach,briefContext,onOpenAthlet
     (briefContext||[]).forEach(r=>{const m=r.meta||{}; if(m.source==="morning_brief"&&m.kind==="decision"&&m.week===week&&m.athlete_id&&m.flag) s.add(`${m.athlete_id}:${m.flag}`);});
     return s;
   },[briefContext,week]);
+  // A18: question ids already answered this week — the bank skips them and
+  // rotates to the next generator instead of re-asking daily.
+  const answeredQ = useMemo(()=>{
+    const s=new Set();
+    (briefContext||[]).forEach(r=>{const m=r.meta||{}; if(m.source==="morning_brief"&&m.week===week&&m.question_id) s.add(m.question_id);});
+    return s;
+  },[briefContext,week]);
   // Cheap + pure — recomputes for the collapsed headline as decisions land.
-  const preview = useMemo(()=>buildMorningBrief({D,athletes,changeRequests,cleared,dateKey}),[D,athletes,changeRequests,cleared,dateKey]);
+  const preview = useMemo(()=>buildMorningBrief({D,athletes,changeRequests,cleared,dateKey,answeredQuestionIds:answeredQ}),[D,athletes,changeRequests,cleared,dateKey,answeredQ]);
   const concernsLeft = preview.beats.filter(b=>b.kind==="concern").length;
 
   const openBrief = ()=>{ setBrief(preview); setOutcomes({}); setQMsgs({}); setQDone({}); setOpen(true); try{track("brief_open","coach_dashboard");}catch(e){} };
@@ -2177,7 +2219,8 @@ function MorningBrief({D,athletes,changeRequests,coach,briefContext,onOpenAthlet
     if(busy) return;
     if(action.kind==="open_athlete"){ onOpenAthlete&&onOpenAthlete(beat.athleteId); return; }
     if(action.kind==="share_wins"){
-      exportWins({newPRs:D.prThisWk,notablePRs:D.notablePRs},coach).then((r)=>{
+      // A20: one call-site contract — full stats + school, same image as Overview/Edition.
+      exportWins({newPRs:D.prThisWk,notablePRs:D.notablePRs,activePct:D.activePct,adherenceAvg:D.teamAdh},coach,school).then((r)=>{
         // Never claim "Shared" unless navigator.share actually resolved — WILCO
         // can't share on the coach's behalf, and it isn't a messaging app.
         const chip = r==="shared" ? "Sent — check your Photos ✓" : r==="downloaded" ? "Saved ✓" : r==="preview" ? "Image ready ✓" : null;
@@ -2198,7 +2241,12 @@ function MorningBrief({D,athletes,changeRequests,coach,briefContext,onOpenAthlet
         await onResolveRequest(action.payload.requestId, resolution);
       }
       const handsOff = action.kind==="prefill_program"||(isResolve&&(resolution==="applied"||resolution==="edit"));
-      await writeContext(decisionNote(beat,action.id), {kind:"decision",source:"morning_brief",athlete_id:beat.athleteId||null,flag:beat.meta?.baseFlag||beat.flag||null,action:action.id,week});
+      // A9: hands-off actions only OPEN the staged editor — nothing is decided yet.
+      // Write a non-suppressing "handoff" row (the `cleared` set only counts kind
+      // "decision"); the editor's apply/skip writes the real decision (AthleteDetail's
+      // onLogDecision rows carry `week`). A coach who bails out of the diff sees the
+      // concern again tomorrow instead of losing it for the rest of the week.
+      await writeContext(decisionNote(beat,action.id), {kind:handsOff?"handoff":"decision",source:"morning_brief",athlete_id:beat.athleteId||null,flag:beat.meta?.baseFlag||beat.flag||null,action:action.id,week});
       setOutcomes(o=>({...o,[beat.id]:handsOff?"Opened in editor ✓":`${action.label} ✓`}));
       try{track("brief_decision","coach_dashboard");}catch(e){}
       if(handsOff){
@@ -2238,7 +2286,9 @@ function MorningBrief({D,athletes,changeRequests,coach,briefContext,onOpenAthlet
         const reply=await askClaude(sys,`Q: "${beat.question.text}"\nCoach: "${t}"`,160,[],"claude-haiku-4-5","coach_brief");
         if(reply) setQMsgs(m=>({...m,[beat.id]:[...(m[beat.id]||[]),{role:"wilco",text:reply}]}));
       }
-      await writeContext(`${beat.question.text} → ${t}`.slice(0,280), {kind:"notes",source:"morning_brief",week,...(beat.athleteId?{athlete_id:beat.athleteId}:{})});
+      // A18: stamp the stable question id so tomorrow's brief can skip what's
+      // already been answered instead of re-asking the same question every day.
+      await writeContext(`${beat.question.text} → ${t}`.slice(0,280), {kind:"notes",source:"morning_brief",week,question_id:beat.question.id,...(beat.athleteId?{athlete_id:beat.athleteId}:{})});
       setQDone(d=>({...d,[beat.id]:true}));
     }catch(e){ console.error("brief answer",e); setQDone(d=>({...d,[beat.id]:true})); }
     setBusy(false);
@@ -2700,11 +2750,14 @@ function CoachEdition({digest, athletes, coach, school, onBack, onRead}){
   const c = digest.content_json||{};
   // Always open the Edition at the masthead, not wherever Reports was scrolled.
   useEffect(()=>{ window.scrollTo(0,0); },[digest.id]);
-  // Edition number = this coach's Nth team edition (weekly+monthly, oldest = No. 1).
-  // The gateway scopes coach-digest reads to this coach, so no coach filter needed.
+  // Edition number: the server stamps content_json.edition_no at generation (A6 —
+  // the cron used to delete prior rows, so the count below could never exceed 2).
+  // The count query is only the legacy fallback for pre-stamp digests.
   const [edNo,setEdNo] = useState(null);
   useEffect(()=>{
     let on=true;
+    const stamped = Number(c?.edition_no);
+    if(stamped){ setEdNo(stamped); return; }
     const at=digest?.generated_at||digest?.created_at;
     if(!at){ setEdNo(null); return; }
     sbRead("proof_digests",`?digest_type=in.(weekly_coach,monthly_coach)&generated_at=lte.${encodeURIComponent(at)}&select=id`)
@@ -2806,7 +2859,10 @@ function CoachEdition({digest, athletes, coach, school, onBack, onRead}){
 // dashboard render: hooks in a conditional block violate the Rules of Hooks and
 // crashed the tab when the condition flipped (the sales demo carried this fix).
 function AccountTab({coach,allCoaches,school,athletes,loadAll}){
-              const schoolCoachesList = allCoaches.filter(c=>c.school_id===coach.school_id&&c.role!=="admin");
+              // A2: exclude soft-removed coaches (doRemoveCoach stamps access_code
+              // REMOVED_<code> but leaves school_id/role intact) — they used to
+              // reappear in the list and permanently burn a paid seat.
+              const schoolCoachesList = allCoaches.filter(c=>c.school_id===coach.school_id&&c.role!=="admin"&&!String(c.access_code||"").startsWith("REMOVED_"));
               const atLimit = schoolCoachesList.length>=(school?.max_coaches||3);
               const [acName,setAcName] = useState("");
               const [acEmail,setAcEmail] = useState("");
@@ -3156,15 +3212,18 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
     if(autoApply) runMerge(next);
   };
 
+  // A9: decision rows carry `week` so the Morning Brief's suppression set (which
+  // matches on week) recognizes an editor apply/skip as the REAL decision — the
+  // brief's own hand-off row is a non-suppressing "handoff" now.
   const skipRequest = (r) => {
     onResolveRequest&&onResolveRequest(r,"skipped");
-    onLogDecision&&onLogDecision(`${athlete.name} program request → coach: skip`.slice(0,200), {kind:"decision",source:"request_card",athlete_id:athlete.id,action:"skip",flag:r.source||null});
+    onLogDecision&&onLogDecision(`${athlete.name} program request → coach: skip`.slice(0,200), {kind:"decision",source:"request_card",athlete_id:athlete.id,action:"skip",flag:r.source||null,week:briefWeekKey()});
   };
 
   const dismissStaged = () => {
     if(staged?.requestId&&staged.origin==="request"){
       onResolveRequest&&onResolveRequest({id:staged.requestId},"skipped");
-      onLogDecision&&onLogDecision(`${athlete.name} program request → coach: skip`.slice(0,200), {kind:"decision",source:"request_card",athlete_id:athlete.id,action:"skip",flag:staged.source||null});
+      onLogDecision&&onLogDecision(`${athlete.name} program request → coach: skip`.slice(0,200), {kind:"decision",source:"request_card",athlete_id:athlete.id,action:"skip",flag:staged.source||null,week:briefWeekKey()});
     }
     setStaged(null);
     setMergeState(null);
@@ -3197,7 +3256,7 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
       if(staged?.requestId){
         onResolveRequest&&onResolveRequest({id:staged.requestId}, edited?"edited":"applied");
       }
-      onLogDecision&&onLogDecision(`${athlete.name} program change → coach: ${edited?"edited & applied":"applied"}`.slice(0,200), {kind:"decision",source:staged?.origin==="request"?"request_card":"morning_brief",athlete_id:athlete.id,action:"apply",flag:staged?.source||null});
+      onLogDecision&&onLogDecision(`${athlete.name} program change → coach: ${edited?"edited & applied":"applied"}`.slice(0,200), {kind:"decision",source:staged?.origin==="request"?"request_card":"morning_brief",athlete_id:athlete.id,action:"apply",flag:staged?.source||null,week:briefWeekKey()});
       setStaged(null);
       setMergeState(null);
     } catch(e){
@@ -3407,9 +3466,10 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
                     // One card per lift — an athlete's PR history has several rows for
                     // the same exercise, and without collapsing to the best one a single
                     // lift can fill multiple "top" slots (Back Squat 140 AND 130).
+                    // A23 twin: collapse by canonical lift id, same funnel as everywhere else.
                     const best=new Map();
-                    prs.forEach(p=>{const k=normalizeExName(p.exercise);const cur=best.get(k);if(!cur||((p.estimated_1rm||p.weight||0)>(cur.estimated_1rm||cur.weight||0)))best.set(k,p);});
-                    return [...best.values()].sort((a,b)=>liftTier(normalizeExName(a.exercise))-liftTier(normalizeExName(b.exercise)) || (b.estimated_1rm||b.weight||0)-(a.estimated_1rm||a.weight||0)).slice(0,6);
+                    prs.forEach(p=>{const k=resolveLift(p.exercise||"").id;const cur=best.get(k);if(!cur||((p.estimated_1rm||p.weight||0)>(cur.estimated_1rm||cur.weight||0)))best.set(k,p);});
+                    return [...best.values()].sort((a,b)=>liftTier(resolveLift(a.exercise||"").id)-liftTier(resolveLift(b.exercise||"").id) || (b.estimated_1rm||b.weight||0)-(a.estimated_1rm||a.weight||0)).slice(0,6);
                   })().map((p,i)=>(
                     <div key={i} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:8,padding:"8px 12px"}}>
                       <div style={{color:CA.text,fontSize:12,fontWeight:600}}>{p.exercise}</div>
@@ -3557,11 +3617,14 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
                   // Pass bodyweight so load-bearing bodyweight lifts (dips, pull-ups) score.
                   const e1rm = bestE1RMForExercise(ex, bodyweight);
                   if(!e1rm) return;
-                  const k = normalizeExName(ex.name);
+                  // A23: group via resolveLift (the single funnel) — bare normalizeExName
+                  // skipped the alias layer, so "conventional deadlift" and "deadlift"
+                  // charted as two lifts here while the athlete's own Progress showed one.
+                  const lift = resolveLift(ex.name);
+                  const k = lift.id;
                   const isBW = ex.unit==="bodyweight";
                   const unit = isBW ? "lbs" : (ex.unit||"lbs");
-                  if(!byEx[k]) byEx[k]={key:k,name:displayForKey(k,ex.name),unit,entries:[]};
-                  else byEx[k].name=displayForKey(k,cleanerName(byEx[k].name,ex.name));
+                  if(!byEx[k]) byEx[k]={key:k,name:lift.name,unit,entries:[]};
                   let topSet;
                   if(isBW){
                     // Effective load = bodyweight (+added/−assist); best set = most reps.
