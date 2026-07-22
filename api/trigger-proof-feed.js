@@ -88,6 +88,39 @@ const CHILD_TIMEOUT_MS = 180000;
 const todayStr = () => new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
 const enc = encodeURIComponent;
 
+// Edition history depth (per athlete / per coach). The cron used to DELETE every
+// prior digest before inserting — so nobody could ever re-read last week's letter
+// and the masthead's "No. N" could never exceed 1-2 (it counts rows). We now stamp
+// content_json.edition_no at generation, keep the newest KEEP_EDITIONS rows, and
+// trim only beyond that.
+const KEEP_EDITIONS = 12;
+
+// A17: honor the athlete's Proof schedule picker (Settings saves proof_schedule_dow
+// 0=Sun..6=Sat, proof_schedule_hour 0..23 local, proof_timezone IANA — previously
+// write-only). Scan hour-by-hour (DST-safe via Intl) for the next occurrence of the
+// chosen local weekday+hour; fall back to the legacy +7d cadence when no schedule is
+// set or the tz string is bad. The cron runs hourly (vercel.json) so a lapsed
+// due-time fires within the chosen hour.
+function nextProofSlot(athlete) {
+  const dow = athlete.proof_schedule_dow;
+  const hour = athlete.proof_schedule_hour;
+  const tz = athlete.proof_timezone;
+  if (dow == null || hour == null || !tz) return new Date(Date.now() + 7 * 864e5).toISOString();
+  try {
+    const fmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short", hour: "numeric", hour12: false });
+    const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const start = new Date(); start.setMinutes(0, 0, 0);
+    for (let h = 1; h <= 24 * 8; h++) {
+      const t = new Date(start.getTime() + h * 3600e3);
+      const parts = Object.fromEntries(fmt.formatToParts(t).map((p) => [p.type, p.value]));
+      if (DOW.indexOf(parts.weekday) === Number(dow) && Number(parts.hour) % 24 === Number(hour) % 24) {
+        return t.toISOString();
+      }
+    }
+  } catch { /* invalid tz → legacy cadence */ }
+  return new Date(Date.now() + 7 * 864e5).toISOString();
+}
+
 // Run `fn` over `items` at bounded concurrency, collecting settled results in order.
 async function mapPooled(items, concurrency, fn) {
   const out = [];
@@ -300,19 +333,24 @@ async function runAthlete(athlete, batch, { dryRun = false } = {}) {
     return { athlete: athlete.name, athlete_id: athlete.id, type: windowType, digest, brief: b.brief };
   }
 
-  // Replace any prior weekly/monthly digest for this athlete.
-  await sbDelete("proof_digests", `?athlete_id=eq.${athlete.id}&digest_type=in.(weekly,monthly)`);
+  // Keep edition history (A5/A6): stamp a real edition number, insert, then trim
+  // to the newest KEEP_EDITIONS rows (was: delete ALL priors — which destroyed the
+  // archive and pinned the masthead's row-count "No. N" at 1 forever).
+  const prior = await sbSelect("proof_digests", `?athlete_id=eq.${athlete.id}&digest_type=in.(weekly,monthly)&select=id,content_json&order=created_at.desc`);
+  const editionNo = (Number(prior[0]?.content_json?.edition_no) || prior.length) + 1;
   await sbInsert("proof_digests", {
     athlete_id: athlete.id,
     coach_id: athlete.coach_id || null,
     digest_type: isMonthly ? "monthly" : "weekly",
     label: digest.label,
-    content_json: digest.contentJson,
+    content_json: { ...digest.contentJson, edition_no: editionNo },
     is_read: false,
     has_plateau: digest.has_plateau,
     has_pain: digest.has_pain,
     has_missed: digest.has_missed,
   });
+  const excess = prior.slice(KEEP_EDITIONS - 1).map((r) => `"${r.id}"`);
+  if (excess.length) await sbDelete("proof_digests", `?id=in.(${excess.join(",")})`);
 
   // Advance cycle (1,2,3 weekly; 4 monthly → reset to 1), stamp send + daily cap.
   await sbWrite({
@@ -321,7 +359,7 @@ async function runAthlete(athlete, batch, { dryRun = false } = {}) {
       proof_cycle_count: isMonthly ? 1 : Math.min(cycleCount + 1, 4),
       last_proof_sent_at: new Date().toISOString(),
       last_proof_run_date: todayStr(),
-      next_proof_due_at: new Date(Date.now() + 7 * 864e5).toISOString(),
+      next_proof_due_at: nextProofSlot(athlete),
     },
   });
 
@@ -384,6 +422,15 @@ async function runCoachReports(allAthletes, batch, coaches, opts = {}) {
     const coach = (coaches || []).find((c) => c.id === coachId);
     if (!coach) continue;
     try {
+      // A14: one Edition per week. Fan-out keys off "any roster athlete due today",
+      // so a staggered roster used to regenerate + re-email the coach almost daily
+      // (a paid Sonnet call each). Skip if the coach's newest edition is <6 days
+      // old. Also feeds A5/A6: prior rows drive edition numbering + history trim.
+      const prior = await sbSelect("proof_digests", `?coach_id=eq.${coach.id}&digest_type=in.(weekly_coach,monthly_coach)&select=id,created_at,content_json&order=created_at.desc`);
+      if (!opts.force && prior[0] && Date.now() - new Date(prior[0].created_at).getTime() < 6 * 864e5) {
+        results.push({ coach: coach.name, skipped: true, reason: "edition <6 days old" });
+        continue;
+      }
       const perAthlete = roster.map((a) => enrichForCoach(a, batch));
       // Prior context the coach gave us (season/goals/fatigue/notes) → written into
       // the edition so it advises against the real situation. Defensive: the table
@@ -396,13 +443,20 @@ async function runCoachReports(allAthletes, batch, coaches, opts = {}) {
 
       const attribution = { role: "coach", actor_id: coach.id, coach_id: coach.id, school_id: coach.school_id ?? null };
       const report = await generateCoach(coach, perAthlete, { askClaudeServer, attribution, coachContext }, type);
-      await sbDelete("proof_digests", `?coach_id=eq.${coach.id}&digest_type=eq.${type}`);
+      // A5/A6 (coach side): stamp edition_no, keep history, trim beyond KEEP_EDITIONS.
+      const editionNo = (Number(prior[0]?.content_json?.edition_no) || prior.length) + 1;
       await sbInsert("proof_digests", {
         athlete_id: null, coach_id: coach.id, digest_type: type,
-        label: report.label, content_json: report.contentJson, is_read: false,
+        label: report.label, content_json: { ...report.contentJson, edition_no: editionNo }, is_read: false,
         has_plateau: false, has_pain: report.has_pain, has_missed: report.has_missed,
       });
-      if (coach.email && !opts.skipEmail) await sendEmail(coach.email, `WILCO Coach's Edition — Week of ${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric" })}`, buildDigestEmail(coach.name || "Coach", report.contentJson, report.label));
+      const excess = prior.slice(KEEP_EDITIONS - 1).map((r) => `"${r.id}"`);
+      if (excess.length) await sbDelete("proof_digests", `?id=in.(${excess.join(",")})`);
+      // A25: the monthly recap's email subject used to claim "Week of …" too.
+      const subject = type === "monthly_coach"
+        ? `WILCO Coach's Edition — Monthly Recap, ${new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" })}`
+        : `WILCO Coach's Edition — Week of ${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric" })}`;
+      if (coach.email && !opts.skipEmail) await sendEmail(coach.email, subject, buildDigestEmail(coach.name || "Coach", report.contentJson, report.label));
       // Digest-ready push (respects the coach's notification_prefs.digest toggle).
       try {
         const prefs = coach.notification_prefs || {};
@@ -529,7 +583,8 @@ export default async function handler(req, res) {
       const coaches = await sbSelect("coaches", `?id=eq.${encodeURIComponent(body.coach_id)}&select=id,name,email,school_id,notification_prefs`);
       // skip_email: generate + persist the edition WITHOUT emailing (safe demo/support
       // generation so an external coach isn't emailed a test run). Cron-gated already.
-      const coaches2 = await runCoachReports(roster, rosterBatch, coaches, { skipEmail: !!body.skip_email });
+      // force: bypass the one-edition-per-week gate (support/debug regeneration).
+      const coaches2 = await runCoachReports(roster, rosterBatch, coaches, { skipEmail: !!body.skip_email, force: !!body.force });
       return res.status(200).json({ ok: true, coaches: coaches2 });
     }
 

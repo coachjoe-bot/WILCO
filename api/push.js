@@ -14,6 +14,10 @@
 // push, ever, without Will's explicit sign-off — feed-live (api/trigger-proof-feed.js),
 // inactivity (this file), coach programming-update (api/notify-program-changes.js),
 // and this file's user-initiated "test." Nothing else.
+// POLICY v2.1 (Will sign-off 2026-07-22): three COACH alert types added — injury
+// + big-PR (api/data.js insert hooks) and athlete-gone-quiet (this cron, below).
+// They back the coach Settings toggles that previously controlled nothing; each
+// is gated per-coach via notification_prefs (see notifyCoach in _push.js).
 //
 // INACTIVITY POLICY (replaces the old repeating 3-day nudge): exactly TWO touches
 // per quiet streak — one at 14 days since the athlete's last logged workout, one
@@ -33,7 +37,7 @@ import {
   applyCors, httpErr, str, sbSelect, sbWrite, sbDelete,
   authCaller, tryTokenAuth, authThrottle, clientIp, logError,
 } from "./_supa.js";
-import { ensureVapid, vapidPublicKey, sendTo, sendToAthlete, pushPayload } from "./_push.js";
+import { ensureVapid, vapidPublicKey, sendTo, sendToAthlete, pushPayload, notifyCoach } from "./_push.js";
 
 const enc = encodeURIComponent;
 
@@ -101,6 +105,14 @@ async function runNudges(res) {
   const cutoff14 = daysAgo(STAGE_14_DAYS);
   const cutoff30 = daysAgo(STAGE_30_DAYS);
 
+  // Coach quiet-athlete alerts (policy v2.1) ride the SAME once-per-streak stage
+  // stamps as the athlete nudges — a coach hears about a quiet athlete exactly
+  // when that athlete crosses a stage, never on repeat runs. Name + coach_id for
+  // the alert copy; aggregated per coach below so a multi-quiet day is one push.
+  const athleteRows = await sbSelect("athletes", `?id=in.(${idList})&select=id,name,coach_id`).catch(() => []);
+  const athleteById = Object.fromEntries(athleteRows.map((a) => [a.id, a]));
+  const quietByCoach = {}; // coach_id -> [{name, stage}]
+
   let nudged14 = 0, nudged30 = 0, pruned = 0;
   for (const [athleteId, rows] of Object.entries(byAthlete)) {
     const lastWorkout = lastWorkoutAt[athleteId] || null; // null = no workout row in NUDGE_WINDOW_DAYS (never logged, or 31+ days quiet — both past every stage cutoff)
@@ -137,6 +149,8 @@ async function runNudges(res) {
       if (stageToSend === "30") { nudged30++; stage30Sent = new Date().toISOString(); }
       else { nudged14++; stage14Sent = new Date().toISOString(); }
       patch = { athlete_id: athleteId, last_workout_at: lastWorkout, stage_14_sent_at: stage14Sent, stage_30_sent_at: stage30Sent };
+      const ath = athleteById[athleteId];
+      if (ath?.coach_id) (quietByCoach[ath.coach_id] = quietByCoach[ath.coach_id] || []).push({ name: ath.name, stage: stageToSend });
     }
 
     if (patch) {
@@ -149,7 +163,17 @@ async function runNudges(res) {
     }
   }
 
-  return res.status(200).json({ checked: athleteIds.length, nudged14, nudged30, pruned });
+  // Fan out one quiet-athlete alert per coach (aggregated), pref-gated in notifyCoach.
+  let coachAlerts = 0;
+  for (const [coachId, quiet] of Object.entries(quietByCoach)) {
+    const body = quiet.length === 1
+      ? `${quiet[0].name} has gone quiet — no logged workouts in ${quiet[0].stage} days.`
+      : `${quiet.length} athletes have gone quiet: ${quiet.map((q) => `${q.name} (${q.stage}d)`).join(", ")}.`;
+    const { sent } = await notifyCoach(coachId, "inactive", { title: "WILCO", body, url: "/", type: "coach_quiet" });
+    if (sent) coachAlerts++;
+  }
+
+  return res.status(200).json({ checked: athleteIds.length, nudged14, nudged30, pruned, coachAlerts });
 }
 
 // Vercel Pro: cap this function's execution time. 60s gives the nudge run room

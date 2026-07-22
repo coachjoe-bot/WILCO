@@ -8,7 +8,7 @@
 // Env: VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT.
 
 import webpush from "web-push";
-import { httpErr, sbDelete } from "./_supa.js";
+import { httpErr, sbDelete, sbSelect } from "./_supa.js";
 
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "";
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "";
@@ -35,16 +35,22 @@ const ICON = "/icon-192.png";
 
 // tag scopes which OS notification slot a push lands in — two pushes with the
 // SAME tag replace each other in the tray (renotify:true still buzzes, but only
-// the newer one is visible). Each of the four notification types gets its own
-// tag so, e.g., a feed-live push can never silently swallow a still-unread
-// coach-update push. Explicit map (not a free-form string) keeps the four types
-// the only ones that exist, per notification policy v2.
+// the newer one is visible). Each notification type gets its own tag so, e.g.,
+// a feed-live push can never silently swallow a still-unread coach-update push.
+// Explicit map (not a free-form string) keeps these the only types that exist.
+// Policy v2.1 (Will sign-off 2026-07-22): the three coach alert types (injury,
+// big PR, athlete-gone-quiet) join the original four athlete types + the coach
+// digest — they back the Settings toggles that previously controlled nothing.
 const TAGS = {
   feed: "wilco-feed",
   nudge14: "wilco-nudge-14",
   nudge30: "wilco-nudge-30",
   program: "wilco-program",
   test: "wilco-test",
+  coach_digest: "wilco-coach-digest",
+  coach_injury: "wilco-coach-injury",
+  coach_pr: "wilco-coach-pr",
+  coach_quiet: "wilco-coach-quiet",
 };
 
 // Build a standard payload. `title` varies by type (branding convention: "Coach
@@ -78,6 +84,33 @@ export async function sendTo(sub, payload, table = "push_subscriptions") {
     }
     console.error(`[push] send failed (${code || "network"}) for sub ${sub.id}:`, e?.message);
     return "failed";
+  }
+}
+
+// ── Coach alert fanout (policy v2.1, Will-approved 2026-07-22) ────────────────
+// Send one payload to every device of ONE coach, gated on that coach's own
+// notification_prefs[prefKey] (undefined counts as enabled — matching the
+// Settings toggle's `!==false` rendering and the digest gate in the proof cron).
+// Reads the coach row + subscriptions itself. Best-effort: never throws, so a
+// failed alert can never break the athlete write or cron run that triggered it.
+export async function notifyCoach(coachId, prefKey, msg) {
+  if (!coachId) return { sent: 0 };
+  try {
+    ensureVapid();
+    const enc = encodeURIComponent;
+    const coach = (await sbSelect("coaches", `?id=eq.${enc(coachId)}&select=id,notification_prefs`))[0];
+    if (!coach || (coach.notification_prefs || {})[prefKey] === false) return { sent: 0 };
+    const subs = await sbSelect("coach_push_subscriptions", `?coach_id=eq.${enc(coachId)}&select=*`);
+    if (!subs.length) return { sent: 0 };
+    const payload = pushPayload(msg);
+    let sent = 0;
+    for (const s of subs) {
+      if ((await sendTo(s, payload, "coach_push_subscriptions")) === "sent") sent++;
+    }
+    return { sent };
+  } catch (e) {
+    console.error(`[push] coach alert (${prefKey}) failed:`, e?.message);
+    return { sent: 0 };
   }
 }
 

@@ -15,7 +15,10 @@ export default async function handler(req, res) {
   }
 
   const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
-  const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_KEY || process.env.SUPABASE_KEY;
+  // Service key: the RLS READ lockdown denies anon SELECT on athletes, which made
+  // this cron silently exit "no athletes" every Monday. This is a trusted
+  // cron-secret-gated server context, same as the proof-feed engine.
+  const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
   const RESEND_KEY   = process.env.RESEND_API_KEY;
   const FROM_EMAIL   = process.env.FROM_EMAIL   || "WILCO <reports@wilco.app>";
   const SIGNUP_URL   = process.env.TEAM_SIGNUP_URL || "https://wilco.app/coaches";
@@ -23,7 +26,7 @@ export default async function handler(req, res) {
   console.log("[weekly-report] triggered —", new Date().toISOString());
   console.log("[weekly-report] env check — SUPABASE_URL:", !!SUPABASE_URL, "| SUPABASE_KEY:", !!SUPABASE_KEY, "| RESEND_KEY:", !!RESEND_KEY, "| FROM_EMAIL:", FROM_EMAIL);
 
-  if(!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({error:"Missing Supabase config"});
+  if(!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({error:"Missing Supabase config (SUPABASE_SERVICE_KEY)"});
   if(!RESEND_KEY)                    return res.status(500).json({error:"Missing RESEND_API_KEY — add this in Vercel → Settings → Environment Variables"});
 
   const sbH = {

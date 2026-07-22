@@ -39,7 +39,7 @@
     },
     {
       "path": "/api/trigger-proof-feed",
-      "schedule": "0 14 * * *"
+      "schedule": "0 * * * *"
     },
     {
       "path": "/api/process-deletions",

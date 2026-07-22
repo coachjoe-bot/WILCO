@@ -21,6 +21,7 @@
 //       schools are master-only, and coaches-table writes are admin-only (own school).
 
 import { applyCors, httpErr, str, sbWrite, sbSelect, authCaller, tryTokenAuth, logError, authThrottle, clientIp } from "./_supa.js";
+import { notifyCoach } from "./_push.js";
 
 const enc = encodeURIComponent;
 
@@ -359,7 +360,17 @@ export default async function handler(req, res) {
 
     if (body.op === "insert") {
       if (body.data == null || typeof body.data !== "object") throw httpErr(400, "insert requires data");
+      // Coach alert context must be computed BEFORE the rows land (the pain-dedupe
+      // and PR-improvement checks compare against pre-insert state). Best-effort:
+      // a failure here can never block or fail the athlete's write.
+      let coachAlert = null;
+      try { coachAlert = await prepCoachAlert(caller, table, body.data); }
+      catch (e) { console.error("[data] coach alert prep failed:", e.message); }
       const json = await sbWrite({ method: "POST", table, body: body.data });
+      if (coachAlert) {
+        try { await notifyCoach(coachAlert.coachId, coachAlert.prefKey, coachAlert.msg); }
+        catch (e) { console.error("[data] coach alert send failed:", e.message); }
+      }
       return res.status(200).json(json);
     }
 
@@ -431,6 +442,73 @@ export default async function handler(req, res) {
 
     throw httpErr(400, "Unknown op");
   } catch (e) {
+    return handleErr(e, res, caller, body);
+  }
+}
+
+// ── Coach alert fanouts (notification policy v2.1, Will-approved 2026-07-22) ──
+// The Settings toggles "Athlete injury" and "Big PR" previously controlled pushes
+// that were never sent. Two of the three new coach alert types hook the athlete
+// write path here (the third — "athlete goes quiet" — rides the inactivity cron
+// in api/push.js). notifyCoach gates on the coach's own notification_prefs.
+const getPD = (r) => {
+  const pd = r?.parsed_data;
+  if (typeof pd === "string") { try { return JSON.parse(pd); } catch { return {}; } }
+  return pd || {};
+};
+const epley = (w, r) => (!w || w <= 0) ? 0 : Math.round(w * (1 + (r || 1) / 30));
+
+async function prepCoachAlert(caller, table, data) {
+  if (caller.role !== "athlete") return null;
+  const rows = Array.isArray(data) ? data : [data];
+
+  if (table === "workouts") {
+    const areas = [...new Set(rows.flatMap((r) => (getPD(r).pain_flags || []).map((p) => p && p.area).filter(Boolean)))];
+    if (!areas.length) return null;
+    const athlete = (await sbSelect("athletes", `?id=eq.${enc(caller.id)}&select=id,name,coach_id`))[0];
+    if (!athlete?.coach_id) return null;
+    // One injury alert per athlete per day: skip if an earlier row today already
+    // flagged pain (multi-message sessions would otherwise ping the coach per message).
+    const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
+    const today = await sbSelect("workouts", `?athlete_id=eq.${enc(caller.id)}&created_at=gte.${dayStart.toISOString()}&select=parsed_data&limit=50`);
+    if (today.some((w) => (getPD(w).pain_flags || []).length)) return null;
+    return {
+      coachId: athlete.coach_id, prefKey: "injury",
+      msg: { title: "WILCO", body: `${athlete.name} flagged ${areas.join(", ")} pain in today's log.`, url: "/", type: "coach_injury" },
+    };
+  }
+
+  if (table === "prs") {
+    // "Big PR" = a true improvement over an existing best (first-ever PR rows are
+    // baselines, not news). Compare against pre-insert state.
+    const existing = await sbSelect("prs", `?athlete_id=eq.${enc(caller.id)}&select=exercise,weight,reps,estimated_1rm`);
+    if (!existing.length) return null;
+    const bestByEx = {};
+    for (const p of existing) {
+      const k = String(p.exercise || "").toLowerCase().trim();
+      const e1 = p.estimated_1rm || epley(p.weight, p.reps);
+      if (e1 > (bestByEx[k] || 0)) bestByEx[k] = e1;
+    }
+    const improved = rows.filter((r) => {
+      const k = String(r.exercise || "").toLowerCase().trim();
+      const e1 = r.estimated_1rm || epley(r.weight, r.reps);
+      return bestByEx[k] && e1 > bestByEx[k];
+    });
+    if (!improved.length) return null;
+    const athlete = (await sbSelect("athletes", `?id=eq.${enc(caller.id)}&select=id,name,coach_id`))[0];
+    if (!athlete?.coach_id) return null;
+    const top = improved[0];
+    const extra = improved.length > 1 ? ` (+${improved.length - 1} more)` : "";
+    return {
+      coachId: athlete.coach_id, prefKey: "big_pr",
+      msg: { title: "WILCO", body: `${athlete.name} just hit a new ${top.exercise} PR — ${top.weight} × ${top.reps || 1}.${extra}`, url: "/", type: "coach_pr" },
+    };
+  }
+
+  return null;
+}
+
+function handleErr(e, res, caller, body) {
     const status = e.status || 500;
     // Log only genuine reliability events (5xx — e.g. a Supabase write/read that
     // failed). Routine 4xx (auth/validation) are normal user flow, not failures, so
@@ -447,5 +525,4 @@ export default async function handler(req, res) {
       });
     }
     return res.status(status).json({ error: e.message || "Server error" });
-  }
 }
