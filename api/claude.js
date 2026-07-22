@@ -92,6 +92,12 @@ const FEATURES = new Set([
   // Morning Brief (coach dashboard): Haiku reactions to the coach's free-text
   // replies + ask-backs. The brief itself is deterministic — zero tokens.
   "coach_brief",
+  // Staged program-edit loop (coach dashboard): drafting a locked-program change
+  // request, merging ONE approved change into a program's full text, the Coach's
+  // Edition check-in conversation, and the athlete-side log-correction rewrite.
+  // Already called from src/changeRequest.js / src/App.jsx / coach.jsx — allowlist
+  // them here too so they don't silently fall back to "other" in usage_costs.
+  "change_request_draft", "program_apply_change", "coach_checkin", "log_correction",
 ]);
 
 // Snapshot the segmentation fields AT CALL TIME so cost stays correctly attributed

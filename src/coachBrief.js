@@ -127,9 +127,16 @@ function buildConcernBeat({ t, row, req, dateKey, beatIndex }) {
       athleteId,
       athleteName: name,
       flag: "request",
-      meta: { baseFlag, reason, requestId: req.id, ...(area ? { area } : {}) },
+      // theirWords carries the athlete's own raw text (distinct from `reason`,
+      // which is the drafted suggestion) — only set when the two actually
+      // differ, so the coach editor can quote it without duplicating the
+      // suggestion. Consumed by coach.jsx's act() when handing off to the
+      // staged program editor.
+      meta: { baseFlag, reason, requestId: req.id, theirWords: drafted ? theirWords : null, ...(area ? { area } : {}) },
       actions: [
-        { id: "apply", kind: "resolve_request", label: "Apply", payload: { requestId: req.id, resolution: "applied" } },
+        // "Apply" now hands off to the staged editor for a reviewed diff rather
+        // than writing the program instantly — label reflects that.
+        { id: "apply", kind: "resolve_request", label: "Review & apply", payload: { requestId: req.id, resolution: "applied" } },
         { id: "edit", kind: "resolve_request", label: "Edit", payload: { requestId: req.id, resolution: "edit" } },
         { id: "skip", kind: "resolve_request", label: "Skip", payload: { requestId: req.id, resolution: "skipped" } },
         OPEN_ATHLETE_ACTION(athleteId),
