@@ -2833,7 +2833,9 @@ function AccountTab({coach,allCoaches,school,athletes,loadAll}){
                       <div><div style={{color:CA.muted,fontSize:10,letterSpacing:1}}>SCHOOL</div><div style={{color:CA.text,fontWeight:600,fontSize:14,marginTop:2}}>{school?.name||"—"}</div></div>
                       <div><div style={{color:CA.muted,fontSize:10,letterSpacing:1}}>CODE</div><div style={{display:"flex",alignItems:"center",marginTop:2}}><span style={{color:CA.accent,fontWeight:700,fontSize:18,fontFamily:"'Bebas Neue'",letterSpacing:2}}>{school?.code||"—"}</span>{school?.code&&codeBtn(school.code)}</div></div>
                       <div><div style={{color:CA.muted,fontSize:10,letterSpacing:1}}>TIER</div><div style={{color:CA.text,fontSize:13,marginTop:2}}>{school?.tier||"—"}</div></div>
-                      <div><div style={{color:CA.muted,fontSize:10,letterSpacing:1}}>COACHES</div><div style={{color:CA.text,fontSize:13,marginTop:2}}>{schoolCoachesList.length} / {school?.max_coaches||3}</div></div>
+                      {/* +1 = the signed-in admin, who is pinned into the list below but filtered
+    out of schoolCoachesList — without it the header said 2 over 3 visible rows. */}
+                      <div><div style={{color:CA.muted,fontSize:10,letterSpacing:1}}>COACHES</div><div style={{color:CA.text,fontSize:13,marginTop:2}}>{schoolCoachesList.length+1} / {school?.max_coaches||3}</div></div>
                     </div>
                   </div>
 
