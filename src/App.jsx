@@ -4955,9 +4955,16 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       if(parsed.is_temp_program_update && !updatedAthlete.program_locked && !fromQuickLog){
         try {
           const tempText = await extractProgramText(reply);
-          await sbUpdate("athletes",athlete.id,{temp_program_text:tempText});
-          updatedAthlete.temp_program_text = tempText;
-          setAthlete(updatedAthlete);
+          // extractProgramText falls back to its full input when extraction comes
+          // back empty — writing that would dump Joe's whole conversational reply
+          // into the Program view. Only persist a real extracted program, and say
+          // so: the write was silent, so athletes never knew Field Mode engaged.
+          if(tempText && tempText.trim() && tempText.trim()!==reply.trim()){
+            await sbUpdate("athletes",athlete.id,{temp_program_text:tempText});
+            updatedAthlete.temp_program_text = tempText;
+            setAthlete(updatedAthlete);
+            followUp("✈️ Got it — I've set a temporary program for while you're away. Tell me when you're back and I'll switch you to your regular programming.");
+          }
         } catch(e){}
       }
 
