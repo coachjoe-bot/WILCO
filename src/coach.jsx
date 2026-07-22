@@ -988,9 +988,29 @@ function CoachDashboard({coach,onLogout}) {
   // athlete inactive longer than the window still sorts/filters correctly.
   const lastActive = (id) => rollup[id]?.last_workout_at || null;
 
-  const filtered = athletes.filter(a=>{
+  // Per-athlete pain flags over the 90-day window, computed ONCE per data change
+  // instead of one full workouts scan per athlete per render (the old inline
+  // filter().some() ran O(athletes × windowRows) twice on every search keystroke).
+  // Semantics preserved exactly: `anyPain` ignores resolved areas (the roster
+  // pain FILTER always did), `unresolvedPain` excludes athlete.resolved_pain
+  // (the per-row ⚠ badge check).
+  const painMap = useMemo(()=>{
+    const m = new Map();
+    athletes.forEach(a=>m.set(a.id,{anyPain:false,unresolvedPain:false,resolved:(a.resolved_pain||[]).map(x=>x.toLowerCase())}));
+    workouts.forEach(w=>{
+      const e = m.get(w.athlete_id); if(!e) return;
+      const flags = w.parsed_data?.pain_flags;
+      if(flags?.length>0){
+        e.anyPain = true;
+        if(!e.unresolvedPain&&flags.some(p=>!e.resolved.includes(p.area.toLowerCase()))) e.unresolvedPain = true;
+      }
+    });
+    return m;
+  },[workouts,athletes]);
+
+  const filtered = useMemo(()=>athletes.filter(a=>{
     if(search&&!a.name.toLowerCase().includes(search.toLowerCase())&&!a.sport.toLowerCase().includes(search.toLowerCase())) return false;
-    if(filterPain&&!workouts.filter(w=>w.athlete_id===a.id).some(w=>w.parsed_data?.pain_flags?.length>0)) return false;
+    if(filterPain&&!painMap.get(a.id)?.anyPain) return false;
     if(filterInactive){
       const d = daysBetween(lastActive(a.id));
       if(d!==null&&d<=7) return false;
@@ -1004,7 +1024,8 @@ function CoachDashboard({coach,onLogout}) {
     if(!la) return 1;
     if(!lb) return -1;
     return new Date(lb) - new Date(la);
-  });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }),[athletes,rollup,search,filterPain,filterInactive,sortBy,painMap]);
 
   const tabs = ["overview","athletes","progress","reports",...(isMaster?[]:["settings"]),...(isMaster?["coaches"]:[]),...(!isMaster&&isAdmin?["account"]:[])];
 
@@ -1112,8 +1133,7 @@ function CoachDashboard({coach,onLogout}) {
                     ):filtered.map(a=>{
                       const la = lastActive(a.id);
                       const d = daysBetween(la);
-                      const aResolvedPain = (a.resolved_pain||[]).map(x=>x.toLowerCase());
-                      const hasPain = workouts.filter(w=>w.athlete_id===a.id).some(w=>w.parsed_data?.pain_flags?.some(p=>!aResolvedPain.includes(p.area.toLowerCase())));
+                      const hasPain = !!painMap.get(a.id)?.unresolvedPain;
                       const isSel = selected?.id===a.id;
                       const dot = d===null?CA.muted:d===0?CA.green:d<=3?CA.green:d<=7?CA.amber:CA.red;
                       return (
