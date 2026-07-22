@@ -1901,9 +1901,14 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
   // Edition number = this athlete's Nth digest (weekly+monthly, oldest = No. 1).
   // Counted server-side so it stays right even though only the latest digest is
   // loaded here; on any fetch hiccup the masthead just omits the number.
+  // Server stamps content_json.edition_no at generation (the cron used to delete
+  // all prior rows, so the count below could never exceed 1). The count query is
+  // only the legacy fallback for digests generated before the stamp existed.
   const [edNo,setEdNo] = useState(null);
   useEffect(()=>{
     let on=true;
+    const stamped = Number(c?.edition_no);
+    if(stamped){ setEdNo(stamped); return; }
     const aid=digest?.athlete_id, at=digest?.generated_at||digest?.created_at;
     if(!aid||!at){ setEdNo(null); return; }
     sbRead("proof_digests",`?athlete_id=eq.${aid}&digest_type=in.(weekly,monthly)&generated_at=lte.${encodeURIComponent(at)}&select=id`)
@@ -2111,7 +2116,10 @@ function ProofLetter({intro, sections, flags, label, dateStr}) {
 // Haiku extraction where available; this per-question keyword gate covers the
 // moment right after the athlete answers, before that extraction ever runs).
 // Requires a pain WORD and a body AREA so "all good" / "just tired" never fires.
-const PAIN_WORDS = /\b(pain|hurts?|hurting|sore|soreness|ache[sd]?|aching|tweak(?:ed)?|overworked|banged\s*up|flare[ds]?)\b/i;
+// Broadened 2026-07-22 (A16): "my knee is killing me", "shoulder's acting up",
+// "wrecked my back", "elbow's been bugging me" etc. all name a body area but
+// contained no pain word, so the coach loop-in offer silently never fired.
+const PAIN_WORDS = /\b(pain|hurts?|hurting|sore|soreness|ache[sd]?|aching|tweak(?:ed)?|overworked|banged\s*up|flare[ds]?|killing\s+me|bugging|bothering|acting\s+up|wrecked|messed\s+up|jacked(?:\s+up)?|pinch(?:ing|ed)?|strain(?:ed)?|tight(?:ness)?|inflamed|tender)\b/i;
 const BODY_AREAS = /\b(knees?|shoulders?|back|hips?|ankles?|elbows?|wrists?|neck|hamstrings?|quads?|calv?es|groin|feet|foot|achilles|shins?|glutes?|spine|hands?|thumbs?|fingers?|toes?|traps?|lats?|biceps?|triceps?|forearms?|rotator\s*cuff)\b/i;
 function reportsActivePain(text){
   const t = String(text||"");
@@ -2345,7 +2353,13 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
       coachRequestSentRef.current = true;
       setMessages(prev=>[...prev,{role:"assistant",content:"📨 Sent — your coach will see it on their dashboard with your reasoning."}]);
     }catch(_){
-      setMessages(prev=>[...prev,{role:"assistant",content:"Couldn't send that just now — bring it up with your coach directly whenever you can."}]);
+      // A8: a transient failure used to throw away the drafted request AND the
+      // athlete's consent with no way to retry. Keep the offer pending and re-show
+      // the interstitial — "Send to coach" doubles as Try again, "No thanks" skips.
+      setCoachOfferSending(false);
+      setCoachOfferPending(pending);
+      setMessages(prev=>[...prev,{role:"assistant",content:"Couldn't send that just now. Tap \"Send to coach\" to try again, or \"No thanks\" to skip it."}]);
+      return;
     }
     setCoachOfferSending(false);
     await resumeAfterCoachOffer(pending);
@@ -2503,7 +2517,9 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
         ))}
 
         {/* Monthly: embedded est-1RM progress charts (reused LineChart) */}
-        {phase==="report"&&isMonthly&&Array.isArray(c.charts)&&c.charts.length>0&&(
+        {/* Monthly charts render in EVERY phase (A26) — they used to unmount the
+            moment the check-in started and never came back, including on re-open. */}
+        {isMonthly&&Array.isArray(c.charts)&&c.charts.length>0&&(
           <div style={{display:"flex",flexDirection:"column",gap:12,marginTop:4}}>
             {c.charts.map((ch,i)=>{
               const data=liftSeries(ch.lift);
@@ -4011,7 +4027,7 @@ function CoachSetupScreen({setView,setCoach,setErr,err}) {
     try {
       const spRes = await idApi("set-coach-pin",{coachId:coachRecord.id,accessCode:code.trim().toUpperCase(),pin});
       CURRENT_AUTH={role:"coach",id:coachRecord.id,pin,token:spRes.token};track("login","auth",{role:"coach"});setCoach({...coachRecord,pin});persistAuthSession(coachRecord);setView("coach");
-    } catch(e){setErr("Connection error.");}
+    } catch(e){setErr(e.message||"Connection error.");}
     setLoading(false);
   };
 
@@ -4095,6 +4111,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [showProgress,setShowProgress] = useState(false);
   const [showQuickLog,setShowQuickLog] = useState(false);
   const quickLogPending = useRef(false); // the pending/next send() is a Quick Log draft — a pure workout log that must never write program_text
+  const pendingQuickLogSend = useRef(null); // A12: draft queued while a reply streams — auto-fired when the stream clears
   const [quickLogParked,setQuickLogParked] = useState(false); // an unfinished Quick Log draft is waiting — surfaced on the nav button
   // Re-read whenever the sheet closes (draft just parked) or history moves (they logged, so
   // any parked draft is spent or stale). Mirrors the sheet's own resume conditions exactly —
@@ -4104,6 +4121,17 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     if(!athlete?.id || !historyLoaded || !(athlete.temp_program_text||athlete.program_text)){ setQuickLogParked(false); return; }
     setQuickLogParked(!!qlLoad(athlete.id, workoutHistory));
   },[athlete?.id, athlete?.program_text, athlete?.temp_program_text, historyLoaded, workoutHistory, showQuickLog]);
+  // A12: fire a queued Quick Log send the moment the in-flight reply finishes.
+  // The closure is fresh from the render where loading flipped, so send() sees
+  // current state. Re-assert the pure-log flag — the in-flight send consumed it.
+  useEffect(()=>{
+    if(!loading && !videoLoading && historyLoaded && pendingQuickLogSend.current){
+      const text = pendingQuickLogSend.current;
+      pendingQuickLogSend.current = null;
+      quickLogPending.current = true;
+      send(text);
+    }
+  },[loading,videoLoading,historyLoaded]);
   const [showProfileCompletion,setShowProfileCompletion] = useState(false);
   const [profileBannerDismissed,setProfileBannerDismissed] = useState(()=>{
     try{return!!localStorage.getItem(`wilco_profile_banner_${initialAthlete.id}`);}catch{return false;}
@@ -4113,6 +4141,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [athleteContext,setAthleteContext] = useState(null);
   const [proofDigest,setProofDigest] = useState(null);
   const [showProofChat,setShowProofChat] = useState(false);
+  const [chatDigest,setChatDigest] = useState(null); // A5: a PAST edition opened from the archive (null = latest)
   const [goalCollectionActive,setGoalCollectionActive] = useState(false);
   const [athleteProgramText,setAthleteProgramText] = useState(athlete.program_text||"");
   const [athleteProgramSaving,setAthleteProgramSaving] = useState(false);
@@ -4415,15 +4444,21 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           sbRead("prs",`?athlete_id=eq.${updatedAthlete.id}`),
           sbRead("manual_one_rms",`?athlete_id=eq.${updatedAthlete.id}`),
         ]);
+        // Both maps key by the canonical lift id (resolveLift funnel — same as every
+        // other progress surface). prMap used to key by RAW lowercased name but look
+        // up by normalized name, so any plural/abbreviated lift ("Squats", "RDL")
+        // never matched: every workout inserted a fresh "first PR" row and the
+        // celebration/propagation branch never fired. Comparisons are in lbs so kg
+        // rows rank correctly against lbs rows.
         const prMap = {};
         if(Array.isArray(existingPRs)){
           existingPRs.forEach(pr=>{
-            const k = pr.exercise?.toLowerCase().trim();
-            if(!prMap[k]||epley1RM(pr.weight,pr.reps)>epley1RM(prMap[k].weight,prMap[k].reps)) prMap[k]=pr;
+            const k = resolveLift(pr.exercise||"").id;
+            if(!prMap[k]||epley1RM(toLbs(pr.weight,pr.unit),pr.reps)>epley1RM(toLbs(prMap[k].weight,prMap[k].unit),prMap[k].reps)) prMap[k]=pr;
           });
         }
         if(Array.isArray(existingManual)){
-          existingManual.forEach(m=>{ manualMap[m.normalized_exercise]=m; });
+          existingManual.forEach(m=>{ manualMap[resolveLift(m.normalized_exercise||m.exercise||"").id]=m; });
         }
 
         // Collect the new prs rows and insert them in ONE gateway call after the
@@ -4435,7 +4470,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           if(!ex.name||ex.unit==="bodyweight") continue;
           const exE1RM = bestE1RMForExercise(ex);
           if(!exE1RM) continue;
-          const k = normalizeExName(ex.name);
+          const k = resolveLift(ex.name).id;
           // Use the heaviest single set as the representative weight/reps for the prs row
           const topSet = getExerciseSets(ex).reduce((best,s)=>{
             const e = epley1RM(toLbs(s.weight, ex.unit), s.reps);
@@ -4458,7 +4493,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // Manual (actual, non-estimated) 1RM — set via chat declaration or an achieved true single.
         const oneRMAttempts = (parsed.pr_attempts||[]).filter(p=>p.reps===1 && p.achieved && p.exercise && p.weight);
         for(const attempt of oneRMAttempts){
-          const k = normalizeExName(attempt.exercise);
+          const k = resolveLift(attempt.exercise).id;         // canonical id — matches both maps above
+          const kNorm = normalizeExName(attempt.exercise);    // DB convention for normalized_exercise
           const unit = attempt.unit==="kg" ? "kg" : "lbs";
           const newLbs = toLbs(attempt.weight, unit);
           const existing = manualMap[k];
@@ -4469,9 +4505,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           if(existing){
             await sbUpdate("manual_one_rms", existing.id, {weight:attempt.weight, unit, source:"workout", updated_at:new Date().toISOString()});
           } else {
-            await sbInsert("manual_one_rms", {athlete_id:updatedAthlete.id, exercise:attempt.exercise, normalized_exercise:k, weight:attempt.weight, unit, source:"workout"});
+            await sbInsert("manual_one_rms", {athlete_id:updatedAthlete.id, exercise:attempt.exercise, normalized_exercise:kNorm, weight:attempt.weight, unit, source:"workout"});
           }
-          manualMap[k] = {athlete_id:updatedAthlete.id, exercise:attempt.exercise, normalized_exercise:k, weight:attempt.weight, unit, source:"workout"};
+          manualMap[k] = {athlete_id:updatedAthlete.id, exercise:attempt.exercise, normalized_exercise:kNorm, weight:attempt.weight, unit, source:"workout"};
           newPRs.push({exercise:attempt.exercise, weight:attempt.weight, unit, reps:1, e1rm:newLbs, prevE1RM:oldLbs, diff:newLbs-oldLbs, old1RM:oldLbs, isActual1RM:true});
         }
       }
@@ -4856,6 +4892,15 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const send = async (overrideText) => {
     const msg = (typeof overrideText==="string" ? overrideText : input).trim();
     if(!msg||loading||videoLoading||!historyLoaded) return;
+    // A27: typing while the session-gap question is pending resolves it as "same
+    // workout" (the conservative default — no new session boundary) and processes
+    // the typed message normally, matching the other chip flows' typed-means-
+    // dismissed contract. This was the only chip that hard-locked the composer.
+    if(sessionCheckPending){
+      const pendingCheck = sessionCheckPending;
+      setSessionCheckPending(null);
+      try { await finalizeWorkout(pendingCheck.parsed,pendingCheck.msg,pendingCheck.reply,pendingCheck.updatedAthlete,false,false); } catch(_){}
+    }
     // Quick Log drafts are pure workout logs. Consume the flag for THIS send so a
     // draft can NEVER be classified as a program and overwrite program_text.
     const fromQuickLog = quickLogPending.current;
@@ -4872,6 +4917,11 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     // Same for a pending athlete-side self-apply change: typing instead of tapping
     // a chip cancels whatever phase it was in.
     if(selfChangePending) setSelfChangePending(null);
+    // A7: the clears above just nulled every chip, but this closure's state
+    // variables still hold the OLD values — so the offer gate further down must
+    // not read them (a message typed over a chip could never get its own
+    // coach-request/self-change offer). Chips set during THIS send flip this local.
+    let chipSetThisSend = false;
 
     // ── Goal collection flow (first chat only) ──────────────────────────────
     if(goalCollectionActive){
@@ -4965,8 +5015,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           return u;
         });
       };
+      let streamedText = ""; // full text received so far — survives a mid-stream death (A28)
       const applyDelta = (chunk)=>{
         if(firstDelta){ firstDelta = false; setLoading(false); } // hide the typing dot once text starts
+        streamedText += chunk;
         deltaBuf += chunk;
         if(deltaRaf==null) deltaRaf = requestAnimationFrame(flushDelta);
       };
@@ -4981,6 +5033,12 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       if(reply && reply.trim()){
         // Settle on the stream's full text — guarantees the tail chunk that was
         // still buffered when the stream closed is never dropped.
+        setMessages(prev=>{ const u=[...prev]; const last=u[u.length-1]; if(last && last.role==="assistant") u[u.length-1]={role:"assistant",content:reply}; return u; });
+      } else if(streamedText.trim().length > 80){
+        // A28: the stream died but a substantial partial is already on screen.
+        // Keep it — regenerating replaced visibly-rendered text with differently-
+        // worded copy and billed the tokens twice. Only regenerate empty bubbles.
+        reply = streamedText;
         setMessages(prev=>{ const u=[...prev]; const last=u[u.length-1]; if(last && last.role==="assistant") u[u.length-1]={role:"assistant",content:reply}; return u; });
       } else {
         reply = await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext);
@@ -5015,7 +5073,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           const plan = await resolveLogCorrection(msg, newMsgs.slice(-6), workoutHistory);
           if(plan?.found && plan.workout_id!=null && Array.isArray(plan.edits) && plan.edits.length &&
              workoutHistory.some(w=>String(w.id)===String(plan.workout_id))){
-            setCorrectionPending({plan, targetId: plan.workout_id});
+            setCorrectionPending({plan, targetId: plan.workout_id}); chipSetThisSend = true;
             followUp(`Here's the fix:\n\n${plan.summary}\n\nTap “Apply fix” below and I'll set the record straight — any false PR or max from the mistype gets recalculated too. Nothing changes until you tap.`);
           } else {
             followUp(`I couldn't safely pin down that entry${plan?.reason?` (${plan.reason.toLowerCase()})`:""}. Open MY LOG → tap Edit on the workout and fix it by hand — takes 30 seconds.`);
@@ -5043,7 +5101,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // the coach's inbox (coach-experience-vision §4). Nothing writes on decline.
         try {
           const draft = await draftChangeRequest({athlete: updatedAthlete, message: msg, programText: updatedAthlete.program_text||"", askClaude});
-          setChangeRequestPending({suggestion: draft.suggestion, lift: draft.lift, current: draft.current, why: draft.why, source: draft.source, athleteMsg: msg});
+          setChangeRequestPending({suggestion: draft.suggestion, lift: draft.lift, current: draft.current, why: draft.why, source: draft.source, athleteMsg: msg}); chipSetThisSend = true;
           followUp(`🔒 Your coach has your program locked, so I can't change it myself — but I can send them a request. Here's what I'd ask for:\n\n"${draft.suggestion}"\n\nWant me to send that to your coach?`);
         } catch(e){}
       } else if(parsed.program_append && !fromQuickLog){
@@ -5067,7 +5125,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           if(hasContent){
             if(hasProgram){
               // Already have one — ASK before switching, don't write yet.
-              setProgramReplacePending({newText:programText.trim()});
+              setProgramReplacePending({newText:programText.trim()}); chipSetThisSend = true;
               followUp("You've already got a program saved. Want me to replace it with this one? Tap “Replace program” below to switch, or “Keep current” to leave it as-is. I won't change anything until you say so.");
             } else {
               await sbUpdate("athletes",athlete.id,{program_text:programText});
@@ -5086,7 +5144,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           const looksLikeProgram = generated && generated.trim().length > 120 && generated.trim().split("\n").length > 3;
           if(looksLikeProgram){
             if(hasProgram){
-              setProgramReplacePending({newText:generated.trim()});
+              setProgramReplacePending({newText:generated.trim()}); chipSetThisSend = true;
               followUp("That's the program I'd put you on. You've already got one saved though — want me to replace it? Tap “Replace program” below to switch, or “Keep current”. Nothing changes until you say so.");
             } else {
               await sbUpdate("athletes",athlete.id,{program_text:generated.trim()});
@@ -5113,7 +5171,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // One offer per flag per session (coachFlagOfferedRef, shared across both
       // branches), and never stacked on top of another pending confirm chip.
       const lockedBranchFired = wantsProgramWrite && updatedAthlete.program_locked;
-      const noOtherOfferPending = !changeRequestPending && !programReplacePending && !correctionPending && !selfChangePending;
+      // A7: computed from what THIS send actually did — the state variables in this
+      // closure are stale (cleared chips still read non-null, so "my knee hurts on
+      // squats" typed over a Replace chip never got its coach-request offer).
+      const noOtherOfferPending = !chipSetThisSend;
       if(!lockedBranchFired && parsed.coach_flag && updatedAthlete.coach_id
          && (parsed.coach_flag==="pain" || updatedAthlete.program_locked)
          && !coachFlagOfferedRef.current[parsed.coach_flag]
@@ -5200,8 +5261,14 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         if(saved.length) followUp("✓ Got it — I'll remember that.");
       }
 
-      // Gap check: 1–3 hrs since last real entry → ask same workout or new session
-      if(parsed.exercises?.length>0){
+      // Gap check: 1–3 hrs since last real entry → ask same workout or new session.
+      // Skipped for backdated logs (A24): the check keys off wall-clock time, but a
+      // "yesterday's workout" with log_date set isn't "this workout" at all — the
+      // question had no sensible answer. A backdated log is by definition its own
+      // session, so finalize it as one instead of asking.
+      if(parsed.exercises?.length>0 && parsed.log_date){
+        parsed.new_session = true;
+      } else if(parsed.exercises?.length>0){
         const lastReal = workoutHistory.find(w=>isRealSession(w));
         if(lastReal){
           const gapMin = Math.round((Date.now()-new Date(lastReal.created_at))/60000);
@@ -5706,11 +5773,10 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             🎬
           </button>
           <textarea value={input} onChange={e=>setInput(e.target.value)}
-            placeholder={sessionCheckPending?"Tap Same workout or New session above...":`Tell Coach Joe about your workout, ${athlete.name}...`} rows={2}
-            disabled={!!sessionCheckPending}
-            style={{flex:1,background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,padding:"10px 14px",color:CA.text,fontSize:14,outline:"none",resize:"none",lineHeight:1.5,opacity:sessionCheckPending?0.4:1}}/>
-          <button onClick={send} disabled={loading||videoLoading||!input.trim()||!historyLoaded||!!sessionCheckPending}
-            style={{background:CA_BTN,boxShadow:`0 0 12px ${CA_GLOW}`,border:"none",borderRadius:12,width:44,height:44,cursor:(loading||!input.trim()||sessionCheckPending)?"not-allowed":"pointer",opacity:(loading||!input.trim()||sessionCheckPending)?0.5:1,fontSize:18,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,color:"#02040c",fontWeight:700}}>
+            placeholder={sessionCheckPending?"Tap a chip above, or keep typing (counts as same workout)...":`Tell Coach Joe about your workout, ${athlete.name}...`} rows={2}
+            style={{flex:1,background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,padding:"10px 14px",color:CA.text,fontSize:14,outline:"none",resize:"none",lineHeight:1.5}}/>
+          <button onClick={send} disabled={loading||videoLoading||!input.trim()||!historyLoaded}
+            style={{background:CA_BTN,boxShadow:`0 0 12px ${CA_GLOW}`,border:"none",borderRadius:12,width:44,height:44,cursor:(loading||!input.trim())?"not-allowed":"pointer",opacity:(loading||!input.trim())?0.5:1,fontSize:18,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,color:"#02040c",fontWeight:700}}>
             →
           </button>
         </div>
@@ -5748,7 +5814,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
       )}
 
       {/* My Log Modal */}
-      {showLog&&<MyLogModal workoutHistory={workoutHistory} athlete={athlete} onClose={()=>setShowLog(false)} proofDigest={proofDigest} onDigestRead={(d)=>setProofDigest(d)} onOpenProofChat={()=>{setShowLog(false);setShowProofChat(true);}} setWorkoutHistory={setWorkoutHistory}/>}
+      {showLog&&<MyLogModal workoutHistory={workoutHistory} athlete={athlete} onClose={()=>setShowLog(false)} proofDigest={proofDigest} onDigestRead={(d)=>setProofDigest(d)} onOpenProofChat={(past)=>{setShowLog(false);setChatDigest(past&&past.id?past:null);setShowProofChat(true);}} setWorkoutHistory={setWorkoutHistory}/>}
 
       {/* Program View Modal */}
       {showProgram&&(
@@ -5835,11 +5901,23 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           onSend={(text)=>{
             setShowQuickLog(false);
             // Mark this as a Quick Log draft so send() can never route it into a
-            // program overwrite (survives the parked-input path below too).
+            // program overwrite (survives the queued path below too).
             quickLogPending.current = true;
-            // If a send is already in flight, park the draft in the input box
-            // instead of silently dropping it (send() early-returns while busy).
-            if(loading||videoLoading||!historyLoaded) setInput(text);
+            // A12: if a send is in flight, QUEUE the draft and auto-fire it the
+            // moment the stream clears (it used to be silently parked in the chat
+            // input, unsent — and localStorage was already cleared, so backgrounding
+            // the app lost the log). Status note inserts BEFORE the streaming
+            // placeholder so the stream's settle write still targets the last bubble.
+            if(loading||videoLoading||!historyLoaded){
+              pendingQuickLogSend.current = text;
+              const note = {role:"assistant",content:"Got your log — I'll send it the moment this reply finishes."};
+              setMessages(prev=>{
+                const u=[...prev];
+                if(u.length && u[u.length-1].role==="assistant") u.splice(u.length-1,0,note);
+                else u.push(note);
+                return u;
+              });
+            }
             else send(text);
           }}
         />
@@ -5869,15 +5947,16 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         />
       )}
 
-      {/* Proof Feed Check-In Modal (weekly + monthly guided chat) */}
-      {showProofChat&&proofDigest&&(
+      {/* Proof Feed Check-In Modal (weekly + monthly guided chat). chatDigest lets a
+          PAST edition open here (A5 archive) without clobbering the app-level latest. */}
+      {showProofChat&&(chatDigest||proofDigest)&&(
         <ProofChatModal
           athlete={athlete}
-          digest={proofDigest}
+          digest={chatDigest||proofDigest}
           workoutHistory={workoutHistory}
-          onClose={()=>setShowProofChat(false)}
+          onClose={()=>{setShowProofChat(false);setChatDigest(null);}}
           onContextSaved={(ctx)=>setAthleteContext(ctx)}
-          onDigestRead={(d)=>setProofDigest(d)}
+          onDigestRead={(d)=>{ if(!chatDigest) setProofDigest(d); }}
         />
       )}
 
@@ -6013,17 +6092,20 @@ const buildQuickLogContext = (athlete, workoutHistory, manualRMs, messages, goal
   }
   // 1RM cheat sheet: best history e1RM per exercise, overlaid with actual 1RMs
   // (manual_one_rms) — higher number wins, same rule as the Progress modal.
+  // Grouped by resolveLift (A23): bare normalizeExName skipped the alias layer, so
+  // "conventional deadlift" and "deadlift" split into two entries with two 1RMs.
   const byEx = {};
   workoutHistory.forEach(w=>{ (w.parsed_data?.exercises||[]).forEach(ex=>{
     if(!ex.name) return;
     const e1 = bestE1RMForExercise(ex, bodyweight);
     if(!e1) return;
-    const k = normalizeExName(ex.name);
-    if(!byEx[k]) byEx[k]={name:displayForKey(k,ex.name), e1rm:e1};
-    else { byEx[k].name=displayForKey(k,cleanerName(byEx[k].name,ex.name)); if(e1>byEx[k].e1rm) byEx[k].e1rm=e1; }
+    const lift = resolveLift(ex.name);
+    const k = lift.id;
+    if(!byEx[k]) byEx[k]={name:lift.name, e1rm:e1};
+    else if(e1>byEx[k].e1rm) byEx[k].e1rm=e1;
   });});
   (manualRMs||[]).forEach(m=>{
-    const k = normalizeExName(m.normalized_exercise||m.exercise);
+    const k = resolveLift(m.normalized_exercise||m.exercise).id;
     const lbs = toLbs(m.weight, m.unit);
     if(!byEx[k]||lbs>byEx[k].e1rm) byEx[k]={name:m.exercise, e1rm:lbs, actual:true};
   });
@@ -6341,6 +6423,16 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
   const [olderWorkouts,setOlderWorkouts] = useState([]);
   const [loadingOlder,setLoadingOlder] = useState(false);
   const [reachedEnd,setReachedEnd] = useState(false);
+  // A5: past editions for the PROOF tab archive — one paged read when the tab opens.
+  const [pastDigests,setPastDigests] = useState([]);
+  useEffect(()=>{
+    if(tab!=="proof"||!proofDigest) return;
+    let on=true;
+    sbRead("proof_digests",`?athlete_id=eq.${athlete.id}&digest_type=in.(weekly,monthly)&order=created_at.desc&limit=12&select=*`)
+      .then(rows=>{ if(on&&Array.isArray(rows)) setPastDigests(rows.filter(r=>r.id!==proofDigest.id)); })
+      .catch(()=>{});
+    return ()=>{ on=false; };
+  },[tab,athlete.id,proofDigest?.id]);
   const painKey = `wilco_resolved_pain_${athlete.id}`;
   const [resolvedPain,setResolvedPain] = useState(()=>{
     try{return JSON.parse(localStorage.getItem(painKey)||"[]");}catch{return[];}
@@ -6553,8 +6645,33 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                 }catch(_){}
               };
               return (
-                <ProofEnvelope digest={d} athleteName={athlete?.name}
-                  onOpen={()=>{ markRead(); onOpenProofChat&&onOpenProofChat(); }}/>
+                <>
+                  <ProofEnvelope digest={d} athleteName={athlete?.name}
+                    onOpen={()=>{ markRead(); onOpenProofChat&&onOpenProofChat(); }}/>
+                  {/* A5: past letters — the cron keeps edition history now instead of
+                      deleting it, so every prior letter is one tap away. */}
+                  {pastDigests.length>0&&(
+                    <div style={{marginTop:18}}>
+                      <div style={{color:CA.muted,fontSize:10,letterSpacing:2,fontWeight:700,marginBottom:8}}>PAST LETTERS</div>
+                      {pastDigests.map(p=>{
+                        const pc = p.content_json||{};
+                        const pd_ = p.generated_at||p.created_at;
+                        const when = pd_ ? new Date(pd_).toLocaleDateString("en-US",{month:"long",day:"numeric"}) : "";
+                        const firstLine = (pc.intro||pc.sections?.[0]?.body||"").split("\n")[0].slice(0,90);
+                        return (
+                          <button key={p.id} onClick={()=>onOpenProofChat&&onOpenProofChat(p)}
+                            style={{display:"block",width:"100%",textAlign:"left",background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:10,padding:"11px 14px",marginBottom:8,cursor:"pointer"}}>
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+                              <span style={{color:CA.text,fontSize:12.5,fontWeight:700}}>{p.digest_type==="monthly"?"Monthly Recap":"Weekly Edition"}{Number(pc.edition_no)?` · No. ${pc.edition_no}`:""}</span>
+                              <span style={{color:CA.muted,fontSize:10.5}}>{when}</span>
+                            </div>
+                            {firstLine&&<div style={{color:CA.muted2,fontSize:11,marginTop:3,lineHeight:1.4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{firstLine}…</div>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
               );
             })()}
           </div>
@@ -6592,7 +6709,16 @@ function EditWorkoutModal({session, onClose, setWorkoutHistory}) {
     session.entries.forEach((entry,ei)=>{
       const pd = parseEntry(entry);
       (pd.exercises||[]).forEach((ex,xi)=>{
-        out.push({ei,xi,name:ex.name,sets:ex.sets||1,reps:ex.reps||1,weight:ex.weight??"",unit:ex.unit||"lbs",hadSetDetails:Array.isArray(ex.set_details)&&ex.set_details.length>0,deleted:false});
+        out.push({
+          ei,xi,name:ex.name,sets:ex.sets||1,reps:ex.reps||1,weight:ex.weight??"",unit:ex.unit||"lbs",
+          // A3: exercises WITH per-set variation get one editable line per set —
+          // the modal used to flatten the whole ramp to one value (and warned it would),
+          // while the AI correction path could already write surgical new_set_details.
+          setDetails: Array.isArray(ex.set_details)&&ex.set_details.length
+            ? ex.set_details.map(s=>({weight:s.weight??"",reps:s.reps??"",warmup:!!s.warmup}))
+            : null,
+          deleted:false,
+        });
       });
     });
     return out;
@@ -6601,6 +6727,7 @@ function EditWorkoutModal({session, onClose, setWorkoutHistory}) {
   const [err,setErr] = useState("");
 
   const updateRow = (idx,field,val) => setRows(prev=>prev.map((r,i)=>i===idx?{...r,[field]:val}:r));
+  const updateSetRow = (idx,si,field,val) => setRows(prev=>prev.map((r,i)=>i===idx?{...r,setDetails:r.setDetails.map((s,j)=>j===si?{...s,[field]:val}:s)}:r));
   const removeRow = (idx) => setRows(prev=>prev.map((r,i)=>i===idx?{...r,deleted:true}:r));
 
   const save = async () => {
@@ -6615,20 +6742,30 @@ function EditWorkoutModal({session, onClose, setWorkoutHistory}) {
         const pd = parseEntry(entry);
         const origExercises = pd.exercises||[];
         const keptRows = rows.filter(r=>r.ei===ei && !r.deleted);
+        const detailsSig = (d)=>JSON.stringify((d||[]).map(s=>({w:s.weight===""?"":+s.weight,r:s.reps===""?"":+s.reps,u:!!s.warmup})));
         if(keptRows.length===origExercises.length && rows.filter(r=>r.ei===ei).every(r=>!r.deleted &&
-            r.sets===(origExercises[r.xi]?.sets||1) && r.reps===(origExercises[r.xi]?.reps||1) && String(r.weight)===String(origExercises[r.xi]?.weight??""))) {
+            r.sets===(origExercises[r.xi]?.sets||1) && r.reps===(origExercises[r.xi]?.reps||1) && String(r.weight)===String(origExercises[r.xi]?.weight??"") &&
+            (!r.setDetails || detailsSig(r.setDetails)===detailsSig(origExercises[r.xi]?.set_details)))) {
           continue; // nothing changed in this entry
         }
         const newExercises = keptRows.map(r=>{
           const orig = origExercises[r.xi]||{};
+          if(r.setDetails){
+            // A3: per-set edit — write the corrected set_details back and keep the
+            // flat summary fields at the parse convention (sets = working-set count,
+            // reps/weight = the heaviest working set).
+            const details = r.setDetails.map(s=>({weight:s.weight===""?0:+s.weight, reps:s.reps===""?0:+s.reps, ...(s.warmup?{warmup:true}:{})}));
+            const working = details.filter(s=>!s.warmup);
+            const pool = working.length?working:details;
+            const top = pool.reduce((b,s)=>(b==null||s.weight>b.weight?s:b), null);
+            return {...orig, sets:pool.length, reps:top?.reps??orig.reps, weight:top?.weight??orig.weight, unit:r.unit, set_details:details};
+          }
           return {
             ...orig,
             sets: r.sets===""?null:+r.sets,
             reps: r.reps===""?null:+r.reps,
             weight: r.weight===""?null:+r.weight,
             unit: r.unit,
-            // Edited manually — the old per-set breakdown no longer matches, so drop it
-            // rather than leave it inconsistent with the new flat values.
             set_details: null,
           };
         });
@@ -6664,7 +6801,31 @@ function EditWorkoutModal({session, onClose, setWorkoutHistory}) {
                 <div style={{color:CA.text,fontWeight:700,fontSize:13}}>{r.name}</div>
                 <button onClick={()=>removeRow(idx)} style={{background:"none",border:"none",color:"#ef4444",cursor:"pointer",fontSize:11}}>Remove</button>
               </div>
-              {r.hadSetDetails&&<div style={{color:CA.muted,fontSize:10,marginBottom:6,lineHeight:1.4}}>This exercise had per-set weight/rep variation. Editing here replaces it with one flat value across all sets.</div>}
+              {r.setDetails?(
+                /* A3: one editable line per actual set (warm-up badge preserved) —
+                   editing no longer flattens the athlete's real ramp to one value. */
+                <div>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                    <label style={{color:CA.muted,fontSize:9,letterSpacing:1,flex:1}}>WEIGHT × REPS, PER SET</label>
+                    <select value={r.unit} onChange={e=>updateRow(idx,"unit",e.target.value)} style={inpA({padding:"4px 6px",fontSize:11,width:70})}>
+                      <option value="lbs">lbs</option>
+                      <option value="kg">kg</option>
+                      <option value="bodyweight">BW</option>
+                    </select>
+                  </div>
+                  {(()=>{ let wn=0; return r.setDetails.map((s,si)=>{
+                    const tag = s.warmup ? "W-UP" : `SET ${++wn}`;
+                    return (
+                      <div key={si} style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+                        <span style={{fontFamily:"ui-monospace,Menlo,monospace",fontSize:9,color:s.warmup?CA.muted2:CA.muted,width:40,flexShrink:0,letterSpacing:0.5}}>{tag}</span>
+                        <input type="number" min={0} value={s.weight} onChange={e=>updateSetRow(idx,si,"weight",e.target.value)} style={inpA({padding:"6px 8px",fontSize:12,flex:1.3})}/>
+                        <span style={{color:CA.muted,fontSize:11}}>×</span>
+                        <input type="number" min={0} value={s.reps} onChange={e=>updateSetRow(idx,si,"reps",e.target.value)} style={inpA({padding:"6px 8px",fontSize:12,flex:1})}/>
+                      </div>
+                    );
+                  }); })()}
+                </div>
+              ):(
               <div style={{display:"flex",gap:8}}>
                 <div style={{flex:1}}>
                   <label style={{color:CA.muted,fontSize:9,letterSpacing:1,display:"block",marginBottom:3}}>SETS</label>
@@ -6687,6 +6848,7 @@ function EditWorkoutModal({session, onClose, setWorkoutHistory}) {
                   </select>
                 </div>
               </div>
+              )}
             </div>
           ))}
           {err&&<div style={{color:"#ef4444",fontSize:12,marginBottom:10}}>{err}</div>}
@@ -6718,10 +6880,14 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   // the wrong power-cell colour. Tube stays empty until then, then fills once, correctly.
   useEffect(()=>{ if(tab!=="benchmarks"||!rmLoaded){ setBenchGo(false); return; } const t=setTimeout(()=>setBenchGo(true),80); return ()=>clearTimeout(t); },[tab,rmLoaded]);
 
+  const [prRows,setPrRows] = useState([]); // all-time prs rows — seed bests past the 100-workout history cap (A22)
   useEffect(()=>{
     sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`).then(rows=>{
       if(Array.isArray(rows)) setManualRMs(rows);
     }).catch(()=>{}).finally(()=>setRmLoaded(true));
+    sbRead("prs",`?athlete_id=eq.${athlete.id}`).then(rows=>{
+      if(Array.isArray(rows)) setPrRows(rows);
+    }).catch(()=>{});
   },[athlete.id]);
 
   const matchesSearch = (name) => !search.trim() || (name||"").toLowerCase().includes(search.trim().toLowerCase());
@@ -6763,6 +6929,19 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
         if(!byEx[lift.id]) byEx[lift.id]={key:lift.id,name:lift.name,e1rm,unit,benchKey:lift.benchKey,bwLoaded:lift.bwLoaded};
         else if(e1rm>byEx[lift.id].e1rm) byEx[lift.id].e1rm=e1rm;
       });
+    });
+
+    // A22: seed from the athlete's all-time prs rows — the boot fetch caps history
+    // at 100 rows, so "lifetime" bests silently shrank once older workouts fell out
+    // of the window. Same additive higher-wins rule as the coach dashboard's
+    // seedFromPRs (grit.js); prs e1RMs are lbs-equivalents.
+    prRows.forEach(p=>{
+      const lift = resolveLift(p.exercise||"");
+      if(!lift.tracked) return;
+      const lbs = p.estimated_1rm || epley1RM(toLbs(p.weight,p.unit), p.reps||1);
+      if(!(lbs>0)) return;
+      if(!byEx[lift.id]) byEx[lift.id]={key:lift.id,name:lift.name,e1rm:lbs,unit:"lbs",benchKey:lift.benchKey,bwLoaded:lift.bwLoaded};
+      else if(lbs>byEx[lift.id].e1rm) byEx[lift.id].e1rm=lbs;
     });
 
     // Overlay ACTUAL 1RMs (manual_one_rms — user-set OR system-detected from a reported/
@@ -6855,7 +7034,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
 
     return { rankedLifts, benchSorted, strengthScore, topTierIdx, prsHit, exercisesAll, prListAll };
   // eslint-disable-next-line react-hooks/exhaustive-deps -- bodyweight/genderKey/age/tierIdxOf all derive from athlete
-  }, [workoutHistory, manualRMs, athlete]);
+  }, [workoutHistory, manualRMs, prRows, athlete]);
 
   // Search filter applied to the memoized aggregation (re-runs cheaply on each keystroke).
   const dedupedBench = benchSorted.filter(b=>matchesSearch(b.name));
@@ -6887,10 +7066,12 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
     return ()=>clearTimeout(id);
   },[benchSig,bodyweight]);   // eslint-disable-line react-hooks/exhaustive-deps
 
+  const [manualMsg,setManualMsg] = useState(""); // A4: save/remove failure surfaced in the edit row
   const saveManual = async (row) => {
     const w = parseFloat(editVal);
     if(!w||w<=0) return;
     const unit = row.unit==="kg"?"kg":"lbs";
+    setManualMsg("");
     try {
       if(row.manual){
         await sbUpdate("manual_one_rms", row.manual.id, {weight:w, unit, source:"manual", updated_at:new Date().toISOString()});
@@ -6900,9 +7081,27 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
         const newRow = Array.isArray(inserted)&&inserted[0] ? inserted[0] : {athlete_id:athlete.id,exercise:row.name,normalized_exercise:row.key,weight:w,unit,source:"manual"};
         setManualRMs(prev=>[...prev,newRow]);
       }
-    } catch(_){}
-    setEditingKey(null);
-    setEditVal("");
+      setEditingKey(null);
+      setEditVal("");
+    } catch(_){
+      // A4: a swallowed failure used to close the editor looking exactly like a success.
+      setManualMsg("Couldn't save that — check your connection and try again.");
+    }
+  };
+  // A4: remove a mistyped actual 1RM — the estimate takes back over. This was the
+  // only unrecoverable bad-data path in the modal (chat log-correction can only
+  // clamp source==='workout' rows, never a manual typo).
+  const removeManual = async (row) => {
+    if(!row.manual?.id) return;
+    setManualMsg("");
+    try {
+      await sbDelete("manual_one_rms",`?id=eq.${row.manual.id}`);
+      setManualRMs(prev=>prev.filter(m=>m.id!==row.manual.id));
+      setEditingKey(null);
+      setEditVal("");
+    } catch(_){
+      setManualMsg("Couldn't remove that — try again.");
+    }
   };
 
   return (
@@ -7043,16 +7242,19 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
                   <div>
                     <div style={{color:CA.text,fontWeight:700,fontSize:14}}>{ex.name}</div>
-                    <div style={{color:CA.muted,fontSize:11,marginTop:2}}>{ex.entries.length} set{ex.entries.length!==1?"s":""} logged</div>
+                    {/* one entry per logged instance (best set only), not per set — say so (A30) */}
+                    <div style={{color:CA.muted,fontSize:11,marginTop:2}}>logged {ex.entries.length} time{ex.entries.length!==1?"s":""}</div>
                   </div>
                   <div style={{textAlign:"right"}}>
                     <div style={{color:CA.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>BEST EST. 1RM</div>
-                    <div style={{fontFamily:"'Bebas Neue'",fontSize:28,color:CA.accent,lineHeight:1}}>{Math.round(ex.e1rm)}<span style={{fontSize:11,color:CA.muted,fontFamily:"'DM Sans'",marginLeft:2}}>{ex.unit==="kg"?"kg":"lbs"}</span></div>
+                    {/* e1rm is always a lbs-equivalent (toLbs in grit) — a kg logger's 100kg
+                        bench used to read "221 kg" (A19). Always label lbs, like Benchmarks. */}
+                    <div style={{fontFamily:"'Bebas Neue'",fontSize:28,color:CA.accent,lineHeight:1}}>{Math.round(ex.e1rm)}<span style={{fontSize:11,color:CA.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span></div>
                     {ex.bwLoaded&&bwLoadLabel(ex.e1rm,bodyweight)&&<div style={{color:CA.muted,fontSize:10,marginTop:3}}>{bwLoadLabel(ex.e1rm,bodyweight)}</div>}
                   </div>
                 </div>
                 {ex.entries.length>=2?(
-                  <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={CA.cyan} palette={CA} unit={ex.unit==="kg"?"kg":"lbs"}/>
+                  <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:e.e1rm}))} color={CA.cyan} palette={CA} unit="lbs"/>
                 ):(
                   <div style={{background:CA.navy3,borderRadius:8,padding:"8px 12px",fontSize:12,color:CA.muted2}}>Log again to see a trend.</div>
                 )}
@@ -7103,19 +7305,26 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                     <div style={{color:row.manual?CA.accent:CA.muted,fontSize:10,fontWeight:700,letterSpacing:1,marginTop:2}}>{row.manual?"ACTUAL 1RM":"ESTIMATED 1RM"}</div>
                   </div>
                   <div style={{textAlign:"right"}}>
-                    <div style={{fontFamily:"'Bebas Neue'",fontSize:28,color:CA.accent,lineHeight:1}}>{Math.round(row.active)}<span style={{fontSize:11,color:CA.muted,fontFamily:"'DM Sans'",marginLeft:2}}>{row.unit==="kg"?"kg":"lbs"}</span></div>
+                    {/* row.active is lbs-converted (toLbs) — always label lbs (A19) */}
+                    <div style={{fontFamily:"'Bebas Neue'",fontSize:28,color:CA.accent,lineHeight:1}}>{Math.round(row.active)}<span style={{fontSize:11,color:CA.muted,fontFamily:"'DM Sans'",marginLeft:2}}>lbs</span></div>
                     {row.bwLoaded&&bwLoadLabel(row.active,bodyweight)&&<div style={{color:CA.muted,fontSize:10,marginTop:2}}>{bwLoadLabel(row.active,bodyweight)}</div>}
                     {row.manual&&row.estimated>0&&<div style={{color:CA.muted,fontSize:10,marginTop:2}}>est. {Math.round(row.estimated)}lbs</div>}
                   </div>
                 </div>
                 {editingKey===row.key?(
-                  <div style={{display:"flex",gap:8,marginTop:10}}>
-                    <input autoFocus type="number" min={0} value={editVal} onChange={e=>setEditVal(e.target.value)} placeholder={`Actual 1RM (${row.unit==="kg"?"kg":"lbs"})`} style={inpA({padding:"8px 10px",fontSize:13,flex:1})}/>
-                    <button onClick={()=>saveManual(row)} style={{background:CA.accent,border:"none",color:CA.navy,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13,fontWeight:700}}>Save</button>
-                    <button onClick={()=>{setEditingKey(null);setEditVal("");}} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13}}>Cancel</button>
+                  <div style={{marginTop:10}}>
+                    <div style={{display:"flex",gap:8}}>
+                      <input autoFocus type="number" min={0} value={editVal} onChange={e=>setEditVal(e.target.value)} placeholder={`Actual 1RM (${row.unit==="kg"?"kg":"lbs"})`} style={inpA({padding:"8px 10px",fontSize:13,flex:1})}/>
+                      <button onClick={()=>saveManual(row)} style={{background:CA.accent,border:"none",color:CA.navy,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13,fontWeight:700}}>Save</button>
+                      <button onClick={()=>{setEditingKey(null);setEditVal("");setManualMsg("");}} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13}}>Cancel</button>
+                    </div>
+                    {row.manual&&(
+                      <button onClick={()=>removeManual(row)} style={{marginTop:8,background:"none",border:"none",color:"#ef4444",cursor:"pointer",fontSize:11,padding:0}}>Remove actual 1RM — go back to the estimate</button>
+                    )}
+                    {manualMsg&&<div style={{color:"#ef4444",fontSize:11,marginTop:6}}>{manualMsg}</div>}
                   </div>
                 ):(
-                  <button onClick={()=>{setEditingKey(row.key);setEditVal(row.manual?String(row.manual.weight):"");}} style={{marginTop:10,background:"none",border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12}}>
+                  <button onClick={()=>{setEditingKey(row.key);setEditVal(row.manual?String(row.manual.weight):"");setManualMsg("");}} style={{marginTop:10,background:"none",border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12}}>
                     {row.manual?"Update actual 1RM":"Set actual 1RM"}
                   </button>
                 )}
