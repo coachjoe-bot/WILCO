@@ -16,6 +16,13 @@ import { qlLoad, qlSave, qlClear } from "./quicklog.js";
 // governing when Joe offers to loop the human coach in (see file header).
 import { draftChangeRequest, fileChangeRequest, flagToSource } from "./changeRequest.js";
 import { lineDiff, findPlacement, mergeGuard } from "./programDiff.js";
+// Boot layer: is this build still the deployed one, the warm-reopen snapshot, and
+// the offline send queue. Storage/pure rules with their own suite (test-boot.mjs).
+import {
+  runningAssetPaths, isStaleBuild, buildGreeting,
+  saveSnapshot, loadSnapshot, pruneSnapshots,
+  queueOutbox, readOutbox, shiftOutbox,
+} from "./boot.js";
 // Grit strength-ranking module (e1RM primitives, name normalization, tier ladder,
 // bodyweight/age-fair thresholds) — single canonical source shared with the server
 // Proof Feed engine (api/_grit.js re-exports this file's server-safe subset).
@@ -143,6 +150,16 @@ const isIOSSafari = () => {
 const INSTALL_DISMISS_KEY = "wilco_install_dismissed";
 const installDismissed = () => { try { return !!localStorage.getItem(INSTALL_DISMISS_KEY); } catch { return false; } };
 const rememberInstallDismissed = () => { try { localStorage.setItem(INSTALL_DISMISS_KEY, "1"); } catch {} };
+// The one re-ask, stamped separately from the signup dismissal so a "not now" at
+// signup doesn't spend it — and so this can only ever happen once per device.
+const INSTALL_SECOND_KEY = "wilco_install_second_chance";
+const INSTALL_MILESTONE = 3;               // workouts logged before the re-ask
+const secondChanceSpent = () => { try { return !!localStorage.getItem(INSTALL_SECOND_KEY); } catch { return false; } };
+const spendSecondChance = () => { try { localStorage.setItem(INSTALL_SECOND_KEY, "1"); } catch {} };
+// Can this device actually install right now? Same three conditions the signup
+// prompt checks — asking someone already installed, or on a platform with no
+// install path (an in-app webview), is pure noise.
+const canOfferInstall = () => !isStandalone() && !secondChanceSpent() && (!!deferredInstallPrompt || isIOSSafari());
 // Set when signup completes so AthleteView can auto-show the install prompt
 // exactly once, on that first post-signup screen only (never on normal loads).
 let JUST_SIGNED_UP = false;
@@ -211,7 +228,14 @@ function touchAuthSession(){   // extend the rolling window when the app is fore
     if(s && s.token){ s.trustedUntil = Date.now() + AUTH_TRUST_MS; localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(s)); }
   }catch{}
 }
-function clearAuthSession(){ try{ localStorage.removeItem(AUTH_SESSION_KEY); }catch{} CURRENT_AUTH = null; }
+// Log Out wipes the warm-reopen snapshot too. It holds an athlete's name, session
+// count, goals and recent workouts — leaving it behind would let the next person
+// on a shared team phone see the previous athlete's data painted on first load.
+function clearAuthSession(){
+  try{ localStorage.removeItem(AUTH_SESSION_KEY); }catch{}
+  try{ pruneSnapshots(null); }catch{}
+  CURRENT_AUTH = null;
+}
 
 const dataApi = async (op,table,{data,id,params}={}) => {
   const r = await fetch("/api/data",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth:CURRENT_AUTH,op,table,data,id,params})});
@@ -559,6 +583,43 @@ if(typeof window!=="undefined"){
     });
     if(willReload) reloadForStaleChunk();
   });
+}
+
+// ─── "UPDATE READY" (proactive half of the same problem) ─────────────────────
+// The self-heal above is REACTIVE: it only fires once a chunk import has already
+// failed. It exists because sw.js answers navigations from the cached shell, so a
+// new deploy is normally picked up on the NEXT open — an athlete can ride a dead
+// build for a whole session and only find out by crashing into a 404'd chunk.
+//
+// This closes that window from the front: ask the deployed /asset-manifest.json
+// (the same file sw.js already uses for cache pruning) whether the assets THIS
+// document is running still exist. If they don't, the athlete gets a dismissible
+// pill instead of a crash, and tapping it runs the same purge+reload the self-heal
+// uses (a bare reload can't fix this — see reloadForStaleChunk).
+//
+// Bias is heavily toward silence: every ambiguous answer is "no update" (see
+// isStaleBuild), the check is skipped offline, and the pill never interrupts a
+// streaming reply. A false pill shown to the whole installed base would be worse
+// than the bug.
+const UPDATE_POLL_MS = 15 * 60 * 1000;   // background poll
+const UPDATE_MIN_GAP_MS = 5 * 60 * 1000; // floor between checks (tab-focus can fire often)
+const RUNNING_ASSETS = typeof document !== "undefined"
+  ? runningAssetPaths(document, import.meta.url)
+  : new Set();
+
+async function fetchAssetManifest(){
+  try{
+    const r = await fetch("/asset-manifest.json", { cache: "no-store" });
+    if(!r.ok) return null;
+    return await r.json();
+  }catch(_){ return null; }
+}
+
+// True when the running build's assets are gone from the deployed manifest.
+async function newVersionAvailable(){
+  if(typeof navigator!=="undefined" && navigator.onLine===false) return false;
+  if(RUNNING_ASSETS.size===0) return false;   // dev server / unbundled — nothing to compare
+  return isStaleBuild(RUNNING_ASSETS, await fetchAssetManifest());
 }
 
 // ─── ENGAGEMENT TRACKING (Phase 2) ────────────────────────────────────────────
@@ -1628,6 +1689,103 @@ export function useIsMobile(bp=640) {
     return()=>window.removeEventListener("resize",handler);
   },[bp]);
   return isMobile;
+}
+
+// ─── CONNECTIVITY ─────────────────────────────────────────────────────────────
+// navigator.onLine is a floor, not a truth (it reports "online" on a wifi captive
+// portal or a gym's dead-zone signal). So the app treats it as authoritative only
+// for the FALSE case — "the OS says there's no network" is never wrong — and lets
+// the send path mark itself offline when a request actually fails with a network
+// error. That keeps the banner honest in the basement-gym case the SW was built for.
+export function useOnline() {
+  const [online,setOnline] = useState(typeof navigator!=="undefined" ? navigator.onLine!==false : true);
+  useEffect(()=>{
+    const up=()=>setOnline(true), down=()=>setOnline(false);
+    window.addEventListener("online",up);
+    window.addEventListener("offline",down);
+    return ()=>{ window.removeEventListener("online",up); window.removeEventListener("offline",down); };
+  },[]);
+  return online;
+}
+// A fetch that failed because there is no network, as opposed to a 4xx/5xx the
+// server actually answered. TypeError is what fetch throws for a transport failure
+// in every browser we support; the message check covers the SW's own abort text.
+export const isNetworkError = (e) =>
+  !!e && (e.name==="TypeError" || /network|failed to fetch|load failed|offline/i.test(e.message||""));
+
+// ─── BUILD FRESHNESS HOOK + "UPDATE READY" PILL ──────────────────────────────
+// The pill renders at the app root (so it survives every view) but the thing it
+// must not interrupt — a streaming reply — lives deep inside AthleteView. Rather
+// than thread a prop through, AthleteView publishes its busy state to this tiny
+// module-level store and the watcher subscribes.
+let STREAM_BUSY = false;
+const streamBusySubs = new Set();
+export const setStreamBusy = (v) => {
+  const next = !!v;
+  if(STREAM_BUSY===next) return;
+  STREAM_BUSY = next;
+  streamBusySubs.forEach(fn=>{ try{ fn(next); }catch(_){} });
+};
+function useStreamBusy() {
+  const [busy,setBusy] = useState(STREAM_BUSY);
+  useEffect(()=>{ streamBusySubs.add(setBusy); return ()=>{ streamBusySubs.delete(setBusy); }; },[]);
+  return busy;
+}
+
+// Polls on a timer and on tab-focus (the moment an athlete comes back to a PWA
+// that's been backgrounded for days is exactly when it's most likely stale), with
+// a floor between checks so focus-thrashing can't hammer the network. `busy` is
+// passed by the caller — the pill must never appear over a streaming reply.
+function useUpdateReady(busy) {
+  const [ready,setReady] = useState(false);
+  const [dismissed,setDismissed] = useState(false);
+  const lastCheck = useRef(0);
+  useEffect(()=>{
+    let on = true;
+    const check = async () => {
+      if(!on || ready) return;
+      const now = Date.now();
+      if(now - lastCheck.current < UPDATE_MIN_GAP_MS) return;
+      lastCheck.current = now;
+      if(await newVersionAvailable() && on) setReady(true);
+    };
+    // First check is deferred: a cold boot is the one moment the athlete is already
+    // waiting on the network, and a brand-new build is never stale on its own load.
+    const first = setTimeout(check, 45000);
+    const timer = setInterval(check, UPDATE_POLL_MS);
+    const onFocus = () => { if(document.visibilityState==="visible") check(); };
+    document.addEventListener("visibilitychange", onFocus);
+    window.addEventListener("online", onFocus);
+    return ()=>{ on=false; clearTimeout(first); clearInterval(timer); document.removeEventListener("visibilitychange", onFocus); window.removeEventListener("online", onFocus); };
+  },[ready]);
+  return { show: ready && !dismissed && !busy, dismiss: ()=>setDismissed(true) };
+}
+
+// Mounted once at the app root — the pill has to outlive view switches (home →
+// athlete → coach) and a stale build is stale on every screen, not just the chat.
+function UpdateWatcher() {
+  const { show, dismiss } = useUpdateReady(useStreamBusy());
+  return show ? <UpdatePill onDismiss={dismiss}/> : null;
+}
+
+function UpdatePill({onDismiss}) {
+  const [going,setGoing] = useState(false);
+  return (
+    /* Anchored to the BOTTOM, not the top: at the top it sits directly on the
+       athlete header and hides their name and workout count — the two things
+       that are supposed to be permanently visible. Down here it only ever
+       overlaps the quick-reply ticker, which scrolls past anyway. */
+    <div style={{position:"fixed",bottom:"calc(104px + env(safe-area-inset-bottom, 0px))",left:0,right:0,display:"flex",justifyContent:"center",zIndex:9000,pointerEvents:"none"}}>
+      <div style={{pointerEvents:"auto",display:"flex",alignItems:"center",gap:10,background:"rgba(6,10,22,.94)",border:`1px solid ${CA.accent}`,boxShadow:`0 0 18px ${CA.accent}44`,borderRadius:999,padding:"7px 8px 7px 16px",maxWidth:"92vw"}}>
+        <span style={{color:CA.accent,fontSize:12,fontWeight:600,whiteSpace:"nowrap"}}>New version ready</span>
+        <button onClick={()=>{ if(going) return; setGoing(true); reloadForStaleChunk(); }}
+          style={{background:CA.accent,border:"none",color:"#02040c",borderRadius:999,padding:"5px 14px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1.5,whiteSpace:"nowrap"}}>
+          {going?"REFRESHING…":"REFRESH"}
+        </button>
+        <button onClick={onDismiss} title="Not now" style={{background:"none",border:"none",color:CA.muted,cursor:"pointer",fontSize:16,lineHeight:1,padding:"0 6px"}}>×</button>
+      </div>
+    </div>
+  );
 }
 
 // ─── LINE CHART ───────────────────────────────────────────────────────────────
@@ -2743,7 +2901,7 @@ class ErrorBoundary extends Component {
 }
 
 export default function WilcoApp() {
-  return <ErrorBoundary><WilcoRoot/></ErrorBoundary>;
+  return <ErrorBoundary><><UpdateWatcher/><WilcoRoot/></></ErrorBoundary>;
 }
 
 function WilcoRoot() {
@@ -2879,7 +3037,7 @@ function EventLanding({event, onStart, onLogin}) {
 // installed (standalone) — callers check that plus the persisted dismissal.
 // Android/Chrome: one tap fires the captured beforeinstallprompt. iOS Safari:
 // programmatic install doesn't exist, so we show the 3-step Share instructions.
-function InstallPrompt({manual, onClose}) {
+function InstallPrompt({manual, milestone, onClose}) {
   const [installing,setInstalling] = useState(false);
   const canNativeInstall = !!deferredInstallPrompt;
   const showIOSSteps = !canNativeInstall && isIOSSafari();
@@ -2909,9 +3067,13 @@ function InstallPrompt({manual, onClose}) {
         style={{width:"100%",maxWidth:380,background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:22}}>
         <div style={{textAlign:"center",marginBottom:14}}>
           <img src="/icon-192.png" alt="" width={56} height={56} style={{borderRadius:14,marginBottom:10}}/>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:24,color:CA.accent,letterSpacing:2}}>PUT WILCO ON YOUR HOME SCREEN</div>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:24,color:CA.accent,letterSpacing:2}}>
+            {milestone ? `${milestone} WORKOUTS IN — PUT WILCO ON YOUR HOME SCREEN` : "PUT WILCO ON YOUR HOME SCREEN"}
+          </div>
           <div style={{color:CA.muted2,fontSize:13,lineHeight:1.6,marginTop:6}}>
-            WILCO isn't in the App Store. Install it from here and it opens full screen like a normal app, right next to the rest of your apps.
+            {milestone
+              ? <>You're logging. Install WILCO and it opens full screen like a normal app — and it's the only way Joe can nudge you when you go quiet.</>
+              : <>WILCO isn't in the App Store. Install it from here and it opens full screen like a normal app, right next to the rest of your apps.</>}
           </div>
         </div>
 
@@ -4145,16 +4307,65 @@ function CoachSetupScreen({setView,setCoach,setErr,err}) {
   );
 }
 
+// ─── BOOT GREETING (shared by the warm-reopen path and the network path) ─────
+// One function so the greeting painted instantly from the on-device snapshot is
+// byte-identical to the one the boot batch would produce from the same last log.
+// That equality is what makes a warm reopen safe: the real data landing a second
+// later does not visibly rewrite what Joe just said. See src/boot.js.
+function lastLogSummary(lastLog) {
+  const lastRunD = lastLog?.parsed_data?.run_data;
+  const lastExs = lastRunD
+    ? `${lastRunD.run_type||"run"}${lastRunD.distance_miles?" "+lastRunD.distance_miles+"mi":lastRunD.distance_km?" "+lastRunD.distance_km+"km":""}${lastRunD.duration_minutes?" ("+lastRunD.duration_minutes+"min)":""}`
+    : lastLog?.parsed_data?.exercises?.map(e=>`${e.name}${e.weight?" "+fmtWeight(e.weight,e.unit):""}${e.sets&&e.reps?" "+e.sets+"x"+e.reps:""}`).join(", ")||"";
+  const lastDate = lastLog ? fmtDateShort(lastLog.created_at) : null;
+  return lastExs ? `Last session (${lastDate}): ${lastExs}.` : "";
+}
+function bootGreeting(name, tier, lastLog) {
+  return buildGreeting({
+    name,
+    isFree: (tier||"free")==="free",
+    hasLog: !!lastLog,
+    dAgo: lastLog ? daysBetween(lastLog.created_at) : null,
+    summary: lastLogSummary(lastLog),
+  });
+}
+
 // ─── ATHLETE VIEW ─────────────────────────────────────────────────────────────
 function AthleteView({athlete: initialAthlete, onLogout}) {
   const [athlete,setAthlete] = useState(initialAthlete);
-  const [messages,setMessages] = useState([]);
+  // WARM REOPEN. The boot batch below is five gateway round-trips before the
+  // header count, the week strip, MY LOG and the Proof tab have anything in them —
+  // on gym cellular with cold functions that's 1-3s of shimmer on EVERY reopen,
+  // even though last session's answer is sitting on the device. So we paint from
+  // the snapshot immediately and let the real read swap in behind it. The snapshot
+  // is display-only: `historyLoaded` still gates sending, because send() reasons
+  // about session boundaries and must never do that on a stale 30-row window.
+  const [snapshot] = useState(()=>loadSnapshot(initialAthlete.id));
+  const [messages,setMessages] = useState(()=>{
+    // Today's transcript wins outright (it's live, not a snapshot). Reading it here
+    // instead of in the boot effect also kills the old empty-then-restored flash.
+    try{
+      const stored = JSON.parse(localStorage.getItem(`wilco_chat_${initialAthlete.id}_${new Date().toLocaleDateString()}`)||"null");
+      if(Array.isArray(stored)&&stored.length>0) return stored;
+    }catch(_){}
+    // No transcript yet: a returning athlete gets their greeting now rather than
+    // after the network. Skipped for the first-chat athlete — that path opens the
+    // goal-collection conversation, which is not a greeting and must not be faked.
+    const snap = loadSnapshot(initialAthlete.id);
+    if(snap && initialAthlete.first_chat_complete && snap.workouts.length>0){
+      return [{role:"assistant",content:bootGreeting(initialAthlete.name, initialAthlete.tier, snap.workouts[0])}];
+    }
+    return [];
+  });
   const [input,setInput] = useState("");
   const [loading,setLoading] = useState(false);
   const [videoLoading,setVideoLoading] = useState(false);
   const [prStamp,setPrStamp] = useState(null);   // {exercise,weight,unit} → "NEW MAX" stamp overlay when a PR lands
-  const [workoutHistory,setWorkoutHistory] = useState([]);
+  const [workoutHistory,setWorkoutHistory] = useState(()=>snapshot?.workouts||[]);
   const [historyLoaded,setHistoryLoaded] = useState(false);
+  // True when there's on-device data worth painting before the network answers.
+  // Drives the CHROME only (header stats, week strip, log) — never the composer.
+  const warm = !!snapshot && snapshot.workouts.length>0;
   const [movementPrompt,setMovementPrompt] = useState(false);
   const [movementLabel,setMovementLabel] = useState("");
   const [sessionCheckPending,setSessionCheckPending] = useState(null);
@@ -4211,17 +4422,38 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       send(text);
     }
   },[loading,videoLoading,historyLoaded]);
+  // Publish "a reply is streaming" to the app-root update watcher, so the
+  // "New version ready" pill can never appear on top of Joe mid-sentence.
+  useEffect(()=>{ setStreamBusy(loading||videoLoading); },[loading,videoLoading]);
+  useEffect(()=>()=>setStreamBusy(false),[]); // unmount (logout) must not leave it stuck on
   const [showProfileCompletion,setShowProfileCompletion] = useState(false);
   const [profileBannerDismissed,setProfileBannerDismissed] = useState(()=>{
     try{return!!localStorage.getItem(`wilco_profile_banner_${initialAthlete.id}`);}catch{return false;}
   });
   const [showPushPrompt,setShowPushPrompt] = useState(false); // one-time post-workout notifications offer
-  const [athleteGoals,setAthleteGoals] = useState([]);
-  const [athleteContext,setAthleteContext] = useState(null);
-  const [proofDigest,setProofDigest] = useState(null);
+  // Seeded from the warm-reopen snapshot (see `snapshot` above) so the Proof tab
+  // and Joe's context aren't empty for the first second of a reopen.
+  const [athleteGoals,setAthleteGoals] = useState(()=>snapshot?.goals||[]);
+  const [athleteContext,setAthleteContext] = useState(()=>snapshot?.context||null);
+  const [proofDigest,setProofDigest] = useState(()=>snapshot?.digest||null);
   const [showProofChat,setShowProofChat] = useState(false);
   const [chatDigest,setChatDigest] = useState(null); // A5: a PAST edition opened from the archive (null = latest)
   const [retryPending,setRetryPending] = useState(null); // text of a send that failed — drives the Retry chip
+  // ── OFFLINE ──────────────────────────────────────────────────────────────
+  // sw.js deliberately makes an offline OPEN work (cached shell + cached assets),
+  // but the app layer never knew it was offline: the boot batch failed into a
+  // cheerful greeting with no history, and a sent workout just errored. In a gym
+  // basement — the exact place this app is used — that reads as "WILCO is broken".
+  // Now: an honest banner, and the message is QUEUED rather than lost.
+  //
+  // navigator.onLine is trusted only for its FALSE answer (the OS saying "no
+  // network" is never wrong). The lying case — signal bars but nothing gets
+  // through — is caught by `netDown`, which a real network failure sets.
+  const online = useOnline();
+  const [netDown,setNetDown] = useState(false);
+  const offline = !online || netDown;
+  const [outbox,setOutbox] = useState(()=>readOutbox(initialAthlete.id));
+  useEffect(()=>{ if(online) setNetDown(false); },[online]); // regained signal → re-trust the network
   const [resumingProgram,setResumingProgram] = useState(false);
   // program_modifications is written on every PR propagation, correction reversal
   // and Field Mode switch, and was readable through the gateway — but nothing in
@@ -4310,13 +4542,23 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // loads), and only if not already installed, not previously dismissed, and this
   // platform actually has an install path. "manual" comes from Settings and
   // ignores the dismissal (that's the point of the persistent entry).
-  const [showInstall,setShowInstall] = useState(null); // null | "auto" | "manual"
+  const [showInstall,setShowInstall] = useState(null); // null | "auto" | "manual" | "milestone"
+  const [installMilestone,setInstallMilestone] = useState(0);
   useEffect(()=>{
     if(!JUST_SIGNED_UP) return;
     JUST_SIGNED_UP = false;
     if(isStandalone()||installDismissed()) return;
     if(deferredInstallPrompt||isIOSSafari()) setShowInstall("auto");
   },[]);
+  // The one re-ask, at the 3rd logged workout (see INSTALL_MILESTONE). Deliberately
+  // ignores the signup dismissal — that "not now" was answered before they'd used
+  // the app — but spends its own one-shot stamp either way.
+  const offerSecondChanceInstall = (count) => {
+    if(!canOfferInstall()) return;
+    spendSecondChance();
+    setInstallMilestone(count);
+    setTimeout(()=>setShowInstall("milestone"), 2600); // let the milestone callout land first
+  };
   const closeInstall = () => {
     if(showInstall==="auto") rememberInstallDismissed();
     setShowInstall(null);
@@ -4382,6 +4624,39 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   },[messages,historyLoaded]);
   // Unmount (logout) is also a save point — the cleanup above only cancels.
   useEffect(()=>chatPersistFlush,[]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Drain the offline queue one message at a time, each through the normal send()
+  // path — so a replayed workout gets the same parsing, session-gap check and PR
+  // detection a live one would. One per pass, gated on nothing else being in
+  // flight; the queue shrinks every pass, so this can't spin.
+  // (Declared down here, not with the other chat effects, because a dependency
+  // array is evaluated during RENDER — referencing `offline`/`outbox` above their
+  // own declarations is a temporal-dead-zone crash, not a lint nit.)
+  useEffect(()=>{
+    if(offline||loading||videoLoading||!historyLoaded||outbox.length===0) return;
+    const { item, rest } = shiftOutbox(athlete.id);
+    if(!item){ setOutbox([]); return; }
+    setOutbox(rest);   // its pending bubble disappears here; send() appends the real one
+    if(item.pure) quickLogPending.current = item.text; // a queued Quick Log draft is still a pure log
+    send(item.text);
+  },[offline,loading,videoLoading,historyLoaded,outbox]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Snapshot for the NEXT open. Debounced because `athlete` gets a new object
+  // identity on nearly every message; written only once the real data has landed,
+  // so a warm-but-stale render can never be re-snapshotted as if it were fresh.
+  const snapRef = useRef({});
+  snapRef.current = {athlete, workoutHistory, goals:athleteGoals, context:athleteContext, digest:proofDigest};
+  useEffect(()=>{
+    if(!historyLoaded||!athlete?.id) return;
+    const t = setTimeout(()=>saveSnapshot(athlete.id, snapRef.current), 1200);
+    return ()=>clearTimeout(t);
+  },[historyLoaded,athlete,workoutHistory,athleteGoals,athleteContext,proofDigest]);
+  // iOS kills a backgrounded PWA without warning, so the debounce above can lose
+  // the last minute of a session. pagehide is the one event that reliably fires.
+  useEffect(()=>{
+    const flush = ()=>{ if(historyLoaded&&athlete?.id) saveSnapshot(athlete.id, snapRef.current); };
+    window.addEventListener("pagehide", flush);
+    return ()=>window.removeEventListener("pagehide", flush);
+  },[historyLoaded,athlete?.id]);
 
   useEffect(()=>{
     // Prune stale per-day chat caches: every day leaves a wilco_chat_<id>_<date>
@@ -4456,14 +4731,15 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
 
         if(logs&&logs.length>0) setWorkoutHistory(logs);
 
-        const lastLog = logs?.[0];
-        const dAgo = lastLog ? daysBetween(lastLog.created_at) : null;
-        const lastRunD = lastLog?.parsed_data?.run_data;
-        const lastExs = lastRunD
-          ? `${lastRunD.run_type||"run"}${lastRunD.distance_miles?" "+lastRunD.distance_miles+"mi":lastRunD.distance_km?" "+lastRunD.distance_km+"km":""}${lastRunD.duration_minutes?" ("+lastRunD.duration_minutes+"min)":""}`
-          : lastLog?.parsed_data?.exercises?.map(e=>`${e.name}${e.weight?" "+fmtWeight(e.weight,e.unit):""}${e.sets&&e.reps?" "+e.sets+"x"+e.reps:""}`).join(", ")||"";
-        const lastDate = lastLog ? fmtDateShort(lastLog.created_at) : null;
-        const summary = lastExs ? `Last session (${lastDate}): ${lastExs}.` : "";
+        // OFFLINE / FAILED BATCH. Every read above is individually caught into an
+        // empty array, so a dead network never throws — which meant the greeting
+        // below used to tell a 200-session athlete to "tell me about your first
+        // workout", as if their whole history had vanished. Fall back to the
+        // snapshot's newest row (already painted on screen) so the greeting stays
+        // true, and flip the banner on when the OS confirms there's no network.
+        const readsFailed = !_fa;
+        if(readsFailed && typeof navigator!=="undefined" && navigator.onLine===false) setNetDown(true);
+        const lastLog = (logs&&logs.length>0) ? logs[0] : (snapshot?.workouts?.[0] || null);
 
         // Goal collection: first chat ever
         const latestAthlete = freshAthlete?.[0]||athlete;
@@ -4474,29 +4750,20 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           return;
         }
 
-        let greeting;
-        // Free tier: always greet as fresh start (no memory between sessions)
-        const isFree = tier==="free";
-        if(!lastLog||isFree){
-          greeting = isFree&&lastLog
-            ? `What's up, ${athlete.name}. I'm starting fresh — Free tier doesn't store your history between sessions. What did you get after today?`
-            : `Welcome to WILCO, ${athlete.name}. Tell me about your first workout -- what you did, how it felt, any questions.`;
-        } else if(dAgo>=7){
-          greeting = `${athlete.name}. It's been ${dAgo} days since your last log. That's a week. What happened? We can't build anything on inconsistency. ${summary} What did you get after today?`;
-        } else if(dAgo>=4){
-          greeting = `${athlete.name}. ${dAgo} days since your last log. It's not about workout 1 -- it's about workout 100. ${summary} What did you do today?`;
-        } else if(dAgo>=2){
-          greeting = `Back at it, ${athlete.name}. ${summary} What did you get after today?`;
-        } else {
-          greeting = summary ? `${athlete.name}. ${summary} What are you getting after today?` : `What's up, ${athlete.name}. What did you get after today?`;
-        }
-        setMessages([{role:"assistant",content:greeting}]);
+        // Same function the warm-reopen path used, so if the snapshot already
+        // painted a greeting this produces the identical string and nothing on
+        // screen visibly rewrites itself. (src/boot.js, scripts/test-boot.mjs)
+        setMessages([{role:"assistant",content:bootGreeting(athlete.name, tier, lastLog)}]);
       } catch(e){
-        setMessages([{role:"assistant",content:`What's up, ${athlete.name}. What did you get after today?`}]);
+        // A boot batch that died on the network is the offline open the SW was
+        // built for. Say so instead of greeting them as if their history were
+        // simply empty — and keep whatever the snapshot already painted.
+        if(isNetworkError(e)) setNetDown(true);
+        if(messages.length===0) setMessages([{role:"assistant",content:`What's up, ${athlete.name}. What did you get after today?`}]);
       }
       setHistoryLoaded(true);
     })();
-  },[]);
+  },[]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const finalizeWorkout = async (parsed, msg, reply, updatedAthlete, isNewSession, addReply) => {
     const tier = updatedAthlete.tier||"free";
@@ -4586,6 +4853,14 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             :`Workout ${crossed}. Keep stacking.`;
           setTimeout(()=>setMessages(prev=>[...prev,{role:"assistant",content:milestoneMsg}]),1500);
         }
+        // SECOND-CHANCE INSTALL. The only automatic install offer fires seconds
+        // after signup — before the athlete has felt anything — and one dismissal
+        // is permanent except for a buried Settings entry. Installed users are also
+        // the only ones who can receive push, which is the whole retention channel.
+        // So ask once more at a moment of demonstrated commitment: crossing the 3rd
+        // logged workout. Stamped separately from the signup dismissal, and once
+        // ever — a third ask would be nagging.
+        if(prevCount<INSTALL_MILESTONE && newCount>=INSTALL_MILESTONE) offerSecondChanceInstall(newCount);
       } catch(_){}
 
       // Auto PR detection (estimated 1RM, from any logged set — handles variable weight/reps via set_details)
@@ -5067,6 +5342,22 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const send = async (overrideText) => {
     const msg = (typeof overrideText==="string" ? overrideText : input).trim();
     if(!msg||loading||videoLoading||!historyLoaded) return;
+    // No signal: keep the message instead of failing it. It lives ONLY in the
+    // outbox — never optimistically written to `workouts` — and replays through
+    // this same function when connectivity returns, so a queued log can never
+    // become a phantom session. The Quick Log pure-log flag rides along in the
+    // queue entry; without it a draft replayed hours later could be classified as
+    // a program and overwrite program_text.
+    if(offline){
+      const pure = quickLogPending.current === msg;
+      quickLogPending.current = null;
+      setInput("");
+      // Queued messages render from `outbox`, NOT from `messages` — send() owns the
+      // transcript and appends its own copy on replay, so a bubble pushed into
+      // `messages` here would survive into that append and show twice.
+      setOutbox(queueOutbox(athlete.id, msg, {pure}));
+      return;
+    }
     // A27: typing while the session-gap question is pending resolves it as "same
     // workout" (the conservative default — no new session boundary) and processes
     // the typed message normally, matching the other chip flows' typed-means-
@@ -5503,6 +5794,25 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       await finalizeWorkout(parsed,msg,finalReply,updatedAthlete,false,false);
     } catch(e){
       console.error("JoBot error:",e);
+      // A transport failure with the OS still claiming "online" is the gym-basement
+      // case: signal bars, nothing gets through. Treat it as offline from here —
+      // the banner turns on, the message goes to the queue instead of the retry
+      // chip, and it flushes by itself the moment the connection is real again.
+      if(isNetworkError(e)){
+        setNetDown(true);
+        // Move the athlete's message out of the transcript and into the queue, so
+        // it renders as a pending bubble (from `outbox`) exactly like one typed
+        // while already offline — and doesn't double up when the replay appends it.
+        setMessages(prev=>{
+          const last = prev[prev.length-1];
+          const withoutBlank = (last && last.role==="assistant" && !last.content) ? prev.slice(0,-1) : prev;
+          const i = withoutBlank.map(m=>m.role==="user"&&m.content===msg).lastIndexOf(true);
+          return i===-1 ? withoutBlank : [...withoutBlank.slice(0,i),...withoutBlank.slice(i+1)];
+        });
+        setOutbox(queueOutbox(athlete.id, msg, {pure:fromQuickLog}));
+        setLoading(false);
+        return;
+      }
       const errText = `Hit a snag. Try again. (${e?.message||"unknown error"})`;
       // A stream+fallback double failure leaves the empty assistant placeholder
       // (appended before streaming started) as the last message — fill it with
@@ -5735,7 +6045,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         {/* Row 1: identity */}
         <div style={{display:"flex",alignItems:"baseline",gap:10,minWidth:0}}>
           <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.cyan,letterSpacing:2,lineHeight:1,flexShrink:0,whiteSpace:"nowrap"}}>COACH JOE-BOT</div>
-          {historyLoaded&&(
+          {(historyLoaded||warm)&&(
           <div style={{display:"flex",alignItems:"baseline",gap:4,flexShrink:0}} title="Workouts logged">
             <span style={{color:CA.muted,fontSize:9,letterSpacing:1,fontWeight:600}}>WORKOUTS:</span>
             {/* Authoritative lifetime session total (server-maintained). groupIntoSessions
@@ -5754,7 +6064,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         {/* Row 1.5: streak charge-chain — this week's training as a row of links,
             trained days lit + glowing (electric blue), rest cooled steel. Today is
             marked by a brighter letter. Static on mount — no light-up animation. */}
-        {historyLoaded&&(
+        {(historyLoaded||warm)&&(
           <div style={{display:"flex",alignItems:"center",gap:3,padding:"2px 0 4px"}} title="Your training this week">
             <span style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:8,letterSpacing:1,color:CA.faint,textTransform:"uppercase",marginRight:4}}>WK</span>
             {[0,1,2,3,4,5,6].map(i=>{const on=trainedThisWeek.has(i);return <div key={i} className={`streaklnk${on?" on":""}`}/>;})}
@@ -5786,6 +6096,17 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         </div>
         </div>
       </div>
+
+      {/* Offline banner. Deliberately above every other banner and never
+          dismissible: while it's up, nothing the athlete types is reaching the
+          server, and that is the single most important thing on the screen. */}
+      {offline&&(
+        <div style={{background:`${CA.amber}18`,borderBottom:`1px solid ${CA.amber}55`,padding:"7px 16px",display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+          <span style={{color:CA.amber,fontSize:12}}>
+            You're offline — {outbox.length>0 ? `${outbox.length} ${outbox.length===1?"log is":"logs are"} waiting and will send when you're back.` : "logs will send when you're back."}
+          </span>
+        </div>
+      )}
 
       {/* Profile completion banner */}
       {!profileBannerDismissed&&!athlete.birthday&&(
@@ -5819,7 +6140,10 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
 
       {/* Messages */}
       <div style={{flex:1,overflowY:"auto",padding:"16px 16px 8px"}}>
-        {!historyLoaded?(
+        {/* The skeleton is now only for a TRUE cold start. A warm reopen already
+            has the greeting (or today's transcript) painted from the device, so
+            showing "Syncing feed" over it would be a step backwards. */}
+        {!historyLoaded&&messages.length===0?(
           <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12,padding:"48px 20px"}}>
             <div className="ld-charge"><i/></div>
             <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:10,letterSpacing:1,color:CA.muted}}>Syncing feed</div>
@@ -5837,6 +6161,21 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
                   {/* While the streaming placeholder is still empty, show the typing dots INSIDE
                       this bubble (instead of a second stacked indicator bubble below). */}
                   {m.role==="assistant"?(!m.content&&loading&&i===messages.length-1?<div className="ld-dots"><i/><i/><i/></div>:<StreamText text={m.content}/>):m.content}
+                </div>
+              </div>
+            ))}
+            {/* Messages waiting on signal. Rendered from `outbox`, deliberately NOT
+                pushed into `messages`: send() owns the transcript and appends its
+                own copy when the queue drains, so a bubble living in both places
+                would show twice. Always last, which is also always correct — a
+                queued message is by definition newer than everything above it. */}
+            {outbox.map((q,i)=>(
+              <div key={`q${i}`} className="fade-up" style={{marginBottom:12,display:"flex",justifyContent:"flex-end"}}>
+                <div style={{maxWidth:"80%",padding:"10px 14px",borderRadius:"15px 15px 4px 15px",background:CA_BUBBLE,color:"#fff",fontSize:14,lineHeight:1.7,whiteSpace:"pre-wrap",opacity:.72,border:`1px dashed rgba(255,255,255,.35)`}}>
+                  {q.text}
+                  <div style={{marginTop:5,fontSize:10,letterSpacing:.5,color:"rgba(255,255,255,.8)",display:"flex",alignItems:"center",gap:4}}>
+                    <span style={{fontSize:9}}>◷</span> Waiting for signal
+                  </div>
                 </div>
               </div>
             ))}
@@ -6204,7 +6543,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
       )}
 
       {/* Add-to-Home-Screen prompt (post-signup auto, or manual from Settings) */}
-      {showInstall&&<InstallPrompt manual={showInstall==="manual"} onClose={closeInstall}/>}
+      {showInstall&&<InstallPrompt manual={showInstall==="manual"} milestone={showInstall==="milestone"?installMilestone:0} onClose={closeInstall}/>}
 
       {/* Progress Modal */}
       {showProgress&&(
