@@ -21,9 +21,26 @@
 import { epley1RM, computeGritSnapshot, TIER_NAMES, getBenchKey } from "./grit.js";
 
 // ── parsed_data access ────────────────────────────────────────────────────────
+// Legacy rows store parsed_data as a JSON STRING, and the coach Overview's D memo
+// hits the same rows ~15-25x each (pcGroup alone runs ~14 times per athlete across
+// this/last week, 7 day columns, 4 volume weeks and the plateau window, each
+// calling isRealSession → getPD, plus buildLiftHistory, aggregateInjuries and the
+// heatmap flags) — tens of thousands of redundant parses per recompute on a roster
+// with legacy history. Cache the parse on the row object itself.
+//
+// No new aliasing: an object-typed parsed_data ALREADY returns a shared reference
+// today, so callers were never entitled to mutate what getPD hands back (every
+// call site across coach.jsx, grit.js, api/_proof.js and here is read-only).
+// WeakMap keyed on the row, so cached parses die with the rows.
+const pdCache = new WeakMap();
 export const getPD = (w) => {
   if (typeof w.parsed_data === "string") {
-    try { return JSON.parse(w.parsed_data); } catch { return {}; }
+    const hit = pdCache.get(w);
+    if (hit) return hit;
+    let parsed;
+    try { parsed = JSON.parse(w.parsed_data); } catch { parsed = {}; }
+    pdCache.set(w, parsed);
+    return parsed;
   }
   return w.parsed_data || {};
 };

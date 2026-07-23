@@ -1017,7 +1017,15 @@ const extractProgramText = async (message) => {
     "Extract the training program from this athlete message. Return only the program content — days, exercises, sets, reps, weights. Clean formatting. No intro, no commentary, no explanation.",
     message, 800, [], "claude-sonnet-5", "program_extract"
   );
-  return text?.trim() || message;
+  // Returns null (NOT the raw input) when extraction comes back empty. Falling
+  // back to the input meant an empty extraction handed the caller the athlete's
+  // whole chat message, which the append branch would concatenate onto
+  // program_text and the update/create branches would save verbatim — burying
+  // conversational prose in the program, where it then poisons every future chat
+  // context, the Proof Feed program parse, and PR propagation. The temp-program
+  // branch already guarded against this specific fallback; per the flush-changes
+  // rule the guard now lives at the source so all four call sites are covered.
+  return text?.trim() || null;
 };
 
 // The athlete's existing lift vocabulary for the parser's NAME REUSE rule: one
@@ -1155,7 +1163,13 @@ Rules:
 // The plan is shown to the athlete for a confirm tap before anything is written
 // (applyCorrection), and it must NEVER guess: found:false routes to manual Edit.
 const resolveLogCorrection = async (message, recentChat, rows) => {
-  const candidates = rows.slice(0,12).filter(r=>r.id).map(r=>({
+  // Filter BEFORE slicing. workoutHistory holds a row for every chat message, so
+  // slicing first meant that after a chatty stretch the 12 candidate slots were
+  // mostly contentless Q&A rows and the actual mistyped workout fell outside the
+  // window — the resolver returned found:false and bounced the athlete to manual
+  // Edit, in exactly the flow this engine exists for. Now it always sees the 12
+  // most recent REAL logged entries (and stops paying prompt tokens for the rest).
+  const candidates = rows.filter(r=>r.id && (r.parsed_data?.exercises?.length || r.parsed_data?.pr_attempts?.length)).slice(0,12).map(r=>({
     id: r.id,
     logged_at: r.created_at,
     athlete_message: (r.raw_message||"").slice(0,200),
@@ -4171,6 +4185,32 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [proofDigest,setProofDigest] = useState(null);
   const [showProofChat,setShowProofChat] = useState(false);
   const [chatDigest,setChatDigest] = useState(null); // A5: a PAST edition opened from the archive (null = latest)
+  // Header session count + this-week streak strip, memoized on the data they
+  // derive from. AthleteView re-renders on every keystroke AND on every streamed
+  // reply chunk (applyDelta → setMessages), and both of these used to recompute
+  // inline: groupIntoSessions over ~100 rows (its sort comparator allocates two
+  // Date objects per comparison) plus a per-row effectiveDate + JSON.parse for the
+  // strip — GC-heavy work dozens of times a second while Joe is typing. Pure
+  // derived data, so the rendered output is identical.
+  const headerSessionCount = useMemo(
+    ()=>Math.max(athlete.total_sessions_logged||0, groupIntoSessions(workoutHistory).length),
+    [workoutHistory, athlete.total_sessions_logged]
+  );
+  const trainedThisWeek = useMemo(()=>{
+    const now=new Date();
+    const dow=(now.getDay()+6)%7;                       // Mon=0 .. Sun=6
+    const monday=new Date(now); monday.setHours(0,0,0,0); monday.setDate(now.getDate()-dow);
+    const trained=new Set();
+    // Only a REAL logged session lights a day — a row with actual exercises or a
+    // run. Chat messages / form-review rows (empty exercises) must NOT count.
+    workoutHistory.forEach(w=>{
+      const d=effectiveDate(w); if(d<monday) return;   // backdated logs light their real day
+      const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
+      const hasWork=(Array.isArray(pd.exercises)&&pd.exercises.length>0)||!!pd.run_data;
+      if(hasWork) trained.add((d.getDay()+6)%7);
+    });
+    return trained;
+  },[workoutHistory]);
   const [goalCollectionActive,setGoalCollectionActive] = useState(false);
   const [athleteProgramText,setAthleteProgramText] = useState(athlete.program_text||"");
   // Re-seed the Program-tab editor whenever the SAVED program changes underneath
@@ -4551,7 +4591,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       }
 
       if(addReply) setMessages(prev=>[...prev,{role:"assistant",content:reply}]);
-      setWorkoutHistory(prev=>[{id:insertedId,raw_message:msg,parsed_data:parsedFinal,created_at:new Date().toISOString()},...prev]);
+      // athlete_id is REQUIRED: groupIntoSessions buckets by it, so without it this
+      // optimistic row landed in the `undefined` bucket and could never merge with
+      // the same session's server-loaded rows — MY LOG showed the second message of
+      // a session as its own WORKOUT card and the header count ran one high until a
+      // reload. bot_reply feeds the card's Coach Joe quote. (The cert-block fallback
+      // row already sets athlete_id — this was its forgotten twin.)
+      setWorkoutHistory(prev=>[{id:insertedId,athlete_id:updatedAthlete.id,raw_message:msg,bot_reply:reply,parsed_data:parsedFinal,created_at:new Date().toISOString()},...prev]);
 
       if(newPRs.length>0){
         // PR propagation: update program weights for each new PR — but only the
@@ -4585,6 +4631,23 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           }
           if(propagationLog.length>0){
             try {
+              // Freshness check before a full-text overwrite. Propagation captured
+              // program_text at message time and then spent 5-15s inside an AI call;
+              // if the coach saved an edit to the same column in that window, writing
+              // now would clobber it with a rescale of the OLD program (last-write-
+              // wins over a multi-second gap). Skipping is self-healing — the next PR
+              // re-runs propagation against the coach's new text — whereas a
+              // clobbered coach edit is silent data loss.
+              let fresh = true;
+              try {
+                const cur = await sbRead("athletes",`?id=eq.${updatedAthlete.id}&select=program_text`);
+                const serverText = Array.isArray(cur)&&cur[0] ? (cur[0].program_text||"") : null;
+                if(serverText!==null && serverText!==(prevProgramText||"")) fresh = false;
+              } catch(_){ /* can't verify — fall through and write, same as before */ }
+              if(!fresh){
+                propagationLog.length = 0;   // also suppresses the athlete-facing note below
+                throw new Error("program changed underneath propagation — skipping write");
+              }
               await sbUpdate("athletes",updatedAthlete.id,{program_text:currentProgramText});
               setAthlete(prev=>({...prev,program_text:currentProgramText}));
               updatedAthlete.program_text = currentProgramText;
@@ -5029,6 +5092,14 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // arrives — the parse and all persistence below continue in the background.
       // The reply used to be held until parse + save finished (several bcrypt-gated
       // gateway round-trips), which made every message feel slower than the AI was.
+      // NOTE on updatedAthlete: it stays the in-flight working copy for this send's
+      // own logic, but every setAthlete below uses a functional merge instead of
+      // passing this same object. Handing React the identical reference twice in
+      // one send (e.g. a message that sets a temp program AND records bodyweight)
+      // hit the Object.is bailout, so the second update never re-rendered and any
+      // child memoized on the athlete reference stayed stale — it only recovered
+      // when followUp's setMessages happened to force a parent render. It also
+      // mutated live state in place.
       const parsedP = parseWorkout(msg,athlete.name,athlete.sport,knownExerciseNames(workoutHistory));
       // Stream the coaching reply into a live-updating bubble: append an empty
       // assistant message and grow it as deltas arrive. On ANY stream failure (or an
@@ -5151,7 +5222,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             const merged = hasProgram ? (updatedAthlete.program_text.trim() + "\n\n" + addition.trim()) : addition.trim();
             await sbUpdate("athletes",athlete.id,{program_text:merged});
             updatedAthlete.program_text = merged;
-            setAthlete(updatedAthlete);
+            setAthlete(prev=>({...prev, program_text: merged}));
             followUp(hasProgram ? "📋 Added that to your Program tab." : "📋 Saved that to your Program tab.");
           }
         } catch(e){}
@@ -5168,7 +5239,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             } else {
               await sbUpdate("athletes",athlete.id,{program_text:programText});
               updatedAthlete.program_text = programText;
-              setAthlete(updatedAthlete);
+              setAthlete(prev=>({...prev, program_text: programText}));
               followUp("📋 Program saved to your Program tab — I'll reference it every session.");
             }
           }
@@ -5187,7 +5258,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             } else {
               await sbUpdate("athletes",athlete.id,{program_text:generated.trim()});
               updatedAthlete.program_text = generated.trim();
-              setAthlete(updatedAthlete);
+              setAthlete(prev=>({...prev, program_text: generated.trim()}));
               followUp("📋 Saved that to your Program tab — it'll drive every session from here. Tweak it anytime in the Program tab.");
             }
           }
@@ -5249,14 +5320,16 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       if(parsed.is_temp_program_update && !updatedAthlete.program_locked && !fromQuickLog){
         try {
           const tempText = await extractProgramText(reply);
-          // extractProgramText falls back to its full input when extraction comes
-          // back empty — writing that would dump Joe's whole conversational reply
-          // into the Program view. Only persist a real extracted program, and say
-          // so: the write was silent, so athletes never knew Field Mode engaged.
+          // extractProgramText now returns null on an empty extraction (the raw-input
+          // fallback that used to dump Joe's whole reply into the Program view was
+          // removed at the source, covering all four call sites). The !==reply guard
+          // stays as belt-and-braces against a model that simply echoes the reply.
+          // Confirm in chat either way — the write used to be silent, so athletes
+          // never knew Field Mode had engaged.
           if(tempText && tempText.trim() && tempText.trim()!==reply.trim()){
             await sbUpdate("athletes",athlete.id,{temp_program_text:tempText});
             updatedAthlete.temp_program_text = tempText;
-            setAthlete(updatedAthlete);
+            setAthlete(prev=>({...prev, temp_program_text: tempText}));
             followUp("✈️ Got it — I've set a temporary program for while you're away. Tell me when you're back and I'll switch you to your regular programming.");
           }
         } catch(e){}
@@ -5267,7 +5340,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         try {
           await sbUpdate("athletes",athlete.id,{temp_program_text:null});
           updatedAthlete.temp_program_text = null;
-          setAthlete(updatedAthlete);
+          setAthlete(prev=>({...prev, temp_program_text: null}));
           followUp("✅ Temporary program cleared — back to your regular programming.");
         } catch(e){}
       }
@@ -5287,7 +5360,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           try{
             await sbUpdate("athletes",athlete.id,{weight_lbs:Math.round(cr.weight_lbs)});
             updatedAthlete.weight_lbs = Math.round(cr.weight_lbs);
-            setAthlete(updatedAthlete);
+            setAthlete(prev=>({...prev, weight_lbs: Math.round(cr.weight_lbs)}));
             saved.push("weight");
           }catch(_){}
         }
@@ -5561,7 +5634,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
                 here only sees the capped workoutHistory window, so it can only ever push the
                 shown number UP (e.g. a brand-new athlete before the first server sync) —
                 never below the stored count, which would look like sessions vanishing. */}
-            <span style={{fontFamily:"'Bebas Neue'",fontSize:18,color:CA.accent,lineHeight:1}}>{Math.max(athlete.total_sessions_logged||0, groupIntoSessions(workoutHistory).length)}</span>
+            <span style={{fontFamily:"'Bebas Neue'",fontSize:18,color:CA.accent,lineHeight:1}}>{headerSessionCount}</span>
           </div>
           )}
           <div style={{flex:1,minWidth:0,color:CA.muted,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{athlete.name}</div>
@@ -5573,27 +5646,13 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         {/* Row 1.5: streak charge-chain — this week's training as a row of links,
             trained days lit + glowing (electric blue), rest cooled steel. Today is
             marked by a brighter letter. Static on mount — no light-up animation. */}
-        {historyLoaded&&(()=>{
-          const now=new Date();
-          const dow=(now.getDay()+6)%7;                       // Mon=0 .. Sun=6
-          const monday=new Date(now); monday.setHours(0,0,0,0); monday.setDate(now.getDate()-dow);
-          const trained=new Set();
-          // Only a REAL logged session lights a day — a row with actual exercises or a
-          // run. Chat messages / form-review rows (empty exercises) must NOT count.
-          workoutHistory.forEach(w=>{
-            const d=effectiveDate(w); if(d<monday) return;   // backdated logs light their real day
-            const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
-            const hasWork=(Array.isArray(pd.exercises)&&pd.exercises.length>0)||!!pd.run_data;
-            if(hasWork) trained.add((d.getDay()+6)%7);
-          });
-          return (
-            <div style={{display:"flex",alignItems:"center",gap:3,padding:"2px 0 4px"}} title="Your training this week">
-              <span style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:8,letterSpacing:1,color:CA.faint,textTransform:"uppercase",marginRight:4}}>WK</span>
-              {[0,1,2,3,4,5,6].map(i=>{const on=trained.has(i);return <div key={i} className={`streaklnk${on?" on":""}`}/>;})}
-              <span style={{fontFamily:"'Bebas Neue'",fontSize:12,color:CA.cyan,marginLeft:5}}>{trained.size}</span>
-            </div>
-          );
-        })()}
+        {historyLoaded&&(
+          <div style={{display:"flex",alignItems:"center",gap:3,padding:"2px 0 4px"}} title="Your training this week">
+            <span style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:8,letterSpacing:1,color:CA.faint,textTransform:"uppercase",marginRight:4}}>WK</span>
+            {[0,1,2,3,4,5,6].map(i=>{const on=trainedThisWeek.has(i);return <div key={i} className={`streaklnk${on?" on":""}`}/>;})}
+            <span style={{fontFamily:"'Bebas Neue'",fontSize:12,color:CA.cyan,marginLeft:5}}>{trainedThisWeek.size}</span>
+          </div>
+        )}
         {/* Row 2: nav — Quick Log owns the left slot; marginRight:auto keeps the
             right-side group pinned right even when Quick Log is hidden (free tier).
             Quick Log's label carries its state: an unfinished workout is visible from the
@@ -6310,7 +6369,19 @@ function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals,
     if(!ins||editBusy) return;
     setEditBusy(true); setEditErr("");
     try{
-      const ctx = ctxRef.current || buildQuickLogContext(athlete, workoutHistory, [], messages, goals, contextNotes);
+      // A RESUMED draft never ran generate(), so ctxRef is null here. The fallback
+      // used to rebuild context with a hardcoded EMPTY manualRMs, so an edit like
+      // "I did day 2" re-derived the whole log from history-estimated e1RMs only,
+      // ignoring the athlete's recorded actual 1RMs — percentage-programmed weights
+      // came out different from the same edit on a fresh draft. Fetch them the same
+      // way generate() does, and stash the ctx so later edits reuse it.
+      let ctx = ctxRef.current;
+      if(!ctx){
+        let manualRMs = [];
+        try{ manualRMs = await sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`)||[]; }catch(_){}
+        ctx = buildQuickLogContext(athlete, workoutHistory, manualRMs, messages, goals, contextNotes);
+        ctxRef.current = ctx;
+      }
       const revised = await askClaude(QL_EDIT_SYS,
         `Today is ${todayStr()}.\n\n${ctxBlock(ctx)}\n\nCURRENT FOCUS NOTE:\n${notes||"(none)"}\n\nCURRENT DRAFT:\n${draft.trim()||"(empty)"}\n\nATHLETE'S INSTRUCTION:\n${ins}`,
         800, [], "claude-sonnet-5", "quick_log_edit");

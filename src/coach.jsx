@@ -930,13 +930,25 @@ function CoachDashboard({coach,onLogout}) {
     }
   };
 
+  // Bulk writes go out in bounded-parallel chunks instead of strictly serially —
+  // a 30-athlete roster was ~30 × 150-300ms of sequential gateway round-trips
+  // (a 5-9s spinner). DELIBERATELY still one sbUpdate per athlete id: api/data.js
+  // fires the coach-programming-update push hook only when body.id is present on a
+  // single-athlete update, and its comment documents this per-id loop as the
+  // contract. Collapsing to one id=in.(...) write would silently kill that hook.
+  const CHUNK = 5;
+  const writeChunked = async (ids, patch) => {
+    const list = [...ids];
+    for(let i=0;i<list.length;i+=CHUNK){
+      await Promise.all(list.slice(i,i+CHUNK).map(id=>sbUpdate("athletes",id,patch)));
+    }
+  };
+
   const handleBulkAssign = async () => {
     if(!bulkProgram.trim()||selectedIds.size===0) return;
     setBulkSaving(true);
     try {
-      for(const id of selectedIds){
-        await sbUpdate("athletes",id,{program_text:bulkProgram.trim()});
-      }
+      await writeChunked(selectedIds,{program_text:bulkProgram.trim()});
       setAthletes(prev=>prev.map(a=>selectedIds.has(a.id)?{...a,program_text:bulkProgram.trim()}:a));
       // parse-at-save for bulk: same text for everyone → ONE Haiku call, then the
       // parsed row is fanned out per athlete (fire-and-forget).
@@ -971,9 +983,7 @@ function CoachDashboard({coach,onLogout}) {
       const targetCoach = assignCoachId ? allCoaches.find(c=>c.id===assignCoachId) : null;
       if(assignCoachId && !targetCoach){ setAssignError("Coach not found — try again."); setAssignSaving(false); return; }
       const patch = targetCoach ? {coach_id:targetCoach.id, school_id:targetCoach.school_id||null} : {coach_id:null, school_id:null};
-      for(const id of selectedIds){
-        await sbUpdate("athletes",id,patch);
-      }
+      await writeChunked(selectedIds,patch);
       setAthletes(prev=>prev.map(a=>selectedIds.has(a.id)?{...a,...patch}:a));
       setSelectedIds(new Set());
       setSelectMode(false);
@@ -1853,7 +1863,24 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
     return `${r.score}% · Exercises ${b.E}% · Volume ${b.V}%${b.W!=null?` · Weights ${b.W}%`:""} — weighted 50/30/20, pro-rated for mid-week`;
   };
   // Hover tooltip shared across every chart data point.
-  const tipOn = (text)=>({onMouseEnter:(e)=>setTip({x:e.clientX,y:e.clientY,text}),onMouseMove:(e)=>setTip({x:e.clientX,y:e.clientY,text}),onMouseLeave:()=>setTip(null)});
+  // rAF-throttled: onMouseMove fires at pointer rate (60-120Hz) and each setTip
+  // re-rendered the ENTIRE CoachOverview tree (heatmap cells, 4 SVGs, the Morning
+  // Brief) even though the D memo is stable — continuous full-tree renders while
+  // hovering any chart point, i.e. visible jank on an iPad. Coalescing to one
+  // update per frame keeps the tooltip pixel-identical (it still tracks the
+  // cursor) at a fraction of the renders. Same props shape at all ~14 call sites.
+  const tipRaf = useRef(null);
+  const tipNext = useRef(null);
+  const setTipThrottled = (v)=>{
+    tipNext.current = v;
+    if(tipRaf.current!=null) return;
+    tipRaf.current = requestAnimationFrame(()=>{ tipRaf.current = null; setTip(tipNext.current); });
+  };
+  // Leaving must land immediately — a queued frame could otherwise re-show the tip
+  // after the pointer is gone (and a pending frame must never outlive unmount).
+  const clearTip = ()=>{ if(tipRaf.current!=null){ cancelAnimationFrame(tipRaf.current); tipRaf.current=null; } tipNext.current=null; setTip(null); };
+  useEffect(()=>()=>{ if(tipRaf.current!=null) cancelAnimationFrame(tipRaf.current); },[]);
+  const tipOn = (text)=>({onMouseEnter:(e)=>setTipThrottled({x:e.clientX,y:e.clientY,text}),onMouseMove:(e)=>setTipThrottled({x:e.clientX,y:e.clientY,text}),onMouseLeave:clearTip});
   const wkLabel = (i)=>i===D.prWeeks.length-1?"This week":`${D.prWeeks.length-1-i} wk ago`;
   const span = (n)=>isMobile?{}:{gridColumn:`span ${n}`};
   // adherence heatmap rows: worst adherence first (needs attention); truncation is
@@ -2674,7 +2701,10 @@ function CoachCheckin({digest, team, coach, onRead}){
       if(!rows.length && transcript.trim()){
         rows.push({coach_id:coach.id, note:`checkin: ${transcript.slice(0,600)}`, meta:{kind:"checkin_raw"}, is_long_term:false});
       }
-      for(const r of rows){ try{ await sbInsert("coach_context",r); }catch(e){ console.error("coach_context write",e); } }
+      // ONE insert, not one per row — this was up to ~7 sequential gateway
+      // round-trips (season, goal, response, notes + each decision) while the coach
+      // watched "Saving to your team context…". sbInsert already takes arrays.
+      try{ await sbInsert("coach_context",rows); }catch(e){ console.error("coach_context write",e); }
       try{ await sbUpdate("proof_digests", digest.id, {is_read:true, content_json:{...c, checkin_done:true}}); onRead&&onRead(); }catch(e){ console.error(e); }
       setMsgs(m=>[...m.filter(x=>x.text!=="Saving to your team context…"),{role:"sys",text:"✓ Saved — I'll build next week's edition around this."}]);
       setDone(true);
@@ -2707,7 +2737,10 @@ function CoachCheckin({digest, team, coach, onRead}){
       setBusy(true);
       try{
         const sys=`You are WILCO, a strength coach's AI assistant. The coach asked a question mid-check-in. Answer it directly and briefly (1-3 sentences), grounded in the team read, then stop — don't move on. ${teamCtx()}`;
-        const reply=await askClaude(sys, `They were asked: "${q.text}"\nThey replied: "${t}"`, 300, [], "claude-sonnet-5", "coach_checkin");
+        // Haiku, matching the Morning Brief's ask-back twin (coach.jsx ~2201) —
+        // identical job (answer briefly from the team read, then stop) at ~10x
+        // lower cost per turn in the usage_costs ledger.
+        const reply=await askClaude(sys, `They were asked: "${q.text}"\nThey replied: "${t}"`, 300, [], "claude-haiku-4-5", "coach_checkin");
         setMsgs(m=>[...m,{role:"wilco",text:reply||"Your call either way."},{role:"wilco",text:q.text}]);
       }catch(e){ setMsgs(m=>[...m,{role:"wilco",text:q.text}]); }
       setBusy(false);
@@ -3348,8 +3381,15 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
   };
 
   const lastWorkout = workouts[0];
-  const resolvedPainAreas = (athlete.resolved_pain||[]).map(a=>a.toLowerCase());
-  const hasPain = workouts.some(w=>w.parsed_data?.pain_flags?.some(p=>!resolvedPainAreas.includes(p.area.toLowerCase())));
+  // Memoized: EVERY program-textarea keystroke (and every staged-editor state
+  // change) re-renders AthleteDetail, and these used to re-run a full
+  // groupIntoSessions (filter + O(W log W) sort) plus a pain scan over the
+  // athlete's ALL-TIME lazy-loaded history — hundreds of rows for a 55-session
+  // athlete, thousands for a multi-year one. Direct input-latency win in the
+  // surface coaches type in most.
+  const resolvedPainAreas = useMemo(()=>(athlete.resolved_pain||[]).map(a=>a.toLowerCase()),[athlete.resolved_pain]);
+  const hasPain = useMemo(()=>workouts.some(w=>getPD(w).pain_flags?.some(p=>!resolvedPainAreas.includes(p.area.toLowerCase()))),[workouts,resolvedPainAreas]);
+  const sessionCount = useMemo(()=>groupIntoSessions(workouts).length,[workouts]);
   const tabs = ["overview","workouts","progress","program"];
 
   return (
@@ -3363,7 +3403,7 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
         </div>
         <div style={{flex:"1 1 180px",minWidth:0}}>
           <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.text,letterSpacing:1}}>{athlete.name}</div>
-          <div style={{color:CA.muted,fontSize:12}}>{athlete.sport} · {groupIntoSessions(workouts).length} sessions</div>
+          <div style={{color:CA.muted,fontSize:12}}>{athlete.sport} · {sessionCount} sessions</div>
           {athlete.season_date&&<div style={{color:CA.accent,fontSize:11}}>Season: {fmtDate(athlete.season_date)}</div>}
         </div>
         <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
