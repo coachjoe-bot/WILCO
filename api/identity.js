@@ -58,6 +58,7 @@ export default async function handler(req, res) {
       case "hash-pin":             return await hashPinAction(req, res, body);
       case "create-athlete":       return await createAthleteAction(req, res, body);
       case "set-coach-pin":        return await setCoachPinAction(req, res, body);
+      case "add-coach":            return await addCoachAction(req, res, body);
       case "log-error":            return await handleLogError(req, res, body);
       case "log-events":           return await handleLogEvents(req, res, body);
       default:                     return res.status(400).json({ error: "Unknown action" });
@@ -204,9 +205,18 @@ async function coachDashboard(req, res, body) {
   const isMaster = me.role === "master";
   const isAdmin = me.role === "admin";
 
+  // An ADMIN also sees their school's UNASSIGNED athletes. Removing a coach nulls
+  // coach_id, and non-master coaches were scoped strictly to coach_id=eq.me — so
+  // those athletes became invisible to the entire school and could only be
+  // recovered from the master account. They are already writable by an admin in
+  // their school (data.js), so this is read parity, not new authority. Deliberately
+  // NOT "every athlete in the school": that would turn an admin's roster, triage
+  // and brief into the whole school overnight. Just the orphans.
   const athletes = isMaster
     ? await sbSelect("athletes", "?order=created_at.desc&select=*")
-    : await sbSelect("athletes", `?coach_id=eq.${enc(me.id)}&order=created_at.desc&select=*`);
+    : (isAdmin && me.school_id)
+      ? await sbSelect("athletes", `?or=(coach_id.eq.${enc(me.id)},and(coach_id.is.null,school_id.eq.${enc(me.school_id)}))&order=created_at.desc&select=*`)
+      : await sbSelect("athletes", `?coach_id=eq.${enc(me.id)}&order=created_at.desc&select=*`);
 
   let coaches = [];
   if (isMaster) coaches = await sbSelect("coaches", "?order=created_at.asc&select=*");
@@ -218,12 +228,27 @@ async function coachDashboard(req, res, body) {
     : [];
   const schoolsAll = isMaster ? await sbSelect("schools", "?select=*&order=created_at.asc") : [];
 
+  // Per-coach athlete counts for the school. The Account tab used to derive these
+  // from the caller's own roster, which for an admin is their athletes plus the
+  // unassigned bucket — so every OTHER coach read as "0 athletes", and the
+  // remove-coach step would have offered no reassignment at exactly the moment a
+  // whole roster was about to be orphaned. Counts only; no athlete data crosses
+  // the boundary, so an admin's read scope is unchanged.
+  let coachCounts = null;
+  if ((isAdmin || isMaster) && (me.school_id || isMaster)) {
+    const scope = isMaster ? "?select=coach_id" : `?school_id=eq.${enc(me.school_id)}&select=coach_id`;
+    const rows = await sbSelect("athletes", scope);
+    coachCounts = {};
+    for (const r of rows) if (r.coach_id) coachCounts[r.coach_id] = (coachCounts[r.coach_id] || 0) + 1;
+  }
+
   // Coaches don't need athletes'/coaches' PINs — strip them.
   return res.status(200).json({
     athletes: athletes.map(stripPin),
     coaches: coaches.map(stripPin),
     school,
     schoolsAll,
+    coachCounts,
   });
 }
 
@@ -308,6 +333,71 @@ async function setCoachPinAction(req, res, body) {
   // Proving the access code + setting the PIN IS an authentication event — mint a
   // session token so this first coach session skips per-request bcrypt too.
   return res.status(200).json({ ok: true, token: mintSessionToken("coach", coachId) });
+}
+
+// ── add-coach (ONE server-side op for every add-coach flow) ──────────────────
+// All three client flows (AccountTab, master SchoolsList, school onboarding) used
+// to compute coach_number and access_code IN THE BROWSER from a possibly-stale
+// coaches list, then plain-insert. Two admins adding at once, a double-tap racing
+// the disabled flag, or adding before the roster refreshed could mint two coaches
+// with the SAME access_code — and resolve-coach-code takes found[0], so one of
+// them could never register. That is a silently unusable paid seat.
+//
+// Here the SERVER reads max(coach_number) for the school, assigns the code, checks
+// the seat limit, and inserts. The unique index on coaches.access_code is what
+// makes it actually atomic rather than merely narrower: if a concurrent insert
+// wins the race, the insert fails and we retry with the next number.
+const CODE_FOR = (schoolCode, n) => String(schoolCode||"???").toUpperCase() + String(n).padStart(2, "0");
+
+async function addCoachAction(req, res, body) {
+  const me = await authCoachThrottled(req, body.coachId, body.pin);
+  const isMaster = me.role === "master";
+  if (!isMaster && me.role !== "admin") throw httpErr(403, "Only an admin can add a coach");
+
+  const schoolId = str(body.schoolId, { max: 64, name: "schoolId" });
+  // An admin may only ever add into THEIR OWN school. Master can target any.
+  if (!isMaster && me.school_id !== schoolId) throw httpErr(403, "Not your school");
+
+  const name = str(body.name, { max: 100, name: "Coach name" });
+  const email = str(body.email, { max: 200, name: "Coach email" }).toLowerCase();
+  if (!email.includes("@")) throw httpErr(400, "Enter a valid coach email");
+  const role = body.role === "admin" ? "admin" : "coach";
+
+  const schools = await sbSelect("schools", `?id=eq.${enc(schoolId)}&select=id,code,name,max_coaches`);
+  const school = schools[0];
+  if (!school) throw httpErr(404, "School not found");
+
+  const existing = await sbSelect("coaches", `?school_id=eq.${enc(schoolId)}&select=id,coach_number,access_code,role,email`);
+  // Seat limit counts what the UI counts: assistant coaches, excluding the
+  // soft-removed rows (access_code stamped REMOVED_*) that used to burn a seat.
+  const active = existing.filter((c) => c.role !== "admin" && !String(c.access_code || "").startsWith("REMOVED_"));
+  const max = school.max_coaches || 3;
+  if (role !== "admin" && active.length >= max) throw httpErr(409, `Coach limit reached for this plan (${max}).`);
+  // Adding the same person twice is a mistake, not a race — say so plainly.
+  if (existing.some((c) => String(c.email || "").toLowerCase() === email && !String(c.access_code || "").startsWith("REMOVED_"))) {
+    throw httpErr(409, "A coach with that email is already on this school.");
+  }
+
+  let n = existing.reduce((m, c) => Math.max(m, c.coach_number || 0), 0) + 1;
+  // Retry on a unique-code collision (23505). Bounded — five losses in a row means
+  // something else is wrong and we should fail loudly rather than spin.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const access_code = role === "admin" ? String(school.code || "???").toUpperCase() + "AD" : CODE_FOR(school.code, n);
+    try {
+      const created = await sbWrite({
+        method: "POST", table: "coaches",
+        body: { name, email, school_id: schoolId, coach_number: role === "admin" ? 0 : n, access_code, role },
+      });
+      const row = Array.isArray(created) ? created[0] : created;
+      if (!row) throw httpErr(502, "Could not create coach. Try again.");
+      return res.status(200).json({ coach: stripPin(row), accessCode: access_code, schoolName: school.name || "" });
+    } catch (e) {
+      const dup = /duplicate key|23505|already exists/i.test(e?.message || "");
+      if (!dup || role === "admin") throw e;
+      n += 1;   // someone else took this number between our read and our insert
+    }
+  }
+  throw httpErr(409, "Couldn't assign a unique access code — try again.");
 }
 
 // (log-error / log-events handlers + their helpers moved to ./_telemetry.js;
