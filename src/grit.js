@@ -283,8 +283,6 @@ export const TIER_POINTS = [10, 25, 50, 100, 175, 275, 400, 600];
 // Flavor line per tier (shown in the Top Rank classification popover).
 export const TIER_DESC = ["just off the ground", "on the come-up", "lookin' sharp", "just plain solid", "top of the gym", "a cut above", "national-class", "truly incredible"];
 // Load-bearing bodyweight lifts show a cleaner name + a "bodyweight + added" readout.
-export const BENCH_DISPLAY = { "weighted pull-up": "Pull-Ups", "weighted dip": "Dips" };
-export const BENCH_IS_BW = { "weighted pull-up": true, "weighted dip": true };
 
 // Per-lift bodyweight-multiple cut-lines to REACH each tier 1..7 (Rookie = below [0]).
 // [Gritty, Sharp, Strong, Elite, Dominant, Untouchable, Legendary]. Anchored to
@@ -640,3 +638,45 @@ export function sessionTopSet(exercises) {
   }
   return best;
 }
+
+// ─── SESSION GROUPING ────────────────────────────────────────────────────────
+// Lives here rather than in App.jsx because effectiveDate (the thing it sorts by)
+// already does, because it's pure and server-safe, and because it decides the
+// number the athlete sees on their header and the coach sees on the roster — the
+// one that ratcheted DOWN once already. Now covered by scripts/test-session-grouping.mjs.
+//
+// A "real session" is a row with actual work in it: exercises or a run. Chat-only
+// rows, form reviews and program pastes are all workouts-table rows too, and none
+// of them are a training session.
+//
+// NOTE on parsed_data: this reads it directly rather than through a JSON.parse
+// tolerant accessor, matching the App.jsx original byte for byte (every row in the
+// database is jsonb-object today; verified 2026-07-23). proofcore's isRealSession
+// twin DOES parse legacy strings — if a string-typed row ever appears, these two
+// will disagree about the session count, and this is the one to change.
+export const isRealSession = (w) => w?.parsed_data?.exercises?.length > 0 || !!w?.parsed_data?.run_data;
+
+// Entries within gapMs of each other (same athlete) are ONE session.
+// parsed_data.new_session === true forces a split even inside the window — that's
+// the flag the "same workout or new session?" chip writes, so an explicit answer
+// from the athlete always beats the time heuristic.
+export const groupIntoSessions = (workouts, gapMs = 3*60*60*1000) => {
+  const byAthlete = {};
+  (workouts || []).filter(isRealSession).forEach(w => {
+    if(!byAthlete[w.athlete_id]) byAthlete[w.athlete_id] = [];
+    byAthlete[w.athlete_id].push(w);
+  });
+  const sessions = [];
+  Object.values(byAthlete).forEach(entries => {
+    const sorted = [...entries].sort((a,b)=>effectiveDate(a)-effectiveDate(b));
+    let lastTime = null; let cur = null;
+    sorted.forEach(w => {
+      const t = effectiveDate(w).getTime();
+      if(!lastTime || w.parsed_data?.new_session===true || t-lastTime>gapMs){
+        cur = {entries:[w],athleteId:w.athlete_id}; sessions.push(cur);
+      } else { cur.entries.push(w); }
+      lastTime = t;
+    });
+  });
+  return sessions;
+};

@@ -2,6 +2,14 @@ import { useState, useEffect, useRef, useMemo, Component, lazy, Suspense } from 
 // Coach dashboard lives in its own lazily-loaded chunk (src/coach.jsx) so the
 // athlete-facing bundle — what 95% of users download — stays smaller.
 const CoachDashboard = lazy(()=>import("./coach.jsx"));
+// Warm-fetch that chunk when we already KNOW a coach is landing on it. The split
+// exists so the 95% of users who are athletes don't download ~55KB of dashboard —
+// but a restored coach session pays for that split twice: once waiting on the
+// boot batch, once more on the Suspense fallback while the chunk downloads. This
+// starts the download during boot instead of after it. Athletes never trigger it,
+// so the reason for the split is untouched. Fire-and-forget: a failed prefetch
+// just means the normal lazy import does its job a moment later.
+const prefetchCoachChunk = () => { import("./coach.jsx").catch(()=>{}); };
 // The /pure entry does NOT inject the Stripe script at import time — loading only
 // happens when checkout actually calls loadStripe (see getStripeJs below).
 import { loadStripe } from "@stripe/stripe-js/pure";
@@ -19,6 +27,14 @@ import {
 // governing when Joe offers to loop the human coach in (see file header).
 import { draftChangeRequest, fileChangeRequest, flagToSource } from "./changeRequest.js";
 import { lineDiff, findPlacement, mergeGuard } from "./programDiff.js";
+// Chat-routing decisions (model escalation, "remember this", is-this-a-log, PR
+// propagation guards). Pure regexes/logic pulled out of send() so they have a
+// suite — see src/chatRouting.js and scripts/test-chat-routing.mjs.
+import {
+  needsAdvancedParser, looksLikeLifting, parseGotNothing, asksToRemember,
+  looksLikeWorkoutLog, hasExplicitWorkingBasis, propagate1RM, isFullProgramEcho,
+} from "./chatRouting.js";
+export { isFullProgramEcho };
 // Boot layer: is this build still the deployed one, the warm-reopen snapshot, and
 // the offline send queue. Storage/pure rules with their own suite (test-boot.mjs).
 import {
@@ -34,14 +50,16 @@ import {
 // keeps that import working unchanged while grit.js stays the single source of truth.
 import {
   epley1RM, MAX_E1RM_REPS, getExerciseSets, bestE1RMForExercise, effectiveDate,
+  isRealSession, groupIntoSessions,
   normalizeExName, displayForKey, cleanerName, liftTier,
   resolveLift, displayForLift, bwLoadLabel, BW_LOADED_IDS,
-  TIER_NAMES, TIER_COLORS, TIER_POINTS, TIER_DESC, BENCH_DISPLAY, BENCH_IS_BW,
+  TIER_NAMES, TIER_COLORS, TIER_POINTS, TIER_DESC,
   BENCH_THRESHOLDS, tierForRatio, bwTierFactor, ageTierFactor, scaledThresholds, getBenchKey,
   sessionTonnage, sessionTopSet,
 } from "./grit.js";
 export {
   epley1RM, getExerciseSets, bestE1RMForExercise, effectiveDate,
+  isRealSession, groupIntoSessions,
   normalizeExName, displayForKey, cleanerName, liftTier,
 };
 
@@ -219,6 +237,11 @@ function restoreAuthSession(){
   try{
     const s = JSON.parse(localStorage.getItem(AUTH_SESSION_KEY) || "null");
     if(!s || !s.token || !s.record) return null;
+    // Only the two roles the app can actually RENDER. WilcoRoot has a view for
+    // athlete and coach and nothing else, so restoring anything else re-arms
+    // CURRENT_AUTH for a view that never mounts — and disagrees with index.html's
+    // boot gate, which paints the splash for an unknown role. (test-boot-skeleton.mjs)
+    if(s.role !== "athlete" && s.role !== "coach") return null;
     if(Date.now() > (s.trustedUntil||0) || Date.now() > tokenExpMs(s.token)){ localStorage.removeItem(AUTH_SESSION_KEY); return null; }
     CURRENT_AUTH = { role:s.role, id:s.id, pin:s.pin, token:s.token };
     s.trustedUntil = Date.now() + AUTH_TRUST_MS;   // opening the app counts as use
@@ -950,35 +973,8 @@ export const fmtWeight = (weight, unit) => {
 export const toLbs = (weight, unit) => (unit==="kg" ? weight*2.205 : weight);
 
 // A "real session" has at least one parsed exercise or run_data (filters out pure Q&A messages)
-export const isRealSession = (w) => w?.parsed_data?.exercises?.length > 0 || !!w?.parsed_data?.run_data;
-
-// normalizeExName, cleanerName, displayForKey, liftTier now live in ./grit.js
-// (imported above) — shared with the server Proof Feed's Grit rank computation.
-
-
-// Groups workout entries into sessions using time-gap logic.
-// Entries within gapMs of each other (same athlete) = same session.
-// new_session:true in parsed_data forces a split even within the gap window.
-export const groupIntoSessions = (workouts, gapMs = 3*60*60*1000) => {
-  const byAthlete = {};
-  workouts.filter(isRealSession).forEach(w => {
-    if(!byAthlete[w.athlete_id]) byAthlete[w.athlete_id] = [];
-    byAthlete[w.athlete_id].push(w);
-  });
-  const sessions = [];
-  Object.values(byAthlete).forEach(entries => {
-    const sorted = [...entries].sort((a,b)=>effectiveDate(a)-effectiveDate(b));
-    let lastTime = null; let cur = null;
-    sorted.forEach(w => {
-      const t = effectiveDate(w).getTime();
-      if(!lastTime || w.parsed_data?.new_session===true || t-lastTime>gapMs){
-        cur = {entries:[w],athleteId:w.athlete_id}; sessions.push(cur);
-      } else { cur.entries.push(w); }
-      lastTime = t;
-    });
-  });
-  return sessions;
-};
+// isRealSession + groupIntoSessions now live in ./grit.js (imported+re-exported
+// above) — pure, server-safe, and next to effectiveDate which they sort by.
 
 
 // ─── CLAUDE ──────────────────────────────────────────────────────────────────
@@ -1119,8 +1115,6 @@ const parseWorkout = async (message, name, sport, knownNames = []) => {
   "run_data":{"run_type":"easy"|"tempo"|"interval"|"long_run"|"race"|"recovery"|"fartlek"|null,"distance_miles":number|null,"distance_km":number|null,"duration_minutes":number|null,"pace_per_mile":string|null,"pace_per_km":string|null,"heart_rate_avg":number|null,"heart_rate_max":number|null,"intervals":[{"repeat":number|null,"distance":string|null,"time":string|null,"pace":string|null,"rest":string|null}]|null,"notes":string|null}|null,
   "practice_data":{"practice_type":"practice"|"game"|"scrimmage"|"conditioning"|"skill_work"|"film"|"walkthrough"|null,"sport":string|null,"duration_minutes":number|null,"intensity":"light"|"moderate"|"high"|"very_high"|null,"notes":string|null}|null,
   "pain_flags":[{"area":string,"description":string}],
-  "equipment_issues":[string],
-  "questions":[string],
   "pr_attempts":[{"exercise":string,"weight":number,"reps":number,"achieved":boolean}],
   "session_feel":"great"|"good"|"average"|"rough"|null,
   "context_request":{"is_explicit":boolean,"note":string|null,"is_injury":boolean,"weight_lbs":number|null}|null,
@@ -1196,7 +1190,7 @@ Rules:
   // cluster / myo, AMRAP, to-failure) are the hardest to parse and the most error-prone
   // on Haiku — send those straight to Sonnet. Everything else stays Haiku-first (~3x
   // cheaper) with the escalate-on-empty net below.
-  const advanced = /superset|super set|drop\s?set|rest[- ]?pause|cluster|myo[- ]?reps?|amrap|to failure|warm[- ]?up|worked up|ramp(?:ed|ing)? up|giant set|triset/i.test(message);
+  const advanced = needsAdvancedParser(message);
   const firstModel = advanced ? "claude-sonnet-5" : "claude-haiku-4-5";
   let parsed = null;
   try { parsed = await runParse(firstModel); }
@@ -1206,17 +1200,11 @@ Rules:
   // Olympic-lifting complexes ("A+B 4x1+1 @ w1/w2/w3") into general_notes with an
   // empty exercises[], so the workout never shows in the log. This keeps the common
   // path cheap and only pays for Sonnet on the rare hard parse.
-  const looksLikeLifting = /\d+\s*x\s*\d+|@\s*\d|\d+\s*(?:lbs?|kgs?)\b/i.test(message);
-  const gotNothing = !parsed || (
-    (!Array.isArray(parsed.exercises) || parsed.exercises.length === 0) &&
-    !parsed.run_data && !parsed.practice_data &&
-    (!Array.isArray(parsed.pr_attempts) || parsed.pr_attempts.length === 0)
-  );
-  if (gotNothing && looksLikeLifting && firstModel !== "claude-sonnet-5") {
+  if (parseGotNothing(parsed) && looksLikeLifting(message) && firstModel !== "claude-sonnet-5") {
     try { parsed = await runParse("claude-sonnet-5"); }
     catch { /* keep the Haiku result (or null) and fall through to the default */ }
   }
-  return parsed || {exercises:[],run_data:null,practice_data:null,pain_flags:[],equipment_issues:[],questions:[],pr_attempts:[],session_feel:null,general_notes:message,is_program_update:false,program_append:false,program_create_request:false,is_temp_program_update:false,is_program_revert:false,log_correction:null,coach_flag:null};
+  return parsed || {exercises:[],run_data:null,practice_data:null,pain_flags:[],pr_attempts:[],session_feel:null,general_notes:message,is_program_update:false,program_append:false,program_create_request:false,is_temp_program_update:false,is_program_revert:false,log_correction:null,coach_flag:null};
 };
 
 // ─── LOG CORRECTION RESOLVER ─────────────────────────────────────────────────
@@ -1463,32 +1451,11 @@ SPORT: ${JOEBOT_SPORTS[athlete.sport]||"Build a general strength base."}${pastCo
 // When a new PR is logged, recalculate absolute weights in program_text for that lift.
 // Logic: find lines containing the lift name, replace each weight number with
 // the same % of the new 1RM, rounded to nearest 5.
-const propagate1RM = (programText, exerciseName, old1RM, new1RM) => {
-  if(!programText||!old1RM||!new1RM||old1RM===new1RM||old1RM<=0) return {text:programText,changed:false};
-  const safeEx = exerciseName.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
-  const lines = programText.split("\n");
-  let changed = false;
-  const updated = lines.map(line => {
-    if(!(new RegExp(safeEx,"i")).test(line)) return line;
-    return line.replace(/(\d+)\s*(lbs?)/gi, (match,num) => {
-      const w = +num;
-      if(w<45||w>old1RM*1.5) return match; // skip bar weight / outliers
-      const pct = w / old1RM;
-      const newW = Math.round((new1RM * pct) / 5) * 5;
-      if(newW===w) return match;
-      changed = true;
-      return `${newW}lbs`;
-    });
-  });
-  return {text:updated.join("\n"),changed};
-};
 
 // Does the program pin its numbers to an explicit basis the athlete set on
 // purpose (training max, working weights, a stated reference the %s hang off)
 // rather than tracking their true 1RM? If so, a new PR must NOT blindly rescale
 // those numbers. Used only as a guard on the deterministic fallback below.
-const hasExplicitWorkingBasis = (programText) =>
-  /training max|\bTM\b|working (?:max|weight|set|number)|work(?:ing)? weight|based (?:on|off)|%.{0,20}\bof\b.{0,20}(?:working|training)/i.test(programText||"");
 
 // AI-driven PR propagation. Reads the whole program, works out what each lift's
 // numbers are actually based on, and only updates weights that genuinely track
@@ -1523,8 +1490,6 @@ export const propagateForPRs = async (programText, prs) => {
 // mid-text and the partial overwrote the real program_text); the check-in
 // injury-rewrite path is its twin and was missing it entirely. Flush-changes
 // rule: any new full-echo call site must go through this.
-export const isFullProgramEcho = (prog, programText) =>
-  !!prog && prog.length >= 60 && prog.length >= String(programText || "").length * 0.9;
 
 // The Grit benchmark ladder (TIER_NAMES/COLORS/POINTS/DESC, BENCH_THRESHOLDS,
 // tierForRatio, bwTierFactor, ageTierFactor, scaledThresholds, getBenchKey) now
@@ -2918,7 +2883,11 @@ function WilcoRoot() {
   // Restore a recent sign-in (see persistAuthSession) so a cold reopen skips the
   // homescreen and lands back in the app. Runs once, before children mount, so
   // CURRENT_AUTH is re-armed in time for the first data/identity call.
-  const [restored] = useState(()=>restoreAuthSession());
+  const [restored] = useState(()=>{
+    const r = restoreAuthSession();
+    if(r?.role==="coach") prefetchCoachChunk();   // see prefetchCoachChunk
+    return r;
+  });
   const [view,setView] = useState(eventCtx?.active ? "event" : (restored ? restored.role : "home"));
   const [athlete,setAthlete] = useState(()=> restored?.role==="athlete" ? {...restored.record, pin:restored.pin} : null);
   const [coach,setCoach] = useState(()=> restored?.role==="coach" ? {...restored.record, pin:restored.pin} : null);
@@ -5877,9 +5846,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // The model's is_explicit flag alone over-triggers on passing remarks (it
       // fired on "I'm at the hotel gym"), so the raw message must also contain one
       // of the remember-phrasings the parse rules enumerate before anything saves.
-      const EXPLICIT_MEMORY_RE = /\b(remember|note that|make a note|keep in mind|don'?t forget|from now on|for future reference|going forward|just so you know|for the record|update my (info|profile|weight))\b/i;
       const cr = parsed.context_request;
-      if(cr && cr.is_explicit && !fromQuickLog && EXPLICIT_MEMORY_RE.test(msg)){
+      if(cr && cr.is_explicit && !fromQuickLog && asksToRemember(msg)){
         const saved = [];
         if(typeof cr.weight_lbs==="number" && cr.weight_lbs>50 && cr.weight_lbs<600){
           try{
@@ -6149,7 +6117,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         athlete_id:athlete.id,
         raw_message:`[Form review: ${file.name}]`,
         bot_reply:analysis,
-        parsed_data:{exercises:[],pain_flags:[],equipment_issues:[],questions:[],session_feel:null,general_notes:"Video form review"}
+        parsed_data:{exercises:[],pain_flags:[],session_feel:null,general_notes:"Video form review"}
       });
     } catch(err){
       updateMsg(`Couldn't analyze that video. ${err.message||"Try a shorter clip (MP4 works best)."}`);
@@ -6812,16 +6780,6 @@ const dayLabelFromRaw = (raw) => {
 // Joe)? Used to anchor Quick Log's "where you are" on the day the athlete typed even when
 // the exercise parser failed to extract anything — the day LABEL lives in raw_message
 // regardless of parse success, so day-sequencing shouldn't be hostage to the parser.
-const looksLikeWorkoutLog = (raw) => {
-  if(typeof raw!=="string") return false;
-  const s = raw.trim();
-  if(!s || s.startsWith("[Form review:")) return false;
-  const first = s.split("\n")[0].trim();
-  // A question / request to the coach is not a log.
-  if(/\?/.test(first) || /^\s*(what|when|which|can|could|should|is|are|do|does|how|why|show|tell|give)\b/i.test(first)) return false;
-  // A log carries set×rep or @weight or a bare lbs/kg load.
-  return /\b\d+\s*[x×]\s*\d+/i.test(s) || /@\s*\d/.test(s) || /\b\d+\s*(lbs|kg)\b/i.test(s);
-};
 
 const buildQuickLogContext = (athlete, workoutHistory, manualRMs, messages, goals, contextNotes) => {
   const program = athlete.temp_program_text || athlete.program_text || "";
@@ -7976,9 +7934,17 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
     // lift.id, so "deadlift" == "conventional deadlift", "deficit pull" == "deficit
     // deadlift", the two sit-up spellings collapse, and junk ("lift") is dropped —
     // and the Benchmarks/Strength/PR tabs can never bucket the same lift differently.
+    // SINGLE PASS over history. This used to be three separate walks — one to build
+    // byEx, one for prsHit, and then one FULL rescan per tracked lift to build its
+    // chart entries — so a 20-lift athlete with a 100-row window paid ~2,000 row
+    // visits and ~10,000 resolveLift + bestE1RMForExercise calls every time this
+    // memo recomputed. Everything downstream now reads from what this one loop
+    // collects. Output is identical; only the number of visits changed.
     const byEx = {};
+    const entriesByLift = {};   // lift.id -> [{date, e1rm}] in encounter order
     workoutHistory.forEach(w=>{
-      const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
+      const pd = getPD(w);
+      const when = effectiveDate(w);
       (pd.exercises||[]).forEach(ex=>{
         if(!ex.name) return;
         const lift = resolveLift(ex.name);
@@ -7987,12 +7953,17 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
         // pull-ups) score a 1RM; every other bodyweight movement returns 0 and drops out.
         const e1rm = bestE1RMForExercise(ex, bodyweight);
         if(!e1rm) return;
+        (entriesByLift[lift.id] = entriesByLift[lift.id] || []).push({date:when, e1rm});
         // A bodyweight lift's e1rm is already a lbs-equivalent, so label it "lbs".
         const unit = ex.unit==="bodyweight" ? "lbs" : (ex.unit||"lbs");
         if(!byEx[lift.id]) byEx[lift.id]={key:lift.id,name:lift.name,e1rm,unit,benchKey:lift.benchKey,bwLoaded:lift.bwLoaded};
         else if(e1rm>byEx[lift.id].e1rm) byEx[lift.id].e1rm=e1rm;
       });
     });
+    // Chronological per lift, computed once and reused by BOTH prsHit and the
+    // charts below. Sort is stable, so two entries on the same date keep the order
+    // they were logged in — which is what the old row-by-row walk produced.
+    Object.values(entriesByLift).forEach(list=>list.sort((a,b)=>a.date-b.date));
 
     // A22: seed from the athlete's all-time prs rows — the boot fetch caps history
     // at 100 rows, so "lifetime" bests silently shrank once older workouts fell out
@@ -8050,34 +8021,24 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
     const topTierIdx = (bodyweight && rankedLifts.length) ? Math.max(...rankedLifts.map(tierIdxOf)) : -1;
 
     // PRs Hit — lifetime count of new-best moments across every lift (first best counts).
-    const prsHit = (()=>{
-      const best={}; let count=0;
-      [...workoutHistory].sort((a,b)=>effectiveDate(a)-effectiveDate(b)).forEach(w=>{
-        const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
-        (pd.exercises||[]).forEach(ex=>{
-          if(!ex.name) return;
-          const lift = resolveLift(ex.name);
-          if(!lift.tracked) return;
-          const e=bestE1RMForExercise(ex, bodyweight);
-          if(!e) return;
-          const k=lift.id;
-          if(!(k in best)){ best[k]=e; count++; }
-          else if(e>best[k]+0.5){ best[k]=e; count++; }
-        });
-      });
+    // Counted per lift off the same chronological entries — the "best" map was always
+    // keyed per lift, so walking each lift's own timeline gives the identical count
+    // the global chronological walk did, without a second pass over history.
+    const prsHit = Object.values(entriesByLift).reduce((count, list)=>{
+      let best = null;
+      for(const e of list){
+        if(best===null){ best = e.e1rm; count++; }
+        else if(e.e1rm > best + 0.5){ best = e.e1rm; count++; }
+      }
       return count;
-    })();
+    }, 0);
 
     // Strength/running progress for other tabs. Entries are matched to a lift by the
     // SAME canonical id (resolveLift), so an aliased spelling in history ("weighted
     // pull-ups") still lands under its canonical lift ("Pull-Up").
-    const exercisesAll = Object.values(byEx).map(ex=>{
-      const entries = workoutHistory.flatMap(w=>{
-        const pd=typeof w.parsed_data==="string"?(()=>{try{return JSON.parse(w.parsed_data);}catch{return{};}})():(w.parsed_data||{});
-        return (pd.exercises||[]).filter(e=>e.name && resolveLift(e.name).id===ex.key).map(e=>({date:effectiveDate(w),e1rm:bestE1RMForExercise(e, bodyweight)})).filter(e=>e.e1rm>0);
-      }).sort((a,b)=>a.date-b.date);
-      return {...ex,entries};
-    }).sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.e1rm-a.e1rm);
+    const exercisesAll = Object.values(byEx)
+      .map(ex=>({...ex, entries: entriesByLift[ex.key] || []}))
+      .sort((a,b)=>liftTier(a.key)-liftTier(b.key) || b.e1rm-a.e1rm);
 
     // PR tab — manual (actual) 1RM takes precedence over the estimated 1RM above.
     const prMap = {};

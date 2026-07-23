@@ -50,11 +50,17 @@ export function priceFor(tier, billing) {
 // Reverse lookup used by the webhook: price ID → {tier, billing}. Checks both maps
 // so a test-mode price still resolves correctly.
 export function tierForPrice(priceId) {
+  // Bail on a missing price. PRICES_TEST's entries are `undefined` whenever the
+  // STRIPE_TEST_PRICE_* env vars aren't set (i.e. on prod), so without this guard
+  // `tierForPrice(undefined)` matched `pro.monthly === undefined` and reported
+  // PRO — a webhook event that arrived without a price would silently grant a
+  // paid tier. Same for a falsy entry inside a map.
+  if (!priceId) return { tier: null, billing: null };
   for (const map of [PRICES_LIVE, PRICES_TEST]) {
     for (const [tier, b] of Object.entries(map)) {
       if (!b) continue;
-      if (b.monthly === priceId) return { tier, billing: "monthly" };
-      if (b.annual === priceId)  return { tier, billing: "annual" };
+      if (b.monthly && b.monthly === priceId) return { tier, billing: "monthly" };
+      if (b.annual && b.annual === priceId)  return { tier, billing: "annual" };
     }
   }
   return { tier: null, billing: null };

@@ -1262,6 +1262,11 @@ function CoachDashboard({coach,onLogout}) {
                       }}
                       onAthleteDelete={(id)=>{
                         setAthletes(prev=>prev.filter(a=>a.id!==id));
+                        // Their pending change requests are gone from the DB now; drop
+                        // them from memory too, or the roster keeps showing "1 request"
+                        // for an athlete who no longer exists until the next full load.
+                        setChangeRequests(prev=>prev.filter(r=>r.athlete_id!==id));
+                        setPrescriptions(prev=>prev.filter(p=>p.athlete_id!==id));
                         setSelected(null);
                       }}
                       onAthletePatched={(id,patch)=>{
@@ -3392,10 +3397,28 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
   const [staged,setStaged] = useState(null);
   const [mergeState,setMergeState] = useState(null);
 
+  // Deleting an athlete cleaned out workouts and prs and nothing else, so every
+  // sibling table kept its rows keyed to an athlete id that no longer resolves —
+  // goals, manual 1RMs, program-modification history, past Proof editions, saved
+  // context notes, push subscriptions, consent records and any open change
+  // requests. Personal data surviving a delete is exactly what the deletion
+  // promise says won't happen (api/process-deletions.js already enumerates the
+  // same set for the GDPR path; this is the coach-initiated twin of that list).
+  //
+  // Order matters only in that children go before the parent. Each child delete is
+  // caught individually: a single failing table must not abort the run and leave
+  // the athlete row itself behind, half-deleted.
+  const ATHLETE_CHILD_TABLES = [
+    "workouts", "prs", "athlete_goals", "manual_one_rms", "program_modifications",
+    "proof_digests", "athlete_context", "push_subscriptions", "legal_acceptances",
+    "program_change_requests", "program_prescriptions",
+  ];
   const handleDelete = async () => {
     try {
-      await sbDelete("workouts",`?athlete_id=eq.${athlete.id}`);
-      await sbDelete("prs",`?athlete_id=eq.${athlete.id}`);
+      for(const t of ATHLETE_CHILD_TABLES){
+        try{ await sbDelete(t,`?athlete_id=eq.${athlete.id}`); }
+        catch(e){ console.error(`athlete delete: ${t} failed`, e); }
+      }
       await sbDelete("athletes",`?id=eq.${athlete.id}`);
       onAthleteDelete(athlete.id);
     } catch(e){ console.error(e); }

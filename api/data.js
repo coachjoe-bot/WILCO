@@ -424,9 +424,20 @@ export default async function handler(req, res) {
       if (caller.role === "athlete" && conflict !== ATHLETE_OWN_COL[table]) {
         throw httpErr(403, "Upsert not allowed on that key");
       }
-      // Non-master coaches have no legitimate upsert path (the app never coach-upserts),
-      // and upsert applies no ownFilter — so block it rather than leave an unscoped write.
-      if (caller.role === "coach" && !coachIsMaster) {
+      // Non-master coaches had NO upsert path at all, on the reasoning that the app
+      // never coach-upserts and upsert applies no ownFilter. That stopped being true
+      // when the dashboard started parsing programs on demand: parseAndCacheProgram
+      // spends a Haiku call and then upserts program_prescriptions — which 403'd for
+      // every coach who isn't master. The cache row was therefore never written, so
+      // the SAME programs were re-parsed on every single dashboard load, burning a
+      // Haiku call per athlete per load, forever. (Audit's coach-admin invisible list.)
+      //
+      // Narrow carve-out rather than lifting the block: the parsed-program cache only,
+      // conflicting only on athlete_id. Safety comes from two independent facts —
+      // assertRows above already proved every row's athlete_id is on THIS coach's
+      // roster, and pinning the conflict key to the ownership column means the merge
+      // can only ever land on that same row. Anything else still 403s.
+      if (caller.role === "coach" && !coachIsMaster && !(table === "program_prescriptions" && conflict === ATHLETE_OWN_COL[table])) {
         throw httpErr(403, "Upsert not allowed for this account");
       }
       const json = await sbWrite({
