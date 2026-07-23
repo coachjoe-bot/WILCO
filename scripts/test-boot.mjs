@@ -160,14 +160,35 @@ check("no program on file → not eligible", elig({ program_text: undefined }) =
 check("first chat not done → not eligible", elig({ first_chat_complete: false }) === false);
 check("null athlete → not eligible", B.openerEligibleFor(null) === false);
 
+// displayWeights: the loggable draft keeps the pounds FIRST (parse-safe); the
+// athlete-facing display leads with the program's own prescription. At stake is
+// that a percentage never swaps places with the weight in a way that could later
+// be mislogged — but this is display-only, so the priority is "shows the source".
+const DW = B.displayWeights;
+check("percentage leads, weight in parens", DW("Snatch 4x1 @ 185 (75%)") === "Snatch 4x1 @ 75% (185 lbs)");
+check("RPE leads, weight in parens", DW("Bench 5x5 @ 185 (RPE 8)") === "Bench 5x5 @ RPE 8 (185 lbs)");
+check("last time trails, weight leads", DW("Barbell Row 3x10 @ 135 (last time)") === "Barbell Row 3x10 @ 135 lbs (last time)");
+check("a program-stated weight just gets a unit", DW("Front Squat 5x5 @ 225") === "Front Squat 5x5 @ 225 lbs");
+check("a fill-in blank is left alone", DW("Weighted Dips 3x8 @ ___") === "Weighted Dips 3x8 @ ___");
+check("weighted bodyweight passes through", DW("Weighted Pull-ups 3x8 +25") === "Weighted Pull-ups 3x8 +25");
+check("plain bodyweight passes through", DW("Push-ups 3x20") === "Push-ups 3x20");
+check("timed hold passes through", DW("Plank 3x60s") === "Plank 3x60s");
+check("no double-unit on an already-led percentage", !DW("Snatch 4x1 @ 185 (75%)").includes("lbs%"));
+check("multiple lines each reformat independently", DW("Squat 5x3 @ 275 (80%)\nBench 5x5 @ 185") === "Squat 5x3 @ 80% (275 lbs)\nBench 5x5 @ 185 lbs");
+
 // The opener frames the resolved draft as a session to RUN. Draft line 1 is the day
-// label; it gets woven into the lead, and the exercises follow.
-const DRAFT = "Day 5 – Push B\n\nBench 5x5 @ 185\nWeighted Dips 3x8 +25";
+// label; it gets woven into the lead, and the exercises follow (reformatted so the
+// program's percentage/RPE/last-time source shows next to the resolved weight).
+const DRAFT = "Day 5 – Push B\n\nBench 5x5 @ 185 (75%)\nOverhead Press 5x5 @ 115 (RPE 8)\nBarbell Row 3x10 @ 135 (last time)\nFront Squat 3x5 @ 225\nWeighted Dips 3x8 +25";
 const op = B.buildTodayOpener({ name: "Marcus", dAgo: 1, draft: DRAFT });
 check("opener names the athlete", op.startsWith("What's up, Marcus."));
 check("opener weaves in the day label", op.includes("Here's today — Day 5 – Push B:"));
 check("opener does not duplicate the day label", op.split("Day 5 – Push B").length === 2);
-check("opener carries the exercise lines with numbers", op.includes("Bench 5x5 @ 185") && op.includes("Weighted Dips 3x8 +25"));
+check("opener shows the percentage source", op.includes("Bench 5x5 @ 75% (185 lbs)"));
+check("opener shows the RPE source", op.includes("Overhead Press 5x5 @ RPE 8 (115 lbs)"));
+check("opener shows the last-time source", op.includes("Barbell Row 3x10 @ 135 lbs (last time)"));
+check("opener units a program-stated weight", op.includes("Front Squat 3x5 @ 225 lbs"));
+check("opener passes weighted bodyweight through", op.includes("Weighted Dips 3x8 +25"));
 check("opener closes with a run-it cue", op.includes("log it here when you're done"));
 const opLapsed = B.buildTodayOpener({ name: "Marcus", dAgo: 6, draft: DRAFT });
 check("lapsed athlete still gets the days-since nudge", opLapsed.includes("6 days since your last log"));

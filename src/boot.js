@@ -188,6 +188,33 @@ export function openerEligibleFor(a) {
     && !!(a.temp_program_text || a.program_text);
 }
 
+// Reshape the loggable draft's number-first annotation into the athlete-facing
+// order that leads with the program's OWN prescription, so they see where the
+// weight came from — not just a bare number. The draft (what actually gets logged)
+// keeps the pounds first for safe parsing; this is display only.
+//   "@ 185 (75%)"       -> "@ 75% (185 lbs)"
+//   "@ 185 (RPE 8)"     -> "@ RPE 8 (185 lbs)"
+//   "@ 135 (last time)" -> "@ 135 lbs (last time)"   (no % to lead with)
+//   "@ 225"             -> "@ 225 lbs"                (program stated it outright)
+//   "@ ___"             -> unchanged
+// Bodyweight ("+25"), rep-only ("3x20") and timed ("3x60s") lines have no "@ N"
+// and pass through untouched.
+export function displayWeights(text) {
+  let out = String(text || "");
+  // "@ N (source)": a %/RPE source leads; anything else (last time) trails.
+  out = out.replace(/@\s*(\d+(?:\.\d+)?)\s*\(([^)]+)\)/g, (_m, w, source) => {
+    const s = source.trim();
+    const lead = /%/.test(s) || /^(rpe|rir)\b/i.test(s);
+    return lead ? `@ ${s} (${w} lbs)` : `@ ${w} lbs (${s})`;
+  });
+  // A bare "@ N" (program stated the pounds) gets a unit — but never a number that
+  // already carries lbs/kg, a following paren, or a % sign (a just-led percentage).
+  // The \b after the digits stops the engine backtracking to a PARTIAL number when
+  // the lookahead fails (e.g. matching "13" of "135 lbs" and leaving "5 lbs").
+  out = out.replace(/@\s*(\d+(?:\.\d+)?)\b(?!\s*(?:lbs\b|kg\b|%|\())/gi, "@ $1 lbs");
+  return out;
+}
+
 // Frame the resolved draft as a session to RUN, not a log to type. The draft's
 // first line is the program day label ("Day 5 – Push B"); we weave that into the
 // lead and show the exercises below it. A lapsed athlete still gets the nudge.
@@ -196,7 +223,7 @@ export function buildTodayOpener({ name, dAgo, draft }) {
   if (!d) return "";
   const nl = d.indexOf("\n");
   const dayLabel = (nl >= 0 ? d.slice(0, nl) : d).trim();
-  const body = (nl >= 0 ? d.slice(nl + 1) : "").trim();
+  const body = displayWeights((nl >= 0 ? d.slice(nl + 1) : "").trim());
   const label = dayLabel ? ` — ${dayLabel}` : "";
   const lead = (dAgo != null && dAgo >= 4)
     ? `${name}. ${dAgo} days since your last log — let's get back on it. Here's today${label}:`
