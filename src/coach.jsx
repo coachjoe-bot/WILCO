@@ -682,6 +682,7 @@ function CoachDashboard({coach,onLogout}) {
   const [selected,setSelected] = useState(null);
   const [search,setSearch] = useState("");
   const [filterPain,setFilterPain] = useState(false);
+  const [filterRequests,setFilterRequests] = useState(false);
   const [filterInactive,setFilterInactive] = useState(false);
   const [sortBy,setSortBy] = useState("lastActive"); // "lastActive" | "name"
   const [recalcStatus,setRecalcStatus] = useState(null); // null | "running" | "done" | "error" | "X/Y
@@ -1020,12 +1021,22 @@ function CoachDashboard({coach,onLogout}) {
     return m;
   },[workouts,athletes]);
 
+  // Pending program-change requests per athlete. The data was already loaded and
+  // handed to Overview + AthleteDetail, but the roster row — the list a coach
+  // actually browses — gave no signal who was waiting on a decision.
+  const pendingReqCount = useMemo(()=>{
+    const m = new Map();
+    (changeRequests||[]).forEach(r=>{ if(r.status==="pending") m.set(r.athlete_id,(m.get(r.athlete_id)||0)+1); });
+    return m;
+  },[changeRequests]);
+
   const filtered = useMemo(()=>athletes.filter(a=>{
     if(search&&!a.name.toLowerCase().includes(search.toLowerCase())&&!a.sport.toLowerCase().includes(search.toLowerCase())) return false;
     // A15: use the badge's unresolved-pain predicate — filtering "Pain flags" used
     // to list athletes whose pain was already marked resolved, unbadged, so the
     // filter looked broken. Filter and ⚠ badge now always agree.
     if(filterPain&&!painMap.get(a.id)?.unresolvedPain) return false;
+    if(filterRequests&&!pendingReqCount.get(a.id)) return false;
     if(filterInactive){
       const d = daysBetween(lastActive(a.id));
       if(d!==null&&d<=7) return false;
@@ -1040,7 +1051,7 @@ function CoachDashboard({coach,onLogout}) {
     if(!lb) return -1;
     return new Date(lb) - new Date(la);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }),[athletes,rollup,search,filterPain,filterInactive,sortBy,painMap]);
+  }),[athletes,rollup,search,filterPain,filterInactive,filterRequests,sortBy,painMap,pendingReqCount]);
 
   const tabs = ["overview","athletes","progress","reports",...(isMaster?[]:["settings"]),...(isMaster?["coaches"]:[]),...(!isMaster&&isAdmin?["account"]:[])];
 
@@ -1115,6 +1126,12 @@ function CoachDashboard({coach,onLogout}) {
                         style={{flex:1,background:filterInactive?`${CA.accent}20`:"transparent",border:`1px solid ${filterInactive?CA.accent:CA.border}`,color:filterInactive?CA.accent:CA.muted,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11,fontFamily:"'DM Sans'"}}>
                         Inactive 7d+
                       </button>
+                      {pendingReqCount.size>0&&(
+                        <button onClick={()=>setFilterRequests(p=>!p)}
+                          style={{flex:1,background:filterRequests?`${CA.amber}20`:"transparent",border:`1px solid ${filterRequests?CA.amber:CA.border}`,color:filterRequests?CA.amber:CA.muted,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11,fontFamily:"'DM Sans'"}}>
+                          Requests
+                        </button>
+                      )}
                       <button onClick={()=>setSortBy(s=>s==="lastActive"?"name":"lastActive")}
                         style={{flex:1,background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11,fontFamily:"'DM Sans'",display:"flex",alignItems:"center",justifyContent:"center",gap:4}}>
                         <span>{sortBy==="lastActive"?"⏱":"A–Z"}</span>
@@ -1149,6 +1166,7 @@ function CoachDashboard({coach,onLogout}) {
                       const la = lastActive(a.id);
                       const d = daysBetween(la);
                       const hasPain = !!painMap.get(a.id)?.unresolvedPain;
+                      const reqCount = pendingReqCount.get(a.id)||0;
                       const isSel = selected?.id===a.id;
                       const dot = d===null?CA.muted:d===0?CA.green:d<=3?CA.green:d<=7?CA.amber:CA.red;
                       return (
@@ -1167,6 +1185,7 @@ function CoachDashboard({coach,onLogout}) {
                             <div style={{color:CA.muted,fontSize:11}}>{a.sport} · {rollup[a.id]?.session_count ?? 0} sessions</div>
                           </div>
                           <div style={{textAlign:"right",flexShrink:0}}>
+                            {reqCount>0&&<div style={{color:CA.amber,fontSize:9,marginBottom:2,fontWeight:700}}>{reqCount} request{reqCount>1?"s":""}</div>}
                             {hasPain&&<div style={{color:CA.red,fontSize:9,marginBottom:2}}>⚠ pain</div>}
                             <div style={{display:"flex",alignItems:"center",gap:4,justifyContent:"flex-end"}}>
                               <div style={{width:7,height:7,borderRadius:"50%",background:dot}}/>
@@ -1226,6 +1245,10 @@ function CoachDashboard({coach,onLogout}) {
                         setAthletes(prev=>prev.filter(a=>a.id!==id));
                         setSelected(null);
                       }}
+                      onAthletePatched={(id,patch)=>{
+                        setAthletes(prev=>prev.map(a=>a.id===id?{...a,...patch}:a));
+                        setSelected(prev=>prev&&prev.id===id?{...prev,...patch}:prev);
+                      }}
                     />
                     )}
                   </div>
@@ -1243,7 +1266,28 @@ function CoachDashboard({coach,onLogout}) {
               <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.8)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:500,padding:24}}>
                 <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:500}}>
                   <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.accent,letterSpacing:2,marginBottom:4}}>BULK ASSIGN PROGRAM</div>
-                  <div style={{color:CA.muted,fontSize:12,marginBottom:14}}>Assigning to {selectedIds.size} athlete{selectedIds.size!==1?"s":""} — overwrites any existing program.</div>
+                  <div style={{color:CA.muted,fontSize:12,marginBottom:10}}>Assigning to {selectedIds.size} athlete{selectedIds.size!==1?"s":""} — overwrites any existing program.</div>
+                  {/* Name exactly whose tuned programs are about to be wiped. Every
+                      selected athlete's program_text and program_locked is already in
+                      memory; the generic warning above meant a coach couldn't see they
+                      were about to overwrite 3 individually-tuned (or locked) programs
+                      among 12 selected. Highest-regret action in this tab. */}
+                  {(()=>{
+                    const sel = athletes.filter(a=>selectedIds.has(a.id));
+                    const withProgram = sel.filter(a=>a.program_text&&a.program_text.trim());
+                    if(!withProgram.length) return (
+                      <div style={{color:CA.muted2,fontSize:11.5,marginBottom:14}}>None of the selected athletes have a program yet — nothing will be overwritten.</div>
+                    );
+                    const names = withProgram.map(a=>`${a.name}${a.program_locked?" 🔒":""}`);
+                    const rest = sel.length - withProgram.length;
+                    return (
+                      <div style={{background:`${CA.amber}12`,border:`1px solid ${CA.amber}55`,borderRadius:9,padding:"9px 12px",marginBottom:14}}>
+                        <div style={{color:CA.amber,fontSize:10.5,fontWeight:700,letterSpacing:1,marginBottom:4}}>WILL OVERWRITE {withProgram.length} EXISTING PROGRAM{withProgram.length>1?"S":""}</div>
+                        <div style={{color:CA.muted2,fontSize:11.5,lineHeight:1.55}}>{names.join(", ")}</div>
+                        {rest>0&&<div style={{color:CA.muted,fontSize:11,marginTop:4}}>{rest} other{rest>1?"s":""} — no program yet</div>}
+                      </div>
+                    );
+                  })()}
                   <textarea value={bulkProgram} onChange={e=>setBulkProgram(e.target.value)} placeholder={"Paste the program here...\n\nExample:\nWeek 1:\n  Mon: Squat 3×5, Bench 3×5\n  Wed: Deadlift 1×5, OHP 3×5"} rows={10}
                     style={{width:"100%",background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:10,padding:"12px 14px",color:CA.text,fontSize:13,outline:"none",resize:"vertical",lineHeight:1.6,fontFamily:"'DM Sans'",marginBottom:14}}/>
                   <div style={{display:"flex",gap:8}}>
@@ -1496,7 +1540,19 @@ function CoachDashboard({coach,onLogout}) {
                     return (
                     <button key={tr.id} onClick={()=>setSelectedDigest(tr)} style={{width:"100%",background:CA.navy2,border:`1px solid ${CA.accent}40`,borderRadius:14,padding:16,textAlign:"left",cursor:"pointer",display:"block",marginBottom:12}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                        <div style={{color:isM?CA.blue:CA.accent,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>{isM?`MONTHLY RECAP${mLabel?` · ${mLabel.toUpperCase()}`:""}`:"THIS WEEK'S EDITION"}</div>
+                        <div style={{display:"flex",alignItems:"center",gap:7}}>
+                          <div style={{color:isM?CA.blue:CA.accent,fontFamily:"'Bebas Neue'",fontSize:16,letterSpacing:2}}>{isM?`MONTHLY RECAP${mLabel?` · ${mLabel.toUpperCase()}`:""}`:"THIS WEEK'S EDITION"}</div>
+                          {/* is_read was already set by the cron (false) and by check-in
+                              completion (true), and the ATHLETE side shows a dot for the
+                              same field — the coach just never got one, so a dismissed
+                              push meant no in-app signal a new edition was waiting. */}
+                          {!tr.is_read&&(
+                            <span style={{display:"inline-flex",alignItems:"center",gap:4}}>
+                              <span style={{width:6,height:6,borderRadius:"50%",background:CA.accent,boxShadow:`0 0 7px ${CA.accent}`}}/>
+                              <span style={{color:CA.accent,fontSize:9,fontWeight:700,letterSpacing:1}}>NEW</span>
+                            </span>
+                          )}
+                        </div>
                         <div style={{display:"flex",gap:6}}>
                           {tr.has_pain&&<div style={{background:CA.red+"1A",border:"1px solid "+CA.red+"4D",borderRadius:4,padding:"2px 6px",color:CA.red,fontSize:10}}>INJURIES</div>}
                           {tr.has_missed&&<div style={{background:`${CA.navy3}`,border:`1px solid ${CA.border}`,borderRadius:4,padding:"2px 6px",color:CA.muted,fontSize:10}}>AT-RISK</div>}
@@ -1824,8 +1880,18 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
       if(inj&&((inj.recurring&&inj.recurring.length)||(inj.active&&inj.active.length))){
         const rec=inj.recurring&&inj.recurring[0]; const area=rec?rec.area:inj.active[0];
         triage.push({id:r.a.id,sev:"crit",kind:"Injury",name:r.a.name,what:`${area} flagged${rec?` ${rec.count} sessions running`:" this week"}`});
-      } else if(r.daysSince!=null && r.daysSince>=5 && r.daysSince<=21){
-        triage.push({id:r.a.id,sev:"warn",kind:"Quiet",name:r.a.name,what:`no session in ${r.daysSince} days`});
+      } else if(r.daysSince!=null && r.daysSince>=5){
+        // No upper bound. This used to stop at 21 days, so an undecided quiet
+        // athlete silently aged OUT of triage and the brief at exactly the
+        // churn-critical moment — cleared without the coach ever deciding, when
+        // the "Season's done" decision exists precisely to clear them explicitly.
+        // Past 4 weeks it escalates to crit and reads as churn risk, and it keeps
+        // flagging until a decision row exists (weekly suppression handles the rest).
+        const gone = r.daysSince > 28;
+        triage.push({
+          id:r.a.id, sev: gone?"crit":"warn", kind:"Quiet", name:r.a.name,
+          what: gone ? `dark ${Math.floor(r.daysSince/7)} weeks — still on the roster?` : `no session in ${r.daysSince} days`,
+        });
       } else if(todayIdx>=3 && r.score!=null && r.score<55){
         const b=r.adhB;
         let why="";
@@ -1880,7 +1946,32 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
   // after the pointer is gone (and a pending frame must never outlive unmount).
   const clearTip = ()=>{ if(tipRaf.current!=null){ cancelAnimationFrame(tipRaf.current); tipRaf.current=null; } tipNext.current=null; setTip(null); };
   useEffect(()=>()=>{ if(tipRaf.current!=null) cancelAnimationFrame(tipRaf.current); },[]);
-  const tipOn = (text)=>({onMouseEnter:(e)=>setTipThrottled({x:e.clientX,y:e.clientY,text}),onMouseMove:(e)=>setTipThrottled({x:e.clientX,y:e.clientY,text}),onMouseLeave:clearTip});
+  // Tap anywhere else dismisses a touch-opened tip. Registered only while one is
+  // showing, and on the NEXT tick so the opening tap can't immediately close it.
+  useEffect(()=>{
+    if(!tip) return;
+    let armed=false;
+    const arm=setTimeout(()=>{armed=true;},0);
+    const away=()=>{ if(armed) clearTip(); };
+    document.addEventListener("touchstart",away,{passive:true});
+    return ()=>{ clearTimeout(arm); document.removeEventListener("touchstart",away); };
+  },[tip]);
+  // Touch support: every explanatory tooltip on this dashboard (the 50/30/20
+  // adherence breakdown, chart point values, Grit tier meanings, heatmap details)
+  // was mouse-only, i.e. unreachable on the iPad/phone coaches actually use —
+  // despite cursor:pointer implying otherwise. First tap shows the tip, tapping
+  // again or anywhere else dismisses it (standard mobile chart pattern).
+  const tipOn = (text)=>({
+    onMouseEnter:(e)=>setTipThrottled({x:e.clientX,y:e.clientY,text}),
+    onMouseMove:(e)=>setTipThrottled({x:e.clientX,y:e.clientY,text}),
+    onMouseLeave:clearTip,
+    onTouchStart:(e)=>{
+      const t=e.touches&&e.touches[0]; if(!t) return;
+      // Don't preventDefault — a heatmap cell's own onClick (the day inspector)
+      // must still fire; this only adds the explanatory tip alongside it.
+      setTip(cur=>cur&&cur.text===text?null:{x:t.clientX,y:t.clientY,text});
+    },
+  });
   const wkLabel = (i)=>i===D.prWeeks.length-1?"This week":`${D.prWeeks.length-1-i} wk ago`;
   const span = (n)=>isMobile?{}:{gridColumn:`span ${n}`};
   // adherence heatmap rows: worst adherence first (needs attention); truncation is
@@ -3183,7 +3274,7 @@ function collapseDiffForDisplay(diff){
 }
 
 // ─── ATHLETE DETAIL (Coach Dashboard) ────────────────────────────────────────
-function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProgramSave,onAthleteDelete,prefill,onPrefillConsumed,coachContext=[],onLogDecision}) {
+function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProgramSave,onAthleteDelete,onAthletePatched,prefill,onPrefillConsumed,coachContext=[],onLogDecision}) {
   const isMobile = useIsMobile();
   const [tab,setTab] = useState("overview");
   const [programText,setProgramText] = useState(athlete.program_text||"");
@@ -3370,6 +3461,22 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
       if(extracted) setProgramText(prev=>prev?prev+"\n\n"+extracted:extracted);
     } catch(err){ setProgramError("Couldn't read that image. Try a clearer photo."); }
     setPhotoProcessing(false);
+  };
+
+  const [timelineShown,setTimelineShown] = useState(60); // Workouts-tab pager
+  // Reset the pager when switching athletes so a deep scroll doesn't carry over.
+  useEffect(()=>{ setTimelineShown(60); },[athlete.id]);
+  const [endTempConfirm,setEndTempConfirm] = useState(false);
+  const [endingTemp,setEndingTemp] = useState(false);
+  const [endTempError,setEndTempError] = useState("");
+  const endTempProgram = async () => {
+    setEndingTemp(true); setEndTempError("");
+    try {
+      await sbUpdate("athletes",athlete.id,{temp_program_text:null});
+      setEndTempConfirm(false);
+      onAthletePatched&&onAthletePatched(athlete.id,{temp_program_text:null});
+    } catch(err){ setEndTempError("Couldn't end it just now — try again."); }
+    setEndingTemp(false);
   };
 
   const toggleLock = async () => {
@@ -3561,7 +3668,7 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
 
           return (
             <div>
-              {timeline.slice(0,60).map((item,i)=>{
+              {timeline.slice(0,timelineShown).map((item,i)=>{
                 // ── Workout / run session (merged across entries within the 3hr window) ──
                 if(item.type==="session"){
                   const session = item.data;
@@ -3658,6 +3765,18 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
                   </div>
                 );
               })}
+              {/* The hard slice(0,60) hid history the lazy full-history fetch had
+                  already paid for, with no indication more existed. Purely
+                  client-side, mirroring the athlete-side MY LOG pager. */}
+              {timeline.length>timelineShown&&(
+                <div style={{textAlign:"center",padding:"6px 0 2px"}}>
+                  <div style={{color:CA.muted,fontSize:11,marginBottom:8}}>Showing {timelineShown} of {timeline.length}</div>
+                  <button onClick={()=>setTimelineShown(n=>n+60)}
+                    style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:8,padding:"8px 18px",cursor:"pointer",fontSize:12,fontFamily:"'DM Sans'"}}>
+                    Show older
+                  </button>
+                </div>
+              )}
             </div>
           );
         })()}
@@ -3793,7 +3912,30 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
               <div style={{background:`${CA.accent}12`,border:`1px solid ${CA.accent}50`,borderRadius:12,padding:14,marginBottom:16}}>
                 <div style={{color:CA.accent,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:6}}>✈️ TEMPORARY PROGRAM ACTIVE</div>
                 <div style={{color:CA.muted2,fontSize:12,lineHeight:1.6,marginBottom:10,whiteSpace:"pre-wrap"}}>{athlete.temp_program_text}</div>
-                <div style={{color:CA.muted,fontSize:11}}>Joe-bot is using this instead of the regular program. It will revert automatically when {athlete.name} tells Joe-bot they're back to normal.</div>
+                <div style={{color:CA.muted,fontSize:11,marginBottom:10}}>Joe-bot is using this instead of the regular program. It normally reverts when {athlete.name} tells Joe-bot they're back — you can end it here if they forget.</div>
+                {/* The banner used to say "reverts automatically" and give the coach
+                    nothing: if the athlete never said the magic phrase, the real
+                    program stayed on hold indefinitely and the coach could only
+                    watch. temp_program_text is already coach-writable. */}
+                {endTempConfirm?(
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                    <span style={{color:CA.muted2,fontSize:11.5}}>Resume the regular program now?</span>
+                    <button onClick={endTempProgram} disabled={endingTemp}
+                      style={{background:`${CA.accent}20`,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:8,padding:"5px 12px",cursor:endingTemp?"default":"pointer",fontSize:11.5,fontWeight:700,opacity:endingTemp?0.6:1}}>
+                      {endingTemp?"Ending…":"Yes, resume"}
+                    </button>
+                    <button onClick={()=>setEndTempConfirm(false)} disabled={endingTemp}
+                      style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"5px 12px",cursor:"pointer",fontSize:11.5}}>
+                      Cancel
+                    </button>
+                  </div>
+                ):(
+                  <button onClick={()=>setEndTempConfirm(true)}
+                    style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:11.5}}>
+                    End temp program — resume regular
+                  </button>
+                )}
+                {endTempError&&<div style={{color:CA.red,fontSize:11,marginTop:6}}>{endTempError}</div>}
               </div>
             )}
 

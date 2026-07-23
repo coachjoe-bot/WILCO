@@ -1303,7 +1303,24 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
   // the current message is appended again explicitly in userMsg below — so the
   // window must EXCLUDE the last element or every prompt carries the athlete's
   // message twice (a verbatim duplicate of up to a whole pasted program).
-  const hist = history.slice(-7,-1).map(m=>`${m.role==="user"?athlete.name:"Coach Joe"}: ${m.content}`).join("\n");
+  // Window raised 6 -> 16 messages (~8 turns). At 6, a follow-up like "what about
+  // the second option you gave me?" fell out of context after ~3 turns. The static
+  // persona block is prompt-cached, so the marginal cost is history tokens only —
+  // bounded here by a character budget with oldest-first truncation so a pasted
+  // program in the transcript can't blow up the prompt. Measurable in usage_costs.
+  const HIST_MSGS = 16, HIST_CHARS = 6000;
+  const hist = (()=>{
+    const window = history.slice(-(HIST_MSGS+1),-1);
+    const lines = window.map(m=>`${m.role==="user"?athlete.name:"Coach Joe"}: ${m.content}`);
+    let total = 0;
+    const kept = [];
+    for(let i=lines.length-1;i>=0;i--){        // newest-first accumulate, so the
+      total += lines[i].length + 1;            // oldest lines are what get dropped
+      if(total > HIST_CHARS && kept.length) break;
+      kept.unshift(lines[i]);
+    }
+    return kept.join("\n");
+  })();
 
   // Improved history context with explicit dates so bot can answer "what did I do Monday" etc.
   let pastContext = "";
@@ -4185,6 +4202,30 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [proofDigest,setProofDigest] = useState(null);
   const [showProofChat,setShowProofChat] = useState(false);
   const [chatDigest,setChatDigest] = useState(null); // A5: a PAST edition opened from the archive (null = latest)
+  const [retryPending,setRetryPending] = useState(null); // text of a send that failed — drives the Retry chip
+  const [resumingProgram,setResumingProgram] = useState(false);
+  // Field Mode exit as a real control (the chat "I'm back" parse still works — this
+  // is the same write, just reachable). Mirrors the is_program_revert branch.
+  const resumeRegularProgram = async () => {
+    if(resumingProgram) return;
+    setResumingProgram(true);
+    try{
+      await sbUpdate("athletes",athlete.id,{temp_program_text:null});
+      setAthlete(prev=>({...prev,temp_program_text:null}));
+      setShowProgram(false);
+      setMessages(prev=>[...prev,{role:"assistant",content:"✅ Welcome back — you're on your regular program again."}]);
+    }catch(_){
+      setMessages(prev=>[...prev,{role:"assistant",content:"Couldn't switch you back just now — try again in a sec."}]);
+    }
+    setResumingProgram(false);
+  };
+  // Opens the existing change-request conversation from the locked Program tab.
+  // Joe asks what they'd change; their next message routes through the normal
+  // locked-program branch in send(), which drafts the request and shows the
+  // Send-to-coach chips — so this adds a doorway, not a second code path.
+  const startChangeRequestFromProgram = () => {
+    setMessages(prev=>[...prev,{role:"assistant",content:"Your coach has your program locked, but I can send them a request. What would you change, and why? (e.g. \"swap back squats — my knee's been bugging me\")"}]);
+  };
   // Header session count + this-week streak strip, memoized on the data they
   // derive from. AthleteView re-renders on every keystroke AND on every streamed
   // reply chunk (applyDelta → setMessages), and both of these used to recompute
@@ -5018,6 +5059,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     // Same for a pending athlete-side self-apply change: typing instead of tapping
     // a chip cancels whatever phase it was in.
     if(selfChangePending) setSelfChangePending(null);
+    if(retryPending) setRetryPending(null);
     // A7: the clears above just nulled every chip, but this closure's state
     // variables still hold the OLD values — so the offer gate further down must
     // not read them (a message typed over a chip could never get its own
@@ -5419,6 +5461,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       if(fromQuickLog){
         try{ qlSave(athlete.id, workoutHistory, {draft:msg, notes:"", undoStack:[]}); setQuickLogParked(true); }catch(_){}
       }
+      // Offer a one-tap retry so the athlete never has to retype a workout log.
+      setRetryPending(msg);
     }
     setLoading(false);
   };
@@ -5753,7 +5797,23 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
       {/* Quick replies scroll as a continuous "recommendations" ticker — phrases
           split by a glowing blue divider, auto-scrolling, tap a phrase to load it
           (pauses on hover). The session-check prompt stays a static two-button row. */}
-      {sessionCheckPending?(
+      {retryPending?(
+        /* A failed send left the athlete's message in the transcript unprocessed
+           with no way forward but retyping it — and every message here is
+           potentially a multi-line workout log. Same chip pattern as the five
+           confirm flows. */
+        <div className="no-sb" style={{padding:"0 14px 4px",display:"flex",gap:6,overflowX:"auto",flexShrink:0,alignItems:"center",flexWrap:"nowrap"}}>
+          <span style={{color:CA.muted,fontSize:12,flexShrink:0}}>↑</span>
+          <button onClick={()=>{const t=retryPending;setRetryPending(null);send(t);}}
+            style={{background:`${CA.accent}20`,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+            ↻ Retry
+          </button>
+          <button onClick={()=>{setInput(retryPending);setRetryPending(null);}}
+            style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+            Edit it
+          </button>
+        </div>
+      ):sessionCheckPending?(
         <div className="no-sb" style={{padding:"0 14px 4px",display:"flex",gap:6,overflowX:"auto",flexShrink:0,alignItems:"center",flexWrap:"nowrap"}}>
           <span style={{color:CA.muted,fontSize:12,flexShrink:0}}>↑</span>
           <button onClick={()=>confirmSession(false)}
@@ -5952,13 +6012,28 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
                     <pre style={{color:CA.muted2,fontSize:12,lineHeight:1.6,fontFamily:"'DM Sans'",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{athlete.program_text}</pre>
                   </div>
                 )}
-                <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:9,letterSpacing:1,color:CA.amber,textTransform:"uppercase",opacity:0.8,paddingTop:2}}>Resume full program when home →</div>
+                {/* This line used to be static decoration. The ONLY way out of
+                    Field Mode was the parser catching an "I'm back" phrasing, so a
+                    missed phrase left the athlete on the hotel program indefinitely
+                    with their real program on hold. Same revert write as the chat path. */}
+                <button onClick={resumeRegularProgram} disabled={resumingProgram}
+                  style={{background:`${CA.amber}18`,border:`1px solid ${CA.amber}`,color:CA.amber,borderRadius:10,padding:"11px 14px",cursor:resumingProgram?"default":"pointer",fontSize:13,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,opacity:resumingProgram?0.6:1,marginTop:2}}>
+                  {resumingProgram?"RESUMING…":"I'M BACK — RESUME MY PROGRAM"}
+                </button>
               </div>
             ):athlete.program_locked?(
               <>
                 <div style={{background:`${CA.accent}15`,border:`1px solid ${CA.accent}40`,margin:"12px 16px 0",borderRadius:10,padding:"8px 14px",color:CA.accent,fontSize:12}}>
                   🔒 Program locked by coach — contact your coach to make changes.
                 </div>
+                {/* The full Joe-authored change-request flow already exists, but only
+                    fired when chat happened to parse a program-write intent or a
+                    pain/plateau flag — never from the screen where a locked athlete
+                    actually stares at their program. Zero new backend. */}
+                <button onClick={()=>{ setShowProgram(false); startChangeRequestFromProgram(); }}
+                  style={{margin:"10px 16px 0",background:`${CA.accent}20`,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:10,padding:"11px 14px",cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>
+                  REQUEST A CHANGE
+                </button>
                 <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
                   <pre style={{color:CA.text,fontSize:12.5,lineHeight:1.8,fontFamily:"ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>
                     {athlete.program_text}
