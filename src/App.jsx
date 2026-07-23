@@ -11,7 +11,10 @@ const StripePayBlock = lazy(()=>import("./payform.jsx"));
 import { ConsentFlow, LEGAL_VERSION } from "./legal.jsx";
 // Quick Log draft persistence — the rules that let an athlete close the sheet mid-workout
 // and pick it back up (expiry window, staleness check, clear-on-send).
-import { qlLoad, qlSave, qlClear } from "./quicklog.js";
+import {
+  qlLoad, qlSave, qlClear, splitQuickLogReply, streamQuickLogReply,
+  qlMarkUsed, qlPrebuildEligible, qlMarkPrebuilt,
+} from "./quicklog.js";
 // Coach change-request drafting/filing — single source of truth for the rule set
 // governing when Joe offers to loop the human coach in (see file header).
 import { draftChangeRequest, fileChangeRequest, flagToSource } from "./changeRequest.js";
@@ -4401,6 +4404,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // — that message inherited the pure-log flag and silently skipped every
   // program-write and correction branch. Matching on the text scopes it correctly.
   const quickLogPending = useRef(null);
+  // The TODAY'S FOCUS note that came with the draft currently being sent:
+  // {text, note}. The note explains why the session mattered (day intent, key-lift
+  // structure, injury/goal cues) and the app already paid a Sonnet call to write
+  // it — but it was shown once in the sheet and then thrown away on send. Keyed on
+  // the exact draft text, same as quickLogPending, so a later message can't inherit
+  // someone else's note. Stamped onto the workout row as parsed_data.focus_note.
+  const quickLogNote = useRef(null);
   const pendingQuickLogSend = useRef(null); // A12: draft queued while a reply streams — auto-fired when the stream clears
   const [quickLogParked,setQuickLogParked] = useState(false); // an unfinished Quick Log draft is waiting — surfaced on the nav button
   // Re-read whenever the sheet closes (draft just parked) or history moves (they logged, so
@@ -4409,7 +4419,11 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // so the button can never advertise a draft the sheet would then refuse to resume.
   useEffect(()=>{
     if(!athlete?.id || !historyLoaded || !(athlete.temp_program_text||athlete.program_text)){ setQuickLogParked(false); return; }
-    setQuickLogParked(!!qlLoad(athlete.id, workoutHistory));
+    const parked = qlLoad(athlete.id, workoutHistory);
+    // A PRE-BUILT draft is not "the workout you started" — nobody started it. It
+    // opens instantly, but the button keeps saying QUICK LOG so RESUME LOG stays a
+    // true statement about the athlete's own unfinished work.
+    setQuickLogParked(!!parked && !parked.prebuilt);
   },[athlete?.id, athlete?.program_text, athlete?.temp_program_text, historyLoaded, workoutHistory, showQuickLog]);
   // A12: fire a queued Quick Log send the moment the in-flight reply finishes.
   // The closure is fresh from the render where loading flipped, so send() sees
@@ -4625,6 +4639,39 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // Unmount (logout) is also a save point — the cleanup above only cancels.
   useEffect(()=>chatPersistFlush,[]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // BACKGROUND PRE-BUILD. Every input the draft needs (program, history, today's
+  // chat, goals, context) is already in state before the athlete taps QUICK LOG,
+  // yet generation always happened on demand behind a spinner. Building it after
+  // boot means the sheet opens to a finished draft instead of a wait.
+  //
+  // The cost gate lives in quicklog.js: only athletes who actually sent a Quick Log
+  // in the last 14 days, at most once per LOCAL calendar day. Worst case is one
+  // ~$0.01 call per day per active Quick Log user; a new or lapsed athlete never
+  // triggers a speculative call at all. The day is stamped BEFORE the call so a
+  // failing prompt can't retry on every reopen.
+  const prebuiltRef = useRef(false);
+  useEffect(()=>{
+    if(prebuiltRef.current || !historyLoaded || offline) return;
+    if((athlete.tier||"free")==="free") return;
+    if(!(athlete.temp_program_text||athlete.program_text)) return;
+    if(qlLoad(athlete.id, workoutHistory)) return;      // already have a draft to open
+    if(!qlPrebuildEligible(athlete.id)) return;
+    prebuiltRef.current = true;
+    // Deliberately late: the boot batch, the digest read and any restored chat all
+    // come first. This is a convenience, and it must never compete for the
+    // connection with something the athlete is actually waiting on.
+    const t = setTimeout(async ()=>{
+      qlMarkPrebuilt(athlete.id);
+      try{
+        const res = await generateQuickLogDraft({athlete, workoutHistory, messages, goals:athleteGoals, contextNotes:athleteContext});
+        if(res.rest || !res.draft.trim()) return;
+        if(qlLoad(athlete.id, workoutHistory)) return;   // they opened the sheet while we were drafting
+        qlSave(athlete.id, workoutHistory, {draft:res.draft, notes:res.notes, undoStack:[], prebuilt:true});
+      }catch(_){ /* silent: the sheet just drafts on open, exactly as before */ }
+    }, 8000);
+    return ()=>clearTimeout(t);
+  },[historyLoaded,offline]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Drain the offline queue one message at a time, each through the normal send()
   // path — so a replayed workout gets the same parsing, session-gap check and PR
   // detection a live one would. One per pass, gated on nothing else being in
@@ -4638,6 +4685,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     if(!item){ setOutbox([]); return; }
     setOutbox(rest);   // its pending bubble disappears here; send() appends the real one
     if(item.pure) quickLogPending.current = item.text; // a queued Quick Log draft is still a pure log
+    if(item.note) quickLogNote.current = {text:item.text, note:item.note}; // …and keeps its focus note
     send(item.text);
   },[offline,loading,videoLoading,historyLoaded,outbox]); // eslint-disable-line react-hooks/exhaustive-deps
   // Snapshot for the NEXT open. Debounced because `athlete` gets a new object
@@ -4780,7 +4828,14 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       }
     } catch(_) {}
     try {
-      const parsedFinal = isNewSession ? {...parsed,new_session:true} : parsed;
+      let parsedFinal = isNewSession ? {...parsed,new_session:true} : parsed;
+      // Stamp the Quick Log focus note onto the row it belongs to. Matched on the
+      // exact draft text so it can only ever land on its own workout, and consumed
+      // here so a later log can't inherit it.
+      if(quickLogNote.current && quickLogNote.current.text===msg){
+        parsedFinal = {...parsedFinal, focus_note: quickLogNote.current.note};
+        quickLogNote.current = null;
+      }
       // Free tier: no memory — don't persist workouts or PRs
       if(tier==="free"){
         if(addReply) setMessages(prev=>[...prev,{role:"assistant",content:reply}]);
@@ -5350,12 +5405,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     // a program and overwrite program_text.
     if(offline){
       const pure = quickLogPending.current === msg;
+      const note = (quickLogNote.current && quickLogNote.current.text===msg) ? quickLogNote.current.note : null;
       quickLogPending.current = null;
       setInput("");
       // Queued messages render from `outbox`, NOT from `messages` — send() owns the
       // transcript and appends its own copy on replay, so a bubble pushed into
       // `messages` here would survive into that append and show twice.
-      setOutbox(queueOutbox(athlete.id, msg, {pure}));
+      setOutbox(queueOutbox(athlete.id, msg, {pure, note}));
       return;
     }
     // A27: typing while the session-gap question is pending resolves it as "same
@@ -5809,7 +5865,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           const i = withoutBlank.map(m=>m.role==="user"&&m.content===msg).lastIndexOf(true);
           return i===-1 ? withoutBlank : [...withoutBlank.slice(0,i),...withoutBlank.slice(i+1)];
         });
-        setOutbox(queueOutbox(athlete.id, msg, {pure:fromQuickLog}));
+        setOutbox(queueOutbox(athlete.id, msg, {
+          pure: fromQuickLog,
+          note: (quickLogNote.current && quickLogNote.current.text===msg) ? quickLogNote.current.note : null,
+        }));
         setLoading(false);
         return;
       }
@@ -6504,12 +6563,14 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           contextNotes={athleteContext}
           onClose={()=>setShowQuickLog(false)}
           onAddProgram={()=>{setShowQuickLog(false);setShowProgram(true);}}
-          onSend={(text)=>{
+          onSend={(text,focusNote)=>{
             setShowQuickLog(false);
             // Mark THIS draft text as a Quick Log log so send() can never route it
             // into a program overwrite (survives the queued path below too). Keyed
             // on the text, so a different message typed later can't inherit it.
             quickLogPending.current = text;
+            quickLogNote.current = focusNote ? {text, note:focusNote} : null;
+            qlMarkUsed(athlete.id); // this is what makes them eligible for tomorrow's pre-build
             // A12: if a send is in flight, QUEUE the draft and auto-fire it the
             // moment the stream clears (it used to be silently parked in the chat
             // input, unsent — and localStorage was already cleared, so backgrounding
@@ -6783,6 +6844,47 @@ Rules:
 - If the instruction is NOT about editing this draft (a coaching question, chit-chat), return the current draft EXACTLY unchanged.
 - Output ONLY the log text. No commentary, no markdown.`;
 
+// ─── DRAFT GENERATION (shared by the sheet and the background pre-build) ─────
+// Pulled out of QuickLogSheet so the exact same call can run before the athlete
+// taps QUICK LOG. Streams by default: the one-shot version put a 4-8s spinner on
+// the front door of the feature, and the app already had a proven streaming twin
+// (askClaudeStream) built for precisely that reason on the chat side.
+//
+// `onProgress({notes, log, complete})` fires per delta with the reply parsed so far
+// (see streamQuickLogReply) — the focus note renders while the log is still being
+// written. Omit it for the background pre-build, which has nothing to paint.
+const qlTodayStr = () => new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"});
+const qlCtxBlock = (ctx) => `PROGRAM:\n${ctx.program||"(none)"}\n\nCONVERSATION THIS SESSION (what the athlete already told Joe today — HONOR any program day or exercise change stated here over your own inference):\n${ctx.chatLines||"(nothing said yet)"}\n\nWHERE YOU ARE (pick today's session from THIS — the athlete's real position is where they last logged, moved forward; do NOT compute the week from today's date against the program's printed block dates):\n${ctx.whereYouAre||"(nothing logged yet — start at the program's first day, Week 1)"}\n\nRECENT SESSIONS (newest first):\n${ctx.sessionLines||"(none logged yet)"}\n\n1RM CHEAT SHEET:\n${ctx.rmLines||"(none known)"}\n\nGOALS (for the focus note — cite only if a goal maps to a lift in today's session):\n${ctx.goalLines||"(none stated)"}\n\nSAVED CONTEXT (preferences/history worth knowing — use only if relevant to today's lifts):\n${ctx.ctxNotes||"(none)"}\n\nINJURY HISTORY (guard the affected areas; note it only if today's lifts touch them):\n${ctx.injury||"(none)"}\n\nRECENT FORM REVIEWS (past video-check cues — cite one only if it names a movement in today's session):\n${ctx.formReviews||"(none)"}`;
+
+async function generateQuickLogDraft({athlete, workoutHistory, messages, goals, contextNotes, onProgress}) {
+  let manualRMs = [];
+  try{ manualRMs = await sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`)||[]; }catch(_){}
+  const ctx = buildQuickLogContext(athlete, workoutHistory, manualRMs, messages, goals, contextNotes);
+  const user = `Today is ${qlTodayStr()}.\n\n${qlCtxBlock(ctx)}`;
+  let text = "";
+  try{
+    let acc = "";
+    text = await askClaudeStream(QL_DRAFT_SYS, user, {
+      maxTokens:800, model:"claude-sonnet-5", feature:"quick_log_draft",
+      onDelta: onProgress ? (d)=>{
+        acc += d;
+        // A rest day answers with the bare token REST_DAY — don't flash that into
+        // the focus-note box on the way to the rest-day screen.
+        if(acc.trim().startsWith("REST_DAY")) return;
+        onProgress(streamQuickLogReply(acc));
+      } : undefined,
+    });
+  }catch(_streamErr){
+    // Same fallback shape the video-review path uses: a dropped stream degrades to
+    // the old one-shot call rather than to an error screen.
+    text = await askClaude(QL_DRAFT_SYS, user, 800, [], "claude-sonnet-5", "quick_log_draft");
+  }
+  const t = (text||"").trim();
+  if(!t || t==="REST_DAY") return { ctx, rest:true, notes:"", draft:"" };
+  const { notes, log } = splitQuickLogReply(t);
+  return { ctx, rest:false, notes: notes===null ? "" : notes, draft: log };
+}
+
 function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals, contextNotes, onClose, onAddProgram, onSend}) {
   const hasProgram = !!(athlete.temp_program_text||athlete.program_text);
   const [draft,setDraft] = useState("");
@@ -6796,27 +6898,26 @@ function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals,
   const [resumed,setResumed] = useState(false); // drives the "picked up where you left off" banner
   const ctxRef = useRef(null);
 
-  const todayStr = () => new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"});
-  const ctxBlock = (ctx) => `PROGRAM:\n${ctx.program||"(none)"}\n\nCONVERSATION THIS SESSION (what the athlete already told Joe today — HONOR any program day or exercise change stated here over your own inference):\n${ctx.chatLines||"(nothing said yet)"}\n\nWHERE YOU ARE (pick today's session from THIS — the athlete's real position is where they last logged, moved forward; do NOT compute the week from today's date against the program's printed block dates):\n${ctx.whereYouAre||"(nothing logged yet — start at the program's first day, Week 1)"}\n\nRECENT SESSIONS (newest first):\n${ctx.sessionLines||"(none logged yet)"}\n\n1RM CHEAT SHEET:\n${ctx.rmLines||"(none known)"}\n\nGOALS (for the focus note — cite only if a goal maps to a lift in today's session):\n${ctx.goalLines||"(none stated)"}\n\nSAVED CONTEXT (preferences/history worth knowing — use only if relevant to today's lifts):\n${ctx.ctxNotes||"(none)"}\n\nINJURY HISTORY (guard the affected areas; note it only if today's lifts touch them):\n${ctx.injury||"(none)"}\n\nRECENT FORM REVIEWS (past video-check cues — cite one only if it names a movement in today's session):\n${ctx.formReviews||"(none)"}`;
+  const todayStr = qlTodayStr;
+  const ctxBlock = qlCtxBlock;
 
+  // Streams into the sheet: the focus note starts rendering in ~1s and the log
+  // types itself in, instead of 4-8s of "Building today's log…" on the feature's
+  // front door. SEND stays disabled until the stream closes (phase flips to ready).
   const generate = async () => {
-    setPhase("loading");
+    setPhase("loading"); setNotes(""); setDraft("");
     try{
-      let manualRMs = [];
-      try{ manualRMs = await sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`)||[]; }catch(_){}
-      const ctx = buildQuickLogContext(athlete, workoutHistory, manualRMs, messages, goals, contextNotes);
-      ctxRef.current = ctx;
-      const text = await askClaude(QL_DRAFT_SYS, `Today is ${todayStr()}.\n\n${ctxBlock(ctx)}`, 800, [], "claude-sonnet-5", "quick_log_draft");
-      const t = (text||"").trim();
-      if(!t || t==="REST_DAY"){ setNotes(""); setDraft(""); setPhase("rest"); }
-      else {
-        // Split worksheet from log on the "===" separator line. If the model
-        // skipped the worksheet, treat the whole output as the log.
-        const parts = t.split(/\n\s*={3,}\s*\n/);
-        if(parts.length>=2){ setNotes(parts[0].trim()); setDraft(parts.slice(1).join("\n").trim()); }
-        else { setNotes(""); setDraft(t); }
-        setPhase("ready");
-      }
+      const res = await generateQuickLogDraft({
+        athlete, workoutHistory, messages, goals, contextNotes,
+        onProgress: ({notes:n, log})=>{
+          setPhase("streaming");
+          setNotes(n);
+          if(log) setDraft(log);
+        },
+      });
+      ctxRef.current = res.ctx;
+      if(res.rest){ setNotes(""); setDraft(""); setPhase("rest"); }
+      else { setNotes(res.notes); setDraft(res.draft); setPhase("ready"); }
     }catch(e){ setPhase("error"); }
   };
   // Boot: pick up the parked draft, or draft today from scratch. Deliberately waits for the
@@ -6831,7 +6932,10 @@ function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals,
     const parked = qlLoad(athlete.id, workoutHistory);
     if(parked){
       setDraft(parked.draft); setNotes(parked.notes); setUndoStack(parked.undoStack);
-      setResumed(true); setPhase("ready");
+      // Only the athlete's OWN parked work gets the "picked up where you left off"
+      // banner. A background pre-build just opens, instantly, with no explanation
+      // owed — claiming they left off would be a lie about their own session.
+      setResumed(!parked.prebuilt); setPhase("ready");
     } else generate();
   },[historyLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -6884,12 +6988,10 @@ function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals,
       const revised = await askClaude(QL_EDIT_SYS,
         `Today is ${todayStr()}.\n\n${ctxBlock(ctx)}\n\nCURRENT FOCUS NOTE:\n${notes||"(none)"}\n\nCURRENT DRAFT:\n${draft.trim()||"(empty)"}\n\nATHLETE'S INSTRUCTION:\n${ins}`,
         800, [], "claude-sonnet-5", "quick_log_edit");
-      let t = (revised||"").trim();
       // A two-section reply means the day changed and the worksheet was rebuilt
-      // to match; a plain reply is a log-only tweak (worksheet stays put).
-      let newNotes = null;
-      const rparts = t.split(/\n\s*={3,}\s*\n/);
-      if(rparts.length>=2){ newNotes = rparts[0].trim(); t = rparts.slice(1).join("\n").trim(); }
+      // to match; a plain reply is a log-only tweak (worksheet stays put) — which
+      // is exactly why splitQuickLogReply returns null, not "", for "no section".
+      const { notes:newNotes, log:t } = splitQuickLogReply(revised);
       if(t && (t!==draft.trim() || (newNotes!==null && newNotes!==notes))){
         setUndoStack(prev=>[...prev,{draft,notes}]);
         setDraft(t);
@@ -6966,17 +7068,23 @@ function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals,
               <button onClick={startFresh} style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,flexShrink:0,whiteSpace:"nowrap"}}>↻ Start fresh</button>
             </div>
           )}
-          {notes&&phase==="ready"&&(
+          {notes&&(phase==="ready"||phase==="streaming")&&(
             <div style={{flexShrink:0,maxHeight:"30%",overflowY:"auto",background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:10,padding:"10px 12px"}}>
-              <div style={{color:CA.cyan,fontSize:9,fontWeight:700,letterSpacing:1.5,marginBottom:5}}>TODAY'S FOCUS</div>
+              <div style={{color:CA.cyan,fontSize:9,fontWeight:700,letterSpacing:1.5,marginBottom:5,display:"flex",alignItems:"center",gap:6}}>
+                TODAY'S FOCUS
+                {phase==="streaming"&&<span style={{color:CA.muted,fontWeight:400,letterSpacing:0.5,fontSize:9}}>drafting…</span>}
+              </div>
               <div style={{color:CA.muted2,fontSize:12,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{notes}</div>
             </div>
           )}
+          {/* Read-only while the stream is still writing into it — typing into text
+              that's about to be overwritten by the next delta loses the edit. */}
           <textarea
             value={draft}
             onChange={e=>setDraft(e.target.value)}
-            placeholder={phase==="rest"?"Your draft will appear here…":""}
-            style={{flex:1,minHeight:160,background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,padding:"12px 14px",color:CA.text,fontSize:14,outline:"none",resize:"none",lineHeight:1.8,fontFamily:"'DM Sans'"}}
+            readOnly={phase==="streaming"}
+            placeholder={phase==="rest"?"Your draft will appear here…":phase==="streaming"?"Drafting today's log…":""}
+            style={{flex:1,minHeight:160,background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,padding:"12px 14px",color:CA.text,fontSize:14,outline:"none",resize:"none",lineHeight:1.8,fontFamily:"'DM Sans'",opacity:phase==="streaming"?0.85:1}}
           />
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <div style={{color:CA.muted,fontSize:11}}>Tap the draft to edit directly, or tell Joe below.</div>
@@ -7003,14 +7111,14 @@ function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals,
               onChange={e=>setInstruction(e.target.value)}
               onKeyDown={e=>{ if(e.key==="Enter"){ e.preventDefault(); applyInstruction(); } }}
               placeholder="Tell Joe what to change…"
-              disabled={editBusy}
+              disabled={editBusy||phase==="streaming"}
               style={{flex:1,minWidth:0,background:CA.navy,border:`1px solid ${CA.blue}`,borderRadius:10,padding:"11px 13px",color:CA.text,fontSize:13,outline:"none"}}
             />
             <button onClick={()=>setShowEditHelp(v=>!v)} title="Examples"
               style={{background:showEditHelp?`${CA.blue}22`:"none",border:`1px solid ${showEditHelp?CA.blue:CA.border}`,color:showEditHelp?CA.blue:CA.muted2,borderRadius:"50%",width:32,height:32,flexShrink:0,cursor:"pointer",fontSize:14,display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1}}>
               ⓘ
             </button>
-            <button onClick={applyInstruction} disabled={editBusy||!instruction.trim()}
+            <button onClick={applyInstruction} disabled={editBusy||phase==="streaming"||!instruction.trim()}
               style={{background:CA.navy3,border:`1px solid ${CA.blue}`,color:editBusy?CA.muted:CA.blue,borderRadius:10,padding:"11px 16px",cursor:editBusy?"wait":"pointer",fontSize:13,fontWeight:700,flexShrink:0}}>
               {editBusy?"…":"Apply"}
             </button>
@@ -7020,7 +7128,9 @@ function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals,
           {/* Drop the parked copy BEFORE handing the draft off. Once it's logged, resuming it
               would show the athlete a workout they already sent and invite a double-log —
               the one way draft memory could actually corrupt their history. */}
-          <button onClick={()=>{qlClear(athlete.id);onSend(draft.replace(/\s*[@+]\s*_{2,}/g,"").trim());}} disabled={!canSend}
+          {/* The focus note goes WITH the log — it's the record of why this session
+              mattered, and it's already paid for. See parsed_data.focus_note. */}
+          <button onClick={()=>{qlClear(athlete.id);onSend(draft.replace(/\s*[@+]\s*_{2,}/g,"").trim(), notes||null);}} disabled={!canSend}
             style={{background:canSend?CA.accent:CA.navy3,color:canSend?"#000":CA.muted,border:`1px solid ${canSend?CA.accent:CA.border}`,borderRadius:12,padding:"14px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:16,cursor:canSend?"pointer":"not-allowed"}}>
             SEND TO CHAT →
           </button>

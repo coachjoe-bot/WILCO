@@ -181,6 +181,14 @@ reset();
 B.queueOutbox(ATH, "Upper A\nBench 185x5", { pure: true });
 check("pure flag is stored", B.readOutbox(ATH)[0].pure === true);
 check("pure flag survives the shift", B.shiftOutbox(ATH).item.pure === true);
+// The focus note cost a Sonnet call — it must survive the offline gap too.
+reset();
+B.queueOutbox(ATH, "Upper A", { pure: true, note: "Heavy bench day — 89% of your 275." });
+check("focus note is queued with the draft", B.readOutbox(ATH)[0].note === "Heavy bench day — 89% of your 275.");
+check("no note → null, not undefined", B.queueOutbox("other", "x")[0].note === null);
+reset();
+B.queueOutbox(ATH, "Upper A", { note: "x".repeat(5000) });
+check("a runaway note is capped", B.readOutbox(ATH)[0].note.length === 1200);
 reset();
 store.set(B.outboxKey(ATH), JSON.stringify([{ text: "x", at: Date.now(), pure: "yes" }]));
 check("pure is normalized to a boolean", B.readOutbox(ATH)[0].pure === true);
