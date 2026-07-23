@@ -3171,6 +3171,7 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
   const [loading,setLoading] = useState(false);
   const [athleteRow,setAthleteRow] = useState(null); // created athlete (exists before payment)
   const [showConsent,setShowConsent] = useState(false); // T&C + Privacy consent overlay
+  const [codeState,setCodeState] = useState(null); // {status:"checking"|"ok"|"bad", school?:string}
   const setD = (k,v) => setData(p=>({...p,[k]:v}));
   useEffect(()=>{ track("signup_start","auth"); },[]); // activation-funnel top (pre-login)
 
@@ -3184,9 +3185,18 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
   // The ordered list of step numbers actually shown, given the level + tier. Drives
   // the "STEP X OF Y" header and the back/next navigation (so skipped steps stay
   // hidden and the count stays contiguous). Step 13 (recruiting) was removed.
-  const visibleSteps = [1,2,3, ...(competitive?[4]:[]), 5,6,7,8,9, ...(competitive?[10]:[]), 11, ...(student?[12]:[]),
+  // FIVE profile screens (was 9-12, branching by persona). The old wizard asked
+  // one scalar fact per screen (birthday, then height/weight, then gender...) and
+  // put each OPTIONAL field on its own screen, so the most common interaction on
+  // three of them was "tap Next without typing anything". Conditionals are now
+  // conditional BLOCKS inside screen 5 rather than conditional STEPS, so every
+  // athlete sees the same five screens:
+  //   1 who you are · 2 secure it · 3 about you · 4 your training · 5 optional extras
+  // Plan (14) and payment (15) keep their numbers on purpose — the Crunch event
+  // flow jumps straight to setStep(eventCtx?15:14) and school signups skip both.
+  const visibleSteps = [1,2,3,4,5,
     ...(data.isSchool ? [] : eventCtx ? [15] : [14, ...(isPaidTier?[15]:[])])]; // event flow: plan is fixed, skip selection
-  const lastDataStep = student ? 12 : 11;   // final profile question before consent
+  const lastDataStep = 5;   // final profile screen before consent
   const prevStep = () => { const i=visibleSteps.indexOf(step); return i>0 ? visibleSteps[i-1] : null; };
 
   // Insert the athlete once all profile data is collected (step 13). The row must
@@ -3274,10 +3284,16 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
   // parental for 13–17) and create the account. If the athlete already consented +
   // was created on a previous pass (navigated back then forward), don't re-show it —
   // school finishes onboarding; everyone else continues to plan selection.
-  const proceedToConsent = async () => {
+  // `override` carries the just-resolved {coachId,schoolId,isSchool} from screen 5.
+  // setData hasn't flushed when this is called from the same handler, so reading
+  // data.isSchool here would see the PREVIOUS value and route a school athlete to
+  // plan selection. (On a first pass athleteRow is null so this branch is skipped
+  // anyway, but back-navigating after account creation re-enters it.)
+  const proceedToConsent = async (override) => {
     setErr("");
+    const isSchoolNow = override ? override.isSchool : data.isSchool;
     if(athleteRow){
-      if(data.isSchool){
+      if(isSchoolNow){
         setLoading(true);
         try { await finishOnboarding("school", athleteRow); }
         catch(e){ setErr("Connection error."); setLoading(false); }
@@ -3313,6 +3329,35 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
     setView("athlete");
   };
 
+  // Resolve the team code as soon as the athlete leaves the field, not only when
+  // they press Next. Two reasons: they get immediate confirmation the code worked
+  // (it silently did nothing before), and knowing isSchool early is what lets the
+  // button read "Create Account →" for school athletes, who skip plan + payment.
+  // Idempotent — nextStep re-resolves as a fallback if this never ran.
+  const resolveTeamCode = async () => {
+    const code = data.coachCode.trim().toUpperCase();
+    if(!code){ setCodeState(null); setData(p=>({...p,coachId:null,schoolId:null,isSchool:false})); return; }
+    if(codeState?.status==="ok" && codeState.code===code) return; // already resolved
+    setCodeState({status:"checking",code});
+    try {
+      const res = await idApi("resolve-coach-code",{code});
+      if(res.coach){
+        setData(p=>({...p,coachId:res.coach.id,schoolId:res.coach.school_id||null,isSchool:true}));
+        // resolve-coach-code returns the COACH's name (no school name), so say that
+        // rather than inventing a label. Deliberately not adding school_name to the
+        // endpoint: it's unauthenticated, and this shouldn't widen what a guessed
+        // code reveals.
+        setCodeState({status:"ok",code,school:res.coach.name?`${res.coach.name}'s dashboard`:"your team"});
+      } else {
+        setData(p=>({...p,coachId:null,schoolId:null,isSchool:false}));
+        setCodeState({status:"bad",code});
+      }
+    } catch(_){
+      // Network hiccup — don't block signup; nextStep retries before consent.
+      setCodeState(null);
+    }
+  };
+
   const nextStep = async () => {
     setErr("");
     if(step===1){
@@ -3330,49 +3375,41 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
       if(!data.email.trim()||!data.email.includes("@")){setErr("Enter a valid email address.");return;}
       setStep(3);
     } else if(step===3){
-      setStep(competitive?4:5); // non-competitive athletes skip the team code
-    } else if(step===4){
-      // Resolve school membership now so school athletes skip plan + payment.
-      setLoading(true);
-      let coachId=null,schoolId=null,isSchool=false;
-      if(data.coachCode.trim()){
-        try {
-          const res = await idApi("resolve-coach-code",{code:data.coachCode.trim().toUpperCase()});
-          if(res.coach){ coachId=res.coach.id; schoolId=res.coach.school_id||null; isSchool=true; }
-        } catch(_){}
-      }
-      setData(p=>({...p,coachId,schoolId,isSchool}));
-      setLoading(false);
-      setStep(5);
-    } else if(step===5){
-      // Birthday
+      // ABOUT YOU — birthday + height/weight + gender (was three screens). Same
+      // rules, same order, so the first offending field still gets the message.
       if(!data.birthday){setErr("Enter your birthday.");return;}
       const dob = new Date(data.birthday);
       const ageYears = Math.floor((Date.now()-dob)/(365.25*24*60*60*1000));
       if(ageYears<13){setErr("You must be at least 13 to use WILCO.");return;}
       if(ageYears>100){setErr("Enter a valid birthday.");return;}
-      setStep(6);
-    } else if(step===6){
-      // Height + Weight
       if(!data.heightFt||isNaN(data.heightFt)||+data.heightFt<3||+data.heightFt>8){setErr("Enter a valid height.");return;}
       if(!data.weight||isNaN(data.weight)||+data.weight<50||+data.weight>500){setErr("Enter a valid weight.");return;}
-      setStep(7);
-    } else if(step===7){
       if(!data.gender){setErr("Select a gender option.");return;}
-      setStep(8);
-    } else if(step===8){
-      setStep(9);
-    } else if(step===9){
+      setStep(4);
+    } else if(step===4){
+      // YOUR TRAINING — goal + days + equipment (goal and days had no validation
+      // of their own; equipment keeps its at-least-one rule).
       if(data.equipment.length===0){setErr("Select at least one equipment option.");return;}
-      setStep(competitive?10:11); // non-competitive athletes skip position/event
-    } else if(step===10){
-      setStep(11);
-    } else if(step===11){
-      // Injury is the last data step for non-students; students still have grad year.
-      if(student) setStep(12); else await proceedToConsent();
-    } else if(step===12){
-      // graduation_year — optional; final data step for students → consent.
-      await proceedToConsent();
+      setStep(5);
+    } else if(step===5){
+      // OPTIONAL EXTRAS — team code, position, injuries, grad year. Nothing here is
+      // required, so this screen only resolves the team code (which decides whether
+      // the athlete is school-billed and therefore skips plan + payment) and moves
+      // to consent. Team-code resolution stays exactly where it was in the flow:
+      // immediately before account creation.
+      setLoading(true);
+      let coachId=null,schoolId=null,isSchool=false;
+      if(competitive && data.coachCode.trim()){
+        try {
+          const res = await idApi("resolve-coach-code",{code:data.coachCode.trim().toUpperCase()});
+          if(res.coach){ coachId=res.coach.id; schoolId=res.coach.school_id||null; isSchool=true; }
+        } catch(_){}
+      }
+      // proceedToConsent reads `data`, and this setData won't have flushed yet —
+      // so hand the resolved membership straight through instead of relying on it.
+      setData(p=>({...p,coachId,schoolId,isSchool}));
+      setLoading(false);
+      await proceedToConsent({coachId,schoolId,isSchool});
     } else if(step===14){
       // Plan selection
       if(data.tier==="free"){
@@ -3494,8 +3531,55 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
             placeholder="you@email.com" style={inpA()}/>
         </div>
       </>}
+      {/* ── Step 3: ABOUT YOU — birthday + size + gender (was 3 screens) ── */}
       {step===3&&<>
-        <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>What's your primary training goal? Joe-bot tailors every recommendation to this.</div>
+        <div style={{color:CA.muted2,fontSize:13,marginBottom:18,lineHeight:1.6}}>A few basics so Joe can calibrate your benchmarks and program targets. Not stored publicly.</div>
+        <div style={{marginBottom:16}}>
+          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>BIRTHDAY</label>
+          <input type="date" value={data.birthday}
+            onChange={e=>setD("birthday",e.target.value)}
+            max={localISODate()}
+            style={inpA({colorScheme:"dark"})}/>
+        </div>
+        <div style={{marginBottom:16}}>
+          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>HEIGHT</label>
+          <div style={{display:"flex",gap:8}}>
+            <div style={{flex:1,position:"relative"}}>
+              <input type="number" inputMode="numeric" min={3} max={8} value={data.heightFt}
+                onChange={e=>setD("heightFt",e.target.value)} placeholder="5" style={inpA({textAlign:"center"})}/>
+              <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:CA.muted,fontSize:12,pointerEvents:"none"}}>ft</span>
+            </div>
+            <div style={{flex:1}}>
+              <select value={data.heightIn} onChange={e=>setD("heightIn",e.target.value)} style={inpA({textAlign:"center"})}>
+                {[0,1,2,3,4,5,6,7,8,9,10,11].map(n=><option key={n} value={n}>{n} in</option>)}
+              </select>
+            </div>
+          </div>
+        </div>
+        <div style={{marginBottom:16}}>
+          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>WEIGHT <span style={{color:CA.muted,fontWeight:400}}>(lbs)</span></label>
+          <input type="number" inputMode="numeric" min={50} max={500} value={data.weight}
+            onChange={e=>setD("weight",e.target.value)} placeholder="e.g. 185" style={inpA()}/>
+        </div>
+        <div style={{marginBottom:20}}>
+          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:8}}>SEX <span style={{color:CA.muted,fontWeight:400}}>(calibrates strength standards)</span></label>
+          <div style={{display:"flex",gap:8}}>
+            {["Male","Female"].map(g=>(
+              <div key={g} onClick={()=>setD("gender",g)}
+                style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:9,cursor:"pointer",padding:"13px 10px",background:data.gender===g?`${CA.accent}18`:CA.navy3,borderRadius:10,border:`2px solid ${data.gender===g?CA.accent:CA.border}`,transition:"all 0.15s"}}>
+                <div style={{width:18,height:18,borderRadius:"50%",border:`2px solid ${data.gender===g?CA.accent:CA.muted}`,background:data.gender===g?CA.accent:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                  {data.gender===g&&<span style={{color:"#000",fontSize:9,fontWeight:700}}>✓</span>}
+                </div>
+                <div style={{color:CA.text,fontWeight:600,fontSize:14}}>{g}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </>}
+      {/* ── Step 4: YOUR TRAINING — goal + days + equipment (was 3 screens) ── */}
+      {step===4&&<>
+        <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>What are you training for, and what have you got to train with? Joe tailors every recommendation to this.</div>
+        <div style={{color:CA.muted,fontSize:11,letterSpacing:1,marginBottom:8}}>PRIMARY GOAL</div>
         {[
           {key:"strength",label:"Get Stronger",sub:"Maximal strength — squat, deadlift, bench, Olympic lifts"},
           {key:"sport",label:"Sport Performance",sub:"Explosiveness, speed, and conditioning for my sport"},
@@ -3514,33 +3598,84 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
             </div>
           </div>
         ))}
+        <div style={{color:CA.muted,fontSize:11,letterSpacing:1,margin:"18px 0 8px"}}>DAYS PER WEEK</div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          {[2,3,4,5,6].map(d=>(
+            <div key={d} onClick={()=>setD("trainingDays",d)}
+              style={{flex:"1 1 60px",padding:"14px 8px",textAlign:"center",cursor:"pointer",background:data.trainingDays===d?`${CA.accent}18`:CA.navy3,borderRadius:10,border:`2px solid ${data.trainingDays===d?CA.accent:CA.border}`,transition:"all 0.15s"}}>
+              <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:data.trainingDays===d?CA.accent:CA.muted2,lineHeight:1}}>{d}</div>
+              <div style={{color:CA.muted,fontSize:10,marginTop:2}}>days</div>
+            </div>
+          ))}
+        </div>
+        <div style={{color:CA.muted,fontSize:11,letterSpacing:1,margin:"18px 0 8px"}}>WHERE YOU TRAIN <span style={{color:CA.muted,fontWeight:400,letterSpacing:0}}>(select all that apply)</span></div>
+        {["Full gym","Barbells & racks","Dumbbells only","Bodyweight only","Home gym (mixed)"].map(eq=>{
+          const selected = data.equipment.includes(eq);
+          return (
+            <div key={eq} onClick={()=>setD("equipment",selected?data.equipment.filter(e=>e!==eq):[...data.equipment,eq])}
+              style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",marginBottom:8,padding:"12px 16px",background:selected?`${CA.accent}18`:CA.navy3,borderRadius:10,border:`2px solid ${selected?CA.accent:CA.border}`,transition:"all 0.15s"}}>
+              <div style={{width:20,height:20,borderRadius:4,border:`2px solid ${selected?CA.accent:CA.muted}`,background:selected?CA.accent:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                {selected&&<span style={{color:"#000",fontSize:10,fontWeight:700}}>✓</span>}
+              </div>
+              <div style={{color:CA.text,fontWeight:600,fontSize:14}}>{eq}</div>
+            </div>
+          );
+        })}
         <div style={{marginBottom:12}}/>
       </>}
-      {step===4&&<>
-        <div style={{color:CA.muted2,fontSize:13,marginBottom:6,lineHeight:1.6}}>
-          Are you training with a school or team on WILCO?
+      {/* ── Step 5: OPTIONAL EXTRAS — team code, position, injuries, grad year.
+             Every field here is optional and each used to own a whole screen, so
+             the most common interaction was tapping Next without typing. The
+             persona conditionals are BLOCKS now, not separate steps. ── */}
+      {step===5&&<>
+        <div style={{color:CA.muted2,fontSize:13,marginBottom:18,lineHeight:1.6}}>Last bit — all optional. Anything you add here just makes Joe's advice sharper.</div>
+        {competitive&&(
+          <div style={{marginBottom:16,background:`${CA.accent}0f`,border:`1px solid ${CA.accent}44`,borderRadius:10,padding:"12px 14px"}}>
+            <label style={{color:CA.accent,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>TEAM CODE <span style={{color:CA.muted,fontWeight:400,textTransform:"none",letterSpacing:0}}>(from your coach or athletic director)</span></label>
+            <input value={data.coachCode} onChange={e=>{setD("coachCode",e.target.value.toUpperCase());setCodeState(null);}}
+              onBlur={resolveTeamCode}
+              placeholder="e.g. LHS01" style={inpA({textTransform:"uppercase",letterSpacing:3,fontWeight:700})}/>
+            {codeState?.status==="checking"&&<div style={{color:CA.muted,fontSize:11,marginTop:6}}>Checking code…</div>}
+            {codeState?.status==="ok"&&<div style={{color:CA.green,fontSize:11.5,marginTop:6,fontWeight:600}}>✓ You'll be connected to {codeState.school}</div>}
+            {codeState?.status==="bad"&&<div style={{color:CA.amber,fontSize:11.5,marginTop:6}}>We couldn't find that code — double-check it, or leave it blank and join on your own.</div>}
+            <div style={{color:CA.muted,fontSize:11,marginTop:6,lineHeight:1.5}}>Connects you to their dashboard automatically. Training on your own? Leave it blank.</div>
+            <div style={{marginTop:12}}>
+              <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH'S NAME</label>
+              <input value={data.coachName} onChange={e=>setD("coachName",e.target.value)} autoComplete="off"
+                placeholder="Coach Smith" style={inpA()}/>
+            </div>
+            <div style={{marginTop:12}}>
+              <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH'S EMAIL</label>
+              <input type="email" value={data.coachEmail} onChange={e=>setD("coachEmail",e.target.value)} autoComplete="off"
+                placeholder="coach@school.edu" style={inpA()}/>
+              <div style={{color:CA.muted,fontSize:11,marginTop:6,lineHeight:1.5}}>Pro/Elite: coach gets weekly progress reports. All tiers: coach gets a welcome email.</div>
+            </div>
+          </div>
+        )}
+        {competitive&&(
+          <div style={{marginBottom:16}}>
+            <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>POSITION OR EVENT</label>
+            <input value={data.positionOrEvent} onChange={e=>setD("positionOrEvent",e.target.value)}
+              placeholder="e.g. Linebacker, 100m sprints, Power lifter..."
+              style={inpA()}/>
+          </div>
+        )}
+        <div style={{marginBottom:16}}>
+          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>INJURIES OR LIMITATIONS</label>
+          <textarea value={data.injuryHistory} onChange={e=>setD("injuryHistory",e.target.value)}
+            placeholder="e.g. Left knee surgery 2022, lower back tightness..."
+            rows={3}
+            style={{...inpA(),resize:"none",lineHeight:1.5}}/>
+          <div style={{color:CA.muted,fontSize:11,marginTop:6,lineHeight:1.5}}>Helps Joe give safer recommendations.</div>
         </div>
-        <div style={{color:CA.muted,fontSize:12,marginBottom:16,lineHeight:1.6}}>
-          If your coach or athletic director gave you a team code, enter it below — it connects you to their dashboard automatically. <span style={{color:CA.text,fontWeight:600}}>Training on your own? Just leave this blank and hit Next.</span>
-        </div>
-        {/* Team code — joins athlete to a specific coach's dashboard */}
-        <div style={{marginBottom:14,background:`${CA.accent}0f`,border:`1px solid ${CA.accent}44`,borderRadius:10,padding:"12px 14px"}}>
-          <label style={{color:CA.accent,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>TEAM CODE <span style={{color:CA.muted,fontWeight:400,textTransform:"none",letterSpacing:0}}>(optional — from your coach or athletic director)</span></label>
-          <input value={data.coachCode} onChange={e=>setD("coachCode",e.target.value.toUpperCase())}
-            placeholder="e.g. LHS01" style={inpA({textTransform:"uppercase",letterSpacing:3,fontWeight:700})}/>
-          <div style={{color:CA.muted,fontSize:11,marginTop:6,lineHeight:1.5}}>No team code? No problem — WILCO works great on its own.</div>
-        </div>
-        <div style={{marginBottom:14}}>
-          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH'S NAME <span style={{color:CA.muted,fontWeight:400}}>(optional)</span></label>
-          <input value={data.coachName} onChange={e=>setD("coachName",e.target.value)} autoComplete="off"
-            placeholder="Coach Smith" style={inpA()}/>
-        </div>
-        <div style={{marginBottom:20}}>
-          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH'S EMAIL <span style={{color:CA.muted,fontWeight:400}}>(optional)</span></label>
-          <input type="email" value={data.coachEmail} onChange={e=>setD("coachEmail",e.target.value)} autoComplete="off"
-            placeholder="coach@school.edu" style={inpA()}/>
-          <div style={{color:CA.muted,fontSize:11,marginTop:6,lineHeight:1.5}}>Pro/Elite: coach gets weekly progress reports. All tiers: coach gets a welcome email.</div>
-        </div>
+        {student&&(
+          <div style={{marginBottom:20}}>
+            <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>GRADUATION YEAR</label>
+            <input type="number" inputMode="numeric" value={data.graduationYear}
+              onChange={e=>setD("graduationYear",e.target.value.replace(/\D/g,"").slice(0,4))}
+              placeholder="e.g. 2027" style={inpA({fontSize:20,letterSpacing:2,textAlign:"center"})}/>
+          </div>
+        )}
       </>}
       {/* ── Step 14: Plan selection (last data step) ── */}
       {step===14&&<>
@@ -3566,137 +3701,6 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
           </div>
         )}
       </>}
-      {/* ── Step 5: Birthday ── */}
-      {step===5&&<>
-        <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>When is your birthday? We use this to personalize your program thresholds — not stored publicly.</div>
-        <div style={{marginBottom:20}}>
-          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>BIRTHDAY</label>
-          <input type="date" value={data.birthday}
-            onChange={e=>setD("birthday",e.target.value)}
-            max={localISODate()}
-            style={inpA({colorScheme:"dark"})}/>
-        </div>
-      </>}
-
-      {/* ── Step 6: Height + Weight ── */}
-      {step===6&&<>
-        <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Used to personalize your strength benchmarks and programming targets.</div>
-        <div style={{marginBottom:16}}>
-          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>HEIGHT</label>
-          <div style={{display:"flex",gap:8}}>
-            <div style={{flex:1,position:"relative"}}>
-              <input type="number" inputMode="numeric" min={3} max={8} value={data.heightFt}
-                onChange={e=>setD("heightFt",e.target.value)} placeholder="5" style={inpA({textAlign:"center"})}/>
-              <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:CA.muted,fontSize:12,pointerEvents:"none"}}>ft</span>
-            </div>
-            <div style={{flex:1}}>
-              <select value={data.heightIn} onChange={e=>setD("heightIn",e.target.value)} style={inpA({textAlign:"center"})}>
-                {[0,1,2,3,4,5,6,7,8,9,10,11].map(n=><option key={n} value={n}>{n} in</option>)}
-              </select>
-            </div>
-          </div>
-        </div>
-        <div style={{marginBottom:20}}>
-          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>WEIGHT <span style={{color:CA.muted,fontWeight:400}}>(lbs)</span></label>
-          <input type="number" inputMode="numeric" min={50} max={500} value={data.weight}
-            onChange={e=>setD("weight",e.target.value)} placeholder="e.g. 185" style={inpA()}/>
-        </div>
-      </>}
-
-      {/* ── Step 7: Gender ── */}
-      {step===7&&<>
-        <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Used to calibrate your strength benchmarks.</div>
-        {["Male","Female"].map(g=>(
-          <div key={g} onClick={()=>setD("gender",g)}
-            style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",marginBottom:8,padding:"14px 16px",background:data.gender===g?`${CA.accent}18`:CA.navy3,borderRadius:10,border:`2px solid ${data.gender===g?CA.accent:CA.border}`,transition:"all 0.15s"}}>
-            <div style={{width:20,height:20,borderRadius:"50%",border:`2px solid ${data.gender===g?CA.accent:CA.muted}`,background:data.gender===g?CA.accent:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
-              {data.gender===g&&<span style={{color:"#000",fontSize:10,fontWeight:700}}>✓</span>}
-            </div>
-            <div style={{color:CA.text,fontWeight:600,fontSize:14}}>{g}</div>
-          </div>
-        ))}
-        <div style={{marginBottom:12}}/>
-      </>}
-
-      {/* ── Step 8: Training days/week ── */}
-      {step===8&&<>
-        <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>How many days per week are you available to train?</div>
-        <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:20}}>
-          {[2,3,4,5,6].map(d=>(
-            <div key={d} onClick={()=>setD("trainingDays",d)}
-              style={{flex:"1 1 60px",padding:"16px 8px",textAlign:"center",cursor:"pointer",background:data.trainingDays===d?`${CA.accent}18`:CA.navy3,borderRadius:10,border:`2px solid ${data.trainingDays===d?CA.accent:CA.border}`,transition:"all 0.15s"}}>
-              <div style={{fontFamily:"'Bebas Neue'",fontSize:28,color:data.trainingDays===d?CA.accent:CA.muted2,lineHeight:1}}>{d}</div>
-              <div style={{color:CA.muted,fontSize:10,marginTop:2}}>days</div>
-            </div>
-          ))}
-        </div>
-      </>}
-
-      {/* ── Step 9: Equipment ── */}
-      {step===9&&<>
-        <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Where do you typically train? Select all that apply.</div>
-        {["Full gym","Barbells & racks","Dumbbells only","Bodyweight only","Home gym (mixed)"].map(eq=>{
-          const selected = data.equipment.includes(eq);
-          return (
-            <div key={eq} onClick={()=>setD("equipment",selected?data.equipment.filter(e=>e!==eq):[...data.equipment,eq])}
-              style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",marginBottom:8,padding:"12px 16px",background:selected?`${CA.accent}18`:CA.navy3,borderRadius:10,border:`2px solid ${selected?CA.accent:CA.border}`,transition:"all 0.15s"}}>
-              <div style={{width:20,height:20,borderRadius:4,border:`2px solid ${selected?CA.accent:CA.muted}`,background:selected?CA.accent:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
-                {selected&&<span style={{color:"#000",fontSize:10,fontWeight:700}}>✓</span>}
-              </div>
-              <div style={{color:CA.text,fontWeight:600,fontSize:14}}>{eq}</div>
-            </div>
-          );
-        })}
-        <div style={{marginBottom:12}}/>
-      </>}
-
-      {/* ── Step 10: Position / event (optional) ── */}
-      {step===10&&<>
-        <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Helps Coach Joe give sport-specific advice. You can skip this.</div>
-        <div style={{marginBottom:20}}>
-          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>POSITION OR EVENT <span style={{color:CA.muted,fontWeight:400}}>(optional)</span></label>
-          <input value={data.positionOrEvent} onChange={e=>setD("positionOrEvent",e.target.value)}
-            placeholder="e.g. Linebacker, 100m sprints, Power lifter..."
-            style={inpA()}/>
-        </div>
-        <button onClick={()=>{setErr("");setStep(11);}}
-          style={{background:"none",border:"none",color:CA.muted,fontSize:13,cursor:"pointer",textAlign:"center",width:"100%",marginBottom:12}}>
-          Skip →
-        </button>
-      </>}
-
-      {/* ── Step 11: Injury history (optional) ── */}
-      {step===11&&<>
-        <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Helps Joe-bot give safer recommendations. You can skip this.</div>
-        <div style={{marginBottom:20}}>
-          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>INJURIES OR LIMITATIONS <span style={{color:CA.muted,fontWeight:400}}>(optional)</span></label>
-          <textarea value={data.injuryHistory} onChange={e=>setD("injuryHistory",e.target.value)}
-            placeholder="e.g. Left knee surgery 2022, lower back tightness..."
-            rows={3}
-            style={{...inpA(),resize:"none",lineHeight:1.5}}/>
-        </div>
-        <button onClick={()=>{setErr(""); if(student) setStep(12); else proceedToConsent();}}
-          style={{background:"none",border:"none",color:CA.muted,fontSize:13,cursor:"pointer",textAlign:"center",width:"100%",marginBottom:12}}>
-          Skip →
-        </button>
-      </>}
-
-      {/* ── Step 12: Graduation year (optional) ── */}
-      {step===12&&<>
-        <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>What year do you graduate? Helps track your athletic timeline.</div>
-        <div style={{marginBottom:16}}>
-          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>GRADUATION YEAR <span style={{color:CA.muted,fontWeight:400}}>(optional)</span></label>
-          <input type="number" inputMode="numeric" value={data.graduationYear}
-            onChange={e=>setD("graduationYear",e.target.value.replace(/\D/g,"").slice(0,4))}
-            placeholder="e.g. 2027" style={inpA({fontSize:20,letterSpacing:2,textAlign:"center"})}/>
-        </div>
-        <button onClick={()=>{setErr(""); proceedToConsent();}}
-          style={{background:"none",border:"none",color:CA.muted,fontSize:13,cursor:"pointer",textAlign:"center",width:"100%",marginBottom:12}}>
-          Skip →
-        </button>
-      </>}
-
-      {/* ── Step 15: Payment (Pro/Elite only) ── */}
       {step===15&&(
         <PaymentStep
           athleteId={data.athleteId}
@@ -5358,8 +5362,17 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         } catch(e){}
       }
 
-      // Temporary adapted program — conditions described, extract program from Joe-bot's reply
-      if(parsed.is_temp_program_update && !updatedAthlete.program_locked && !fromQuickLog){
+      // Temporary adapted program — conditions described, extract program from Joe-bot's reply.
+      //
+      // FIELD MODE IS AVAILABLE TO COACH-LOCKED ATHLETES (Will, 2026-07-22). It used
+      // to be gated on !program_locked, which excluded exactly the roster/school
+      // athletes most likely to travel — a locked athlete in a hotel got a chat
+      // answer and nothing saved. This is safe because temp_program_text is a
+      // SEPARATE column: the coach's locked program_text is never read, written or
+      // modified here, only temporarily superseded in what Joe coaches from. The
+      // coach keeps full control — AthleteDetail shows the Field Mode banner with an
+      // "End temp program" button, and the note filed below puts it in their brief.
+      if(parsed.is_temp_program_update && !fromQuickLog){
         try {
           const tempText = await extractProgramText(reply);
           // extractProgramText now returns null on an empty extraction (the raw-input
@@ -5372,7 +5385,29 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             await sbUpdate("athletes",athlete.id,{temp_program_text:tempText});
             updatedAthlete.temp_program_text = tempText;
             setAthlete(prev=>({...prev, temp_program_text: tempText}));
-            followUp("✈️ Got it — I've set a temporary program for while you're away. Tell me when you're back and I'll switch you to your regular programming.");
+            followUp(updatedAthlete.program_locked
+              ? "✈️ Got it — I've set you up with a temporary program for while you're away. Your coach's program is untouched and waiting; I've let them know you're on the road. Tell me when you're back."
+              : "✈️ Got it — I've set a temporary program for while you're away. Tell me when you're back and I'll switch you to your regular programming.");
+            // Leave a coach-visible trace in the program audit trail. Deliberately
+            // NOT coach_context: that table isn't athlete-writable (the write would
+            // 403), and its notes are concatenated into the coach's Edition prompt
+            // (api/trigger-proof-feed.js), so an athlete-authored row there would be
+            // a prompt-injection path into the coach's AI. program_modifications is
+            // athlete-owned, feeds no prompt, and is exactly the "what changed and
+            // why" ledger. Fixed wording — no athlete free text is persisted.
+            // No new push type either; notification policy v2.1 enumerates them, and
+            // the coach's AthleteDetail banner already shows Field Mode live.
+            if(updatedAthlete.coach_id){
+              try{
+                await sbInsert("program_modifications",{
+                  athlete_id: updatedAthlete.id,
+                  modification_type: "field_mode",
+                  description: "Training away from their usual setup — Joe set a temporary program. The coach's program is on hold, not changed.",
+                  old_value: null,
+                  new_value: null,
+                });
+              }catch(_){ /* best-effort — never blocks the athlete's temp program */ }
+            }
           }
         } catch(e){}
       }
