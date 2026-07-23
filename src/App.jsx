@@ -4560,6 +4560,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // fires when the underlying program actually changed — which is exactly the case
   // where keeping local edits would clobber a newer program.
   useEffect(()=>{ setAthleteProgramText(athlete.program_text||""); },[athlete.program_text]);
+  // Field Mode only: reveals the regular-program editor under the "On Hold" card.
+  const [editRegularInField,setEditRegularInField] = useState(false);
   const [athleteProgramSaving,setAthleteProgramSaving] = useState(false);
   const [athleteProgramMsg,setAthleteProgramMsg] = useState("");
   const [athletePhotoProcessing,setAthletePhotoProcessing] = useState(false);
@@ -4576,12 +4578,44 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // ignores the dismissal (that's the point of the persistent entry).
   const [showInstall,setShowInstall] = useState(null); // null | "auto" | "manual" | "milestone"
   const [installMilestone,setInstallMilestone] = useState(0);
+  // FACE ID AT SIGNUP. Enrollment was only ever offered inside LoginScreen, AFTER a
+  // manual PIN login — and thanks to the 3h rolling persistent session a new athlete
+  // may not see that screen for days. So the highest-intent moment (they just chose a
+  // PIN, phone in hand, just saw the install prompt) never offered the app's fastest
+  // sign-in. Same biometricEnroll call, same enrollment record; it just happens here
+  // too. Queued BEHIND the install prompt so the two never stack.
+  const [bioOfferPending,setBioOfferPending] = useState(false);
+  const [showBioOffer,setShowBioOffer] = useState(false);
+  const [bioBusy,setBioBusy] = useState(false);
+  const [bioErr,setBioErr] = useState("");
   useEffect(()=>{
     if(!JUST_SIGNED_UP) return;
     JUST_SIGNED_UP = false;
-    if(isStandalone()||installDismissed()) return;
-    if(deferredInstallPrompt||isIOSSafari()) setShowInstall("auto");
-  },[]);
+    if(!isStandalone() && !installDismissed() && (deferredInstallPrompt||isIOSSafari())) setShowInstall("auto");
+    (async()=>{
+      if(getBioEnrollment("athlete")) return;        // already enrolled on this device
+      if(!athlete?.pin || !athlete?.id) return;      // nothing to store
+      if(!(await biometricSupported())) return;      // no platform authenticator
+      setBioOfferPending(true);
+    })();
+  },[]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(()=>{
+    if(bioOfferPending && !showInstall){ setBioOfferPending(false); setShowBioOffer(true); }
+  },[bioOfferPending,showInstall]);
+  const enableBioNow = async () => {
+    if(bioBusy) return;
+    setBioBusy(true); setBioErr("");
+    try{
+      await biometricEnroll({role:"athlete",userId:athlete.id,name:athlete.name,pin:athlete.pin});
+      track("biometric_enroll","auth",{role:"athlete"});
+      setShowBioOffer(false);
+    }catch(e){
+      // Never trap them here — they're already signed in. The next PIN login
+      // re-offers enrollment through the existing LoginScreen card.
+      setBioErr(e.message||"Couldn't set up Face ID. We'll offer it again next time you sign in.");
+    }
+    setBioBusy(false);
+  };
   // The one re-ask, at the 3rd logged workout (see INSTALL_MILESTONE). Deliberately
   // ignores the signup dismissal — that "not now" was answered before they'd used
   // the app — but spends its own one-shot stamp either way.
@@ -5685,11 +5719,26 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           }
         } catch(e){}
       } else if(parsed.program_create_request && !fromQuickLog){
-        // Athlete asked Joe to BUILD them a program. Joe already wrote it into `reply`;
-        // pull the clean program out of it. Only act if the reply actually contains a
-        // real program (not just clarifying questions).
+        // Athlete asked Joe to BUILD them a program. The conversational reply is
+        // capped at 800 tokens, so it can never BE the program — a dedicated
+        // 3500-token generation call writes the real one (see generateFullProgram).
+        // The model answers NEED_MORE_INFO (→ null) when Joe's reply was really just
+        // clarifying questions, which is what the old length heuristic approximated.
+        // A failure falls back to the previous extract-from-reply behavior rather
+        // than leaving the athlete with nothing.
         try {
-          const generated = await extractProgramText(reply);
+          // Status only — deliberately NOT through followUp, which folds the note
+          // into finalReply and would bake "give me a few seconds" into the saved
+          // bot_reply the coach later reads.
+          setMessages(prev=>[...prev,{role:"assistant",content:"Writing the full version into your Program tab — give me a few seconds."}]);
+          let generated = null;
+          try {
+            generated = await generateFullProgram({
+              athlete: updatedAthlete, workoutHistory, messages, goals: athleteGoals,
+              contextNotes: athleteContext, request: msg, joeReply: reply,
+            });
+          } catch(_genErr){ /* fall through to the legacy extraction below */ }
+          if(!generated) generated = await extractProgramText(reply);
           const looksLikeProgram = generated && generated.trim().length > 120 && generated.trim().split("\n").length > 3;
           if(looksLikeProgram){
             if(hasProgram){
@@ -6520,8 +6569,43 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
                 </div>
                 {athlete.program_text&&(
                   <div style={{border:`1px solid ${CA.border}`,borderRadius:9,padding:12,background:"rgba(10,15,30,.4)"}}>
-                    <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:8.5,letterSpacing:1.5,color:CA.muted,textTransform:"uppercase",marginBottom:8}}>Regular Program — On Hold</div>
-                    <pre style={{color:CA.muted2,fontSize:12,lineHeight:1.6,fontFamily:"'DM Sans'",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{athlete.program_text}</pre>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                      <div style={{flex:1,fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:8.5,letterSpacing:1.5,color:CA.muted,textTransform:"uppercase"}}>Regular Program — On Hold</div>
+                      {/* Field Mode used to render BOTH programs read-only, so an
+                          athlete mid-trip who wanted to fix the program they go back
+                          to had to fake a revert, edit, then re-describe their travel
+                          conditions. Chat-side edits are blocked in temp mode too
+                          (the self-change flow requires non-temp state), so this was
+                          the only door. Writes program_text exactly like the normal
+                          branch — the temp program stays the active one until revert.
+                          Never shown for a coach-LOCKED program. */}
+                      {!athlete.program_locked&&(
+                        <button onClick={()=>setEditRegularInField(v=>!v)}
+                          style={{background:"none",border:`1px solid ${editRegularInField?CA.amber:CA.border}`,color:editRegularInField?CA.amber:CA.muted2,borderRadius:7,padding:"3px 9px",cursor:"pointer",fontSize:10,whiteSpace:"nowrap"}}>
+                          {editRegularInField?"✕ Done":"✎ Edit regular program"}
+                        </button>
+                      )}
+                    </div>
+                    {editRegularInField&&!athlete.program_locked?(
+                      <>
+                        <textarea
+                          value={athleteProgramText}
+                          onChange={e=>setAthleteProgramText(e.target.value)}
+                          rows={10}
+                          style={{width:"100%",boxSizing:"border-box",minHeight:180,background:"rgba(58,123,255,0.03)",border:`1px solid ${athleteProgramText!==(athlete.program_text||"")?CA.amber:CA.line2}`,borderRadius:10,padding:"10px 12px",color:CA.text,fontSize:12,outline:"none",resize:"vertical",lineHeight:1.7,fontFamily:"ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"}}
+                        />
+                        {athleteProgramMsg&&(
+                          <div style={{color:athleteProgramMsg==="Saved."?CA.green:CA.red,fontSize:11,fontWeight:600,textAlign:"center",marginTop:6}}>{athleteProgramMsg}</div>
+                        )}
+                        <button onClick={saveAthleteProgram} disabled={athleteProgramSaving||athleteProgramText===(athlete.program_text||"")}
+                          style={{width:"100%",marginTop:8,background:athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?CA.navy3:CA.amber,color:athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?CA.muted:"#1a1204",border:`1px solid ${athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?CA.border:CA.amber}`,borderRadius:9,padding:"9px 16px",cursor:athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?"not-allowed":"pointer",fontSize:12,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>
+                          {athleteProgramSaving?"Saving...":"Save Regular Program"}
+                        </button>
+                        <div style={{color:CA.muted,fontSize:10,textAlign:"center",marginTop:6,lineHeight:1.5}}>Saved for when you're back. Field Mode stays active until you tap “I'm back”.</div>
+                      </>
+                    ):(
+                      <pre style={{color:CA.muted2,fontSize:12,lineHeight:1.6,fontFamily:"'DM Sans'",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{athlete.program_text}</pre>
+                    )}
                   </div>
                 )}
                 {/* This line used to be static decoration. The ONLY way out of
@@ -6634,6 +6718,28 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
 
       {/* Add-to-Home-Screen prompt (post-signup auto, or manual from Settings) */}
       {showInstall&&<InstallPrompt manual={showInstall==="manual"} milestone={showInstall==="milestone"?installMilestone:0} onClose={closeInstall}/>}
+
+      {/* Face ID offer on the just-signed-up path (see the effect above). Same copy
+          and same enrollment call as the post-PIN-login card in LoginScreen. */}
+      {showBioOffer&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(3,8,20,0.88)",zIndex:310,display:"flex",alignItems:"center",justifyContent:"center",padding:20}} onClick={()=>setShowBioOffer(false)}>
+          <div className="fade-up" onClick={e=>e.stopPropagation()}
+            style={{width:"100%",maxWidth:360,background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:24,textAlign:"center"}}>
+            <div style={{fontSize:34,marginBottom:12}}>⚡️</div>
+            <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:22,letterSpacing:2,marginBottom:8}}>FASTER SIGN-IN</div>
+            <div style={{color:CA.muted2,fontSize:13,lineHeight:1.6,marginBottom:20}}>
+              Use Face ID to sign in next time — no name or PIN to type. You can still use your PIN anytime.
+            </div>
+            {bioErr&&<div style={{color:CA.red,fontSize:12,marginBottom:12}}>{bioErr}</div>}
+            <button onClick={enableBioNow} disabled={bioBusy} style={btn(CA.accent,"#000",{opacity:bioBusy?0.7:1,cursor:bioBusy?"not-allowed":"pointer"})}>
+              {bioBusy?"Setting up…":"Enable Face ID"}
+            </button>
+            <div style={{marginTop:10}}>
+              <button onClick={()=>setShowBioOffer(false)} disabled={bioBusy} style={{background:"none",border:"none",color:CA.muted,fontSize:12,cursor:"pointer"}}>Not now</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Progress Modal */}
       {showProgress&&(
@@ -6884,6 +6990,68 @@ Rules:
 // written. Omit it for the background pre-build, which has nothing to paint.
 const qlTodayStr = () => new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"});
 const qlCtxBlock = (ctx) => `PROGRAM:\n${ctx.program||"(none)"}\n\nCONVERSATION THIS SESSION (what the athlete already told Joe today — HONOR any program day or exercise change stated here over your own inference):\n${ctx.chatLines||"(nothing said yet)"}\n\nWHERE YOU ARE (pick today's session from THIS — the athlete's real position is where they last logged, moved forward; do NOT compute the week from today's date against the program's printed block dates):\n${ctx.whereYouAre||"(nothing logged yet — start at the program's first day, Week 1)"}\n\nRECENT SESSIONS (newest first):\n${ctx.sessionLines||"(none logged yet)"}\n\n1RM CHEAT SHEET:\n${ctx.rmLines||"(none known)"}\n\nGOALS (for the focus note — cite only if a goal maps to a lift in today's session):\n${ctx.goalLines||"(none stated)"}\n\nSAVED CONTEXT (preferences/history worth knowing — use only if relevant to today's lifts):\n${ctx.ctxNotes||"(none)"}\n\nINJURY HISTORY (guard the affected areas; note it only if today's lifts touch them):\n${ctx.injury||"(none)"}\n\nRECENT FORM REVIEWS (past video-check cues — cite one only if it names a movement in today's session):\n${ctx.formReviews||"(none)"}`;
+
+// ─── "BUILD ME A PROGRAM" ────────────────────────────────────────────────────
+// The saved program is the athlete's single most-referenced artifact — it's
+// injected into every future chat and drives every Quick Log draft. It used to be
+// whatever could be extracted from Joe's normal chat REPLY, and chat replies are
+// hard-capped at 800 tokens (then re-capped at 800 by extractProgramText). So a
+// 4-day multi-week program was structurally squeezed into a fraction of what the
+// check-in rewrite path (1600) or the coach merge path (4000) already allows: the
+// artifact was shallow by construction, not by the model's judgment.
+//
+// This is a SECOND, dedicated call at 3500 tokens with the athlete's full context
+// (the same block Quick Log builds — profile, goals, real training history, 1RMs,
+// injuries). The chat reply stays short and conversational; the saved program gets
+// real depth.
+const PROGRAM_GEN_SYS = `You are Coach Joe, a strength coach writing a COMPLETE training program for one athlete.
+
+Write the program itself — nothing else. No preamble, no sign-off, no "here's your program", no commentary about what you did or why. The output is saved verbatim into the athlete's Program tab and is read back to them every session, so it must stand alone as a document.
+
+REQUIREMENTS
+- Cover a full training block: at least 4 weeks of progression, laid out so the athlete can see what changes week to week (either a week-by-week layout or a clearly stated progression rule per lift).
+- One clearly labeled session per training day, matching the athlete's stated days per week.
+- Every exercise gets sets x reps AND a load prescription. Use real numbers off their known 1RMs/recent working weights where you have them (percentages are fine, but state the resulting weight when you can). Where you genuinely don't know a load, prescribe by RPE or by "start at X and add Y per week" — never leave a lift blank.
+- Respect their equipment. Never program a lift they can't perform with what they have.
+- Respect their injury history: avoid or substitute movements that aggravate it, and say what the substitution is.
+- Order each session sensibly: main lift(s) first, accessories after, conditioning last.
+- Include warm-up guidance once at the top rather than repeating it per day.
+
+FORMAT
+Plain text. Clear headers for weeks and days. One exercise per line. No markdown tables, no emoji.
+
+IF YOU CANNOT BUILD IT
+If the athlete's request genuinely cannot be answered without information you don't have and can't reasonably assume from their profile, reply with exactly: NEED_MORE_INFO`;
+
+async function generateFullProgram({athlete, workoutHistory, messages, goals, contextNotes, request, joeReply}) {
+  let manualRMs = [];
+  try{ manualRMs = await sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`)||[]; }catch(_){}
+  const ctx = buildQuickLogContext(athlete, workoutHistory, manualRMs, messages, goals, contextNotes);
+  const profile = [
+    athlete.sport && `Sport: ${athlete.sport}`,
+    athlete.position_or_event && `Position/event: ${athlete.position_or_event}`,
+    athlete.level && `Level: ${athlete.level}`,
+    athlete.age && `Age: ${athlete.age}`,
+    athlete.weight_lbs && `Bodyweight: ${athlete.weight_lbs} lbs`,
+    athlete.training_days_per_week && `Training days per week: ${athlete.training_days_per_week}`,
+    athlete.equipment && `Equipment available: ${athlete.equipment}`,
+  ].filter(Boolean).join("\n");
+  const text = await askClaude(
+    PROGRAM_GEN_SYS,
+    `ATHLETE PROFILE:\n${profile||"(sparse — assume a standard commercial gym and 4 days/week)"}\n\n`+
+    `WHAT THEY ASKED FOR:\n${request}\n\n`+
+    `WHAT YOU ALREADY TOLD THEM IN CHAT (build the program that matches this — do not contradict it):\n${joeReply||"(nothing specific)"}\n\n`+
+    `GOALS:\n${ctx.goalLines||"(none stated)"}\n\n`+
+    `1RM CHEAT SHEET (use these to set real loads):\n${ctx.rmLines||"(none known — prescribe by RPE and progression instead)"}\n\n`+
+    `RECENT SESSIONS (newest first — their true current working weights):\n${ctx.sessionLines||"(nothing logged yet)"}\n\n`+
+    `INJURY HISTORY:\n${ctx.injury||"(none)"}\n\n`+
+    `SAVED CONTEXT:\n${ctx.ctxNotes||"(none)"}`,
+    3500, [], "claude-sonnet-5", "program_generate"
+  );
+  const t = (text||"").trim();
+  if(!t || /^NEED_MORE_INFO/i.test(t)) return null;
+  return t;
+}
 
 async function generateQuickLogDraft({athlete, workoutHistory, messages, goals, contextNotes, onProgress}) {
   let manualRMs = [];
