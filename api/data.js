@@ -21,9 +21,18 @@
 //       schools are master-only, and coaches-table writes are admin-only (own school).
 
 import { applyCors, httpErr, str, sbWrite, sbSelect, authCaller, tryTokenAuth, logError, authThrottle, clientIp } from "./_supa.js";
-import { notifyCoach } from "./_push.js";
 
 const enc = encodeURIComponent;
+
+// Coach alert sender, imported LAZILY: ./_push.js pulls in web-push (~34ms of
+// module init), and this is the app's hottest route — every write and every
+// scoped read lands here, while a coach alert fires only on the rare workout
+// row carrying pain flags or a genuinely-improved PR. Loading it on demand
+// keeps that cost off the cold start of the other 99% of calls.
+const notifyCoachLazy = async (...args) => {
+  const { notifyCoach } = await import("./_push.js");
+  return notifyCoach(...args);
+};
 
 // Tables the app legitimately writes. Anything else is rejected outright.
 const WRITABLE = new Set([
@@ -368,7 +377,7 @@ export default async function handler(req, res) {
       catch (e) { console.error("[data] coach alert prep failed:", e.message); }
       const json = await sbWrite({ method: "POST", table, body: body.data });
       if (coachAlert) {
-        try { await notifyCoach(coachAlert.coachId, coachAlert.prefKey, coachAlert.msg); }
+        try { await notifyCoachLazy(coachAlert.coachId, coachAlert.prefKey, coachAlert.msg); }
         catch (e) { console.error("[data] coach alert send failed:", e.message); }
       }
       return res.status(200).json(json);
@@ -456,7 +465,32 @@ const getPD = (r) => {
   if (typeof pd === "string") { try { return JSON.parse(pd); } catch { return {}; } }
   return pd || {};
 };
+// Lift grouping goes through the SAME canonical funnel as every other surface
+// (resolveLift, see the taxonomy header in src/grit.js). Keying by raw lowercased
+// name here would repeat the exact defect this release fixes on the client: a PR
+// on "Squats"/"RDL"/"DB Bench" would compare against an empty bucket and the
+// coach's big-PR alert would silently never fire for those lifts. Imported
+// lazily alongside the sender so the hot path doesn't pay for it.
 const epley = (w, r) => (!w || w <= 0) ? 0 : Math.round(w * (1 + (r || 1) / 30));
+const toLbsSrv = (w, unit) => (unit === "kg" ? Math.round(Number(w || 0) * 2.20462) : Number(w || 0));
+
+// Which of `rows` beat the athlete's existing best for the SAME canonical lift?
+// Pure (resolveLift injected) so scripts/test-coach-alerts.mjs can exercise it
+// without a DB or the web-push import. A lift with no prior row returns nothing:
+// a first-ever PR is a baseline, not news worth pushing to a coach.
+export function pickImprovedPRs(existing, rows, resolveLift) {
+  const e1Of = (p) => p.estimated_1rm || epley(toLbsSrv(p.weight, p.unit), p.reps);
+  const bestByEx = {};
+  for (const p of existing || []) {
+    const k = resolveLift(p.exercise || "").id;
+    const e1 = e1Of(p);
+    if (e1 > (bestByEx[k] || 0)) bestByEx[k] = e1;
+  }
+  return (rows || []).filter((r) => {
+    const k = resolveLift(r.exercise || "").id;
+    return bestByEx[k] && e1Of(r) > bestByEx[k];
+  });
+}
 
 async function prepCoachAlert(caller, table, data) {
   if (caller.role !== "athlete") return null;
@@ -480,20 +514,12 @@ async function prepCoachAlert(caller, table, data) {
 
   if (table === "prs") {
     // "Big PR" = a true improvement over an existing best (first-ever PR rows are
-    // baselines, not news). Compare against pre-insert state.
-    const existing = await sbSelect("prs", `?athlete_id=eq.${enc(caller.id)}&select=exercise,weight,reps,estimated_1rm`);
+    // baselines, not news). Compare against pre-insert state, grouped by canonical
+    // lift id, with both sides converted to lbs so a kg-logged row ranks correctly.
+    const existing = await sbSelect("prs", `?athlete_id=eq.${enc(caller.id)}&select=exercise,weight,reps,unit,estimated_1rm`);
     if (!existing.length) return null;
-    const bestByEx = {};
-    for (const p of existing) {
-      const k = String(p.exercise || "").toLowerCase().trim();
-      const e1 = p.estimated_1rm || epley(p.weight, p.reps);
-      if (e1 > (bestByEx[k] || 0)) bestByEx[k] = e1;
-    }
-    const improved = rows.filter((r) => {
-      const k = String(r.exercise || "").toLowerCase().trim();
-      const e1 = r.estimated_1rm || epley(r.weight, r.reps);
-      return bestByEx[k] && e1 > bestByEx[k];
-    });
+    const { resolveLift } = await import("./_grit.js");
+    const improved = pickImprovedPRs(existing, rows, resolveLift);
     if (!improved.length) return null;
     const athlete = (await sbSelect("athletes", `?id=eq.${enc(caller.id)}&select=id,name,coach_id`))[0];
     if (!athlete?.coach_id) return null;
