@@ -149,6 +149,30 @@ check("recent with summary → summary line", G({ dAgo: 0 }).includes("Squat 315
 check("recent with no summary → plain prompt", G({ dAgo: 0, summary: "" }) === "What's up, Marcus. What did you get after today?");
 check("day count is rendered, not rounded away", G({ dAgo: 12 }).includes("12 days"));
 
+// ─── OPEN-TO-TODAY'S-SESSION OPENER ──────────────────────────────────────────
+// Eligibility gates who opens straight into today's session vs. the plain greeting.
+const elig = (o) => B.openerEligibleFor({ first_chat_complete: true, tier: "pro", program_text: "Day 1 Bench 5x5", ...o });
+check("paid + program + returning → eligible", elig({}) === true);
+check("temp program alone counts", elig({ program_text: undefined, temp_program_text: "Hotel: DB press" }) === true);
+check("free tier → not eligible", elig({ tier: "free" }) === false);
+check("missing tier defaults to free → not eligible", elig({ tier: undefined }) === false);
+check("no program on file → not eligible", elig({ program_text: undefined }) === false);
+check("first chat not done → not eligible", elig({ first_chat_complete: false }) === false);
+check("null athlete → not eligible", B.openerEligibleFor(null) === false);
+
+// The opener frames the resolved draft as a session to RUN. Draft line 1 is the day
+// label; it gets woven into the lead, and the exercises follow.
+const DRAFT = "Day 5 – Push B\n\nBench 5x5 @ 185\nWeighted Dips 3x8 +25";
+const op = B.buildTodayOpener({ name: "Marcus", dAgo: 1, draft: DRAFT });
+check("opener names the athlete", op.startsWith("What's up, Marcus."));
+check("opener weaves in the day label", op.includes("Here's today — Day 5 – Push B:"));
+check("opener does not duplicate the day label", op.split("Day 5 – Push B").length === 2);
+check("opener carries the exercise lines with numbers", op.includes("Bench 5x5 @ 185") && op.includes("Weighted Dips 3x8 +25"));
+check("opener closes with a run-it cue", op.includes("log it here when you're done"));
+const opLapsed = B.buildTodayOpener({ name: "Marcus", dAgo: 6, draft: DRAFT });
+check("lapsed athlete still gets the days-since nudge", opLapsed.includes("6 days since your last log"));
+check("empty draft → empty opener (caller falls back to greeting)", B.buildTodayOpener({ name: "Marcus", dAgo: 1, draft: "" }) === "");
+
 // ─── 3. OFFLINE OUTBOX ───────────────────────────────────────────────────────
 
 reset();

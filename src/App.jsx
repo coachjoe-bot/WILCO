@@ -21,7 +21,7 @@ import { ConsentFlow, LEGAL_VERSION } from "./legal.jsx";
 // and pick it back up (expiry window, staleness check, clear-on-send).
 import {
   qlLoad, qlSave, qlClear, splitQuickLogReply, streamQuickLogReply,
-  qlMarkUsed, qlPrebuildEligible, qlMarkPrebuilt,
+  qlMarkUsed, qlPrebuildEligible, qlMarkPrebuilt, openerLoad, openerSave,
 } from "./quicklog.js";
 // Coach change-request drafting/filing — single source of truth for the rule set
 // governing when Joe offers to loop the human coach in (see file header).
@@ -38,7 +38,7 @@ export { isFullProgramEcho };
 // Boot layer: is this build still the deployed one, the warm-reopen snapshot, and
 // the offline send queue. Storage/pure rules with their own suite (test-boot.mjs).
 import {
-  runningAssetPaths, isStaleBuild, buildGreeting,
+  runningAssetPaths, isStaleBuild, buildGreeting, openerEligibleFor, buildTodayOpener,
   saveSnapshot, loadSnapshot, pruneSnapshots,
   queueOutbox, readOutbox, shiftOutbox,
 } from "./boot.js";
@@ -1336,7 +1336,11 @@ PROGRAM REVIEW (athlete asks you to look at / review / give thoughts on their pr
 - Assume a real program (whether it came from you, another coach, or the athlete) is fundamentally sound. Lead with what's working and WHY it fits their goal. Do NOT hunt for flaws or nitpick to seem useful.
 - Only raise something if it genuinely conflicts with their goal, their sport's demands, a known injury, or basic recovery/safety — and when you do, frame it as one specific, optional adjustment with the reason. No vague "you could add more X."
 - If the program is solid, say so plainly and stop. A short "This lines up well with your [goal] — here's what I'd keep an eye on" is a complete answer. At most 1-2 suggestions; never a teardown.
-- "What's my workout today?" → read their program, match today's day, and give exactly that session (exercises, sets, reps). Don't review it unless asked.
+- "What's my workout today?" (also "what am I doing today", "show me today's workout", "what's on for today") → read their program, match today's day, and give exactly that session as a ready-to-run list: ONE line per exercise, "Name SETSxREPS @ WEIGHT" (weighted bodyweight "Weighted Pull-ups 3x8 +25", plain bodyweight "Push-ups 3x20", timed holds "Plank 3x60s"). Turn every load into an ACTUAL NUMBER so they can start without doing math — check in this exact order and STOP at the first that applies:
+  1. A working weight the program already states for that lift (e.g. "Bench 3x5 @ 185") → use that number exactly as written. Never recompute it.
+  2. Only if the program gives a percentage / RPE instead → that percentage x their 1RM from the ESTIMATED 1RMs list, rounded to the NEAREST 5 lbs.
+  3. Only if the program gives neither → what they lifted last time on that exercise (from the workout history above).
+  If none of the three give a number, write the weight as "@ ___" (or "+___" for added-load bodyweight) — a visible blank beats a guessed number. Include only the exercises programmed for today; don't review or add commentary unless they ask.
 
 SPORT PRACTICE + TRAINING LOAD:
 - Sport practices (practice, game, scrimmage, team conditioning) count as real workouts. A 2-hour basketball practice is significant physical stress — treat it as such.
@@ -1402,6 +1406,30 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
     pastContext = `\n\nATHLETE WORKOUT HISTORY (most recent first):\n${recent}\nWhen asked what they did on a specific day or recently, reference these exact dates and numbers.`;
   }
 
+  // 1RM cheat sheet so "what's my workout today" can turn program percentages into
+  // real weights (weight hierarchy step 2). Best e1RM per lift from logged history,
+  // grouped through resolveLift so aliases collapse — same rule as the Progress
+  // modal and the Quick Log draft. History-derived only: no manual_one_rms read on
+  // every chat turn (the Quick Log opener path already overlays those). If the
+  // program states a working weight or the athlete has no history for a lift, this
+  // list simply isn't used for that lift — the hierarchy handles it.
+  let maxContext = "";
+  if(workoutHistory?.length>0){
+    const bw = athlete.weight_lbs;
+    const byEx = {};
+    workoutHistory.forEach(w=>{ (w.parsed_data?.exercises||[]).forEach(ex=>{
+      if(!ex.name) return;
+      const e1 = bestE1RMForExercise(ex, bw);
+      if(!e1) return;
+      const lift = resolveLift(ex.name);
+      if(!byEx[lift.id]) byEx[lift.id]={name:lift.name, e1rm:e1};
+      else if(e1>byEx[lift.id].e1rm) byEx[lift.id].e1rm=e1;
+    });});
+    const rmLines = Object.values(byEx).sort((a,b)=>b.e1rm-a.e1rm).slice(0,15)
+      .map(r=>`${r.name}: ~${Math.round(r.e1rm)} lbs`).join("\n");
+    if(rmLines) maxContext = `\n\nESTIMATED 1RMs (best per lift from logged history — use ONLY to turn a program percentage into a weight):\n${rmLines}`;
+  }
+
   let programContext = "";
   if(athlete.temp_program_text){
     programContext = `\n\nTEMPORARY ADAPTED PROGRAM (currently active — use this, not the regular program):\n${athlete.temp_program_text}`;
@@ -1420,7 +1448,7 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
   const sys = `TODAY'S DATE: ${todayStr}, ${timeStr}
 Athlete: ${athlete.name}, Sport: ${athlete.sport}${athlete.level?", Level: "+athlete.level:""}
 GOAL: ${JOEBOT_GOALS[athlete.goal||"strength"] || JOEBOT_GOALS.strength}
-SPORT: ${JOEBOT_SPORTS[athlete.sport]||"Build a general strength base."}${pastContext}${programContext}`;
+SPORT: ${JOEBOT_SPORTS[athlete.sport]||"Build a general strength base."}${pastContext}${maxContext}${programContext}`;
 
   let goalsContext = "";
   if(athleteGoals?.length>0){
@@ -4324,6 +4352,31 @@ function bootGreeting(name, tier, lastLog) {
   });
 }
 
+// ─── FIRST MESSAGE ON OPEN (see boot.js openerEligibleFor / buildTodayOpener) ──
+// Decides the opening chat state from ON-DEVICE data only, synchronously, so the
+// warm reopen never flickers greeting -> session. Priority:
+//   1. today's live transcript (they've already chatted today) — restore it.
+//   2. a cached opener for today — paint today's session instantly, free.
+//   3. eligible for a to-be-generated opener — show the typing indicator (empty
+//      messages + openerLoading) so the session lands as the FIRST message, never
+//      as a rewrite of a shown greeting. The boot effect fills it.
+//   4. otherwise the plain greeting.
+// Returns {messages, openerLoading}. `snapshot` is the loadSnapshot() result.
+function planOpener(a, snapshot){
+  try{
+    const stored = JSON.parse(localStorage.getItem(`wilco_chat_${a.id}_${new Date().toLocaleDateString()}`)||"null");
+    if(Array.isArray(stored)&&stored.length>0) return {messages:stored, openerLoading:false};
+  }catch(_){}
+  if(snapshot && a.first_chat_complete && snapshot.workouts.length>0){
+    const cached = openerLoad(a.id);
+    if(cached) return {messages:[{role:"assistant",content:cached}], openerLoading:false};
+    // Merge so program_text/tier from either the snapshot or the login row counts.
+    if(openerEligibleFor({...(snapshot.athlete||{}), ...a})) return {messages:[], openerLoading:true};
+    return {messages:[{role:"assistant",content:bootGreeting(a.name, a.tier, snapshot.workouts[0])}], openerLoading:false};
+  }
+  return {messages:[], openerLoading:false};
+}
+
 // ─── ATHLETE VIEW ─────────────────────────────────────────────────────────────
 function AthleteView({athlete: initialAthlete, onLogout}) {
   const [athlete,setAthlete] = useState(initialAthlete);
@@ -4335,23 +4388,15 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // is display-only: `historyLoaded` still gates sending, because send() reasons
   // about session boundaries and must never do that on a stale 30-row window.
   const [snapshot] = useState(()=>loadSnapshot(initialAthlete.id));
-  const [messages,setMessages] = useState(()=>{
-    // Today's transcript wins outright (it's live, not a snapshot). Reading it here
-    // instead of in the boot effect also kills the old empty-then-restored flash.
-    try{
-      const stored = JSON.parse(localStorage.getItem(`wilco_chat_${initialAthlete.id}_${new Date().toLocaleDateString()}`)||"null");
-      if(Array.isArray(stored)&&stored.length>0) return stored;
-    }catch(_){}
-    // No transcript yet: a returning athlete gets their greeting now rather than
-    // after the network. Skipped for the first-chat athlete — that path opens the
-    // goal-collection conversation, which is not a greeting and must not be faked.
-    // (`snapshot` above is already loaded — same mount, no second parse.)
-    const snap = snapshot;
-    if(snap && initialAthlete.first_chat_complete && snap.workouts.length>0){
-      return [{role:"assistant",content:bootGreeting(initialAthlete.name, initialAthlete.tier, snap.workouts[0])}];
-    }
-    return [];
-  });
+  // One synchronous decision for the opening chat state (transcript / cached opener
+  // / typing-for-opener / greeting) — see planOpener. Computed once so `messages`
+  // and `openerLoading` can't disagree about what the first paint should be.
+  const [boot0] = useState(()=>planOpener(initialAthlete, snapshot));
+  const [messages,setMessages] = useState(boot0.messages);
+  // True while today's session is being generated for the opener: drives the typing
+  // indicator with no message painted, so the session appears as the first message
+  // rather than rewriting a greeting. Cleared by the boot effect and by send().
+  const [openerLoading,setOpenerLoading] = useState(boot0.openerLoading);
   const [input,setInput] = useState("");
   const [loading,setLoading] = useState(false);
   const [videoLoading,setVideoLoading] = useState(false);
@@ -4824,10 +4869,62 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           return;
         }
 
-        // Same function the warm-reopen path used, so if the snapshot already
-        // painted a greeting this produces the identical string and nothing on
-        // screen visibly rewrites itself. (src/boot.js, scripts/test-boot.mjs)
+        // OPEN TO TODAY'S SESSION. A returning, paid athlete with a program opens
+        // straight into today's workout — weights already resolved to numbers — so
+        // they can start without asking. The Quick Log draft engine does the
+        // % -> weight math (QL_DRAFT_SYS weight hierarchy); we just frame it. Cached
+        // per local day so this call happens at most once per day, then instant.
+        const openerAthlete = {...latestAthlete, tier};
+        const cachedOpener = openerLoad(openerAthlete.id);
+        if(cachedOpener){
+          setMessages([{role:"assistant",content:cachedOpener}]);
+          setOpenerLoading(false);
+          setHistoryLoaded(true);
+          return;
+        }
+        if(openerEligibleFor(openerAthlete) && !readsFailed){
+          // History IS loaded — unblock the composer/log now; the typing indicator
+          // (openerLoading) carries the session-is-loading state on its own.
+          setOpenerLoading(true);
+          setHistoryLoaded(true);
+          const histForDraft = (logs&&logs.length>0) ? logs : (snapshot?.workouts||[]);
+          try{
+            const res = await generateQuickLogDraft({
+              athlete: openerAthlete,
+              workoutHistory: histForDraft,
+              messages: [],
+              goals: (Array.isArray(goals)&&goals.length>0) ? goals : athleteGoals,
+              contextNotes: (Array.isArray(ctxRows)&&ctxRows.length>0) ? ctxRows.map(r=>r.content).join("\n\n") : athleteContext,
+            });
+            // Fold in only if the athlete hasn't started typing in the meantime — a
+            // conversation already underway must never be clobbered by the opener.
+            const fresh = (arr)=> (arr.length===0 || (arr.length===1 && arr[0]?.role==="assistant"));
+            if(!res.rest && res.draft.trim()){
+              const opener = buildTodayOpener({
+                name: openerAthlete.name,
+                dAgo: lastLog ? daysBetween(lastLog.created_at) : null,
+                draft: res.draft,
+              });
+              openerSave(openerAthlete.id, opener);
+              // Prime the Quick Log sheet with the same session so it opens instantly.
+              try{ if(!qlLoad(openerAthlete.id, histForDraft)) qlSave(openerAthlete.id, histForDraft, {draft:res.draft, notes:res.notes, undoStack:[], prebuilt:true}); }catch(_){}
+              setMessages(m=> fresh(m) ? [{role:"assistant",content:opener}] : m);
+            } else {
+              // Rest day or nothing to prescribe — fall back to the normal greeting.
+              setMessages(m=> fresh(m) ? [{role:"assistant",content:bootGreeting(openerAthlete.name, tier, lastLog)}] : m);
+            }
+          }catch(_){
+            setMessages(m=> (m.length===0) ? [{role:"assistant",content:bootGreeting(openerAthlete.name, tier, lastLog)}] : m);
+          }
+          setOpenerLoading(false);
+          return;
+        }
+
+        // Not eligible for the opener: the same greeting the warm-reopen path used,
+        // so if the snapshot already painted one this produces the identical string
+        // and nothing on screen visibly rewrites itself. (src/boot.js, test-boot.mjs)
         setMessages([{role:"assistant",content:bootGreeting(athlete.name, tier, lastLog)}]);
+        setOpenerLoading(false);
       } catch(e){
         // A boot batch that died on the network is the offline open the SW was
         // built for. Say so instead of greeting them as if their history were
@@ -5423,6 +5520,11 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const send = async (overrideText) => {
     const msg = (typeof overrideText==="string" ? overrideText : input).trim();
     if(!msg||loading||videoLoading||!historyLoaded) return;
+    // The athlete is talking — the opener's still-generating session must not land
+    // on top of their conversation. Cancel its typing indicator; the in-flight
+    // generateQuickLogDraft still caches for the day but won't paint into chat
+    // (its fold-in guard bails once a user turn exists).
+    setOpenerLoading(false);
     // No signal: keep the message instead of failing it. It lives ONLY in the
     // outbox — never optimistically written to `workouts` — and replays through
     // this same function when connectivity returns, so a queued log can never
@@ -6253,7 +6355,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         {/* The skeleton is now only for a TRUE cold start. A warm reopen already
             has the greeting (or today's transcript) painted from the device, so
             showing "Syncing feed" over it would be a step backwards. */}
-        {!historyLoaded&&messages.length===0?(
+        {!historyLoaded&&messages.length===0&&!openerLoading?(
           <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12,padding:"48px 20px"}}>
             <div className="ld-charge"><i/></div>
             <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:10,letterSpacing:1,color:CA.muted}}>Syncing feed</div>
@@ -6292,7 +6394,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             {/* Standalone indicator only when no empty streaming placeholder is already
                 showing the dots (send() pushes one before the reply streams) — otherwise
                 two "J" bubbles stack during the wait. Video review has no placeholder. */}
-            {(videoLoading||(loading&&!(messages[messages.length-1]?.role==="assistant"&&!messages[messages.length-1]?.content)))&&(
+            {(videoLoading||openerLoading||(loading&&!(messages[messages.length-1]?.role==="assistant"&&!messages[messages.length-1]?.content)))&&(
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
                 <div style={{width:28,height:28,borderRadius:"50%",background:CA_AVATAR,boxShadow:`0 0 12px ${CA_GLOW}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#fff"}}>J</div>
                 <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:"16px 16px 16px 4px",padding:"12px 16px",display:"flex",alignItems:"center",gap:12}}>

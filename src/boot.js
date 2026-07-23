@@ -172,6 +172,38 @@ export function buildGreeting({ name, isFree, hasLog, dAgo, summary }) {
   return s ? `${name}. ${s} What are you getting after today?` : `What's up, ${name}. What did you get after today?`;
 }
 
+// ── 2c. APP-OPEN "TODAY'S SESSION" OPENER ────────────────────────────────────
+// Instead of a bare greeting, a returning athlete opens the app to today's actual
+// session with the weights already resolved to numbers (the Quick Log draft engine
+// does the % -> weight math; see QL_DRAFT_SYS in App.jsx). Pure helpers so the
+// eligibility rule and the message shape are pinned by a test.
+
+// Who gets the opener: a returning, PAID athlete who has a program on file. Free
+// tier stores no program/history server-side, so it always keeps the plain
+// greeting. A temp (travel/injury) program counts — that IS today's session.
+export function openerEligibleFor(a) {
+  return !!a
+    && a.first_chat_complete === true
+    && (a.tier || "free") !== "free"
+    && !!(a.temp_program_text || a.program_text);
+}
+
+// Frame the resolved draft as a session to RUN, not a log to type. The draft's
+// first line is the program day label ("Day 5 – Push B"); we weave that into the
+// lead and show the exercises below it. A lapsed athlete still gets the nudge.
+export function buildTodayOpener({ name, dAgo, draft }) {
+  const d = String(draft || "").trim();
+  if (!d) return "";
+  const nl = d.indexOf("\n");
+  const dayLabel = (nl >= 0 ? d.slice(0, nl) : d).trim();
+  const body = (nl >= 0 ? d.slice(nl + 1) : "").trim();
+  const label = dayLabel ? ` — ${dayLabel}` : "";
+  const lead = (dAgo != null && dAgo >= 4)
+    ? `${name}. ${dAgo} days since your last log — let's get back on it. Here's today${label}:`
+    : `What's up, ${name}. Here's today${label}:`;
+  return `${lead}\n\n${body || d}\n\nRun it top to bottom and log it here when you're done -- or tell me if you're switching anything up.`;
+}
+
 // ── 3. OFFLINE SEND QUEUE ────────────────────────────────────────────────────
 // A message typed with no signal is kept, not lost. It is held ONLY here (never
 // optimistically written to workouts) so a queued log can never become a phantom

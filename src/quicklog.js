@@ -90,6 +90,34 @@ export const qlMarkUsed = (athleteId) => {
 // the pre-build for a second time on the same training day.
 export const qlLocalDay = (now) => new Date(now||Date.now()).toLocaleDateString();
 
+// ─── APP-OPEN OPENER CACHE ───────────────────────────────────────────────────
+// The generated "here's today's session" opener, cached for the LOCAL calendar day
+// so every reopen paints it instantly and free — the ~$0.01 draft call happens at
+// most once per day. Day-stamped (not history-stamped like a Quick Log draft)
+// because the opener is shown ONLY before today's chat starts: the moment the
+// athlete logs or chats, a today-transcript exists and wins over the opener
+// outright, so a mid-day history change can never surface a stale opener.
+// LOCAL day, never UTC — a UTC stamp rolls over mid-evening and would re-fire the
+// draft call a second time on the same training day (same bug class as qlLocalDay).
+const qlOpenerKey = (athleteId) => `wilco_today_opener_${athleteId}`;
+
+export const openerLoad = (athleteId, now) => {
+  try {
+    if (!athleteId) return null;
+    const d = JSON.parse(localStorage.getItem(qlOpenerKey(athleteId)) || "null");
+    if (!d || d.day !== qlLocalDay(now)) return null;
+    if (typeof d.msg !== "string" || !d.msg.trim()) return null;
+    return d.msg;
+  } catch (_) { return null; }
+};
+
+export const openerSave = (athleteId, msg, now) => {
+  try {
+    if (!athleteId || !msg || !String(msg).trim()) return;
+    localStorage.setItem(qlOpenerKey(athleteId), JSON.stringify({ day: qlLocalDay(now), msg: String(msg) }));
+  } catch (_) {}
+};
+
 export const qlPrebuildEligible = (athleteId, now) => {
   try{
     const t = now||Date.now();

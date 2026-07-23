@@ -15,7 +15,7 @@ globalThis.localStorage = {
   removeItem: (k) => store.delete(k),
 };
 
-const { qlKey, qlStamp, qlLoad, qlSave, qlClear, QL_RESUME_MS } = await import("../src/quicklog.js");
+const { qlKey, qlStamp, qlLoad, qlSave, qlClear, QL_RESUME_MS, openerLoad, openerSave } = await import("../src/quicklog.js");
 
 let pass = 0, fail = 0;
 const check = (name, cond) => { if(cond){ pass++; } else { fail++; console.log(`  ✗ ${name}`); } };
@@ -158,6 +158,29 @@ check("mid-note stream shows note, empty log", (()=>{const r=streamQuickLogReply
 check("a partial separator is trimmed off the note", streamQuickLogReply("Heavy bench day.\n==").notes === "Heavy bench day.");
 check("stream after the separator fills the log", (()=>{const r=streamQuickLogReply(TWO);return r.complete&&r.log==="Upper A\nBench 5x5 225";})());
 check("empty stream is safe", streamQuickLogReply("").notes === "");
+
+// ─── app-open opener cache (day-stamped) ─────────────────────────────────────
+// At stake: showing YESTERDAY's session as today's opener. The day stamp is the
+// whole guard, so the cross-midnight cases matter most.
+const MORNING = new Date("2026-07-22T09:00:00").getTime();       // local time, no Z
+const LATER   = new Date("2026-07-22T20:00:00").getTime();       // same local day
+const NEXTDAY = new Date("2026-07-23T06:00:00").getTime();       // next local day
+reset();
+openerSave(ATH, "What's up. Here's today — Upper A:\n\nBench 5x5 @ 185", MORNING);
+check("opener round-trips same day", openerLoad(ATH, LATER) === "What's up. Here's today — Upper A:\n\nBench 5x5 @ 185");
+check("opener from a prior day is dropped", openerLoad(ATH, NEXTDAY) === null);
+check("no opener saved → null", openerLoad("nobody", MORNING) === null);
+reset();
+openerSave(ATH, "   ", MORNING);          // blank/whitespace never persists
+check("a blank opener is not saved", openerLoad(ATH, MORNING) === null);
+openerSave(ATH, "", MORNING);
+check("an empty opener is not saved", openerLoad(ATH, MORNING) === null);
+openerSave("", "hi", MORNING);            // missing athlete id is a no-op
+check("missing athlete id doesn't crash or save", openerLoad("", MORNING) === null);
+reset();
+openerSave(ATH, "morning session", MORNING);
+openerSave(ATH, "re-generated same day", LATER);   // a later save overwrites the day's opener
+check("a later same-day save overwrites", openerLoad(ATH, LATER) === "re-generated same day");
 
 console.log(`\n${fail===0?"✓":"✗"} quick log draft: ${pass} passed, ${fail} failed`);
 process.exit(fail===0?0:1);
