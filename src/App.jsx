@@ -4376,7 +4376,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     // No transcript yet: a returning athlete gets their greeting now rather than
     // after the network. Skipped for the first-chat athlete — that path opens the
     // goal-collection conversation, which is not a greeting and must not be faked.
-    const snap = loadSnapshot(initialAthlete.id);
+    // (`snapshot` above is already loaded — same mount, no second parse.)
+    const snap = snapshot;
     if(snap && initialAthlete.first_chat_complete && snap.workouts.length>0){
       return [{role:"assistant",content:bootGreeting(initialAthlete.name, initialAthlete.tier, snap.workouts[0])}];
     }
