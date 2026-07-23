@@ -2665,6 +2665,15 @@ function CoachCheckin({digest, team, coach, onRead}){
       const add=(kind,note,lt=false)=>{ if(note&&String(note).trim()) rows.push({coach_id:coach.id, note:`${kind}: ${String(note).trim()}`, meta:{kind}, is_long_term:lt}); };
       add("season",ext.season); add("goal",ext.block_goal,true); add("response",ext.team_response); add("notes",ext.athlete_notes,true);
       (Array.isArray(ext.decisions)?ext.decisions:[]).forEach(d=>add("decision",d));
+      // If the distillation produced nothing usable (malformed JSON, or every field
+      // null), keep the coach's OWN words instead of discarding them. The check-in
+      // locks on checkin_done, so there is no retry — one bad model response used to
+      // silently throw away everything they just typed while the UI said "✓ Saved".
+      // generateCoach only joins coach_context .note strings into next week's prompt,
+      // so a raw transcript note flows through exactly like a distilled one.
+      if(!rows.length && transcript.trim()){
+        rows.push({coach_id:coach.id, note:`checkin: ${transcript.slice(0,600)}`, meta:{kind:"checkin_raw"}, is_long_term:false});
+      }
       for(const r of rows){ try{ await sbInsert("coach_context",r); }catch(e){ console.error("coach_context write",e); } }
       try{ await sbUpdate("proof_digests", digest.id, {is_read:true, content_json:{...c, checkin_done:true}}); onRead&&onRead(); }catch(e){ console.error(e); }
       setMsgs(m=>[...m.filter(x=>x.text!=="Saving to your team context…"),{role:"sys",text:"✓ Saved — I'll build next week's edition around this."}]);
@@ -2680,8 +2689,18 @@ function CoachCheckin({digest, team, coach, onRead}){
     setMsgs(m=>[...m,{role:"wilco",text:questions[ni].text}]);
   };
 
+  // Synchronous re-entry guard. `busy` is only set on the AI branches, so a thin
+  // chip answer ("Got it", "Not now") never set it — a fast double-tap ran submit
+  // twice against the same stale q/qi closure: duplicate bubbles, and on the LAST
+  // question advance() fired finish() twice (double coach_context write + double
+  // Haiku call). A ref updates synchronously where setState does not.
+  const submitting = useRef(false);
   const submit = async (text)=>{
-    const t=String(text||"").trim(); if(!t||busy||done||!q) return;
+    const t=String(text||"").trim(); if(!t||busy||done||!q||submitting.current) return;
+    submitting.current = true;
+    try{ await submitInner(t); } finally { submitting.current = false; }
+  };
+  const submitInner = async (t)=>{
     setInput("");
     setMsgs(m=>[...m,{role:"coach",text:t}]);
     if(isAskingBack(t)){

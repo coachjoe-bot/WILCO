@@ -1422,6 +1422,14 @@ export const propagateForPRs = async (programText, prs) => {
   return {text:prog, summary:m[2].trim(), changed:/yes/i.test(m[1])};
 };
 
+// Shared truncation guard for every "echo the FULL program back" call. The rule
+// above was proven necessary once (a 1700-token cap truncated long programs
+// mid-text and the partial overwrote the real program_text); the check-in
+// injury-rewrite path is its twin and was missing it entirely. Flush-changes
+// rule: any new full-echo call site must go through this.
+export const isFullProgramEcho = (prog, programText) =>
+  !!prog && prog.length >= 60 && prog.length >= String(programText || "").length * 0.9;
+
 // The Grit benchmark ladder (TIER_NAMES/COLORS/POINTS/DESC, BENCH_THRESHOLDS,
 // tierForRatio, bwTierFactor, ageTierFactor, scaledThresholds, getBenchKey) now
 // lives in ./grit.js (imported above) — the single shared source with the
@@ -2414,13 +2422,15 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
         const raw = await askClaude(
           `You are Coach Joe Thomas. Propose the SMALLEST safe injury-protective adjustment to this athlete's program based on their check-in — proportionate to the pain, not drastic. Keep their stated goal intact wherever possible; any exercise swap must replace a SPECIFIC slot (name the day and what it replaces), never a floating add-on. If protecting the area genuinely conflicts with the goal timeline, say so honestly in WHY rather than pretending both are fine. Respond in EXACTLY this format and nothing else:\nSUMMARY: <1-2 short sentences naming exactly what you're changing and where it slots in, plain-spoken, second person ("your")>\nWHY: <1 sentence tying it to what they told you in the check-in>\nPROGRAM:\n<the FULL updated program text — preserve structure/format, change only what's needed>`,
           `Current program:\n${athlete.program_text}\n\nCheck-in:\n${qaText}`,
-          1600, [], "claude-sonnet-5", "program_generate"
+          4000, [], "claude-sonnet-5", "program_generate"
         );
         let summary="", why="", prog=null;
         const m = String(raw||"").match(/SUMMARY:\s*([\s\S]*?)\n\s*WHY:\s*([\s\S]*?)\n\s*PROGRAM:\s*\n?([\s\S]*)$/i);
         if(m){ summary=m[1].trim(); why=m[2].trim(); prog=m[3].trim(); }
-        else if(raw && raw.trim().length>60){ prog=raw.trim(); } // model ignored the format — still save the program
-        if(prog && prog.length>60) setProgramPending({newText:prog, summary, why});
+        // NOTE: no "model ignored the format" fallback here — saving an unvalidated
+        // blob as the program is how a conversational reply ends up as someone's
+        // programming. If the format wasn't followed, propose nothing.
+        if(prog && isFullProgramEcho(prog, athlete.program_text)) setProgramPending({newText:prog, summary, why});
       }catch(_){}
     }
 
@@ -2463,11 +2473,13 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
       const raw = await askClaude(
         `You are Coach Joe Thomas. You proposed a program adjustment; the athlete responded with a question or a change request. Answer them, then give your (possibly revised) proposal. Keep changes small and safe. Respond in EXACTLY this format and nothing else:\nREPLY: <1-3 sentences answering them, in your voice>\nSUMMARY: <1-2 short sentences naming exactly what you're now changing, plain-spoken, second person ("your")>\nWHY: <1 sentence>\nPROGRAM:\n<the FULL updated program text — preserve structure/format>`,
         `Current program:\n${athlete.program_text}\n\nYour proposed change:\nSUMMARY: ${programPending.summary||"(none given)"}\nWHY: ${programPending.why||"(none given)"}\nPROPOSED PROGRAM:\n${programPending.newText}\n\nAthlete's response:\n${ask}`,
-        1700, [], "claude-sonnet-5", "program_generate"
+        4000, [], "claude-sonnet-5", "program_generate"
       );
       let replyTxt="", summary=programPending.summary, why=programPending.why, prog=programPending.newText;
       const m = String(raw||"").match(/REPLY:\s*([\s\S]*?)\n\s*SUMMARY:\s*([\s\S]*?)\n\s*WHY:\s*([\s\S]*?)\n\s*PROGRAM:\s*\n?([\s\S]*)$/i);
-      if(m){ replyTxt=m[1].trim(); summary=m[2].trim(); why=m[3].trim(); if(m[4].trim().length>60) prog=m[4].trim(); }
+      // Same truncation guard as the propose path — a truncated echo keeps the
+      // PRIOR proposal rather than replacing it with a mid-sentence fragment.
+      if(m){ replyTxt=m[1].trim(); summary=m[2].trim(); why=m[3].trim(); if(isFullProgramEcho(m[4].trim(), athlete.program_text)) prog=m[4].trim(); }
       else if(raw && raw.trim()){ replyTxt=raw.trim(); } // format not followed — at least show the reply, keep prior proposal
       if(replyTxt) setMessages(prev=>[...prev,{role:"assistant",content:replyTxt}]);
       setProgramPending({newText:prog, summary, why});
@@ -4121,7 +4133,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [showProgram,setShowProgram] = useState(false);
   const [showProgress,setShowProgress] = useState(false);
   const [showQuickLog,setShowQuickLog] = useState(false);
-  const quickLogPending = useRef(false); // the pending/next send() is a Quick Log draft — a pure workout log that must never write program_text
+  // Holds the exact Quick Log draft TEXT awaiting send (not a bare boolean): the
+  // flag marks a pure workout log that must never write program_text, and it used
+  // to apply to whatever the NEXT send happened to be. If the athlete cleared the
+  // parked draft and typed something else — pasting a program, or a log correction
+  // — that message inherited the pure-log flag and silently skipped every
+  // program-write and correction branch. Matching on the text scopes it correctly.
+  const quickLogPending = useRef(null);
   const pendingQuickLogSend = useRef(null); // A12: draft queued while a reply streams — auto-fired when the stream clears
   const [quickLogParked,setQuickLogParked] = useState(false); // an unfinished Quick Log draft is waiting — surfaced on the nav button
   // Re-read whenever the sheet closes (draft just parked) or history moves (they logged, so
@@ -4139,7 +4157,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     if(!loading && !videoLoading && historyLoaded && pendingQuickLogSend.current){
       const text = pendingQuickLogSend.current;
       pendingQuickLogSend.current = null;
-      quickLogPending.current = true;
+      quickLogPending.current = text;   // scope the pure-log flag to THIS exact draft
       send(text);
     }
   },[loading,videoLoading,historyLoaded]);
@@ -4155,6 +4173,15 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [chatDigest,setChatDigest] = useState(null); // A5: a PAST edition opened from the archive (null = latest)
   const [goalCollectionActive,setGoalCollectionActive] = useState(false);
   const [athleteProgramText,setAthleteProgramText] = useState(athlete.program_text||"");
+  // Re-seed the Program-tab editor whenever the SAVED program changes underneath
+  // it. It used to seed once at mount, so every chat-side writer (PR propagation,
+  // replace-confirm, append, self-merge, program-create, check-in rewrite — all of
+  // which only call setAthlete) left the textarea holding the pre-change text with
+  // Save enabled: one tap wrote the stale copy back and silently undid the update,
+  // with no program_modifications trace. Keyed on the saved text, so this only
+  // fires when the underlying program actually changed — which is exactly the case
+  // where keeping local edits would clobber a newer program.
+  useEffect(()=>{ setAthleteProgramText(athlete.program_text||""); },[athlete.program_text]);
   const [athleteProgramSaving,setAthleteProgramSaving] = useState(false);
   const [athleteProgramMsg,setAthleteProgramMsg] = useState("");
   const [athletePhotoProcessing,setAthletePhotoProcessing] = useState(false);
@@ -4914,8 +4941,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     }
     // Quick Log drafts are pure workout logs. Consume the flag for THIS send so a
     // draft can NEVER be classified as a program and overwrite program_text.
-    const fromQuickLog = quickLogPending.current;
-    quickLogPending.current = false;
+    const fromQuickLog = quickLogPending.current === msg;
+    quickLogPending.current = null;
     track("chat_message_sent","ai");
     // A typed message while a program-replace confirmation is pending = the athlete
     // chose NOT to use the chips. Drop the proposal (never switch without an explicit
@@ -5309,6 +5336,16 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         }
         return [...prev,{role:"assistant",content:errText}];
       });
+      // Re-park a failed Quick Log draft. SEND TO CHAT clears the parked
+      // localStorage copy BEFORE the network call, so an offline send (a gym
+      // basement — the exact environment this feature exists for) left the
+      // workout nowhere durable: RESUME LOG stayed dark and reopening Quick Log
+      // regenerated from scratch. Restoring it can't double-log — quicklog.js
+      // stamps the history, so the moment a retry lands and prepends a row the
+      // stamp mismatches and the re-parked copy is dropped.
+      if(fromQuickLog){
+        try{ qlSave(athlete.id, workoutHistory, {draft:msg, notes:"", undoStack:[]}); setQuickLogParked(true); }catch(_){}
+      }
     }
     setLoading(false);
   };
@@ -5911,9 +5948,10 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           onAddProgram={()=>{setShowQuickLog(false);setShowProgram(true);}}
           onSend={(text)=>{
             setShowQuickLog(false);
-            // Mark this as a Quick Log draft so send() can never route it into a
-            // program overwrite (survives the queued path below too).
-            quickLogPending.current = true;
+            // Mark THIS draft text as a Quick Log log so send() can never route it
+            // into a program overwrite (survives the queued path below too). Keyed
+            // on the text, so a different message typed later can't inherit it.
+            quickLogPending.current = text;
             // A12: if a send is in flight, QUEUE the draft and auto-fire it the
             // moment the stream clears (it used to be silently parked in the chat
             // input, unsent — and localStorage was already cleared, so backgrounding
@@ -6445,8 +6483,17 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
     return ()=>{ on=false; };
   },[tab,athlete.id,proofDigest?.id]);
   const painKey = `wilco_resolved_pain_${athlete.id}`;
+  // Seed from the UNION of the server column and this device's localStorage.
+  // resolvePain writes both, but this used to read only localStorage — so on a
+  // second device every previously-resolved pain flag reappeared in MY LOG. The
+  // athlete row is refetched at boot, so resolved_pain is current here.
   const [resolvedPain,setResolvedPain] = useState(()=>{
-    try{return JSON.parse(localStorage.getItem(painKey)||"[]");}catch{return[];}
+    // Lowercased on the way in — both consumers below compare against
+    // p.area.toLowerCase(), and coach.jsx normalizes the same column the same way.
+    const lower = (xs)=>(Array.isArray(xs)?xs:[]).map(x=>String(x).toLowerCase());
+    try{
+      return [...new Set([...lower(athlete.resolved_pain), ...lower(JSON.parse(localStorage.getItem(painKey)||"[]"))])];
+    }catch{return lower(athlete.resolved_pain);}
   });
   const resolvePain = async (area) => {
     const updated=[...new Set([...resolvedPain,area.toLowerCase()])];
@@ -6701,7 +6748,15 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
         <EditWorkoutModal
           session={editSession}
           onClose={()=>setEditSession(null)}
-          setWorkoutHistory={setWorkoutHistory}
+          /* Sessions in this timeline can come from EITHER the recent working set
+             or the paged-in older rows. The modal used to update only
+             workoutHistory, so editing a paged-in session persisted fine but left
+             the card showing pre-edit numbers — indistinguishable from a failed
+             save. Update whichever list holds the row. */
+          onRowUpdated={(id,newParsedData)=>{
+            setWorkoutHistory(prev=>prev.map(w=>w.id===id?{...w,parsed_data:newParsedData}:w));
+            setOlderWorkouts(prev=>prev.map(w=>w.id===id?{...w,parsed_data:newParsedData}:w));
+          }}
         />
       )}
     </div>
@@ -6712,7 +6767,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
 // Lets the athlete fix a past logged workout: adjust sets/reps/weight per exercise,
 // or remove an exercise entirely. Edits are written back to whichever underlying
 // "workouts" row each exercise came from (a session can span more than one entry).
-function EditWorkoutModal({session, onClose, setWorkoutHistory}) {
+function EditWorkoutModal({session, onClose, onRowUpdated}) {
   const parseEntry = (e) => typeof e.parsed_data==="string" ? (()=>{try{return JSON.parse(e.parsed_data);}catch{return {};}})() : (e.parsed_data||{});
 
   const [rows,setRows] = useState(()=>{
@@ -6754,8 +6809,13 @@ function EditWorkoutModal({session, onClose, setWorkoutHistory}) {
         const origExercises = pd.exercises||[];
         const keptRows = rows.filter(r=>r.ei===ei && !r.deleted);
         const detailsSig = (d)=>JSON.stringify((d||[]).map(s=>({w:s.weight===""?"":+s.weight,r:s.reps===""?"":+s.reps,u:!!s.warmup})));
+        // The no-op check must cover UNIT too. Without it, changing only the unit
+        // dropdown (lbs→kg roughly halves the effective load and every e1RM derived
+        // from it) hit `continue` and saved nothing, with no error — and a
+        // mis-captured unit is one of the most common real reasons to edit a log.
         if(keptRows.length===origExercises.length && rows.filter(r=>r.ei===ei).every(r=>!r.deleted &&
             r.sets===(origExercises[r.xi]?.sets||1) && r.reps===(origExercises[r.xi]?.reps||1) && String(r.weight)===String(origExercises[r.xi]?.weight??"") &&
+            r.unit===(origExercises[r.xi]?.unit||"lbs") &&
             (!r.setDetails || detailsSig(r.setDetails)===detailsSig(origExercises[r.xi]?.set_details)))) {
           continue; // nothing changed in this entry
         }
@@ -6782,7 +6842,7 @@ function EditWorkoutModal({session, onClose, setWorkoutHistory}) {
         });
         const newParsedData = {...pd, exercises:newExercises};
         await sbUpdate("workouts", entry.id, {parsed_data:newParsedData});
-        setWorkoutHistory(prev=>prev.map(w=>w.id===entry.id?{...w,parsed_data:newParsedData}:w));
+        onRowUpdated&&onRowUpdated(entry.id, newParsedData);
       }
       onClose();
     } catch(e){
