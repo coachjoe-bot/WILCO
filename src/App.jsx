@@ -3172,6 +3172,7 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
   const [athleteRow,setAthleteRow] = useState(null); // created athlete (exists before payment)
   const [showConsent,setShowConsent] = useState(false); // T&C + Privacy consent overlay
   const [codeState,setCodeState] = useState(null); // {status:"checking"|"ok"|"bad", school?:string}
+  const [nameTakenNote,setNameTakenNote] = useState(false); // someone already uses this name → sign in by email
   const setD = (k,v) => setData(p=>({...p,[k]:v}));
   useEffect(()=>{ track("signup_start","auth"); },[]); // activation-funnel top (pre-login)
 
@@ -3367,7 +3368,10 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
       try{ const res = await idApi("check-athlete-name",{name:data.name.trim()}); nameTaken=!!res.exists; }
       catch(e){ setLoading(false); setErr(e.message||"Connection error. Try again."); return; }
       setLoading(false);
-      if(nameTaken){setErr("That name is already registered. Go to Athlete Login instead.");return;}
+      // A taken name is no longer a dead end. Names can repeat (two Jacob Millers on
+      // one roster is near-certain); what must be unique is the name+email pair, and
+      // login accepts either identifier. Tell them how they'll sign in and move on.
+      setNameTakenNote(nameTaken);
       setStep(2);
     } else if(step===2){
       if(data.pin.length!==4){setErr("PIN must be 4 digits.");return;}
@@ -3512,6 +3516,12 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
       </>}
       {step===2&&<>
         <div style={{color:CA.muted2,fontSize:13,marginBottom:16,lineHeight:1.6}}>Choose a 4-digit PIN you'll remember. Add your email so you can recover access if you ever forget it.</div>
+        {nameTakenNote&&(
+          <div style={{background:`${CA.accent}12`,border:`1px solid ${CA.accent}55`,borderRadius:10,padding:"10px 13px",marginBottom:16}}>
+            <div style={{color:CA.accent,fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:3}}>HEADS UP</div>
+            <div style={{color:CA.muted2,fontSize:12,lineHeight:1.55}}>Someone's already training as <span style={{color:CA.text,fontWeight:600}}>{data.name.trim()}</span>. You can still use that name — just sign in with your <span style={{color:CA.text,fontWeight:600}}>email</span> instead, so we always know which account is yours.</div>
+          </div>
+        )}
         <div style={{marginBottom:16}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>CREATE PIN</label>
           <input type="password" inputMode="numeric" autoComplete="one-time-code" maxLength={4} value={data.pin}
@@ -3758,8 +3768,9 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
         }
         enterApp(res.athlete,pin);
       }
+      else if(res.reason==="ambiguous") setErr("More than one account matches that name and PIN. Sign in with your email address instead.");
       else if(res.reason==="wrong_pin") setErr("Wrong PIN. Try again.");
-      else setErr("Name not found. Check spelling or sign up as a new athlete.");
+      else setErr("We couldn't find that account. Check the spelling, try your email, or sign up as a new athlete.");
     } catch(e){setErr(e.message||"Connection error. Check your internet.");}
     setLoading(false);
   };
@@ -3839,8 +3850,8 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
 
       {mode==="login"&&<>
         <div style={{marginBottom:16}}>
-          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>YOUR NAME</label>
-          <input value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&login()} autoComplete="name" placeholder="Exact name you signed up with" style={inpA()}/>
+          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>NAME OR EMAIL</label>
+          <input value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&login()} autoComplete="username" placeholder="Your name, or the email you signed up with" style={inpA()}/>
         </div>
         <div style={{marginBottom:20}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>YOUR PIN</label>

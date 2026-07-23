@@ -98,13 +98,30 @@ async function athleteLogin(req, res, body) {
   const key = `athlete-login:${clientIp(req)}:${name.toLowerCase()}`;
   await rateLimit(key, { max: 5, windowMin: 15 });
 
-  // PINs are bcrypt-hashed, so we can't filter by them — match by name, then compare.
-  // escapeLike: the name is user input headed into an ilike pattern (see _supa.js).
-  const byName = await sbSelect("athletes", `?name=ilike.${enc(escapeLike(name))}&select=*`);
+  // PINs are bcrypt-hashed, so we can't filter by them — match the identifier,
+  // then compare. escapeLike: user input headed into an ilike pattern (_supa.js).
+  //
+  // Identifier is NAME **or** EMAIL. Name alone used to be the only way in, which
+  // is what forced signup to hard-reject a second "John Smith" — a permanently
+  // lost signup, worst on exactly the school rosters we sell to. Email is already
+  // collected and stored on every row. Looked up only when the name matches
+  // nothing, so existing name logins are byte-identical and can never be shadowed
+  // by someone else's email. Email uses eq (not ilike) — it's an exact identifier
+  // and that keeps it out of pattern-matching entirely.
+  let byName = await sbSelect("athletes", `?name=ilike.${enc(escapeLike(name))}&select=*`);
+  if (byName.length === 0 && name.includes("@")) {
+    byName = await sbSelect("athletes", `?email=eq.${enc(name.toLowerCase())}&select=*`);
+  }
   // bcrypt compares run in parallel — wall time is ~one compare instead of N. The
   // first matching index wins, same row the old sequential loop would have picked.
   const compared = await Promise.all(byName.map((a) => verifyPin(pin, a.pin)));
   const hit = compared.indexOf(true);
+  // Two accounts can now share a name, so a shared PIN could make the match
+  // ambiguous. NEVER pick the first — that is exactly how one athlete would land
+  // in another's account. Ask for the email, which tells them apart.
+  if (compared.filter(Boolean).length > 1) {
+    return res.status(200).json({ athlete: null, reason: "ambiguous" });
+  }
   if (hit !== -1) {
     const a = byName[hit];
     await rateLimitReset(key);
@@ -233,13 +250,21 @@ async function createAthleteAction(req, res, body) {
   const email = str(a.email, { max: 200, name: "Email" });
   await rateLimit(`create-athlete:${clientIp(req)}`, { max: 10, windowMin: 60 });
 
-  // Server-side duplicate-name re-check. The client checks at wizard step 1, but a
-  // race (two devices), a back-navigation minutes later, or a direct API call can
-  // still land here with a taken name — and athlete-login disambiguates same-name
-  // rows by PIN alone, so a colliding PIN would shadow another account. Same
-  // message the step-1 check shows, surfaced via the client's setErr(e.message).
-  const dupes = await sbSelect("athletes", `?name=ilike.${enc(escapeLike(name))}&select=id`);
-  if (dupes.length) throw httpErr(409, "That name is already registered. Go to Athlete Login instead.");
+  // Duplicate handling. A shared NAME is allowed — blocking it made every common-name
+  // collision a permanently lost signup, which bites hardest on the school rosters
+  // (two "Jacob Miller"s on one team is near-certain). What must stay unique is the
+  // (name, email) PAIR:
+  //   • it is the true "this is the same person signing up twice" case
+  //   • it keeps athlete-login's disambiguation sound — same-name rows are told
+  //     apart by PIN, and if that is ever ambiguous the login path below refuses
+  //     rather than guessing (a colliding PIN must never shadow another account)
+  //   • it deliberately does NOT require globally unique email, so a parent can
+  //     still register two children from one address
+  const dupes = await sbSelect(
+    "athletes",
+    `?name=ilike.${enc(escapeLike(name))}&email=eq.${enc(email.toLowerCase())}&select=id`
+  );
+  if (dupes.length) throw httpErr(409, "You already have an account with that name and email. Go to Athlete Login instead.");
 
   const row = { name, email: email.toLowerCase(), pin: await hashPin(pin) };
   for (const k of ATHLETE_FIELDS) if (a[k] !== undefined) row[k] = a[k];
