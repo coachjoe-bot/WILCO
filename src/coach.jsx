@@ -1053,7 +1053,11 @@ function CoachDashboard({coach,onLogout}) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }),[athletes,rollup,search,filterPain,filterInactive,filterRequests,sortBy,painMap,pendingReqCount]);
 
-  const tabs = ["overview","athletes","progress","reports",...(isMaster?[]:["settings"]),...(isMaster?["coaches"]:[]),...(!isMaster&&isAdmin?["account"]:[])];
+  // Master gets Settings too. It was excluded, which meant the master account —
+  // the one coaching real athletes day to day — structurally could not enable its
+  // own digest push or the new injury / big-PR / quiet alerts. Nothing on that tab
+  // is scoped to a school, so there's nothing for master to be excluded from.
+  const tabs = ["overview","athletes","progress","reports","settings",...(isMaster?["coaches"]:[]),...(!isMaster&&isAdmin?["account"]:[])];
 
   return (
     <div className="cyber-coach" style={{minHeight:"100dvh"}}>

@@ -3313,6 +3313,10 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
     if(finalTier==="free" && athleteForApp?.id){
       try { await sbUpdate("athletes",athleteForApp.id,{tier:"free"}); } catch(_){}
     }
+    // The athlete's own welcome email — this is what surfaces a typo'd recovery
+    // address on day 1 instead of at lockout. Fire-and-forget; never blocks entry.
+    fetch("/api/send-athlete-welcome",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({auth:CURRENT_AUTH})}).catch(()=>{});
     if(data.coachEmail.trim()){
       fetch("/api/send-coach-welcome",{method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({auth:CURRENT_AUTH,athleteName:data.name.trim(),athleteSport:data.sport,coachName:data.coachName.trim()||null,coachEmail:data.coachEmail.trim().toLowerCase(),tier:finalTier})
@@ -4219,6 +4223,20 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [chatDigest,setChatDigest] = useState(null); // A5: a PAST edition opened from the archive (null = latest)
   const [retryPending,setRetryPending] = useState(null); // text of a send that failed — drives the Retry chip
   const [resumingProgram,setResumingProgram] = useState(false);
+  // program_modifications is written on every PR propagation, correction reversal
+  // and Field Mode switch, and was readable through the gateway — but nothing in
+  // the app ever showed it. An athlete asking "why does my program say 315 now?"
+  // had no answer surface. Loaded when the Program modal opens.
+  const [programMods,setProgramMods] = useState([]);
+  const [showProgramMods,setShowProgramMods] = useState(false);
+  useEffect(()=>{
+    if(!showProgram||!athlete?.id) return;
+    let on=true;
+    sbRead("program_modifications",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=5&select=*`)
+      .then(r=>{ if(on&&Array.isArray(r)) setProgramMods(r); })
+      .catch(()=>{});
+    return ()=>{ on=false; };
+  },[showProgram,athlete?.id]);
   // Field Mode exit as a real control (the chat "I'm back" parse still works — this
   // is the same write, just reachable). Mirrors the is_program_revert branch.
   const resumeRegularProgram = async () => {
@@ -6038,6 +6056,27 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
               <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.cyan,letterSpacing:2}}>MY PROGRAM</div>
               <button onClick={()=>setShowProgram(false)} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"4px 12px",cursor:"pointer",fontSize:12}}>✕ Close</button>
             </div>
+            {programMods.length>0&&(
+              <div style={{borderBottom:`1px solid ${CA.border}`,background:CA.navy2,flexShrink:0}}>
+                <button onClick={()=>setShowProgramMods(v=>!v)}
+                  style={{width:"100%",background:"none",border:"none",padding:"9px 20px",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",color:CA.muted,fontSize:11,letterSpacing:1,fontFamily:"'DM Sans'"}}>
+                  <span>RECENT CHANGES ({programMods.length})</span>
+                  <span style={{transform:showProgramMods?"rotate(180deg)":"none",transition:"transform 0.15s"}}>▾</span>
+                </button>
+                {showProgramMods&&(
+                  <div style={{padding:"0 20px 12px"}}>
+                    {programMods.map(m=>(
+                      <div key={m.id} style={{display:"flex",gap:10,padding:"7px 0",borderTop:`1px solid ${CA.border}80`}}>
+                        <span style={{color:CA.muted,fontSize:10.5,flexShrink:0,minWidth:44,paddingTop:1}}>
+                          {new Date(m.created_at).toLocaleDateString("en-US",{month:"short",day:"numeric"})}
+                        </span>
+                        <span style={{color:CA.muted2,fontSize:11.5,lineHeight:1.5}}>{m.description}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             {athlete.temp_program_text?(
               // FIELD MODE — the away-ops re-skin of the temporary-program state (artifact .away-*)
               <div style={{flex:1,overflowY:"auto",padding:"16px 18px",display:"flex",flexDirection:"column",gap:13}}>
