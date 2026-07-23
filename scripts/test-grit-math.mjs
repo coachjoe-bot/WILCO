@@ -13,6 +13,7 @@ import {
   bestE1RMForExercise, tierForRatio, bwTierFactor, ageTierFactor,
   scaledThresholds, BENCH_THRESHOLDS, TIER_NAMES, TIER_POINTS,
   REF_BW, bwLoadLabel, computeGritSnapshot, resolveLift,
+  sessionTonnage, sessionTopSet,
 } from "../src/grit.js";
 
 let fail = 0, pass = 0;
@@ -256,6 +257,48 @@ const W = (name, weight, reps, extra = {}) => ({
   const snap = computeGritSnapshot([W("workout", 300, 5), W("hammer curl", 50, 10)], [], opts);
   eq(snap.rankedLifts.length, 0, "junk + non-benchmark lifts → no ranked entries");
   eq(snap.prsHit, 1, "tracked non-benchmark lift (hammer curl) still counts a PR moment");
+}
+
+// ── session summary (MY LOG session cards) ───────────────────────────────────
+// These numbers sit on every session card, so a quietly wrong one is a claim the
+// athlete carries around. Warm-ups excluded and kg converted — the same two things
+// the Strength/PRs tabs got wrong before.
+console.log("sessionTonnage / sessionTopSet:");
+{
+  const sq = { name: "Back Squat", sets: 5, reps: 5, weight: 315, unit: "lbs" };
+  const rdl = { name: "Romanian Deadlift", sets: 3, reps: 8, weight: 225, unit: "lbs" };
+  eq(sessionTonnage([sq]), 7875, "5x5 @315 = 7,875 lbs");
+  eq(sessionTonnage([sq, rdl]), 7875 + 5400, "tonnage sums across exercises");
+  eq(sessionTonnage([]), 0, "empty session = 0");
+  eq(sessionTonnage(null), 0, "null exercises = 0, not a throw");
+  eq(sessionTonnage([{ name: "Push-ups", sets: 3, reps: 20, unit: "bodyweight" }]), 0, "bodyweight work adds no tonnage");
+  eq(sessionTonnage([{ name: "Squat", sets: 3, reps: 5 }]), 0, "no weight logged = no tonnage");
+  // kg must convert, or a kg lifter's session reads ~45% lighter than it was.
+  eq(sessionTonnage([{ name: "Squat", sets: 5, reps: 5, weight: 100, unit: "kg" }]), Math.round(100 * 2.205 * 25), "kg converts to lbs-equivalent");
+  // Warm-ups: counting the empty bar toward "lbs moved" flatters every session.
+  const warmed = { name: "Bench Press", unit: "lbs", set_details: [
+    { weight: 45, reps: 10, warmup: true }, { weight: 135, reps: 5, warmup: true },
+    { weight: 225, reps: 5 }, { weight: 225, reps: 5 },
+  ] };
+  eq(sessionTonnage([warmed]), 2250, "warm-up sets are excluded from tonnage");
+  eq(sessionTopSet([warmed]).weight, 225, "top set ignores warm-ups");
+  // An all-warm-up entry falls back to counting them (same rule bestE1RMForExercise uses),
+  // otherwise a session logged entirely as warm-ups would read as zero work.
+  eq(sessionTonnage([{ name: "Bench", unit: "lbs", set_details: [{ weight: 135, reps: 5, warmup: true }] }]), 675, "all-warmup entry still counts");
+
+  const top = sessionTopSet([sq, rdl]);
+  eq(top.name, "Back Squat", "top set picks the heaviest lift");
+  eq(top.weight, 315, "top set reports the working weight");
+  eq(top.reps, 5, "top set reports its reps");
+  eq(sessionTopSet([]), null, "no exercises → no top set");
+  eq(sessionTopSet([{ name: "Plank", unit: "bodyweight", sets: 3, reps: 60 }]), null, "bodyweight-only session → no top set");
+  // Reported in the logged unit, compared in lbs — 150kg beats 315lb.
+  const mixed = sessionTopSet([sq, { name: "Deadlift", sets: 1, reps: 3, weight: 150, unit: "kg" }]);
+  eq(mixed.unit, "kg", "top set keeps the unit it was logged in");
+  eq(mixed.name, "Deadlift", "comparison happens in lbs-equivalent");
+  // set_details with per-set weights: the heaviest single set wins, not the last.
+  const ramp = { name: "Squat", unit: "lbs", set_details: [{ weight: 275, reps: 3 }, { weight: 335, reps: 1 }, { weight: 225, reps: 8 }] };
+  eq(sessionTopSet([ramp]).weight, 335, "heaviest set wins, not the last one");
 }
 
 if (fail) { console.error(`\n${fail} FAILURE(S) (${pass} passed)`); process.exit(1); }

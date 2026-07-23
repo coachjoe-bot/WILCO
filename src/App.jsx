@@ -38,6 +38,7 @@ import {
   resolveLift, displayForLift, bwLoadLabel, BW_LOADED_IDS,
   TIER_NAMES, TIER_COLORS, TIER_POINTS, TIER_DESC, BENCH_DISPLAY, BENCH_IS_BW,
   BENCH_THRESHOLDS, tierForRatio, bwTierFactor, ageTierFactor, scaledThresholds, getBenchKey,
+  sessionTonnage, sessionTopSet,
 } from "./grit.js";
 export {
   epley1RM, getExerciseSets, bestE1RMForExercise, effectiveDate,
@@ -4315,6 +4316,23 @@ function CoachSetupScreen({setView,setCoach,setErr,err}) {
 // byte-identical to the one the boot batch would produce from the same last log.
 // That equality is what makes a warm reopen safe: the real data landing a second
 // later does not visibly rewrite what Joe just said. See src/boot.js.
+// parsed_data, tolerant of the legacy rows that stored it as a JSON STRING, and
+// memoized per row so a list that reads it once per render doesn't re-parse the
+// same blob dozens of times. Same contract as proofcore's getPD (which the coach
+// chunk uses); kept local so the athlete bundle doesn't pull in the whole
+// proof-feed engine for one accessor.
+const _pdCache = new WeakMap();
+const getPD = (w) => {
+  if(!w || typeof w!=="object") return {};
+  const hit = _pdCache.get(w);
+  if(hit) return hit;
+  let pd = {};
+  if(typeof w.parsed_data==="string"){ try{ pd = JSON.parse(w.parsed_data)||{}; }catch{ pd = {}; } }
+  else pd = w.parsed_data || {};
+  _pdCache.set(w, pd);
+  return pd;
+};
+
 function lastLogSummary(lastLog) {
   const lastRunD = lastLog?.parsed_data?.run_data;
   const lastExs = lastRunD
@@ -6148,7 +6166,18 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
               {athlete.temp_program_text?"✈️ Temp Program":"📋 "+(athlete.program_text?"Program":"Add Program")}
             </button>
           )}
-          {(athlete.tier||"free")!=="free"&&<button onClick={()=>{track("screen_view","nav",{screen:"log"});setShowLog(true);}} style={{background:CA.navy3,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>MY LOG</button>}
+          {/* The unread dot lived ONLY on the Proof tab inside this modal, so a new
+              edition from Joe was invisible unless the athlete happened to open MY
+              LOG first. Same 6px accent dot, on the door instead of behind it —
+              proofDigest is already in scope right here. */}
+          {(athlete.tier||"free")!=="free"&&(
+            <button onClick={()=>{track("screen_view","nav",{screen:"log"});setShowLog(true);}}
+              title={proofDigest&&!proofDigest.is_read?"New letter from Coach Joe":"Your workout log"}
+              style={{position:"relative",background:CA.navy3,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>
+              MY LOG
+              {proofDigest&&!proofDigest.is_read&&<span style={{position:"absolute",top:-3,right:-3,width:8,height:8,borderRadius:"50%",background:CA.accent,boxShadow:`0 0 6px ${CA.accent}`,display:"block"}}/>}
+            </button>
+          )}
           {(athlete.tier||"free")!=="free"&&<button onClick={()=>{track("screen_view","nav",{screen:"progress"});setShowProgress(true);}} style={{background:CA.navy3,border:`1px solid ${CA.blue}`,color:CA.blue,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>PROGRESS</button>}
           <button onClick={()=>setShowSettings(true)} title="Settings" style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:14,lineHeight:1}}>⚙</button>
           {!isMobile&&<button onClick={onLogout} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12}}>Log Out</button>}
@@ -7211,6 +7240,53 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
   // Have we already got the full history in memory? (Then hide the pager.)
   const allLoaded = reachedEnd || totalSessions<=sessionCount;
 
+  // AUTO-LOAD. The button gave no idea whether 1 or 15 pages remained — the modal
+  // held both numbers (totalSessions and sessionCount) and never showed the
+  // relationship. A sentinel near the end of the list pulls the next page in as
+  // the athlete scrolls, and the footer states the position outright.
+  const sentinelRef = useRef(null);
+  const loadOlderRef = useRef(loadOlder);
+  loadOlderRef.current = loadOlder;
+  useEffect(()=>{
+    if(tab!=="workouts"||allLoaded) return;
+    const el = sentinelRef.current;
+    if(!el||typeof IntersectionObserver==="undefined") return;
+    // rootMargin: start the fetch before the sentinel is actually on screen, so
+    // the next page is usually already there by the time they reach the bottom.
+    const io = new IntersectionObserver((entries)=>{
+      if(entries.some(e=>e.isIntersecting)) loadOlderRef.current();
+    },{rootMargin:"600px"});
+    io.observe(el);
+    return ()=>io.disconnect();
+  },[tab,allLoaded,loadingOlder]);
+
+  // LIFT FILTER. "When did I last bench?" meant paging and scanning cards, even
+  // though every row already carries canonicalized exercise names. Chips are the
+  // athlete's OWN most-frequent lifts (from what's loaded), so the row is short
+  // and relevant instead of a generic movement list.
+  const [liftFilter,setLiftFilter] = useState(null);   // canonical lift id, or null
+  const liftChips = useMemo(()=>{
+    const counts = new Map();
+    for(const w of timelineWorkouts){
+      const pd = getPD(w);
+      for(const ex of (pd.exercises||[])){
+        if(!ex?.name) continue;
+        const lift = resolveLift(ex.name);
+        const id = lift.id || normalizeExName(ex.name);
+        if(!id) continue;
+        const cur = counts.get(id) || {id, name: displayForLift(id, cleanerName(ex.name)), n:0};
+        cur.n++; counts.set(id, cur);
+      }
+    }
+    return [...counts.values()].sort((a,b)=>b.n-a.n).slice(0,10);
+  },[timelineWorkouts]);
+  // Does a session contain the filtered lift? Uses the same resolveLift identity the
+  // chips are built from, so a chip can never match zero of the sessions that produced it.
+  const sessionHasLift = (session, liftId) => session.entries.some(e=>{
+    const pd = getPD(e);
+    return (pd.exercises||[]).some(ex=>ex?.name && ((resolveLift(ex.name).id||normalizeExName(ex.name))===liftId));
+  });
+
   return (
     <div className="cyber" style={{position:"fixed",inset:0,zIndex:300,display:"flex",flexDirection:"column",maxWidth:600,margin:"0 auto"}}>
       <style>{GS}</style>
@@ -7251,15 +7327,44 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
           // Backdated sessions/form-checks sort by the day they're attributed to.
           const timeline = [
             ...sessions.map(s=>({type:"session",data:s,date:effectiveDate(s.entries[s.entries.length-1])})),
-            ...formChecks.map(w=>({type:"formcheck",data:w,date:effectiveDate(w)})),
-          ].sort((a,b)=>b.date-a.date);
+            // A lift filter is a question about training ("when did I last bench?"),
+            // so form checks drop out of the list while one is active.
+            ...(liftFilter?[]:formChecks.map(w=>({type:"formcheck",data:w,date:effectiveDate(w)}))),
+          ].filter(it=>!liftFilter||it.type!=="session"||sessionHasLift(it.data,liftFilter))
+           .sort((a,b)=>b.date-a.date);
+
+          const chipRow = liftChips.length>1&&(
+            <div className="no-sb" style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:10,marginBottom:2}}>
+              {liftFilter&&(
+                <button onClick={()=>setLiftFilter(null)}
+                  style={{flexShrink:0,background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:11,whiteSpace:"nowrap"}}>✕ All</button>
+              )}
+              {liftChips.map(c=>{
+                const on = liftFilter===c.id;
+                return (
+                  <button key={c.id} onClick={()=>setLiftFilter(on?null:c.id)}
+                    style={{flexShrink:0,background:on?`${CA.accent}22`:CA.navy3,border:`1px solid ${on?CA.accent:CA.border}`,color:on?CA.accent:CA.muted2,borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:11,fontWeight:on?700:400,whiteSpace:"nowrap"}}>
+                    {c.name}
+                  </button>
+                );
+              })}
+            </div>
+          );
 
           if(timeline.length===0) return (
-            <div style={{color:CA.muted,textAlign:"center",padding:40,fontSize:13}}>No activity logged yet.</div>
+            <div>
+              {chipRow}
+              <div style={{color:CA.muted,textAlign:"center",padding:40,fontSize:13}}>
+                {liftFilter
+                  ? <>No loaded sessions include that lift{allLoaded?".":" yet — keep scrolling to load older history."}</>
+                  : "No activity logged yet."}
+              </div>
+            </div>
           );
 
           return (
             <div>
+              {chipRow}
               {timeline.map((item,i)=>{
                 if(item.type==="session"){
                   const session = item.data;
@@ -7287,6 +7392,14 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                   }).filter(Boolean);
                   const isRunSession = allRunData.length>0 && allExercises.length===0;
                   const runDotColor = isRunSession ? CA.blue : CA.green;
+                  // Volume + top set, from the exercises this card already renders.
+                  // Warm-ups excluded and kg converted (src/grit.js, covered in
+                  // test-grit-math.mjs) — a flattering tonnage number is worse than none.
+                  const tonnage = isRunSession ? 0 : sessionTonnage(allExercises);
+                  const topSet = isRunSession ? null : sessionTopSet(allExercises);
+                  // The Quick Log focus note that came with this session, if any —
+                  // why the day mattered, in Joe's words, kept with the log.
+                  const focusNote = session.entries.map(e=>getPD(e).focus_note).find(Boolean);
 
                   return (
                     <div key={i} style={{background:"rgba(58,123,255,0.03)",border:`1px solid ${CA.line2}`,borderRadius:12,padding:14,marginBottom:10}}>
@@ -7302,6 +7415,18 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                           )}
                         </div>
                       </div>
+                      {(tonnage>0||topSet)&&(
+                        <div style={{display:"flex",flexWrap:"wrap",gap:"2px 8px",justifyContent:"flex-end",marginTop:-4,marginBottom:8,color:CA.muted,fontSize:11,fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>
+                          {tonnage>0&&<span>{tonnage.toLocaleString()} lbs</span>}
+                          {tonnage>0&&topSet&&<span style={{color:CA.faint}}>·</span>}
+                          {topSet&&<span>top: {topSet.name} {fmtWeight(topSet.weight,topSet.unit)}×{topSet.reps}</span>}
+                        </div>
+                      )}
+                      {focusNote&&(
+                        <div style={{marginBottom:8,paddingLeft:10,borderLeft:`2px solid ${CA.cyan}55`,color:CA.muted2,fontSize:11,lineHeight:1.55,whiteSpace:"pre-wrap"}}>
+                          <span style={{color:CA.cyan,fontSize:9,fontWeight:700,letterSpacing:1.2}}>FOCUS </span>{focusNote}
+                        </div>
+                      )}
                       {isRunSession?(
                         <RunCard runData={allRunData[0]} feel={feelVal} palette={CA}/>
                       ):(
@@ -7354,7 +7479,21 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                 return null;
               })}
               {/* Older-session pager. Loads history beyond the recent working set into a
-                  local store (kept out of the AI context on purpose — see olderWorkouts). */}
+                  local store (kept out of the AI context on purpose — see olderWorkouts).
+                  Auto-loads via the sentinel below; the button stays as the manual path
+                  for browsers without IntersectionObserver and as the retry after a
+                  failed page. The footer is the part that was missing — the modal knew
+                  both numbers and never showed the athlete where they were. */}
+              {!allLoaded&&<div ref={sentinelRef} style={{height:1}}/>}
+              <div style={{textAlign:"center",color:CA.muted,fontSize:11,letterSpacing:0.5,padding:"10px 0 2px"}}>
+                {liftFilter
+                  /* While filtering, the count has to be about the FILTER — saying
+                     "6 sessions" over two visible cards reads as a bug. */
+                  ? `${timeline.length} of ${sessionCount} loaded session${sessionCount===1?"":"s"} include ${liftChips.find(c=>c.id===liftFilter)?.name||"this lift"}${allLoaded?"":" — scroll for older history"}`
+                  : allLoaded
+                    ? `${sessionCount} session${sessionCount===1?"":"s"} — that's everything`
+                    : `Showing ${sessionCount} of ${totalSessions} sessions`}
+              </div>
               {!allLoaded&&(
                 <button onClick={loadOlder} disabled={loadingOlder}
                   style={{width:"100%",background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"11px 14px",cursor:loadingOlder?"default":"pointer",fontSize:12,fontWeight:600,letterSpacing:1,textTransform:"uppercase",opacity:loadingOlder?0.6:1,marginTop:2}}>
