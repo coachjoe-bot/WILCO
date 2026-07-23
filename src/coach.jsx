@@ -149,7 +149,7 @@ function ChartBox({h, children}){
 }
 
 // ─── SCHOOLS LIST (master only) ───────────────────────────────────────────────
-function SchoolsList({schools,coaches,onRefresh}) {
+function SchoolsList({schools,coaches,onRefresh,me}) {
   const [confirmDelete,setConfirmDelete] = useState(null); // school id pending delete
   const [deleting,setDeleting] = useState(false);
   const [addingCoachFor,setAddingCoachFor] = useState(null); // school id showing add-coach form
@@ -172,20 +172,13 @@ function SchoolsList({schools,coaches,onRefresh}) {
     if(!newCoachEmail.trim()){setAddCoachErr("Coach email is required.");return;}
     setAddingCoach(true); setAddCoachErr(""); setAddCoachSuccess("");
     try {
-      // Next coach number = max existing coach_number for this school + 1
-      const schoolCoaches = coaches.filter(c=>c.school_id===school.id);
-      const maxNum = schoolCoaches.reduce((m,c)=>Math.max(m,c.coach_number||0),0);
-      const coachNum = maxNum + 1;
-      const accessCode = school.code.toUpperCase() + String(coachNum).padStart(2,"0");
-      const coachRow = await sbInsert("coaches",{
-        name: newCoachName.trim(),
-        email: newCoachEmail.trim().toLowerCase(),
-        school_id: school.id,
-        coach_number: coachNum,
-        access_code: accessCode,
-        role: "coach"
+      // Server assigns coach_number + access_code atomically (identity add-coach),
+      // so two admins adding at the same moment can't mint the same code.
+      const res = await idApi("add-coach",{
+        coachId: me?.id, pin: me?.pin, schoolId: school.id,
+        name: newCoachName.trim(), email: newCoachEmail.trim().toLowerCase(),
       });
-      if(!coachRow?.length) throw new Error("Failed to create coach.");
+      const accessCode = res.accessCode;
       fetch("/api/send-coach-invite",{
         method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({auth:getAuth(),coachName:newCoachName.trim(),coachEmail:newCoachEmail.trim().toLowerCase(),accessCode,schoolName:school.name})
@@ -429,7 +422,7 @@ function CoachesList({coaches,schools,onRefresh}) {
 }
 
 // ─── SCHOOL ONBOARDING FORM (master only) ─────────────────────────────────────
-function SchoolOnboardingForm({onCreated}) {
+function SchoolOnboardingForm({onCreated,me}) {
   const [schoolName,setSchoolName] = useState("");
   const [schoolCode,setSchoolCode] = useState("");
   const [contactEmail,setContactEmail] = useState("");
@@ -504,36 +497,32 @@ function SchoolOnboardingForm({onCreated}) {
       if(!schools?.length) throw new Error("Failed to create school — check if that 3-letter code is already taken.");
       const school=schools[0];
       // 3. Create coaches + send invites
+      // Seats are minted by the server (identity add-coach): it assigns
+      // coach_number + access_code against the live roster and the unique index,
+      // so this loop can't collide with an admin adding a coach at the same moment.
       let created=0;
-      for(let i=0;i<validCoaches.length;i++){
-        const c=validCoaches[i];
-        const coachNum=i+1;
-        const accessCode=schoolCode.toUpperCase()+String(coachNum).padStart(2,"0");
-        const coachRow=await sbInsert("coaches",{
-          name:c.name.trim(),
-          email:c.email.trim().toLowerCase(),
-          school_id:school.id,
-          coach_number:coachNum,
-          access_code:accessCode,
-          role:"coach"
-        });
-        if(coachRow?.length){
+      for(const c of validCoaches){
+        try {
+          const res = await idApi("add-coach",{
+            coachId:me?.id, pin:me?.pin, schoolId:school.id,
+            name:c.name.trim(), email:c.email.trim().toLowerCase(),
+          });
           created++;
           fetch("/api/send-coach-invite",{
             method:"POST",
             headers:{"Content-Type":"application/json"},
-            body:JSON.stringify({auth:getAuth(),coachName:c.name.trim(),coachEmail:c.email.trim().toLowerCase(),accessCode,schoolName:schoolName.trim()})
+            body:JSON.stringify({auth:getAuth(),coachName:c.name.trim(),coachEmail:c.email.trim().toLowerCase(),accessCode:res.accessCode,schoolName:schoolName.trim()})
           }).catch(()=>{});
-        }
+        } catch(_){ /* one bad row must not abandon the rest of the onboarding */ }
       }
       // Create admin account for contact email
       if(contactEmail.trim()){
-        const adminCode=schoolCode.toUpperCase()+"AD";
         try {
-          const adminRow=await sbInsert("coaches",{name:"Admin",email:contactEmail.trim().toLowerCase(),school_id:school.id,coach_number:0,access_code:adminCode,role:"admin"});
-          if(adminRow?.length){
-            fetch("/api/send-coach-invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth:getAuth(),coachName:"Admin",coachEmail:contactEmail.trim().toLowerCase(),accessCode:adminCode,schoolName:schoolName.trim(),isAdmin:true})}).catch(()=>{});
-          }
+          const res = await idApi("add-coach",{
+            coachId:me?.id, pin:me?.pin, schoolId:school.id,
+            name:"Admin", email:contactEmail.trim().toLowerCase(), role:"admin",
+          });
+          fetch("/api/send-coach-invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth:getAuth(),coachName:"Admin",coachEmail:contactEmail.trim().toLowerCase(),accessCode:res.accessCode,schoolName:schoolName.trim(),isAdmin:true})}).catch(()=>{});
         }catch(_){}
       }
       setSuccess(`✓ ${schoolName} onboarded! ${created} coach invite${created!==1?"s":""} sent.`);
@@ -663,6 +652,10 @@ async function sbReadPaged(table, order = "created_at.desc", filter = "") {
 function CoachDashboard({coach,onLogout}) {
   // isMobile (<640) = phone layout; isNarrow (<900) = too tight for list+detail side-by-side
 
+  // Server-computed {coachId: athleteCount} for the school (identity coach-dashboard).
+  // Can't be derived client-side: an admin's roster is their own athletes plus the
+  // unassigned bucket, so every other coach would read as zero.
+  const [coachCounts,setCoachCounts] = useState(null);
   const isMaster = coach.role==="master"||coach.access_code===MASTER_CODE;
   const isAdmin = coach.role==="admin";
   const [athletes,setAthletes] = useState([]);
@@ -839,7 +832,12 @@ function CoachDashboard({coach,onLogout}) {
       const sc = dash.schoolsAll||[];
       let filteredAthletes = Array.isArray(a)?a:[];
       if(!isMaster){
-        filteredAthletes = filteredAthletes.filter(at=>at.coach_id===coach.id);
+        // Admins additionally keep their school's UNASSIGNED athletes (the server
+        // now returns them — see coach-dashboard). Without this the client filter
+        // would strip the orphan bucket straight back out.
+        filteredAthletes = isAdmin
+          ? filteredAthletes.filter(at=>at.coach_id===coach.id || (!at.coach_id && at.school_id===coach.school_id))
+          : filteredAthletes.filter(at=>at.coach_id===coach.id);
       }
       setAthletes(filteredAthletes);
       const ids = filteredAthletes.map(at=>at.id);
@@ -848,6 +846,7 @@ function CoachDashboard({coach,onLogout}) {
       const rmap={}; (Array.isArray(rollupRows)?rollupRows:[]).forEach(r=>{ if(ids.includes(r.athlete_id)) rmap[r.athlete_id]={session_count:r.session_count,last_workout_at:r.last_workout_at}; });
       setRollup(rmap);
       setAllCoaches(Array.isArray(c)?c:[]);
+      setCoachCounts(dash.coachCounts||null);
       setSchool(Array.isArray(s)&&s.length>0?s[0]:null);
       setAllSchools(Array.isArray(sc)?sc:[]);
       // Load proof digests: per-athlete digests for this coach's athletes, plus the
@@ -983,7 +982,12 @@ function CoachDashboard({coach,onLogout}) {
     try {
       const targetCoach = assignCoachId ? allCoaches.find(c=>c.id===assignCoachId) : null;
       if(assignCoachId && !targetCoach){ setAssignError("Coach not found — try again."); setAssignSaving(false); return; }
-      const patch = targetCoach ? {coach_id:targetCoach.id, school_id:targetCoach.school_id||null} : {coach_id:null, school_id:null};
+      // Unassigning as MASTER means "remove from any school". Unassigning as an
+      // ADMIN must keep school_id — that's the only thing keeping the athlete in
+      // their school's Unassigned bucket instead of vanishing from every roster.
+      const patch = targetCoach
+        ? {coach_id:targetCoach.id, school_id:targetCoach.school_id||null}
+        : (isMaster ? {coach_id:null, school_id:null} : {coach_id:null});
       await writeChunked(selectedIds,patch);
       setAthletes(prev=>prev.map(a=>selectedIds.has(a.id)?{...a,...patch}:a));
       setSelectedIds(new Set());
@@ -1154,7 +1158,11 @@ function CoachDashboard({coach,onLogout}) {
                           style={{background:CA_BTN,boxShadow:"0 4px 16px "+CA_GLOW,border:"none",color:"#fff",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,whiteSpace:"nowrap"}}>
                           Program ({selectedIds.size})
                         </button>
-                        {isMaster&&(
+                        {/* Was master-only, which is why a departed coach's athletes
+                            could only be reassigned from Will's account. An admin can
+                            already write any athlete in their school; the modal below
+                            scopes their coach list to that school. */}
+                        {(isMaster||isAdmin)&&(
                           <button onClick={()=>setShowAssignCoachModal(true)}
                             style={{background:CA.blue,border:"none",color:"#fff",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1,whiteSpace:"nowrap"}}>
                             Coach ({selectedIds.size})
@@ -1186,7 +1194,14 @@ function CoachDashboard({coach,onLogout}) {
                           )}
                           <div style={{flex:1,minWidth:0}}>
                             <div style={{color:CA.text,fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:5}}>{a.name}{a.certified_badge_earned_at&&<span title="WILCO Certified" style={{color:CA.accent,fontSize:10,flexShrink:0}}>✦</span>}</div>
-                            <div style={{color:CA.muted,fontSize:11}}>{a.sport} · {rollup[a.id]?.session_count ?? 0} sessions</div>
+                            <div style={{color:CA.muted,fontSize:11,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                              <span>{a.sport} · {rollup[a.id]?.session_count ?? 0} sessions</span>
+                              {/* An orphan from a removed coach. Visible at all only
+                                  since admins started receiving the unassigned bucket. */}
+                              {!a.coach_id&&(
+                                <span style={{background:`${CA.amber}18`,border:`1px solid ${CA.amber}66`,color:CA.amber,borderRadius:4,padding:"0 5px",fontSize:9,fontWeight:700,letterSpacing:.5,whiteSpace:"nowrap"}}>UNASSIGNED</span>
+                              )}
+                            </div>
                           </div>
                           <div style={{textAlign:"right",flexShrink:0}}>
                             {reqCount>0&&<div style={{color:CA.amber,fontSize:9,marginBottom:2,fontWeight:700}}>{reqCount} request{reqCount>1?"s":""}</div>}
@@ -1305,10 +1320,15 @@ function CoachDashboard({coach,onLogout}) {
               </div>
             )}
 
-            {/* Bulk Assign Coach/School Modal (master only) */}
+            {/* Bulk Assign Coach/School Modal. Master sees every coach; an admin sees
+                only their own school's (and can therefore only move athletes inside
+                the school they already administer). */}
             {showAssignCoachModal&&(()=>{
               const schoolsById = Object.fromEntries(allSchools.map(s=>[s.id,s]));
-              const sortedCoaches = [...allCoaches].sort((a,b)=>{
+              const assignable = isMaster
+                ? allCoaches
+                : allCoaches.filter(c=>c.school_id===coach.school_id&&!String(c.access_code||"").startsWith("REMOVED_"));
+              const sortedCoaches = [...assignable].sort((a,b)=>{
                 const sa = schoolsById[a.school_id]?.name||"";
                 const sb = schoolsById[b.school_id]?.name||"";
                 return sa.localeCompare(sb) || a.name.localeCompare(b.name);
@@ -1324,7 +1344,7 @@ function CoachDashboard({coach,onLogout}) {
                     </div>
                     <select value={assignCoachId} onChange={e=>setAssignCoachId(e.target.value)}
                       style={{width:"100%",background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:10,padding:"11px 12px",color:CA.text,fontSize:13,outline:"none",marginBottom:14}}>
-                      <option value="">— Unassigned (remove from any school) —</option>
+                      <option value="">{isMaster?"— Unassigned (remove from any school) —":"— Unassigned (stays in your school) —"}</option>
                       {sortedCoaches.map(c=>{
                         const s = schoolsById[c.school_id];
                         return (
@@ -1637,13 +1657,13 @@ function CoachDashboard({coach,onLogout}) {
 
             {/* ── ACCOUNT TAB (admin only) ── */}
             {/* hooks-order fix: account tab is a real component, not a conditional IIFE (mirrors the sales-demo fix) */}
-            {activeTab==="account"&&isAdmin&&!isMaster&&<AccountTab coach={coach} allCoaches={allCoaches} school={school} athletes={athletes} loadAll={loadAll}/>}
+            {activeTab==="account"&&isAdmin&&!isMaster&&<AccountTab coach={coach} allCoaches={allCoaches} school={school} athletes={athletes} coachCounts={coachCounts} loadAll={loadAll}/>}
 
             {/* ── COACHES TAB (master only) ── */}
             {activeTab==="coaches"&&isMaster&&(
               <div style={{maxWidth:800}}>
                 {/* School onboarding form */}
-                <SchoolOnboardingForm onCreated={loadAll}/>
+                <SchoolOnboardingForm onCreated={loadAll} me={coach}/>
 
 
                 {/* ── PR Recalculation ── */}
@@ -1670,7 +1690,7 @@ function CoachDashboard({coach,onLogout}) {
                   </div>
                 </div>
                 {/* ── SCHOOLS LIST ── */}
-                <SchoolsList schools={allSchools} coaches={allCoaches} onRefresh={loadAll}/>
+                <SchoolsList schools={allSchools} coaches={allCoaches} onRefresh={loadAll} me={coach}/>
 
                 {/* ── COACHES LIST ── */}
                 <CoachesList coaches={allCoaches} schools={allSchools} onRefresh={loadAll}/>
@@ -3005,7 +3025,7 @@ function CoachEdition({digest, athletes, coach, school, onBack, onRead}){
 // ── ACCOUNT TAB (admin only) — extracted from a conditional IIFE inside the
 // dashboard render: hooks in a conditional block violate the Rules of Hooks and
 // crashed the tab when the condition flipped (the sales demo carried this fix).
-function AccountTab({coach,allCoaches,school,athletes,loadAll}){
+function AccountTab({coach,allCoaches,school,athletes,coachCounts,loadAll}){
               // A2: exclude soft-removed coaches (doRemoveCoach stamps access_code
               // REMOVED_<code> but leaves school_id/role intact) — they used to
               // reappear in the list and permanently burn a paid seat.
@@ -3036,26 +3056,55 @@ function AccountTab({coach,allCoaches,school,athletes,loadAll}){
                 if(atLimit){setAcErr("Coach limit reached for your plan.");return;}
                 setAcSaving(true);setAcErr("");setAcOk("");setAcCode("");
                 try {
-                  const nextNum=(schoolCoachesList.reduce((m,c)=>Math.max(m,c.coach_number||0),0))+1;
-                  const newCode=(school?.code||"???").toUpperCase()+String(nextNum).padStart(2,"0");
-                  const row=await sbInsert("coaches",{name:acName.trim(),email:acEmail.trim().toLowerCase(),school_id:coach.school_id,coach_number:nextNum,access_code:newCode,role:"coach"});
-                  if(row?.length){
-                    fetch("/api/send-coach-invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth:getAuth(),coachName:acName.trim(),coachEmail:acEmail.trim().toLowerCase(),accessCode:newCode,schoolName:school?.name||""})}).catch(()=>{});
-                    setAcOk(`✓ ${acName.trim()} added — invite sent.`); setAcCode(newCode);
-                    setAcName("");setAcEmail("");
-                    loadAll();
-                  }else{setAcErr("Could not create coach. Try again.");}
-                }catch(e){setAcErr("Error: "+e.message);}
+                  // Server assigns coach_number + access_code atomically (identity
+                  // add-coach). Computing them here from a possibly-stale roster is
+                  // how two admins adding at once minted the same code — and a
+                  // duplicate code means one of those paid seats can never register.
+                  const res = await idApi("add-coach",{
+                    coachId:coach.id, pin:coach.pin, schoolId:coach.school_id,
+                    name:acName.trim(), email:acEmail.trim().toLowerCase(),
+                  });
+                  const newCode = res.accessCode;
+                  fetch("/api/send-coach-invite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth:getAuth(),coachName:acName.trim(),coachEmail:acEmail.trim().toLowerCase(),accessCode:newCode,schoolName:school?.name||""})}).catch(()=>{});
+                  setAcOk(`✓ ${acName.trim()} added — invite sent.`); setAcCode(newCode);
+                  setAcName("");setAcEmail("");
+                  loadAll();
+                }catch(e){setAcErr(e.message||"Could not create coach. Try again.");}
                 setAcSaving(false);
               };
 
-              const doRemoveCoach = async (c) => {
-                if(!window.confirm(`Remove ${c.name}? Their athletes will remain unassigned.`)) return;
+              // REMOVING A COACH USED TO ORPHAN THEIR ROSTER. The confirm said
+              // "their athletes will remain unassigned" and nulled coach_id — but
+              // the only reassignment tool in the product (bulk Assign-to-Coach) is
+              // master-only, and until now an unassigned athlete didn't even appear
+              // in an admin's roster. So a departing coach's athletes were stranded
+              // until Will intervened on the master account. Now the admin picks who
+              // takes them, in the same step.
+              const [removeTarget,setRemoveTarget] = useState(null);  // the coach being removed
+              const [reassignTo,setReassignTo] = useState("");        // "" = leave unassigned
+              const [removing,setRemoving] = useState(false);
+              const [removeErr,setRemoveErr] = useState("");
+              // How many athletes a coach actually has. NOT countable from `athletes`
+              // here: an admin's roster is their own athletes plus the school's
+              // unassigned ones, so every other coach reads as 0 — and the reassign
+              // step would look unnecessary at exactly the moment a whole roster is
+              // about to be orphaned. Server-computed (identity coach-dashboard).
+              const athleteCountFor = (id) => (coachCounts ? (coachCounts[id]||0) : null);
+              const openRemoveCoach = (c) => { setRemoveTarget(c); setReassignTo(""); setRemoveErr(""); };
+              const confirmRemoveCoach = async () => {
+                const c = removeTarget;
+                if(!c||removing) return;
+                setRemoving(true); setRemoveErr("");
                 try {
+                  // Reassign FIRST. If the seat write succeeded and this failed, the
+                  // athletes would be orphaned under a coach who can no longer log in
+                  // — the exact state this feature exists to prevent.
+                  await sbUpdateWhere("athletes",`?coach_id=eq.${c.id}`,{coach_id: reassignTo || null});
                   await sbUpdate("coaches",c.id,{pin:null,access_code:`REMOVED_${c.access_code}`});
-                  await sbUpdateWhere("athletes",`?coach_id=eq.${c.id}`,{coach_id:null});
+                  setRemoveTarget(null);
                   loadAll();
-                }catch(e){}
+                }catch(e){ setRemoveErr(e?.message||"Couldn't remove that coach. Try again."); }
+                setRemoving(false);
               };
 
               return (
@@ -3087,18 +3136,18 @@ function AccountTab({coach,allCoaches,school,athletes,loadAll}){
                           <span style={{background:`${CA.accent}22`,border:`1px solid ${CA.accent}55`,color:CA.accent,borderRadius:5,padding:"1px 6px",fontSize:9.5,fontWeight:700,letterSpacing:0.5}}>YOU</span>
                           <span style={{color:CA.muted,fontSize:10.5,fontWeight:600,letterSpacing:0.5}}>{coach.role==="admin"?"ADMIN / AD":(coach.role||"COACH").toUpperCase()}</span>
                         </div>
-                        <div style={{color:CA.muted,fontSize:11}}>{coach.email} · Code: {coach.access_code}{coach.access_code&&codeBtn(coach.access_code)} · {athletes.filter(a=>a.coach_id===coach.id).length} athlete{athletes.filter(a=>a.coach_id===coach.id).length!==1?"s":""}</div>
+                        <div style={{color:CA.muted,fontSize:11}}>{coach.email} · Code: {coach.access_code}{coach.access_code&&codeBtn(coach.access_code)}{athleteCountFor(coach.id)!==null&&<> · {athleteCountFor(coach.id)} athlete{athleteCountFor(coach.id)!==1?"s":""}</>}</div>
                       </div>
                     </div>
                     {schoolCoachesList.length===0?<div style={{color:CA.muted,fontSize:13,margin:"12px 0"}}>No assistant coaches added yet.</div>:schoolCoachesList.map(c=>{
-                      const athCount=athletes.filter(a=>a.coach_id===c.id).length;
+                      const athCount=athleteCountFor(c.id);  // server-computed; see athleteCountFor
                       return(
                         <div key={c.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:`1px solid ${CA.border}`}}>
                           <div>
                             <div style={{color:CA.text,fontWeight:600,fontSize:13}}>{c.name}</div>
-                            <div style={{color:CA.muted,fontSize:11}}>{c.email} · Code: {c.access_code} · {athCount} athlete{athCount!==1?"s":""}</div>
+                            <div style={{color:CA.muted,fontSize:11}}>{c.email} · Code: {c.access_code}{athCount!==null&&<> · {athCount} athlete{athCount!==1?"s":""}</>}</div>
                           </div>
-                          <button onClick={()=>doRemoveCoach(c)} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.red,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:11}}>Remove</button>
+                          <button onClick={()=>openRemoveCoach(c)} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.red,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:11}}>Remove</button>
                         </div>
                       );
                     })}
@@ -3118,6 +3167,45 @@ function AccountTab({coach,allCoaches,school,athletes,loadAll}){
                       {acOk&&<div style={{color:CA.green,fontSize:12,marginTop:8,fontWeight:600}}>{acOk}{acCode&&<> Code: <span style={{fontFamily:"'Bebas Neue'",letterSpacing:1,color:CA.accent,fontSize:14}}>{acCode}</span>{codeBtn(acCode)}</>}</div>}
                     </div>
                   </div>
+
+                  {/* Remove-coach + reassign. Replaces the bare confirm() whose only
+                      outcome was "their athletes will remain unassigned". */}
+                  {removeTarget&&(()=>{
+                    const n = athleteCountFor(removeTarget.id);
+                    const options = schoolCoachesList.filter(c=>c.id!==removeTarget.id);
+                    return (
+                      <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.8)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:600,padding:24}} onClick={()=>!removing&&setRemoveTarget(null)}>
+                        <div onClick={e=>e.stopPropagation()} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:24,width:"100%",maxWidth:460}}>
+                          <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.accent,letterSpacing:2,marginBottom:6}}>REMOVE {removeTarget.name.toUpperCase()}</div>
+                          <div style={{color:CA.muted2,fontSize:13,lineHeight:1.6,marginBottom:16}}>
+                            They'll lose access immediately and their seat frees up.
+                            {n===null ? <> Any athletes they coach will move where you choose below.</>
+                              : n>0 ? <> They currently coach <b style={{color:CA.text}}>{n} athlete{n===1?"":"s"}</b> — who should take them?</>
+                              : <> They have no athletes assigned.</>}
+                          </div>
+                          {n!==0&&(
+                            <div style={{marginBottom:16}}>
+                              <div style={{color:CA.muted,fontSize:11,letterSpacing:1,marginBottom:6}}>REASSIGN {n===null?"THEIR ATHLETES":`${n} ATHLETE${n===1?"":"S"}`} TO</div>
+                              <select value={reassignTo} onChange={e=>setReassignTo(e.target.value)}
+                                style={{width:"100%",background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.text,borderRadius:10,padding:"11px 12px",fontSize:13,outline:"none"}}>
+                                <option value="">Leave unassigned (you'll still see them in your roster)</option>
+                                {options.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+                              </select>
+                            </div>
+                          )}
+                          {removeErr&&<div style={{color:CA.red,fontSize:12,marginBottom:12}}>{removeErr}</div>}
+                          <div style={{display:"flex",gap:10}}>
+                            <button onClick={()=>setRemoveTarget(null)} disabled={removing}
+                              style={{flex:1,background:"none",border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:10,padding:"11px",cursor:"pointer",fontSize:13}}>Cancel</button>
+                            <button onClick={confirmRemoveCoach} disabled={removing}
+                              style={{flex:1,background:removing?CA.navy3:CA.red,border:"none",color:"#fff",borderRadius:10,padding:"11px",cursor:removing?"default":"pointer",fontSize:13,fontWeight:700}}>
+                              {removing?"Removing…":"Remove coach"}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               );
 }
@@ -3285,6 +3373,14 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
   const [programLocked,setProgramLocked] = useState(!!athlete.program_locked);
   const [programSaving,setProgramSaving] = useState(false);
   const [programSaved,setProgramSaved] = useState(false);
+  // ONE-CLICK UNDO. Both save paths — manual Save Program and the staged AI merge —
+  // overwrite program_text with no history, so a bad merge caught a second after
+  // saving, or a paste-over mistake, was unrecoverable (the diff overlay gates
+  // BEFORE the save; nothing helped after). Holds the previous text for the
+  // session: {prev, at}. Athlete-facing behavior is unchanged unless Undo is
+  // clicked, which restores through the same onProgramSave path.
+  const [programUndo,setProgramUndo] = useState(null);
+  const [undoing,setUndoing] = useState(false);
   const [programError,setProgramError] = useState("");
   const [photoProcessing,setPhotoProcessing] = useState(false);
   const [confirmDelete,setConfirmDelete] = useState(false);
@@ -3392,7 +3488,11 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
     setProgramSaving(true);
     setProgramError("");
     try {
+      const beforeMerge = athlete.program_text||programText||"";
       await onProgramSave(merged);
+      // The AI merge is the highest-risk write in the product — this is the one
+      // that most needed a way back. See programUndo.
+      if(beforeMerge.trim() && beforeMerge!==merged) setProgramUndo({prev:beforeMerge});
       setProgramText(merged);
       setProgramSaved(true);
       setTimeout(()=>setProgramSaved(false),3000);
@@ -3439,14 +3539,36 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
   const handleProgramSave = async () => {
     setProgramSaving(true);
     setProgramError("");
+    const before = athlete.program_text||"";
     try {
       await onProgramSave(programText);
+      // Only offer Undo when there's actually a prior version to go back to —
+      // "undo" on a first-ever program would just blank it.
+      if(before.trim() && before!==programText) setProgramUndo({prev:before});
       setProgramSaved(true);
       setTimeout(()=>setProgramSaved(false),3000);
     } catch(e){
       setProgramError("Save failed — " + (e?.message||"check your connection and try again."));
     }
     setProgramSaving(false);
+  };
+
+  // Restore the previous version through the SAME save path, so the athlete-facing
+  // write, the program re-parse and the change notification all behave identically
+  // to any other save. Cleared afterwards — one step back, not a stack.
+  const undoProgramSave = async () => {
+    if(!programUndo||undoing) return;
+    setUndoing(true); setProgramError("");
+    try {
+      await onProgramSave(programUndo.prev);
+      setProgramText(programUndo.prev);
+      setProgramUndo(null);
+      setProgramSaved(true);
+      setTimeout(()=>setProgramSaved(false),3000);
+    } catch(e){
+      setProgramError("Undo failed — " + (e?.message||"check your connection and try again."));
+    }
+    setUndoing(false);
   };
 
   const handlePhotoProgram = async (e) => {
@@ -3983,6 +4105,13 @@ function AthleteDetail({athlete,workouts,prs,requests=[],onResolveRequest,onProg
                 {programLocked?"🔒 Program locked":"🔓 Unlocked"}
               </button>
               {programSaved&&<div style={{color:CA.green,fontSize:13,fontWeight:600}}>✓ Saved</div>}
+              {programUndo&&(
+                <button onClick={undoProgramSave} disabled={undoing}
+                  title="Restore the version that was saved before this change"
+                  style={{background:"none",border:`1px solid ${CA.border}`,color:undoing?CA.muted:CA.amber,borderRadius:8,padding:"6px 12px",cursor:undoing?"default":"pointer",fontSize:12,fontWeight:600}}>
+                  {undoing?"Undoing…":"↩ Undo last save"}
+                </button>
+              )}
               {!programSaved&&programText!==(athlete.program_text||"")&&!programSaving&&!programError&&<div style={{color:CA.muted,fontSize:12}}>Unsaved changes</div>}
               {programError&&<div style={{color:CA.red,fontSize:12,fontWeight:600}}>⚠ {programError}</div>}
             </div>

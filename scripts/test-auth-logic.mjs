@@ -85,5 +85,27 @@ check("the pin column is removed", stripPin({ id: "a1", name: "Marcus", pin: "$2
 check("a row without a pin is unchanged", stripPin({ id: "a1", name: "Marcus" }), { id: "a1", name: "Marcus" });
 check("null passes through", stripPin(null), null);
 
+// ── billing-endpoint token authorization ────────────────────────────────────
+// tokenAthleteId IS the authorization rule for the three money endpoints now that
+// they accept a session token instead of demanding the plaintext PIN. Every case
+// here is "can this token act as this athlete" — a loosened predicate would let a
+// coach token, or a token minted for someone else, drive a checkout.
+const { tokenAthleteId } = await import("../api/_stripe.js");
+console.log("\ntokenAthleteId — who may drive a billing call:");
+{
+  const athleteTok = mintSessionToken("athlete", "ath-1");
+  const coachTok = mintSessionToken("coach", "co-1");
+  const authFor = (role, id, token) => ({ role, id, token });
+  check("own token authorizes own athlete", tokenAthleteId(authFor("athlete", "ath-1", athleteTok), "ath-1"), "ath-1");
+  check("token with no athleteId in the body still resolves", tokenAthleteId(authFor("athlete", "ath-1", athleteTok), undefined), "ath-1");
+  check("token cannot act on a DIFFERENT athlete", tokenAthleteId(authFor("athlete", "ath-1", athleteTok), "ath-2"), null);
+  check("a COACH token is never an athlete", tokenAthleteId(authFor("coach", "co-1", coachTok), "co-1"), null);
+  check("a coach token cannot be relabelled as an athlete", tokenAthleteId(authFor("athlete", "co-1", coachTok), "co-1"), null);
+  check("no auth → PIN fallback (null)", tokenAthleteId(undefined, "ath-1"), null);
+  check("auth without a token → PIN fallback", tokenAthleteId({ role: "athlete", id: "ath-1" }, "ath-1"), null);
+  check("a tampered token → PIN fallback", tokenAthleteId(authFor("athlete", "ath-1", athleteTok.slice(0, -3) + "aaa"), "ath-1"), null);
+  check("an expired token → PIN fallback", tokenAthleteId(authFor("athlete", "ath-9", ["v1", "athlete", "ath-9", String(Date.now() - 1000), "sig"].join(".")), "ath-9"), null);
+}
+
 console.log(`\n${fail === 0 ? "All" : ""} ${pass} auth-logic checks pass${fail ? `, ${fail} FAILED` : "."}`);
 process.exit(fail === 0 ? 0 : 1);

@@ -15,10 +15,10 @@ export default async function handler(req, res) {
   if (applyCors(req, res)) return;
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { athleteId, pin, code, tier, billing } = req.body || {};
+  const { athleteId, pin, auth, code, tier, billing } = req.body || {};
 
   try {
-    const athlete = await verifyAthlete({ athleteId, pin });
+    const athlete = await verifyAthlete({ athleteId, pin, auth });
 
     const clean = String(code || "").trim().toUpperCase();
     const stripe = getStripe();

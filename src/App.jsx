@@ -11,11 +11,21 @@ const StripePayBlock = lazy(()=>import("./payform.jsx"));
 import { ConsentFlow, LEGAL_VERSION } from "./legal.jsx";
 // Quick Log draft persistence — the rules that let an athlete close the sheet mid-workout
 // and pick it back up (expiry window, staleness check, clear-on-send).
-import { qlLoad, qlSave, qlClear } from "./quicklog.js";
+import {
+  qlLoad, qlSave, qlClear, splitQuickLogReply, streamQuickLogReply,
+  qlMarkUsed, qlPrebuildEligible, qlMarkPrebuilt,
+} from "./quicklog.js";
 // Coach change-request drafting/filing — single source of truth for the rule set
 // governing when Joe offers to loop the human coach in (see file header).
 import { draftChangeRequest, fileChangeRequest, flagToSource } from "./changeRequest.js";
 import { lineDiff, findPlacement, mergeGuard } from "./programDiff.js";
+// Boot layer: is this build still the deployed one, the warm-reopen snapshot, and
+// the offline send queue. Storage/pure rules with their own suite (test-boot.mjs).
+import {
+  runningAssetPaths, isStaleBuild, buildGreeting,
+  saveSnapshot, loadSnapshot, pruneSnapshots,
+  queueOutbox, readOutbox, shiftOutbox,
+} from "./boot.js";
 // Grit strength-ranking module (e1RM primitives, name normalization, tier ladder,
 // bodyweight/age-fair thresholds) — single canonical source shared with the server
 // Proof Feed engine (api/_grit.js re-exports this file's server-safe subset).
@@ -28,6 +38,7 @@ import {
   resolveLift, displayForLift, bwLoadLabel, BW_LOADED_IDS,
   TIER_NAMES, TIER_COLORS, TIER_POINTS, TIER_DESC, BENCH_DISPLAY, BENCH_IS_BW,
   BENCH_THRESHOLDS, tierForRatio, bwTierFactor, ageTierFactor, scaledThresholds, getBenchKey,
+  sessionTonnage, sessionTopSet,
 } from "./grit.js";
 export {
   epley1RM, getExerciseSets, bestE1RMForExercise, effectiveDate,
@@ -143,6 +154,16 @@ const isIOSSafari = () => {
 const INSTALL_DISMISS_KEY = "wilco_install_dismissed";
 const installDismissed = () => { try { return !!localStorage.getItem(INSTALL_DISMISS_KEY); } catch { return false; } };
 const rememberInstallDismissed = () => { try { localStorage.setItem(INSTALL_DISMISS_KEY, "1"); } catch {} };
+// The one re-ask, stamped separately from the signup dismissal so a "not now" at
+// signup doesn't spend it — and so this can only ever happen once per device.
+const INSTALL_SECOND_KEY = "wilco_install_second_chance";
+const INSTALL_MILESTONE = 3;               // workouts logged before the re-ask
+const secondChanceSpent = () => { try { return !!localStorage.getItem(INSTALL_SECOND_KEY); } catch { return false; } };
+const spendSecondChance = () => { try { localStorage.setItem(INSTALL_SECOND_KEY, "1"); } catch {} };
+// Can this device actually install right now? Same three conditions the signup
+// prompt checks — asking someone already installed, or on a platform with no
+// install path (an in-app webview), is pure noise.
+const canOfferInstall = () => !isStandalone() && !secondChanceSpent() && (!!deferredInstallPrompt || isIOSSafari());
 // Set when signup completes so AthleteView can auto-show the install prompt
 // exactly once, on that first post-signup screen only (never on normal loads).
 let JUST_SIGNED_UP = false;
@@ -211,7 +232,14 @@ function touchAuthSession(){   // extend the rolling window when the app is fore
     if(s && s.token){ s.trustedUntil = Date.now() + AUTH_TRUST_MS; localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(s)); }
   }catch{}
 }
-function clearAuthSession(){ try{ localStorage.removeItem(AUTH_SESSION_KEY); }catch{} CURRENT_AUTH = null; }
+// Log Out wipes the warm-reopen snapshot too. It holds an athlete's name, session
+// count, goals and recent workouts — leaving it behind would let the next person
+// on a shared team phone see the previous athlete's data painted on first load.
+function clearAuthSession(){
+  try{ localStorage.removeItem(AUTH_SESSION_KEY); }catch{}
+  try{ pruneSnapshots(null); }catch{}
+  CURRENT_AUTH = null;
+}
 
 const dataApi = async (op,table,{data,id,params}={}) => {
   const r = await fetch("/api/data",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth:CURRENT_AUTH,op,table,data,id,params})});
@@ -559,6 +587,43 @@ if(typeof window!=="undefined"){
     });
     if(willReload) reloadForStaleChunk();
   });
+}
+
+// ─── "UPDATE READY" (proactive half of the same problem) ─────────────────────
+// The self-heal above is REACTIVE: it only fires once a chunk import has already
+// failed. It exists because sw.js answers navigations from the cached shell, so a
+// new deploy is normally picked up on the NEXT open — an athlete can ride a dead
+// build for a whole session and only find out by crashing into a 404'd chunk.
+//
+// This closes that window from the front: ask the deployed /asset-manifest.json
+// (the same file sw.js already uses for cache pruning) whether the assets THIS
+// document is running still exist. If they don't, the athlete gets a dismissible
+// pill instead of a crash, and tapping it runs the same purge+reload the self-heal
+// uses (a bare reload can't fix this — see reloadForStaleChunk).
+//
+// Bias is heavily toward silence: every ambiguous answer is "no update" (see
+// isStaleBuild), the check is skipped offline, and the pill never interrupts a
+// streaming reply. A false pill shown to the whole installed base would be worse
+// than the bug.
+const UPDATE_POLL_MS = 15 * 60 * 1000;   // background poll
+const UPDATE_MIN_GAP_MS = 5 * 60 * 1000; // floor between checks (tab-focus can fire often)
+const RUNNING_ASSETS = typeof document !== "undefined"
+  ? runningAssetPaths(document, import.meta.url)
+  : new Set();
+
+async function fetchAssetManifest(){
+  try{
+    const r = await fetch("/asset-manifest.json", { cache: "no-store" });
+    if(!r.ok) return null;
+    return await r.json();
+  }catch(_){ return null; }
+}
+
+// True when the running build's assets are gone from the deployed manifest.
+async function newVersionAvailable(){
+  if(typeof navigator!=="undefined" && navigator.onLine===false) return false;
+  if(RUNNING_ASSETS.size===0) return false;   // dev server / unbundled — nothing to compare
+  return isStaleBuild(RUNNING_ASSETS, await fetchAssetManifest());
 }
 
 // ─── ENGAGEMENT TRACKING (Phase 2) ────────────────────────────────────────────
@@ -1628,6 +1693,103 @@ export function useIsMobile(bp=640) {
     return()=>window.removeEventListener("resize",handler);
   },[bp]);
   return isMobile;
+}
+
+// ─── CONNECTIVITY ─────────────────────────────────────────────────────────────
+// navigator.onLine is a floor, not a truth (it reports "online" on a wifi captive
+// portal or a gym's dead-zone signal). So the app treats it as authoritative only
+// for the FALSE case — "the OS says there's no network" is never wrong — and lets
+// the send path mark itself offline when a request actually fails with a network
+// error. That keeps the banner honest in the basement-gym case the SW was built for.
+export function useOnline() {
+  const [online,setOnline] = useState(typeof navigator!=="undefined" ? navigator.onLine!==false : true);
+  useEffect(()=>{
+    const up=()=>setOnline(true), down=()=>setOnline(false);
+    window.addEventListener("online",up);
+    window.addEventListener("offline",down);
+    return ()=>{ window.removeEventListener("online",up); window.removeEventListener("offline",down); };
+  },[]);
+  return online;
+}
+// A fetch that failed because there is no network, as opposed to a 4xx/5xx the
+// server actually answered. TypeError is what fetch throws for a transport failure
+// in every browser we support; the message check covers the SW's own abort text.
+export const isNetworkError = (e) =>
+  !!e && (e.name==="TypeError" || /network|failed to fetch|load failed|offline/i.test(e.message||""));
+
+// ─── BUILD FRESHNESS HOOK + "UPDATE READY" PILL ──────────────────────────────
+// The pill renders at the app root (so it survives every view) but the thing it
+// must not interrupt — a streaming reply — lives deep inside AthleteView. Rather
+// than thread a prop through, AthleteView publishes its busy state to this tiny
+// module-level store and the watcher subscribes.
+let STREAM_BUSY = false;
+const streamBusySubs = new Set();
+export const setStreamBusy = (v) => {
+  const next = !!v;
+  if(STREAM_BUSY===next) return;
+  STREAM_BUSY = next;
+  streamBusySubs.forEach(fn=>{ try{ fn(next); }catch(_){} });
+};
+function useStreamBusy() {
+  const [busy,setBusy] = useState(STREAM_BUSY);
+  useEffect(()=>{ streamBusySubs.add(setBusy); return ()=>{ streamBusySubs.delete(setBusy); }; },[]);
+  return busy;
+}
+
+// Polls on a timer and on tab-focus (the moment an athlete comes back to a PWA
+// that's been backgrounded for days is exactly when it's most likely stale), with
+// a floor between checks so focus-thrashing can't hammer the network. `busy` is
+// passed by the caller — the pill must never appear over a streaming reply.
+function useUpdateReady(busy) {
+  const [ready,setReady] = useState(false);
+  const [dismissed,setDismissed] = useState(false);
+  const lastCheck = useRef(0);
+  useEffect(()=>{
+    let on = true;
+    const check = async () => {
+      if(!on || ready) return;
+      const now = Date.now();
+      if(now - lastCheck.current < UPDATE_MIN_GAP_MS) return;
+      lastCheck.current = now;
+      if(await newVersionAvailable() && on) setReady(true);
+    };
+    // First check is deferred: a cold boot is the one moment the athlete is already
+    // waiting on the network, and a brand-new build is never stale on its own load.
+    const first = setTimeout(check, 45000);
+    const timer = setInterval(check, UPDATE_POLL_MS);
+    const onFocus = () => { if(document.visibilityState==="visible") check(); };
+    document.addEventListener("visibilitychange", onFocus);
+    window.addEventListener("online", onFocus);
+    return ()=>{ on=false; clearTimeout(first); clearInterval(timer); document.removeEventListener("visibilitychange", onFocus); window.removeEventListener("online", onFocus); };
+  },[ready]);
+  return { show: ready && !dismissed && !busy, dismiss: ()=>setDismissed(true) };
+}
+
+// Mounted once at the app root — the pill has to outlive view switches (home →
+// athlete → coach) and a stale build is stale on every screen, not just the chat.
+function UpdateWatcher() {
+  const { show, dismiss } = useUpdateReady(useStreamBusy());
+  return show ? <UpdatePill onDismiss={dismiss}/> : null;
+}
+
+function UpdatePill({onDismiss}) {
+  const [going,setGoing] = useState(false);
+  return (
+    /* Anchored to the BOTTOM, not the top: at the top it sits directly on the
+       athlete header and hides their name and workout count — the two things
+       that are supposed to be permanently visible. Down here it only ever
+       overlaps the quick-reply ticker, which scrolls past anyway. */
+    <div style={{position:"fixed",bottom:"calc(104px + env(safe-area-inset-bottom, 0px))",left:0,right:0,display:"flex",justifyContent:"center",zIndex:9000,pointerEvents:"none"}}>
+      <div style={{pointerEvents:"auto",display:"flex",alignItems:"center",gap:10,background:"rgba(6,10,22,.94)",border:`1px solid ${CA.accent}`,boxShadow:`0 0 18px ${CA.accent}44`,borderRadius:999,padding:"7px 8px 7px 16px",maxWidth:"92vw"}}>
+        <span style={{color:CA.accent,fontSize:12,fontWeight:600,whiteSpace:"nowrap"}}>New version ready</span>
+        <button onClick={()=>{ if(going) return; setGoing(true); reloadForStaleChunk(); }}
+          style={{background:CA.accent,border:"none",color:"#02040c",borderRadius:999,padding:"5px 14px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1.5,whiteSpace:"nowrap"}}>
+          {going?"REFRESHING…":"REFRESH"}
+        </button>
+        <button onClick={onDismiss} title="Not now" style={{background:"none",border:"none",color:CA.muted,cursor:"pointer",fontSize:16,lineHeight:1,padding:"0 6px"}}>×</button>
+      </div>
+    </div>
+  );
 }
 
 // ─── LINE CHART ───────────────────────────────────────────────────────────────
@@ -2743,7 +2905,7 @@ class ErrorBoundary extends Component {
 }
 
 export default function WilcoApp() {
-  return <ErrorBoundary><WilcoRoot/></ErrorBoundary>;
+  return <ErrorBoundary><><UpdateWatcher/><WilcoRoot/></></ErrorBoundary>;
 }
 
 function WilcoRoot() {
@@ -2879,7 +3041,7 @@ function EventLanding({event, onStart, onLogin}) {
 // installed (standalone) — callers check that plus the persisted dismissal.
 // Android/Chrome: one tap fires the captured beforeinstallprompt. iOS Safari:
 // programmatic install doesn't exist, so we show the 3-step Share instructions.
-function InstallPrompt({manual, onClose}) {
+function InstallPrompt({manual, milestone, onClose}) {
   const [installing,setInstalling] = useState(false);
   const canNativeInstall = !!deferredInstallPrompt;
   const showIOSSteps = !canNativeInstall && isIOSSafari();
@@ -2909,9 +3071,13 @@ function InstallPrompt({manual, onClose}) {
         style={{width:"100%",maxWidth:380,background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:22}}>
         <div style={{textAlign:"center",marginBottom:14}}>
           <img src="/icon-192.png" alt="" width={56} height={56} style={{borderRadius:14,marginBottom:10}}/>
-          <div style={{fontFamily:"'Bebas Neue'",fontSize:24,color:CA.accent,letterSpacing:2}}>PUT WILCO ON YOUR HOME SCREEN</div>
+          <div style={{fontFamily:"'Bebas Neue'",fontSize:24,color:CA.accent,letterSpacing:2}}>
+            {milestone ? `${milestone} WORKOUTS IN — PUT WILCO ON YOUR HOME SCREEN` : "PUT WILCO ON YOUR HOME SCREEN"}
+          </div>
           <div style={{color:CA.muted2,fontSize:13,lineHeight:1.6,marginTop:6}}>
-            WILCO isn't in the App Store. Install it from here and it opens full screen like a normal app, right next to the rest of your apps.
+            {milestone
+              ? <>You're logging. Install WILCO and it opens full screen like a normal app — and it's the only way Joe can nudge you when you go quiet.</>
+              : <>WILCO isn't in the App Store. Install it from here and it opens full screen like a normal app, right next to the rest of your apps.</>}
           </div>
         </div>
 
@@ -3034,7 +3200,11 @@ function PaymentStep({athleteId, pin, tier, billing, eventCtx, onSuccess}) {
       try {
         const r = await fetch("/api/create-subscription",{
           method:"POST",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({athleteId,pin,tier,billing,giftCode:appliedGift||undefined,eventSource:eventCtx?.source||undefined,ad:getAdIdentity()||undefined})
+          // Token-first: with a session in hand the plaintext PIN never leaves the
+          // browser for this endpoint, and the server skips a bcrypt compare on
+          // every re-render of checkout (plan change, code applied, retry). `pin`
+          // is sent ONLY as the fallback when there's no token yet.
+          body:JSON.stringify({athleteId,...(CURRENT_AUTH?.token?{auth:CURRENT_AUTH}:{pin}),tier,billing,giftCode:appliedGift||undefined,eventSource:eventCtx?.source||undefined,ad:getAdIdentity()||undefined})
         });
         const j = await r.json();
         if(cancelled) return;
@@ -3072,7 +3242,7 @@ function PaymentStep({athleteId, pin, tier, billing, eventCtx, onSuccess}) {
     try {
       const r = await fetch("/api/validate-gift-code",{
         method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({athleteId,pin,code,tier,billing})
+        body:JSON.stringify({athleteId,...(CURRENT_AUTH?.token?{auth:CURRENT_AUTH}:{pin}),code,tier,billing})
       });
       const j = await r.json();
       if(j.valid){ setAppliedGift(code); setAppliedKind(j.kind||"gift"); setGiftTerms(j.terms||null); setGiftMsg({ok:true,text:j.discountLabel||"Code applied."}); }
@@ -4145,16 +4315,83 @@ function CoachSetupScreen({setView,setCoach,setErr,err}) {
   );
 }
 
+// ─── BOOT GREETING (shared by the warm-reopen path and the network path) ─────
+// One function so the greeting painted instantly from the on-device snapshot is
+// byte-identical to the one the boot batch would produce from the same last log.
+// That equality is what makes a warm reopen safe: the real data landing a second
+// later does not visibly rewrite what Joe just said. See src/boot.js.
+// parsed_data, tolerant of the legacy rows that stored it as a JSON STRING, and
+// memoized per row so a list that reads it once per render doesn't re-parse the
+// same blob dozens of times. Same contract as proofcore's getPD (which the coach
+// chunk uses); kept local so the athlete bundle doesn't pull in the whole
+// proof-feed engine for one accessor.
+const _pdCache = new WeakMap();
+const getPD = (w) => {
+  if(!w || typeof w!=="object") return {};
+  const hit = _pdCache.get(w);
+  if(hit) return hit;
+  let pd = {};
+  if(typeof w.parsed_data==="string"){ try{ pd = JSON.parse(w.parsed_data)||{}; }catch{ pd = {}; } }
+  else pd = w.parsed_data || {};
+  _pdCache.set(w, pd);
+  return pd;
+};
+
+function lastLogSummary(lastLog) {
+  const lastRunD = lastLog?.parsed_data?.run_data;
+  const lastExs = lastRunD
+    ? `${lastRunD.run_type||"run"}${lastRunD.distance_miles?" "+lastRunD.distance_miles+"mi":lastRunD.distance_km?" "+lastRunD.distance_km+"km":""}${lastRunD.duration_minutes?" ("+lastRunD.duration_minutes+"min)":""}`
+    : lastLog?.parsed_data?.exercises?.map(e=>`${e.name}${e.weight?" "+fmtWeight(e.weight,e.unit):""}${e.sets&&e.reps?" "+e.sets+"x"+e.reps:""}`).join(", ")||"";
+  const lastDate = lastLog ? fmtDateShort(lastLog.created_at) : null;
+  return lastExs ? `Last session (${lastDate}): ${lastExs}.` : "";
+}
+function bootGreeting(name, tier, lastLog) {
+  return buildGreeting({
+    name,
+    isFree: (tier||"free")==="free",
+    hasLog: !!lastLog,
+    dAgo: lastLog ? daysBetween(lastLog.created_at) : null,
+    summary: lastLogSummary(lastLog),
+  });
+}
+
 // ─── ATHLETE VIEW ─────────────────────────────────────────────────────────────
 function AthleteView({athlete: initialAthlete, onLogout}) {
   const [athlete,setAthlete] = useState(initialAthlete);
-  const [messages,setMessages] = useState([]);
+  // WARM REOPEN. The boot batch below is five gateway round-trips before the
+  // header count, the week strip, MY LOG and the Proof tab have anything in them —
+  // on gym cellular with cold functions that's 1-3s of shimmer on EVERY reopen,
+  // even though last session's answer is sitting on the device. So we paint from
+  // the snapshot immediately and let the real read swap in behind it. The snapshot
+  // is display-only: `historyLoaded` still gates sending, because send() reasons
+  // about session boundaries and must never do that on a stale 30-row window.
+  const [snapshot] = useState(()=>loadSnapshot(initialAthlete.id));
+  const [messages,setMessages] = useState(()=>{
+    // Today's transcript wins outright (it's live, not a snapshot). Reading it here
+    // instead of in the boot effect also kills the old empty-then-restored flash.
+    try{
+      const stored = JSON.parse(localStorage.getItem(`wilco_chat_${initialAthlete.id}_${new Date().toLocaleDateString()}`)||"null");
+      if(Array.isArray(stored)&&stored.length>0) return stored;
+    }catch(_){}
+    // No transcript yet: a returning athlete gets their greeting now rather than
+    // after the network. Skipped for the first-chat athlete — that path opens the
+    // goal-collection conversation, which is not a greeting and must not be faked.
+    // (`snapshot` above is already loaded — same mount, no second parse.)
+    const snap = snapshot;
+    if(snap && initialAthlete.first_chat_complete && snap.workouts.length>0){
+      return [{role:"assistant",content:bootGreeting(initialAthlete.name, initialAthlete.tier, snap.workouts[0])}];
+    }
+    return [];
+  });
   const [input,setInput] = useState("");
   const [loading,setLoading] = useState(false);
   const [videoLoading,setVideoLoading] = useState(false);
   const [prStamp,setPrStamp] = useState(null);   // {exercise,weight,unit} → "NEW MAX" stamp overlay when a PR lands
-  const [workoutHistory,setWorkoutHistory] = useState([]);
+  const [workoutHistory,setWorkoutHistory] = useState(()=>snapshot?.workouts||[]);
   const [historyLoaded,setHistoryLoaded] = useState(false);
+  // True when there's on-device data worth painting before the network answers.
+  // Drives the CHROME only (header stats, week strip, log) — never the composer.
+  const warm = !!snapshot && snapshot.workouts.length>0;
   const [movementPrompt,setMovementPrompt] = useState(false);
   const [movementLabel,setMovementLabel] = useState("");
   const [sessionCheckPending,setSessionCheckPending] = useState(null);
@@ -4190,6 +4427,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // — that message inherited the pure-log flag and silently skipped every
   // program-write and correction branch. Matching on the text scopes it correctly.
   const quickLogPending = useRef(null);
+  // The TODAY'S FOCUS note that came with the draft currently being sent:
+  // {text, note}. The note explains why the session mattered (day intent, key-lift
+  // structure, injury/goal cues) and the app already paid a Sonnet call to write
+  // it — but it was shown once in the sheet and then thrown away on send. Keyed on
+  // the exact draft text, same as quickLogPending, so a later message can't inherit
+  // someone else's note. Stamped onto the workout row as parsed_data.focus_note.
+  const quickLogNote = useRef(null);
   const pendingQuickLogSend = useRef(null); // A12: draft queued while a reply streams — auto-fired when the stream clears
   const [quickLogParked,setQuickLogParked] = useState(false); // an unfinished Quick Log draft is waiting — surfaced on the nav button
   // Re-read whenever the sheet closes (draft just parked) or history moves (they logged, so
@@ -4198,7 +4442,11 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // so the button can never advertise a draft the sheet would then refuse to resume.
   useEffect(()=>{
     if(!athlete?.id || !historyLoaded || !(athlete.temp_program_text||athlete.program_text)){ setQuickLogParked(false); return; }
-    setQuickLogParked(!!qlLoad(athlete.id, workoutHistory));
+    const parked = qlLoad(athlete.id, workoutHistory);
+    // A PRE-BUILT draft is not "the workout you started" — nobody started it. It
+    // opens instantly, but the button keeps saying QUICK LOG so RESUME LOG stays a
+    // true statement about the athlete's own unfinished work.
+    setQuickLogParked(!!parked && !parked.prebuilt);
   },[athlete?.id, athlete?.program_text, athlete?.temp_program_text, historyLoaded, workoutHistory, showQuickLog]);
   // A12: fire a queued Quick Log send the moment the in-flight reply finishes.
   // The closure is fresh from the render where loading flipped, so send() sees
@@ -4211,17 +4459,38 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       send(text);
     }
   },[loading,videoLoading,historyLoaded]);
+  // Publish "a reply is streaming" to the app-root update watcher, so the
+  // "New version ready" pill can never appear on top of Joe mid-sentence.
+  useEffect(()=>{ setStreamBusy(loading||videoLoading); },[loading,videoLoading]);
+  useEffect(()=>()=>setStreamBusy(false),[]); // unmount (logout) must not leave it stuck on
   const [showProfileCompletion,setShowProfileCompletion] = useState(false);
   const [profileBannerDismissed,setProfileBannerDismissed] = useState(()=>{
     try{return!!localStorage.getItem(`wilco_profile_banner_${initialAthlete.id}`);}catch{return false;}
   });
   const [showPushPrompt,setShowPushPrompt] = useState(false); // one-time post-workout notifications offer
-  const [athleteGoals,setAthleteGoals] = useState([]);
-  const [athleteContext,setAthleteContext] = useState(null);
-  const [proofDigest,setProofDigest] = useState(null);
+  // Seeded from the warm-reopen snapshot (see `snapshot` above) so the Proof tab
+  // and Joe's context aren't empty for the first second of a reopen.
+  const [athleteGoals,setAthleteGoals] = useState(()=>snapshot?.goals||[]);
+  const [athleteContext,setAthleteContext] = useState(()=>snapshot?.context||null);
+  const [proofDigest,setProofDigest] = useState(()=>snapshot?.digest||null);
   const [showProofChat,setShowProofChat] = useState(false);
   const [chatDigest,setChatDigest] = useState(null); // A5: a PAST edition opened from the archive (null = latest)
   const [retryPending,setRetryPending] = useState(null); // text of a send that failed — drives the Retry chip
+  // ── OFFLINE ──────────────────────────────────────────────────────────────
+  // sw.js deliberately makes an offline OPEN work (cached shell + cached assets),
+  // but the app layer never knew it was offline: the boot batch failed into a
+  // cheerful greeting with no history, and a sent workout just errored. In a gym
+  // basement — the exact place this app is used — that reads as "WILCO is broken".
+  // Now: an honest banner, and the message is QUEUED rather than lost.
+  //
+  // navigator.onLine is trusted only for its FALSE answer (the OS saying "no
+  // network" is never wrong). The lying case — signal bars but nothing gets
+  // through — is caught by `netDown`, which a real network failure sets.
+  const online = useOnline();
+  const [netDown,setNetDown] = useState(false);
+  const offline = !online || netDown;
+  const [outbox,setOutbox] = useState(()=>readOutbox(initialAthlete.id));
+  useEffect(()=>{ if(online) setNetDown(false); },[online]); // regained signal → re-trust the network
   const [resumingProgram,setResumingProgram] = useState(false);
   // program_modifications is written on every PR propagation, correction reversal
   // and Field Mode switch, and was readable through the gateway — but nothing in
@@ -4296,6 +4565,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // fires when the underlying program actually changed — which is exactly the case
   // where keeping local edits would clobber a newer program.
   useEffect(()=>{ setAthleteProgramText(athlete.program_text||""); },[athlete.program_text]);
+  // Field Mode only: reveals the regular-program editor under the "On Hold" card.
+  const [editRegularInField,setEditRegularInField] = useState(false);
   const [athleteProgramSaving,setAthleteProgramSaving] = useState(false);
   const [athleteProgramMsg,setAthleteProgramMsg] = useState("");
   const [athletePhotoProcessing,setAthletePhotoProcessing] = useState(false);
@@ -4310,13 +4581,55 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // loads), and only if not already installed, not previously dismissed, and this
   // platform actually has an install path. "manual" comes from Settings and
   // ignores the dismissal (that's the point of the persistent entry).
-  const [showInstall,setShowInstall] = useState(null); // null | "auto" | "manual"
+  const [showInstall,setShowInstall] = useState(null); // null | "auto" | "manual" | "milestone"
+  const [installMilestone,setInstallMilestone] = useState(0);
+  // FACE ID AT SIGNUP. Enrollment was only ever offered inside LoginScreen, AFTER a
+  // manual PIN login — and thanks to the 3h rolling persistent session a new athlete
+  // may not see that screen for days. So the highest-intent moment (they just chose a
+  // PIN, phone in hand, just saw the install prompt) never offered the app's fastest
+  // sign-in. Same biometricEnroll call, same enrollment record; it just happens here
+  // too. Queued BEHIND the install prompt so the two never stack.
+  const [bioOfferPending,setBioOfferPending] = useState(false);
+  const [showBioOffer,setShowBioOffer] = useState(false);
+  const [bioBusy,setBioBusy] = useState(false);
+  const [bioErr,setBioErr] = useState("");
   useEffect(()=>{
     if(!JUST_SIGNED_UP) return;
     JUST_SIGNED_UP = false;
-    if(isStandalone()||installDismissed()) return;
-    if(deferredInstallPrompt||isIOSSafari()) setShowInstall("auto");
-  },[]);
+    if(!isStandalone() && !installDismissed() && (deferredInstallPrompt||isIOSSafari())) setShowInstall("auto");
+    (async()=>{
+      if(getBioEnrollment("athlete")) return;        // already enrolled on this device
+      if(!athlete?.pin || !athlete?.id) return;      // nothing to store
+      if(!(await biometricSupported())) return;      // no platform authenticator
+      setBioOfferPending(true);
+    })();
+  },[]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(()=>{
+    if(bioOfferPending && !showInstall){ setBioOfferPending(false); setShowBioOffer(true); }
+  },[bioOfferPending,showInstall]);
+  const enableBioNow = async () => {
+    if(bioBusy) return;
+    setBioBusy(true); setBioErr("");
+    try{
+      await biometricEnroll({role:"athlete",userId:athlete.id,name:athlete.name,pin:athlete.pin});
+      track("biometric_enroll","auth",{role:"athlete"});
+      setShowBioOffer(false);
+    }catch(e){
+      // Never trap them here — they're already signed in. The next PIN login
+      // re-offers enrollment through the existing LoginScreen card.
+      setBioErr(e.message||"Couldn't set up Face ID. We'll offer it again next time you sign in.");
+    }
+    setBioBusy(false);
+  };
+  // The one re-ask, at the 3rd logged workout (see INSTALL_MILESTONE). Deliberately
+  // ignores the signup dismissal — that "not now" was answered before they'd used
+  // the app — but spends its own one-shot stamp either way.
+  const offerSecondChanceInstall = (count) => {
+    if(!canOfferInstall()) return;
+    spendSecondChance();
+    setInstallMilestone(count);
+    setTimeout(()=>setShowInstall("milestone"), 2600); // let the milestone callout land first
+  };
   const closeInstall = () => {
     if(showInstall==="auto") rememberInstallDismissed();
     setShowInstall(null);
@@ -4382,6 +4695,73 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   },[messages,historyLoaded]);
   // Unmount (logout) is also a save point — the cleanup above only cancels.
   useEffect(()=>chatPersistFlush,[]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // BACKGROUND PRE-BUILD. Every input the draft needs (program, history, today's
+  // chat, goals, context) is already in state before the athlete taps QUICK LOG,
+  // yet generation always happened on demand behind a spinner. Building it after
+  // boot means the sheet opens to a finished draft instead of a wait.
+  //
+  // The cost gate lives in quicklog.js: only athletes who actually sent a Quick Log
+  // in the last 14 days, at most once per LOCAL calendar day. Worst case is one
+  // ~$0.01 call per day per active Quick Log user; a new or lapsed athlete never
+  // triggers a speculative call at all. The day is stamped BEFORE the call so a
+  // failing prompt can't retry on every reopen.
+  const prebuiltRef = useRef(false);
+  useEffect(()=>{
+    if(prebuiltRef.current || !historyLoaded || offline) return;
+    if((athlete.tier||"free")==="free") return;
+    if(!(athlete.temp_program_text||athlete.program_text)) return;
+    if(qlLoad(athlete.id, workoutHistory)) return;      // already have a draft to open
+    if(!qlPrebuildEligible(athlete.id)) return;
+    prebuiltRef.current = true;
+    // Deliberately late: the boot batch, the digest read and any restored chat all
+    // come first. This is a convenience, and it must never compete for the
+    // connection with something the athlete is actually waiting on.
+    const t = setTimeout(async ()=>{
+      qlMarkPrebuilt(athlete.id);
+      try{
+        const res = await generateQuickLogDraft({athlete, workoutHistory, messages, goals:athleteGoals, contextNotes:athleteContext});
+        if(res.rest || !res.draft.trim()) return;
+        if(qlLoad(athlete.id, workoutHistory)) return;   // they opened the sheet while we were drafting
+        qlSave(athlete.id, workoutHistory, {draft:res.draft, notes:res.notes, undoStack:[], prebuilt:true});
+      }catch(_){ /* silent: the sheet just drafts on open, exactly as before */ }
+    }, 8000);
+    return ()=>clearTimeout(t);
+  },[historyLoaded,offline]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Drain the offline queue one message at a time, each through the normal send()
+  // path — so a replayed workout gets the same parsing, session-gap check and PR
+  // detection a live one would. One per pass, gated on nothing else being in
+  // flight; the queue shrinks every pass, so this can't spin.
+  // (Declared down here, not with the other chat effects, because a dependency
+  // array is evaluated during RENDER — referencing `offline`/`outbox` above their
+  // own declarations is a temporal-dead-zone crash, not a lint nit.)
+  useEffect(()=>{
+    if(offline||loading||videoLoading||!historyLoaded||outbox.length===0) return;
+    const { item, rest } = shiftOutbox(athlete.id);
+    if(!item){ setOutbox([]); return; }
+    setOutbox(rest);   // its pending bubble disappears here; send() appends the real one
+    if(item.pure) quickLogPending.current = item.text; // a queued Quick Log draft is still a pure log
+    if(item.note) quickLogNote.current = {text:item.text, note:item.note}; // …and keeps its focus note
+    send(item.text);
+  },[offline,loading,videoLoading,historyLoaded,outbox]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Snapshot for the NEXT open. Debounced because `athlete` gets a new object
+  // identity on nearly every message; written only once the real data has landed,
+  // so a warm-but-stale render can never be re-snapshotted as if it were fresh.
+  const snapRef = useRef({});
+  snapRef.current = {athlete, workoutHistory, goals:athleteGoals, context:athleteContext, digest:proofDigest};
+  useEffect(()=>{
+    if(!historyLoaded||!athlete?.id) return;
+    const t = setTimeout(()=>saveSnapshot(athlete.id, snapRef.current), 1200);
+    return ()=>clearTimeout(t);
+  },[historyLoaded,athlete,workoutHistory,athleteGoals,athleteContext,proofDigest]);
+  // iOS kills a backgrounded PWA without warning, so the debounce above can lose
+  // the last minute of a session. pagehide is the one event that reliably fires.
+  useEffect(()=>{
+    const flush = ()=>{ if(historyLoaded&&athlete?.id) saveSnapshot(athlete.id, snapRef.current); };
+    window.addEventListener("pagehide", flush);
+    return ()=>window.removeEventListener("pagehide", flush);
+  },[historyLoaded,athlete?.id]);
 
   useEffect(()=>{
     // Prune stale per-day chat caches: every day leaves a wilco_chat_<id>_<date>
@@ -4456,14 +4836,15 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
 
         if(logs&&logs.length>0) setWorkoutHistory(logs);
 
-        const lastLog = logs?.[0];
-        const dAgo = lastLog ? daysBetween(lastLog.created_at) : null;
-        const lastRunD = lastLog?.parsed_data?.run_data;
-        const lastExs = lastRunD
-          ? `${lastRunD.run_type||"run"}${lastRunD.distance_miles?" "+lastRunD.distance_miles+"mi":lastRunD.distance_km?" "+lastRunD.distance_km+"km":""}${lastRunD.duration_minutes?" ("+lastRunD.duration_minutes+"min)":""}`
-          : lastLog?.parsed_data?.exercises?.map(e=>`${e.name}${e.weight?" "+fmtWeight(e.weight,e.unit):""}${e.sets&&e.reps?" "+e.sets+"x"+e.reps:""}`).join(", ")||"";
-        const lastDate = lastLog ? fmtDateShort(lastLog.created_at) : null;
-        const summary = lastExs ? `Last session (${lastDate}): ${lastExs}.` : "";
+        // OFFLINE / FAILED BATCH. Every read above is individually caught into an
+        // empty array, so a dead network never throws — which meant the greeting
+        // below used to tell a 200-session athlete to "tell me about your first
+        // workout", as if their whole history had vanished. Fall back to the
+        // snapshot's newest row (already painted on screen) so the greeting stays
+        // true, and flip the banner on when the OS confirms there's no network.
+        const readsFailed = !_fa;
+        if(readsFailed && typeof navigator!=="undefined" && navigator.onLine===false) setNetDown(true);
+        const lastLog = (logs&&logs.length>0) ? logs[0] : (snapshot?.workouts?.[0] || null);
 
         // Goal collection: first chat ever
         const latestAthlete = freshAthlete?.[0]||athlete;
@@ -4474,29 +4855,20 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           return;
         }
 
-        let greeting;
-        // Free tier: always greet as fresh start (no memory between sessions)
-        const isFree = tier==="free";
-        if(!lastLog||isFree){
-          greeting = isFree&&lastLog
-            ? `What's up, ${athlete.name}. I'm starting fresh — Free tier doesn't store your history between sessions. What did you get after today?`
-            : `Welcome to WILCO, ${athlete.name}. Tell me about your first workout -- what you did, how it felt, any questions.`;
-        } else if(dAgo>=7){
-          greeting = `${athlete.name}. It's been ${dAgo} days since your last log. That's a week. What happened? We can't build anything on inconsistency. ${summary} What did you get after today?`;
-        } else if(dAgo>=4){
-          greeting = `${athlete.name}. ${dAgo} days since your last log. It's not about workout 1 -- it's about workout 100. ${summary} What did you do today?`;
-        } else if(dAgo>=2){
-          greeting = `Back at it, ${athlete.name}. ${summary} What did you get after today?`;
-        } else {
-          greeting = summary ? `${athlete.name}. ${summary} What are you getting after today?` : `What's up, ${athlete.name}. What did you get after today?`;
-        }
-        setMessages([{role:"assistant",content:greeting}]);
+        // Same function the warm-reopen path used, so if the snapshot already
+        // painted a greeting this produces the identical string and nothing on
+        // screen visibly rewrites itself. (src/boot.js, scripts/test-boot.mjs)
+        setMessages([{role:"assistant",content:bootGreeting(athlete.name, tier, lastLog)}]);
       } catch(e){
-        setMessages([{role:"assistant",content:`What's up, ${athlete.name}. What did you get after today?`}]);
+        // A boot batch that died on the network is the offline open the SW was
+        // built for. Say so instead of greeting them as if their history were
+        // simply empty — and keep whatever the snapshot already painted.
+        if(isNetworkError(e)) setNetDown(true);
+        if(messages.length===0) setMessages([{role:"assistant",content:`What's up, ${athlete.name}. What did you get after today?`}]);
       }
       setHistoryLoaded(true);
     })();
-  },[]);
+  },[]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const finalizeWorkout = async (parsed, msg, reply, updatedAthlete, isNewSession, addReply) => {
     const tier = updatedAthlete.tier||"free";
@@ -4513,7 +4885,14 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       }
     } catch(_) {}
     try {
-      const parsedFinal = isNewSession ? {...parsed,new_session:true} : parsed;
+      let parsedFinal = isNewSession ? {...parsed,new_session:true} : parsed;
+      // Stamp the Quick Log focus note onto the row it belongs to. Matched on the
+      // exact draft text so it can only ever land on its own workout, and consumed
+      // here so a later log can't inherit it.
+      if(quickLogNote.current && quickLogNote.current.text===msg){
+        parsedFinal = {...parsedFinal, focus_note: quickLogNote.current.note};
+        quickLogNote.current = null;
+      }
       // Free tier: no memory — don't persist workouts or PRs
       if(tier==="free"){
         if(addReply) setMessages(prev=>[...prev,{role:"assistant",content:reply}]);
@@ -4586,6 +4965,14 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             :`Workout ${crossed}. Keep stacking.`;
           setTimeout(()=>setMessages(prev=>[...prev,{role:"assistant",content:milestoneMsg}]),1500);
         }
+        // SECOND-CHANCE INSTALL. The only automatic install offer fires seconds
+        // after signup — before the athlete has felt anything — and one dismissal
+        // is permanent except for a buried Settings entry. Installed users are also
+        // the only ones who can receive push, which is the whole retention channel.
+        // So ask once more at a moment of demonstrated commitment: crossing the 3rd
+        // logged workout. Stamped separately from the signup dismissal, and once
+        // ever — a third ask would be nagging.
+        if(prevCount<INSTALL_MILESTONE && newCount>=INSTALL_MILESTONE) offerSecondChanceInstall(newCount);
       } catch(_){}
 
       // Auto PR detection (estimated 1RM, from any logged set — handles variable weight/reps via set_details)
@@ -5067,6 +5454,23 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const send = async (overrideText) => {
     const msg = (typeof overrideText==="string" ? overrideText : input).trim();
     if(!msg||loading||videoLoading||!historyLoaded) return;
+    // No signal: keep the message instead of failing it. It lives ONLY in the
+    // outbox — never optimistically written to `workouts` — and replays through
+    // this same function when connectivity returns, so a queued log can never
+    // become a phantom session. The Quick Log pure-log flag rides along in the
+    // queue entry; without it a draft replayed hours later could be classified as
+    // a program and overwrite program_text.
+    if(offline){
+      const pure = quickLogPending.current === msg;
+      const note = (quickLogNote.current && quickLogNote.current.text===msg) ? quickLogNote.current.note : null;
+      quickLogPending.current = null;
+      setInput("");
+      // Queued messages render from `outbox`, NOT from `messages` — send() owns the
+      // transcript and appends its own copy on replay, so a bubble pushed into
+      // `messages` here would survive into that append and show twice.
+      setOutbox(queueOutbox(athlete.id, msg, {pure, note}));
+      return;
+    }
     // A27: typing while the session-gap question is pending resolves it as "same
     // workout" (the conservative default — no new session boundary) and processes
     // the typed message normally, matching the other chip flows' typed-means-
@@ -5320,11 +5724,26 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           }
         } catch(e){}
       } else if(parsed.program_create_request && !fromQuickLog){
-        // Athlete asked Joe to BUILD them a program. Joe already wrote it into `reply`;
-        // pull the clean program out of it. Only act if the reply actually contains a
-        // real program (not just clarifying questions).
+        // Athlete asked Joe to BUILD them a program. The conversational reply is
+        // capped at 800 tokens, so it can never BE the program — a dedicated
+        // 3500-token generation call writes the real one (see generateFullProgram).
+        // The model answers NEED_MORE_INFO (→ null) when Joe's reply was really just
+        // clarifying questions, which is what the old length heuristic approximated.
+        // A failure falls back to the previous extract-from-reply behavior rather
+        // than leaving the athlete with nothing.
         try {
-          const generated = await extractProgramText(reply);
+          // Status only — deliberately NOT through followUp, which folds the note
+          // into finalReply and would bake "give me a few seconds" into the saved
+          // bot_reply the coach later reads.
+          setMessages(prev=>[...prev,{role:"assistant",content:"Writing the full version into your Program tab — give me a few seconds."}]);
+          let generated = null;
+          try {
+            generated = await generateFullProgram({
+              athlete: updatedAthlete, workoutHistory, messages, goals: athleteGoals,
+              contextNotes: athleteContext, request: msg, joeReply: reply,
+            });
+          } catch(_genErr){ /* fall through to the legacy extraction below */ }
+          if(!generated) generated = await extractProgramText(reply);
           const looksLikeProgram = generated && generated.trim().length > 120 && generated.trim().split("\n").length > 3;
           if(looksLikeProgram){
             if(hasProgram){
@@ -5503,6 +5922,28 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       await finalizeWorkout(parsed,msg,finalReply,updatedAthlete,false,false);
     } catch(e){
       console.error("JoBot error:",e);
+      // A transport failure with the OS still claiming "online" is the gym-basement
+      // case: signal bars, nothing gets through. Treat it as offline from here —
+      // the banner turns on, the message goes to the queue instead of the retry
+      // chip, and it flushes by itself the moment the connection is real again.
+      if(isNetworkError(e)){
+        setNetDown(true);
+        // Move the athlete's message out of the transcript and into the queue, so
+        // it renders as a pending bubble (from `outbox`) exactly like one typed
+        // while already offline — and doesn't double up when the replay appends it.
+        setMessages(prev=>{
+          const last = prev[prev.length-1];
+          const withoutBlank = (last && last.role==="assistant" && !last.content) ? prev.slice(0,-1) : prev;
+          const i = withoutBlank.map(m=>m.role==="user"&&m.content===msg).lastIndexOf(true);
+          return i===-1 ? withoutBlank : [...withoutBlank.slice(0,i),...withoutBlank.slice(i+1)];
+        });
+        setOutbox(queueOutbox(athlete.id, msg, {
+          pure: fromQuickLog,
+          note: (quickLogNote.current && quickLogNote.current.text===msg) ? quickLogNote.current.note : null,
+        }));
+        setLoading(false);
+        return;
+      }
       const errText = `Hit a snag. Try again. (${e?.message||"unknown error"})`;
       // A stream+fallback double failure leaves the empty assistant placeholder
       // (appended before streaming started) as the last message — fill it with
@@ -5735,7 +6176,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         {/* Row 1: identity */}
         <div style={{display:"flex",alignItems:"baseline",gap:10,minWidth:0}}>
           <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color:CA.cyan,letterSpacing:2,lineHeight:1,flexShrink:0,whiteSpace:"nowrap"}}>COACH JOE-BOT</div>
-          {historyLoaded&&(
+          {(historyLoaded||warm)&&(
           <div style={{display:"flex",alignItems:"baseline",gap:4,flexShrink:0}} title="Workouts logged">
             <span style={{color:CA.muted,fontSize:9,letterSpacing:1,fontWeight:600}}>WORKOUTS:</span>
             {/* Authoritative lifetime session total (server-maintained). groupIntoSessions
@@ -5754,7 +6195,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         {/* Row 1.5: streak charge-chain — this week's training as a row of links,
             trained days lit + glowing (electric blue), rest cooled steel. Today is
             marked by a brighter letter. Static on mount — no light-up animation. */}
-        {historyLoaded&&(
+        {(historyLoaded||warm)&&(
           <div style={{display:"flex",alignItems:"center",gap:3,padding:"2px 0 4px"}} title="Your training this week">
             <span style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:8,letterSpacing:1,color:CA.faint,textTransform:"uppercase",marginRight:4}}>WK</span>
             {[0,1,2,3,4,5,6].map(i=>{const on=trainedThisWeek.has(i);return <div key={i} className={`streaklnk${on?" on":""}`}/>;})}
@@ -5779,13 +6220,35 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
               {athlete.temp_program_text?"✈️ Temp Program":"📋 "+(athlete.program_text?"Program":"Add Program")}
             </button>
           )}
-          {(athlete.tier||"free")!=="free"&&<button onClick={()=>{track("screen_view","nav",{screen:"log"});setShowLog(true);}} style={{background:CA.navy3,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>MY LOG</button>}
+          {/* The unread dot lived ONLY on the Proof tab inside this modal, so a new
+              edition from Joe was invisible unless the athlete happened to open MY
+              LOG first. Same 6px accent dot, on the door instead of behind it —
+              proofDigest is already in scope right here. */}
+          {(athlete.tier||"free")!=="free"&&(
+            <button onClick={()=>{track("screen_view","nav",{screen:"log"});setShowLog(true);}}
+              title={proofDigest&&!proofDigest.is_read?"New letter from Coach Joe":"Your workout log"}
+              style={{position:"relative",background:CA.navy3,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>
+              MY LOG
+              {proofDigest&&!proofDigest.is_read&&<span style={{position:"absolute",top:-3,right:-3,width:8,height:8,borderRadius:"50%",background:CA.accent,boxShadow:`0 0 6px ${CA.accent}`,display:"block"}}/>}
+            </button>
+          )}
           {(athlete.tier||"free")!=="free"&&<button onClick={()=>{track("screen_view","nav",{screen:"progress"});setShowProgress(true);}} style={{background:CA.navy3,border:`1px solid ${CA.blue}`,color:CA.blue,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"'Bebas Neue'",letterSpacing:1}}>PROGRESS</button>}
           <button onClick={()=>setShowSettings(true)} title="Settings" style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:14,lineHeight:1}}>⚙</button>
           {!isMobile&&<button onClick={onLogout} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12}}>Log Out</button>}
         </div>
         </div>
       </div>
+
+      {/* Offline banner. Deliberately above every other banner and never
+          dismissible: while it's up, nothing the athlete types is reaching the
+          server, and that is the single most important thing on the screen. */}
+      {offline&&(
+        <div style={{background:`${CA.amber}18`,borderBottom:`1px solid ${CA.amber}55`,padding:"7px 16px",display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+          <span style={{color:CA.amber,fontSize:12}}>
+            You're offline — {outbox.length>0 ? `${outbox.length} ${outbox.length===1?"log is":"logs are"} waiting and will send when you're back.` : "logs will send when you're back."}
+          </span>
+        </div>
+      )}
 
       {/* Profile completion banner */}
       {!profileBannerDismissed&&!athlete.birthday&&(
@@ -5819,7 +6282,10 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
 
       {/* Messages */}
       <div style={{flex:1,overflowY:"auto",padding:"16px 16px 8px"}}>
-        {!historyLoaded?(
+        {/* The skeleton is now only for a TRUE cold start. A warm reopen already
+            has the greeting (or today's transcript) painted from the device, so
+            showing "Syncing feed" over it would be a step backwards. */}
+        {!historyLoaded&&messages.length===0?(
           <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12,padding:"48px 20px"}}>
             <div className="ld-charge"><i/></div>
             <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:10,letterSpacing:1,color:CA.muted}}>Syncing feed</div>
@@ -5837,6 +6303,21 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
                   {/* While the streaming placeholder is still empty, show the typing dots INSIDE
                       this bubble (instead of a second stacked indicator bubble below). */}
                   {m.role==="assistant"?(!m.content&&loading&&i===messages.length-1?<div className="ld-dots"><i/><i/><i/></div>:<StreamText text={m.content}/>):m.content}
+                </div>
+              </div>
+            ))}
+            {/* Messages waiting on signal. Rendered from `outbox`, deliberately NOT
+                pushed into `messages`: send() owns the transcript and appends its
+                own copy when the queue drains, so a bubble living in both places
+                would show twice. Always last, which is also always correct — a
+                queued message is by definition newer than everything above it. */}
+            {outbox.map((q,i)=>(
+              <div key={`q${i}`} className="fade-up" style={{marginBottom:12,display:"flex",justifyContent:"flex-end"}}>
+                <div style={{maxWidth:"80%",padding:"10px 14px",borderRadius:"15px 15px 4px 15px",background:CA_BUBBLE,color:"#fff",fontSize:14,lineHeight:1.7,whiteSpace:"pre-wrap",opacity:.72,border:`1px dashed rgba(255,255,255,.35)`}}>
+                  {q.text}
+                  <div style={{marginTop:5,fontSize:10,letterSpacing:.5,color:"rgba(255,255,255,.8)",display:"flex",alignItems:"center",gap:4}}>
+                    <span style={{fontSize:9}}>◷</span> Waiting for signal
+                  </div>
                 </div>
               </div>
             ))}
@@ -6093,8 +6574,43 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
                 </div>
                 {athlete.program_text&&(
                   <div style={{border:`1px solid ${CA.border}`,borderRadius:9,padding:12,background:"rgba(10,15,30,.4)"}}>
-                    <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:8.5,letterSpacing:1.5,color:CA.muted,textTransform:"uppercase",marginBottom:8}}>Regular Program — On Hold</div>
-                    <pre style={{color:CA.muted2,fontSize:12,lineHeight:1.6,fontFamily:"'DM Sans'",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{athlete.program_text}</pre>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                      <div style={{flex:1,fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:8.5,letterSpacing:1.5,color:CA.muted,textTransform:"uppercase"}}>Regular Program — On Hold</div>
+                      {/* Field Mode used to render BOTH programs read-only, so an
+                          athlete mid-trip who wanted to fix the program they go back
+                          to had to fake a revert, edit, then re-describe their travel
+                          conditions. Chat-side edits are blocked in temp mode too
+                          (the self-change flow requires non-temp state), so this was
+                          the only door. Writes program_text exactly like the normal
+                          branch — the temp program stays the active one until revert.
+                          Never shown for a coach-LOCKED program. */}
+                      {!athlete.program_locked&&(
+                        <button onClick={()=>setEditRegularInField(v=>!v)}
+                          style={{background:"none",border:`1px solid ${editRegularInField?CA.amber:CA.border}`,color:editRegularInField?CA.amber:CA.muted2,borderRadius:7,padding:"3px 9px",cursor:"pointer",fontSize:10,whiteSpace:"nowrap"}}>
+                          {editRegularInField?"✕ Done":"✎ Edit regular program"}
+                        </button>
+                      )}
+                    </div>
+                    {editRegularInField&&!athlete.program_locked?(
+                      <>
+                        <textarea
+                          value={athleteProgramText}
+                          onChange={e=>setAthleteProgramText(e.target.value)}
+                          rows={10}
+                          style={{width:"100%",boxSizing:"border-box",minHeight:180,background:"rgba(58,123,255,0.03)",border:`1px solid ${athleteProgramText!==(athlete.program_text||"")?CA.amber:CA.line2}`,borderRadius:10,padding:"10px 12px",color:CA.text,fontSize:12,outline:"none",resize:"vertical",lineHeight:1.7,fontFamily:"ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"}}
+                        />
+                        {athleteProgramMsg&&(
+                          <div style={{color:athleteProgramMsg==="Saved."?CA.green:CA.red,fontSize:11,fontWeight:600,textAlign:"center",marginTop:6}}>{athleteProgramMsg}</div>
+                        )}
+                        <button onClick={saveAthleteProgram} disabled={athleteProgramSaving||athleteProgramText===(athlete.program_text||"")}
+                          style={{width:"100%",marginTop:8,background:athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?CA.navy3:CA.amber,color:athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?CA.muted:"#1a1204",border:`1px solid ${athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?CA.border:CA.amber}`,borderRadius:9,padding:"9px 16px",cursor:athleteProgramSaving||athleteProgramText===(athlete.program_text||"")?"not-allowed":"pointer",fontSize:12,fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:1}}>
+                          {athleteProgramSaving?"Saving...":"Save Regular Program"}
+                        </button>
+                        <div style={{color:CA.muted,fontSize:10,textAlign:"center",marginTop:6,lineHeight:1.5}}>Saved for when you're back. Field Mode stays active until you tap “I'm back”.</div>
+                      </>
+                    ):(
+                      <pre style={{color:CA.muted2,fontSize:12,lineHeight:1.6,fontFamily:"'DM Sans'",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{athlete.program_text}</pre>
+                    )}
                   </div>
                 )}
                 {/* This line used to be static decoration. The ONLY way out of
@@ -6165,12 +6681,14 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           contextNotes={athleteContext}
           onClose={()=>setShowQuickLog(false)}
           onAddProgram={()=>{setShowQuickLog(false);setShowProgram(true);}}
-          onSend={(text)=>{
+          onSend={(text,focusNote)=>{
             setShowQuickLog(false);
             // Mark THIS draft text as a Quick Log log so send() can never route it
             // into a program overwrite (survives the queued path below too). Keyed
             // on the text, so a different message typed later can't inherit it.
             quickLogPending.current = text;
+            quickLogNote.current = focusNote ? {text, note:focusNote} : null;
+            qlMarkUsed(athlete.id); // this is what makes them eligible for tomorrow's pre-build
             // A12: if a send is in flight, QUEUE the draft and auto-fire it the
             // moment the stream clears (it used to be silently parked in the chat
             // input, unsent — and localStorage was already cleared, so backgrounding
@@ -6204,7 +6722,29 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
       )}
 
       {/* Add-to-Home-Screen prompt (post-signup auto, or manual from Settings) */}
-      {showInstall&&<InstallPrompt manual={showInstall==="manual"} onClose={closeInstall}/>}
+      {showInstall&&<InstallPrompt manual={showInstall==="manual"} milestone={showInstall==="milestone"?installMilestone:0} onClose={closeInstall}/>}
+
+      {/* Face ID offer on the just-signed-up path (see the effect above). Same copy
+          and same enrollment call as the post-PIN-login card in LoginScreen. */}
+      {showBioOffer&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(3,8,20,0.88)",zIndex:310,display:"flex",alignItems:"center",justifyContent:"center",padding:20}} onClick={()=>setShowBioOffer(false)}>
+          <div className="fade-up" onClick={e=>e.stopPropagation()}
+            style={{width:"100%",maxWidth:360,background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:16,padding:24,textAlign:"center"}}>
+            <div style={{fontSize:34,marginBottom:12}}>⚡️</div>
+            <div style={{color:CA.accent,fontFamily:"'Bebas Neue'",fontSize:22,letterSpacing:2,marginBottom:8}}>FASTER SIGN-IN</div>
+            <div style={{color:CA.muted2,fontSize:13,lineHeight:1.6,marginBottom:20}}>
+              Use Face ID to sign in next time — no name or PIN to type. You can still use your PIN anytime.
+            </div>
+            {bioErr&&<div style={{color:CA.red,fontSize:12,marginBottom:12}}>{bioErr}</div>}
+            <button onClick={enableBioNow} disabled={bioBusy} style={btn(CA.accent,"#000",{opacity:bioBusy?0.7:1,cursor:bioBusy?"not-allowed":"pointer"})}>
+              {bioBusy?"Setting up…":"Enable Face ID"}
+            </button>
+            <div style={{marginTop:10}}>
+              <button onClick={()=>setShowBioOffer(false)} disabled={bioBusy} style={{background:"none",border:"none",color:CA.muted,fontSize:12,cursor:"pointer"}}>Not now</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Progress Modal */}
       {showProgress&&(
@@ -6444,6 +6984,109 @@ Rules:
 - If the instruction is NOT about editing this draft (a coaching question, chit-chat), return the current draft EXACTLY unchanged.
 - Output ONLY the log text. No commentary, no markdown.`;
 
+// ─── DRAFT GENERATION (shared by the sheet and the background pre-build) ─────
+// Pulled out of QuickLogSheet so the exact same call can run before the athlete
+// taps QUICK LOG. Streams by default: the one-shot version put a 4-8s spinner on
+// the front door of the feature, and the app already had a proven streaming twin
+// (askClaudeStream) built for precisely that reason on the chat side.
+//
+// `onProgress({notes, log, complete})` fires per delta with the reply parsed so far
+// (see streamQuickLogReply) — the focus note renders while the log is still being
+// written. Omit it for the background pre-build, which has nothing to paint.
+const qlTodayStr = () => new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"});
+const qlCtxBlock = (ctx) => `PROGRAM:\n${ctx.program||"(none)"}\n\nCONVERSATION THIS SESSION (what the athlete already told Joe today — HONOR any program day or exercise change stated here over your own inference):\n${ctx.chatLines||"(nothing said yet)"}\n\nWHERE YOU ARE (pick today's session from THIS — the athlete's real position is where they last logged, moved forward; do NOT compute the week from today's date against the program's printed block dates):\n${ctx.whereYouAre||"(nothing logged yet — start at the program's first day, Week 1)"}\n\nRECENT SESSIONS (newest first):\n${ctx.sessionLines||"(none logged yet)"}\n\n1RM CHEAT SHEET:\n${ctx.rmLines||"(none known)"}\n\nGOALS (for the focus note — cite only if a goal maps to a lift in today's session):\n${ctx.goalLines||"(none stated)"}\n\nSAVED CONTEXT (preferences/history worth knowing — use only if relevant to today's lifts):\n${ctx.ctxNotes||"(none)"}\n\nINJURY HISTORY (guard the affected areas; note it only if today's lifts touch them):\n${ctx.injury||"(none)"}\n\nRECENT FORM REVIEWS (past video-check cues — cite one only if it names a movement in today's session):\n${ctx.formReviews||"(none)"}`;
+
+// ─── "BUILD ME A PROGRAM" ────────────────────────────────────────────────────
+// The saved program is the athlete's single most-referenced artifact — it's
+// injected into every future chat and drives every Quick Log draft. It used to be
+// whatever could be extracted from Joe's normal chat REPLY, and chat replies are
+// hard-capped at 800 tokens (then re-capped at 800 by extractProgramText). So a
+// 4-day multi-week program was structurally squeezed into a fraction of what the
+// check-in rewrite path (1600) or the coach merge path (4000) already allows: the
+// artifact was shallow by construction, not by the model's judgment.
+//
+// This is a SECOND, dedicated call at 3500 tokens with the athlete's full context
+// (the same block Quick Log builds — profile, goals, real training history, 1RMs,
+// injuries). The chat reply stays short and conversational; the saved program gets
+// real depth.
+const PROGRAM_GEN_SYS = `You are Coach Joe, a strength coach writing a COMPLETE training program for one athlete.
+
+Write the program itself — nothing else. No preamble, no sign-off, no "here's your program", no commentary about what you did or why. The output is saved verbatim into the athlete's Program tab and is read back to them every session, so it must stand alone as a document.
+
+REQUIREMENTS
+- Cover a full training block: at least 4 weeks of progression, laid out so the athlete can see what changes week to week (either a week-by-week layout or a clearly stated progression rule per lift).
+- One clearly labeled session per training day, matching the athlete's stated days per week.
+- Every exercise gets sets x reps AND a load prescription. Use real numbers off their known 1RMs/recent working weights where you have them (percentages are fine, but state the resulting weight when you can). Where you genuinely don't know a load, prescribe by RPE or by "start at X and add Y per week" — never leave a lift blank.
+- Respect their equipment. Never program a lift they can't perform with what they have.
+- Respect their injury history: avoid or substitute movements that aggravate it, and say what the substitution is.
+- Order each session sensibly: main lift(s) first, accessories after, conditioning last.
+- Include warm-up guidance once at the top rather than repeating it per day.
+
+FORMAT
+Plain text. Clear headers for weeks and days. One exercise per line. No markdown tables, no emoji.
+
+IF YOU CANNOT BUILD IT
+If the athlete's request genuinely cannot be answered without information you don't have and can't reasonably assume from their profile, reply with exactly: NEED_MORE_INFO`;
+
+async function generateFullProgram({athlete, workoutHistory, messages, goals, contextNotes, request, joeReply}) {
+  let manualRMs = [];
+  try{ manualRMs = await sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`)||[]; }catch(_){}
+  const ctx = buildQuickLogContext(athlete, workoutHistory, manualRMs, messages, goals, contextNotes);
+  const profile = [
+    athlete.sport && `Sport: ${athlete.sport}`,
+    athlete.position_or_event && `Position/event: ${athlete.position_or_event}`,
+    athlete.level && `Level: ${athlete.level}`,
+    athlete.age && `Age: ${athlete.age}`,
+    athlete.weight_lbs && `Bodyweight: ${athlete.weight_lbs} lbs`,
+    athlete.training_days_per_week && `Training days per week: ${athlete.training_days_per_week}`,
+    athlete.equipment && `Equipment available: ${athlete.equipment}`,
+  ].filter(Boolean).join("\n");
+  const text = await askClaude(
+    PROGRAM_GEN_SYS,
+    `ATHLETE PROFILE:\n${profile||"(sparse — assume a standard commercial gym and 4 days/week)"}\n\n`+
+    `WHAT THEY ASKED FOR:\n${request}\n\n`+
+    `WHAT YOU ALREADY TOLD THEM IN CHAT (build the program that matches this — do not contradict it):\n${joeReply||"(nothing specific)"}\n\n`+
+    `GOALS:\n${ctx.goalLines||"(none stated)"}\n\n`+
+    `1RM CHEAT SHEET (use these to set real loads):\n${ctx.rmLines||"(none known — prescribe by RPE and progression instead)"}\n\n`+
+    `RECENT SESSIONS (newest first — their true current working weights):\n${ctx.sessionLines||"(nothing logged yet)"}\n\n`+
+    `INJURY HISTORY:\n${ctx.injury||"(none)"}\n\n`+
+    `SAVED CONTEXT:\n${ctx.ctxNotes||"(none)"}`,
+    3500, [], "claude-sonnet-5", "program_generate"
+  );
+  const t = (text||"").trim();
+  if(!t || /^NEED_MORE_INFO/i.test(t)) return null;
+  return t;
+}
+
+async function generateQuickLogDraft({athlete, workoutHistory, messages, goals, contextNotes, onProgress}) {
+  let manualRMs = [];
+  try{ manualRMs = await sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`)||[]; }catch(_){}
+  const ctx = buildQuickLogContext(athlete, workoutHistory, manualRMs, messages, goals, contextNotes);
+  const user = `Today is ${qlTodayStr()}.\n\n${qlCtxBlock(ctx)}`;
+  let text = "";
+  try{
+    let acc = "";
+    text = await askClaudeStream(QL_DRAFT_SYS, user, {
+      maxTokens:800, model:"claude-sonnet-5", feature:"quick_log_draft",
+      onDelta: onProgress ? (d)=>{
+        acc += d;
+        // A rest day answers with the bare token REST_DAY — don't flash that into
+        // the focus-note box on the way to the rest-day screen.
+        if(acc.trim().startsWith("REST_DAY")) return;
+        onProgress(streamQuickLogReply(acc));
+      } : undefined,
+    });
+  }catch(_streamErr){
+    // Same fallback shape the video-review path uses: a dropped stream degrades to
+    // the old one-shot call rather than to an error screen.
+    text = await askClaude(QL_DRAFT_SYS, user, 800, [], "claude-sonnet-5", "quick_log_draft");
+  }
+  const t = (text||"").trim();
+  if(!t || t==="REST_DAY") return { ctx, rest:true, notes:"", draft:"" };
+  const { notes, log } = splitQuickLogReply(t);
+  return { ctx, rest:false, notes: notes===null ? "" : notes, draft: log };
+}
+
 function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals, contextNotes, onClose, onAddProgram, onSend}) {
   const hasProgram = !!(athlete.temp_program_text||athlete.program_text);
   const [draft,setDraft] = useState("");
@@ -6457,27 +7100,26 @@ function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals,
   const [resumed,setResumed] = useState(false); // drives the "picked up where you left off" banner
   const ctxRef = useRef(null);
 
-  const todayStr = () => new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"});
-  const ctxBlock = (ctx) => `PROGRAM:\n${ctx.program||"(none)"}\n\nCONVERSATION THIS SESSION (what the athlete already told Joe today — HONOR any program day or exercise change stated here over your own inference):\n${ctx.chatLines||"(nothing said yet)"}\n\nWHERE YOU ARE (pick today's session from THIS — the athlete's real position is where they last logged, moved forward; do NOT compute the week from today's date against the program's printed block dates):\n${ctx.whereYouAre||"(nothing logged yet — start at the program's first day, Week 1)"}\n\nRECENT SESSIONS (newest first):\n${ctx.sessionLines||"(none logged yet)"}\n\n1RM CHEAT SHEET:\n${ctx.rmLines||"(none known)"}\n\nGOALS (for the focus note — cite only if a goal maps to a lift in today's session):\n${ctx.goalLines||"(none stated)"}\n\nSAVED CONTEXT (preferences/history worth knowing — use only if relevant to today's lifts):\n${ctx.ctxNotes||"(none)"}\n\nINJURY HISTORY (guard the affected areas; note it only if today's lifts touch them):\n${ctx.injury||"(none)"}\n\nRECENT FORM REVIEWS (past video-check cues — cite one only if it names a movement in today's session):\n${ctx.formReviews||"(none)"}`;
+  const todayStr = qlTodayStr;
+  const ctxBlock = qlCtxBlock;
 
+  // Streams into the sheet: the focus note starts rendering in ~1s and the log
+  // types itself in, instead of 4-8s of "Building today's log…" on the feature's
+  // front door. SEND stays disabled until the stream closes (phase flips to ready).
   const generate = async () => {
-    setPhase("loading");
+    setPhase("loading"); setNotes(""); setDraft("");
     try{
-      let manualRMs = [];
-      try{ manualRMs = await sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`)||[]; }catch(_){}
-      const ctx = buildQuickLogContext(athlete, workoutHistory, manualRMs, messages, goals, contextNotes);
-      ctxRef.current = ctx;
-      const text = await askClaude(QL_DRAFT_SYS, `Today is ${todayStr()}.\n\n${ctxBlock(ctx)}`, 800, [], "claude-sonnet-5", "quick_log_draft");
-      const t = (text||"").trim();
-      if(!t || t==="REST_DAY"){ setNotes(""); setDraft(""); setPhase("rest"); }
-      else {
-        // Split worksheet from log on the "===" separator line. If the model
-        // skipped the worksheet, treat the whole output as the log.
-        const parts = t.split(/\n\s*={3,}\s*\n/);
-        if(parts.length>=2){ setNotes(parts[0].trim()); setDraft(parts.slice(1).join("\n").trim()); }
-        else { setNotes(""); setDraft(t); }
-        setPhase("ready");
-      }
+      const res = await generateQuickLogDraft({
+        athlete, workoutHistory, messages, goals, contextNotes,
+        onProgress: ({notes:n, log})=>{
+          setPhase("streaming");
+          setNotes(n);
+          if(log) setDraft(log);
+        },
+      });
+      ctxRef.current = res.ctx;
+      if(res.rest){ setNotes(""); setDraft(""); setPhase("rest"); }
+      else { setNotes(res.notes); setDraft(res.draft); setPhase("ready"); }
     }catch(e){ setPhase("error"); }
   };
   // Boot: pick up the parked draft, or draft today from scratch. Deliberately waits for the
@@ -6492,7 +7134,10 @@ function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals,
     const parked = qlLoad(athlete.id, workoutHistory);
     if(parked){
       setDraft(parked.draft); setNotes(parked.notes); setUndoStack(parked.undoStack);
-      setResumed(true); setPhase("ready");
+      // Only the athlete's OWN parked work gets the "picked up where you left off"
+      // banner. A background pre-build just opens, instantly, with no explanation
+      // owed — claiming they left off would be a lie about their own session.
+      setResumed(!parked.prebuilt); setPhase("ready");
     } else generate();
   },[historyLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -6545,12 +7190,10 @@ function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals,
       const revised = await askClaude(QL_EDIT_SYS,
         `Today is ${todayStr()}.\n\n${ctxBlock(ctx)}\n\nCURRENT FOCUS NOTE:\n${notes||"(none)"}\n\nCURRENT DRAFT:\n${draft.trim()||"(empty)"}\n\nATHLETE'S INSTRUCTION:\n${ins}`,
         800, [], "claude-sonnet-5", "quick_log_edit");
-      let t = (revised||"").trim();
       // A two-section reply means the day changed and the worksheet was rebuilt
-      // to match; a plain reply is a log-only tweak (worksheet stays put).
-      let newNotes = null;
-      const rparts = t.split(/\n\s*={3,}\s*\n/);
-      if(rparts.length>=2){ newNotes = rparts[0].trim(); t = rparts.slice(1).join("\n").trim(); }
+      // to match; a plain reply is a log-only tweak (worksheet stays put) — which
+      // is exactly why splitQuickLogReply returns null, not "", for "no section".
+      const { notes:newNotes, log:t } = splitQuickLogReply(revised);
       if(t && (t!==draft.trim() || (newNotes!==null && newNotes!==notes))){
         setUndoStack(prev=>[...prev,{draft,notes}]);
         setDraft(t);
@@ -6627,17 +7270,23 @@ function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals,
               <button onClick={startFresh} style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,flexShrink:0,whiteSpace:"nowrap"}}>↻ Start fresh</button>
             </div>
           )}
-          {notes&&phase==="ready"&&(
+          {notes&&(phase==="ready"||phase==="streaming")&&(
             <div style={{flexShrink:0,maxHeight:"30%",overflowY:"auto",background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:10,padding:"10px 12px"}}>
-              <div style={{color:CA.cyan,fontSize:9,fontWeight:700,letterSpacing:1.5,marginBottom:5}}>TODAY'S FOCUS</div>
+              <div style={{color:CA.cyan,fontSize:9,fontWeight:700,letterSpacing:1.5,marginBottom:5,display:"flex",alignItems:"center",gap:6}}>
+                TODAY'S FOCUS
+                {phase==="streaming"&&<span style={{color:CA.muted,fontWeight:400,letterSpacing:0.5,fontSize:9}}>drafting…</span>}
+              </div>
               <div style={{color:CA.muted2,fontSize:12,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{notes}</div>
             </div>
           )}
+          {/* Read-only while the stream is still writing into it — typing into text
+              that's about to be overwritten by the next delta loses the edit. */}
           <textarea
             value={draft}
             onChange={e=>setDraft(e.target.value)}
-            placeholder={phase==="rest"?"Your draft will appear here…":""}
-            style={{flex:1,minHeight:160,background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,padding:"12px 14px",color:CA.text,fontSize:14,outline:"none",resize:"none",lineHeight:1.8,fontFamily:"'DM Sans'"}}
+            readOnly={phase==="streaming"}
+            placeholder={phase==="rest"?"Your draft will appear here…":phase==="streaming"?"Drafting today's log…":""}
+            style={{flex:1,minHeight:160,background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,padding:"12px 14px",color:CA.text,fontSize:14,outline:"none",resize:"none",lineHeight:1.8,fontFamily:"'DM Sans'",opacity:phase==="streaming"?0.85:1}}
           />
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <div style={{color:CA.muted,fontSize:11}}>Tap the draft to edit directly, or tell Joe below.</div>
@@ -6664,14 +7313,14 @@ function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals,
               onChange={e=>setInstruction(e.target.value)}
               onKeyDown={e=>{ if(e.key==="Enter"){ e.preventDefault(); applyInstruction(); } }}
               placeholder="Tell Joe what to change…"
-              disabled={editBusy}
+              disabled={editBusy||phase==="streaming"}
               style={{flex:1,minWidth:0,background:CA.navy,border:`1px solid ${CA.blue}`,borderRadius:10,padding:"11px 13px",color:CA.text,fontSize:13,outline:"none"}}
             />
             <button onClick={()=>setShowEditHelp(v=>!v)} title="Examples"
               style={{background:showEditHelp?`${CA.blue}22`:"none",border:`1px solid ${showEditHelp?CA.blue:CA.border}`,color:showEditHelp?CA.blue:CA.muted2,borderRadius:"50%",width:32,height:32,flexShrink:0,cursor:"pointer",fontSize:14,display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1}}>
               ⓘ
             </button>
-            <button onClick={applyInstruction} disabled={editBusy||!instruction.trim()}
+            <button onClick={applyInstruction} disabled={editBusy||phase==="streaming"||!instruction.trim()}
               style={{background:CA.navy3,border:`1px solid ${CA.blue}`,color:editBusy?CA.muted:CA.blue,borderRadius:10,padding:"11px 16px",cursor:editBusy?"wait":"pointer",fontSize:13,fontWeight:700,flexShrink:0}}>
               {editBusy?"…":"Apply"}
             </button>
@@ -6681,7 +7330,9 @@ function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals,
           {/* Drop the parked copy BEFORE handing the draft off. Once it's logged, resuming it
               would show the athlete a workout they already sent and invite a double-log —
               the one way draft memory could actually corrupt their history. */}
-          <button onClick={()=>{qlClear(athlete.id);onSend(draft.replace(/\s*[@+]\s*_{2,}/g,"").trim());}} disabled={!canSend}
+          {/* The focus note goes WITH the log — it's the record of why this session
+              mattered, and it's already paid for. See parsed_data.focus_note. */}
+          <button onClick={()=>{qlClear(athlete.id);onSend(draft.replace(/\s*[@+]\s*_{2,}/g,"").trim(), notes||null);}} disabled={!canSend}
             style={{background:canSend?CA.accent:CA.navy3,color:canSend?"#000":CA.muted,border:`1px solid ${canSend?CA.accent:CA.border}`,borderRadius:12,padding:"14px",fontWeight:700,fontFamily:"'Bebas Neue'",letterSpacing:2,fontSize:16,cursor:canSend?"pointer":"not-allowed"}}>
             SEND TO CHAT →
           </button>
@@ -6762,6 +7413,53 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
   // Have we already got the full history in memory? (Then hide the pager.)
   const allLoaded = reachedEnd || totalSessions<=sessionCount;
 
+  // AUTO-LOAD. The button gave no idea whether 1 or 15 pages remained — the modal
+  // held both numbers (totalSessions and sessionCount) and never showed the
+  // relationship. A sentinel near the end of the list pulls the next page in as
+  // the athlete scrolls, and the footer states the position outright.
+  const sentinelRef = useRef(null);
+  const loadOlderRef = useRef(loadOlder);
+  loadOlderRef.current = loadOlder;
+  useEffect(()=>{
+    if(tab!=="workouts"||allLoaded) return;
+    const el = sentinelRef.current;
+    if(!el||typeof IntersectionObserver==="undefined") return;
+    // rootMargin: start the fetch before the sentinel is actually on screen, so
+    // the next page is usually already there by the time they reach the bottom.
+    const io = new IntersectionObserver((entries)=>{
+      if(entries.some(e=>e.isIntersecting)) loadOlderRef.current();
+    },{rootMargin:"600px"});
+    io.observe(el);
+    return ()=>io.disconnect();
+  },[tab,allLoaded,loadingOlder]);
+
+  // LIFT FILTER. "When did I last bench?" meant paging and scanning cards, even
+  // though every row already carries canonicalized exercise names. Chips are the
+  // athlete's OWN most-frequent lifts (from what's loaded), so the row is short
+  // and relevant instead of a generic movement list.
+  const [liftFilter,setLiftFilter] = useState(null);   // canonical lift id, or null
+  const liftChips = useMemo(()=>{
+    const counts = new Map();
+    for(const w of timelineWorkouts){
+      const pd = getPD(w);
+      for(const ex of (pd.exercises||[])){
+        if(!ex?.name) continue;
+        const lift = resolveLift(ex.name);
+        const id = lift.id || normalizeExName(ex.name);
+        if(!id) continue;
+        const cur = counts.get(id) || {id, name: displayForLift(id, cleanerName(ex.name)), n:0};
+        cur.n++; counts.set(id, cur);
+      }
+    }
+    return [...counts.values()].sort((a,b)=>b.n-a.n).slice(0,10);
+  },[timelineWorkouts]);
+  // Does a session contain the filtered lift? Uses the same resolveLift identity the
+  // chips are built from, so a chip can never match zero of the sessions that produced it.
+  const sessionHasLift = (session, liftId) => session.entries.some(e=>{
+    const pd = getPD(e);
+    return (pd.exercises||[]).some(ex=>ex?.name && ((resolveLift(ex.name).id||normalizeExName(ex.name))===liftId));
+  });
+
   return (
     <div className="cyber" style={{position:"fixed",inset:0,zIndex:300,display:"flex",flexDirection:"column",maxWidth:600,margin:"0 auto"}}>
       <style>{GS}</style>
@@ -6802,15 +7500,44 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
           // Backdated sessions/form-checks sort by the day they're attributed to.
           const timeline = [
             ...sessions.map(s=>({type:"session",data:s,date:effectiveDate(s.entries[s.entries.length-1])})),
-            ...formChecks.map(w=>({type:"formcheck",data:w,date:effectiveDate(w)})),
-          ].sort((a,b)=>b.date-a.date);
+            // A lift filter is a question about training ("when did I last bench?"),
+            // so form checks drop out of the list while one is active.
+            ...(liftFilter?[]:formChecks.map(w=>({type:"formcheck",data:w,date:effectiveDate(w)}))),
+          ].filter(it=>!liftFilter||it.type!=="session"||sessionHasLift(it.data,liftFilter))
+           .sort((a,b)=>b.date-a.date);
+
+          const chipRow = liftChips.length>1&&(
+            <div className="no-sb" style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:10,marginBottom:2}}>
+              {liftFilter&&(
+                <button onClick={()=>setLiftFilter(null)}
+                  style={{flexShrink:0,background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:11,whiteSpace:"nowrap"}}>✕ All</button>
+              )}
+              {liftChips.map(c=>{
+                const on = liftFilter===c.id;
+                return (
+                  <button key={c.id} onClick={()=>setLiftFilter(on?null:c.id)}
+                    style={{flexShrink:0,background:on?`${CA.accent}22`:CA.navy3,border:`1px solid ${on?CA.accent:CA.border}`,color:on?CA.accent:CA.muted2,borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:11,fontWeight:on?700:400,whiteSpace:"nowrap"}}>
+                    {c.name}
+                  </button>
+                );
+              })}
+            </div>
+          );
 
           if(timeline.length===0) return (
-            <div style={{color:CA.muted,textAlign:"center",padding:40,fontSize:13}}>No activity logged yet.</div>
+            <div>
+              {chipRow}
+              <div style={{color:CA.muted,textAlign:"center",padding:40,fontSize:13}}>
+                {liftFilter
+                  ? <>No loaded sessions include that lift{allLoaded?".":" yet — keep scrolling to load older history."}</>
+                  : "No activity logged yet."}
+              </div>
+            </div>
           );
 
           return (
             <div>
+              {chipRow}
               {timeline.map((item,i)=>{
                 if(item.type==="session"){
                   const session = item.data;
@@ -6838,6 +7565,14 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                   }).filter(Boolean);
                   const isRunSession = allRunData.length>0 && allExercises.length===0;
                   const runDotColor = isRunSession ? CA.blue : CA.green;
+                  // Volume + top set, from the exercises this card already renders.
+                  // Warm-ups excluded and kg converted (src/grit.js, covered in
+                  // test-grit-math.mjs) — a flattering tonnage number is worse than none.
+                  const tonnage = isRunSession ? 0 : sessionTonnage(allExercises);
+                  const topSet = isRunSession ? null : sessionTopSet(allExercises);
+                  // The Quick Log focus note that came with this session, if any —
+                  // why the day mattered, in Joe's words, kept with the log.
+                  const focusNote = session.entries.map(e=>getPD(e).focus_note).find(Boolean);
 
                   return (
                     <div key={i} style={{background:"rgba(58,123,255,0.03)",border:`1px solid ${CA.line2}`,borderRadius:12,padding:14,marginBottom:10}}>
@@ -6853,6 +7588,18 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                           )}
                         </div>
                       </div>
+                      {(tonnage>0||topSet)&&(
+                        <div style={{display:"flex",flexWrap:"wrap",gap:"2px 8px",justifyContent:"flex-end",marginTop:-4,marginBottom:8,color:CA.muted,fontSize:11,fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>
+                          {tonnage>0&&<span>{tonnage.toLocaleString()} lbs</span>}
+                          {tonnage>0&&topSet&&<span style={{color:CA.faint}}>·</span>}
+                          {topSet&&<span>top: {topSet.name} {fmtWeight(topSet.weight,topSet.unit)}×{topSet.reps}</span>}
+                        </div>
+                      )}
+                      {focusNote&&(
+                        <div style={{marginBottom:8,paddingLeft:10,borderLeft:`2px solid ${CA.cyan}55`,color:CA.muted2,fontSize:11,lineHeight:1.55,whiteSpace:"pre-wrap"}}>
+                          <span style={{color:CA.cyan,fontSize:9,fontWeight:700,letterSpacing:1.2}}>FOCUS </span>{focusNote}
+                        </div>
+                      )}
                       {isRunSession?(
                         <RunCard runData={allRunData[0]} feel={feelVal} palette={CA}/>
                       ):(
@@ -6905,7 +7652,21 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                 return null;
               })}
               {/* Older-session pager. Loads history beyond the recent working set into a
-                  local store (kept out of the AI context on purpose — see olderWorkouts). */}
+                  local store (kept out of the AI context on purpose — see olderWorkouts).
+                  Auto-loads via the sentinel below; the button stays as the manual path
+                  for browsers without IntersectionObserver and as the retry after a
+                  failed page. The footer is the part that was missing — the modal knew
+                  both numbers and never showed the athlete where they were. */}
+              {!allLoaded&&<div ref={sentinelRef} style={{height:1}}/>}
+              <div style={{textAlign:"center",color:CA.muted,fontSize:11,letterSpacing:0.5,padding:"10px 0 2px"}}>
+                {liftFilter
+                  /* While filtering, the count has to be about the FILTER — saying
+                     "6 sessions" over two visible cards reads as a bug. */
+                  ? `${timeline.length} of ${sessionCount} loaded session${sessionCount===1?"":"s"} include ${liftChips.find(c=>c.id===liftFilter)?.name||"this lift"}${allLoaded?"":" — scroll for older history"}`
+                  : allLoaded
+                    ? `${sessionCount} session${sessionCount===1?"":"s"} — that's everything`
+                    : `Showing ${sessionCount} of ${totalSessions} sessions`}
+              </div>
               {!allLoaded&&(
                 <button onClick={loadOlder} disabled={loadingOlder}
                   style={{width:"100%",background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"11px 14px",cursor:loadingOlder?"default":"pointer",fontSize:12,fontWeight:600,letterSpacing:1,textTransform:"uppercase",opacity:loadingOlder?0.6:1,marginTop:2}}>
@@ -7981,7 +8742,10 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
   const renewalDate = athlete.trial_end || athlete.current_period_end || null;
   const currentPriceLabel = currentTier==="pro"||currentTier==="elite" ? (PRICE_LABEL[currentTier]?.[currentBilling]||"") : "";
 
-  // Cancel / resume — both PIN-gated against the money endpoints.
+  // Cancel / resume — both PIN-gated against the money endpoints. DELIBERATELY
+  // still PIN, not the session token: here the PIN isn't transport auth, it's the
+  // athlete re-confirming an irreversible money action they just tapped. The
+  // endpoint accepts a token now (see verifyAthlete) — we choose not to send one.
   const callSubAction = async (action) => {
     if(actionPin.length!==4){ setActionMsg({ok:false,text:"Enter your 4-digit PIN to confirm."}); return; }
     setActionBusy(true); setActionMsg(null);

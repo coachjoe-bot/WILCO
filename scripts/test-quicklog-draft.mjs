@@ -98,5 +98,66 @@ check("empty history has a stable stamp", qlStamp([]) === qlStamp([]));
 check("undefined history doesn't crash the stamp", typeof qlStamp(undefined) === "string");
 check("history without ids still fingerprints", qlStamp([{created_at:"2026-07-21"}]) !== qlStamp([]));
 
+// ─── background pre-build: the cost gate ─────────────────────────────────────
+// Every case here is money. A pre-build the athlete never opens is a wasted Sonnet
+// call, so the gates that REFUSE to generate matter more than the one that allows it.
+const { qlMarkUsed, qlPrebuildEligible, qlMarkPrebuilt, qlLocalDay, QL_PREBUILD_WINDOW_MS } = await import("../src/quicklog.js");
+
+reset();
+check("never used Quick Log → no speculative call", qlPrebuildEligible(ATH) === false);
+qlMarkUsed(ATH);
+check("recent Quick Log user → eligible", qlPrebuildEligible(ATH) === true);
+qlMarkPrebuilt(ATH);
+check("one pre-build per day, not per app open", qlPrebuildEligible(ATH) === false);
+// The stamp is a LOCAL day (a UTC one rolls over mid-evening and buys a second call).
+check("day stamp is the local date", qlLocalDay(Date.now()) === new Date().toLocaleDateString());
+reset();
+store.set(`wilco_quicklog_used_${ATH}`, String(Date.now()));
+store.set(`wilco_quicklog_prebuilt_${ATH}`, new Date(Date.now()-36*60*60*1000).toLocaleDateString());
+check("yesterday's stamp doesn't block today", qlPrebuildEligible(ATH) === true);
+reset();
+store.set(`wilco_quicklog_used_${ATH}`, String(Date.now() - (QL_PREBUILD_WINDOW_MS + 1000)));
+check("lapsed user (>14d) → no speculative call", qlPrebuildEligible(ATH) === false);
+reset();
+store.set(`wilco_quicklog_used_${ATH}`, "garbage");
+check("corrupt usage stamp → no speculative call", qlPrebuildEligible(ATH) === false);
+check("pre-build eligibility is per athlete", (()=>{ reset(); qlMarkUsed("a"); return qlPrebuildEligible("a")===true && qlPrebuildEligible("b")===false; })());
+
+// A pre-built draft must not masquerade as the athlete's own unfinished work.
+reset();
+qlSave(ATH, HIST, {draft:"Upper A\nBench 5x5 225", notes:"n", prebuilt:true});
+check("pre-built flag round trips", qlLoad(ATH, HIST).prebuilt === true);
+qlSave(ATH, HIST, {draft:"Upper A\nBench 5x5 235", notes:"n"});
+check("saving from the sheet clears the pre-built flag", qlLoad(ATH, HIST).prebuilt === false);
+
+// ─── the "===" reply splitter ────────────────────────────────────────────────
+// Three call sites parse this (draft, edit, streaming draft). A missed separator
+// dumps Joe's coaching prose into the workout log, where the chat parser reads it
+// as exercises — so the shape of the reply, not just the storage, gets covered.
+const { splitQuickLogReply, streamQuickLogReply } = await import("../src/quicklog.js");
+
+const TWO = "Heavy bench day.\nClimbs to 89% of your 275.\n===\nUpper A\nBench 5x5 225";
+let s = splitQuickLogReply(TWO);
+check("splits the focus note off the log", s.notes === "Heavy bench day.\nClimbs to 89% of your 275." && s.log === "Upper A\nBench 5x5 225");
+check("no separator → notes is NULL, not empty", splitQuickLogReply("Upper A\nBench 5x5 225").notes === null);
+check("no separator → the whole reply is the log", splitQuickLogReply("Upper A").log === "Upper A");
+// The distinction above is load-bearing: the edit path keeps its existing note when
+// notes===null and replaces it when notes==="".
+check("an explicitly EMPTY note is not null", splitQuickLogReply("\n===\nUpper A").notes === "");
+check("a longer rule still splits", splitQuickLogReply("note\n=========\nlog").log === "log");
+check("padded separator still splits", splitQuickLogReply("note\n   ====   \nlog").log === "log");
+// A second separator is a formatting artifact, not content — the log keeps both
+// halves joined by a newline (unchanged from the original inline parser).
+check("a second separator is dropped, its text kept", splitQuickLogReply("note\n===\nlog a\n===\nlog b").log === "log a\nlog b");
+check("a bare == is NOT a separator", splitQuickLogReply("note\n==\nlog").notes === null);
+check("inline === is not a separator", splitQuickLogReply("do 3x5 === hard").notes === null);
+check("empty input is safe", splitQuickLogReply("").log === "" && splitQuickLogReply(undefined).log === "");
+
+// Streaming: before the separator lands, everything so far is the focus note.
+check("mid-note stream shows note, empty log", (()=>{const r=streamQuickLogReply("Heavy bench day.");return r.notes==="Heavy bench day."&&r.log===""&&!r.complete;})());
+check("a partial separator is trimmed off the note", streamQuickLogReply("Heavy bench day.\n==").notes === "Heavy bench day.");
+check("stream after the separator fills the log", (()=>{const r=streamQuickLogReply(TWO);return r.complete&&r.log==="Upper A\nBench 5x5 225";})());
+check("empty stream is safe", streamQuickLogReply("").notes === "");
+
 console.log(`\n${fail===0?"✓":"✗"} quick log draft: ${pass} passed, ${fail} failed`);
 process.exit(fail===0?0:1);

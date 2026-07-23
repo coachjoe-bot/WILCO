@@ -594,3 +594,49 @@ export function computeGritSnapshot(workouts, manualRMs, opts = {}) {
     prsHit,
   };
 }
+
+// ─── SESSION SUMMARY (MY LOG session cards) ──────────────────────────────────
+// Tonnage and top set for a session, from the exercises the card is already
+// rendering. Both are lbs-equivalent so a kg-logged lift doesn't silently
+// undercount the total — the Strength/PRs tabs had exactly that bug (A-list) and
+// it is not worth reintroducing one card lower.
+//
+// WARM-UPS ARE EXCLUDED from tonnage, matching bestE1RMForExercise: a card that
+// counts a 45lb bar warm-up toward "12,450 lbs moved" is quietly flattering, and
+// the number stops meaning anything across sessions. Bodyweight work contributes
+// no tonnage (there is no load to count without knowing bodyweight per rep).
+
+// Total lbs-equivalent moved in a session: sum of weight x reps over working sets.
+export function sessionTonnage(exercises) {
+  let total = 0;
+  for (const ex of exercises || []) {
+    if (!ex || ex.unit === "bodyweight") continue;
+    const all = getExerciseSets(ex);
+    const sets = all.some((s) => !s.warmup) ? all.filter((s) => !s.warmup) : all;
+    for (const s of sets) {
+      const lbs = toLbs(s.weight || 0, ex.unit);
+      const reps = s.reps || 0;
+      if (lbs > 0 && reps > 0) total += lbs * reps;
+    }
+  }
+  return Math.round(total);
+}
+
+// The session's heaviest single working set, as {name, weight, reps, unit}.
+// Reported in the unit it was LOGGED in (a kg lifter should see kg on their own
+// card); comparison is done in lbs-equivalent so the winner is the real one.
+export function sessionTopSet(exercises) {
+  let best = null, bestLbs = 0;
+  for (const ex of exercises || []) {
+    if (!ex || ex.unit === "bodyweight" || !ex.name) continue;
+    const all = getExerciseSets(ex);
+    const sets = all.some((s) => !s.warmup) ? all.filter((s) => !s.warmup) : all;
+    for (const s of sets) {
+      const w = s.weight || 0;
+      if (w <= 0 || !(s.reps > 0)) continue;
+      const lbs = toLbs(w, ex.unit);
+      if (lbs > bestLbs) { bestLbs = lbs; best = { name: cleanerName(ex.name), weight: w, reps: s.reps, unit: ex.unit || "lbs" }; }
+    }
+  }
+  return best;
+}

@@ -22,11 +22,11 @@ export default async function handler(req, res) {
   if (applyCors(req, res)) return;
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { athleteId, pin, action, tier, billing } = req.body || {};
+  const { athleteId, pin, auth, action, tier, billing } = req.body || {};
   let athlete = null; // hoisted so the catch can attribute (only if verified)
 
   try {
-    athlete = await verifyAthlete({ athleteId, pin });
+    athlete = await verifyAthlete({ athleteId, pin, auth });
     if (!athlete.stripe_subscription_id) {
       return res.status(400).json({ error: "No active subscription." });
     }
