@@ -8,6 +8,7 @@
     "prebuild": "node scripts/check-api-config.mjs",
     "build": "vite build",
     "check:api": "node scripts/check-api-config.mjs",
+    "test": "node scripts/run-tests.mjs",
     "test:smoke": "playwright test"
   },
   "dependencies": {
