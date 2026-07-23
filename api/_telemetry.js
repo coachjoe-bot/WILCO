@@ -31,19 +31,39 @@ const stripQuery = (r) => (typeof r === "string" ? r.split(/[?#]/)[0] : r);
 
 // Server-trusted attribution + snapshots for a verified caller (mirrors the snapshot
 // read in api/claude.js so cost and error rows attribute identically).
+//
+// Module-scope TTL cache, same shape and rationale as loadSnapshot in
+// api/claude.js (its flush-changes twin): this read exists purely for ledger
+// attribution, the snapshot is "at event time" by design, and tier/school/coach
+// changes are rare — so a 60s TTL is well inside the accepted drift tolerance.
+// Telemetry is the higher-volume caller of the two (every batched usage_events
+// flush and every error report), so warm instances skipping the Supabase round
+// trip matters more here than it does on the AI path. Keyed by role:id (athlete
+// and coach ids live in different tables, so the role prefix also prevents
+// cross-table collisions); failures are never cached.
+const ATTR_TTL_MS = 60_000;
+const attrCache = new Map(); // `${role}:${id}` -> { at, attr }
 async function enrichFromCaller(caller) {
+  if (caller.role !== "athlete" && caller.role !== "coach") return { role: "anon" };
+  const cacheKey = `${caller.role}:${caller.id}`;
+  const hit = attrCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < ATTR_TTL_MS) return hit.attr;
+
+  let attr;
   if (caller.role === "athlete") {
     const s = (await sbSelect("athletes", `?id=eq.${enc(caller.id)}&select=tier,school_id,coach_id`))[0] || {};
-    return {
+    attr = {
       role: "athlete", actor_id: caller.id, athlete_id: caller.id,
       tier: s.tier ?? null, school_id: s.school_id ?? null, coach_id: s.coach_id ?? null,
     };
-  }
-  if (caller.role === "coach") {
+  } else {
     const s = (await sbSelect("coaches", `?id=eq.${enc(caller.id)}&select=school_id`))[0] || {};
-    return { role: "coach", actor_id: caller.id, coach_id: caller.id, school_id: s.school_id ?? null };
+    attr = { role: "coach", actor_id: caller.id, coach_id: caller.id, school_id: s.school_id ?? null };
   }
-  return { role: "anon" };
+  // Crude growth bound for very long-lived instances; far above real user counts.
+  if (attrCache.size > 1000) attrCache.clear();
+  attrCache.set(cacheKey, { at: Date.now(), attr });
+  return attr;
 }
 
 // ── log-error (Phase 1.5 reliability ingestion) ──────────────────────────────
