@@ -49,7 +49,9 @@ export default async function handler(req, res) {
   }
 
   try {
-    athlete = await verifyAthlete({ athleteId, pin });
+    // Token-first (see verifyAthlete): the checkout render re-runs on every plan
+    // and code change, and each of those used to cost a bcrypt compare.
+    athlete = await verifyAthlete({ athleteId, pin, auth: req.body?.auth });
 
     if (tier !== "pro" && tier !== "elite") {
       return res.status(400).json({ error: "Choose a Pro or Elite plan to continue." });

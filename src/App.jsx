@@ -3200,7 +3200,11 @@ function PaymentStep({athleteId, pin, tier, billing, eventCtx, onSuccess}) {
       try {
         const r = await fetch("/api/create-subscription",{
           method:"POST",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({athleteId,pin,tier,billing,giftCode:appliedGift||undefined,eventSource:eventCtx?.source||undefined,ad:getAdIdentity()||undefined})
+          // Token-first: with a session in hand the plaintext PIN never leaves the
+          // browser for this endpoint, and the server skips a bcrypt compare on
+          // every re-render of checkout (plan change, code applied, retry). `pin`
+          // is sent ONLY as the fallback when there's no token yet.
+          body:JSON.stringify({athleteId,...(CURRENT_AUTH?.token?{auth:CURRENT_AUTH}:{pin}),tier,billing,giftCode:appliedGift||undefined,eventSource:eventCtx?.source||undefined,ad:getAdIdentity()||undefined})
         });
         const j = await r.json();
         if(cancelled) return;
@@ -3238,7 +3242,7 @@ function PaymentStep({athleteId, pin, tier, billing, eventCtx, onSuccess}) {
     try {
       const r = await fetch("/api/validate-gift-code",{
         method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({athleteId,pin,code,tier,billing})
+        body:JSON.stringify({athleteId,...(CURRENT_AUTH?.token?{auth:CURRENT_AUTH}:{pin}),code,tier,billing})
       });
       const j = await r.json();
       if(j.valid){ setAppliedGift(code); setAppliedKind(j.kind||"gift"); setGiftTerms(j.terms||null); setGiftMsg({ok:true,text:j.discountLabel||"Code applied."}); }
@@ -8737,7 +8741,10 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
   const renewalDate = athlete.trial_end || athlete.current_period_end || null;
   const currentPriceLabel = currentTier==="pro"||currentTier==="elite" ? (PRICE_LABEL[currentTier]?.[currentBilling]||"") : "";
 
-  // Cancel / resume — both PIN-gated against the money endpoints.
+  // Cancel / resume — both PIN-gated against the money endpoints. DELIBERATELY
+  // still PIN, not the session token: here the PIN isn't transport auth, it's the
+  // athlete re-confirming an irreversible money action they just tapped. The
+  // endpoint accepts a token now (see verifyAthlete) — we choose not to send one.
   const callSubAction = async (action) => {
     if(actionPin.length!==4){ setActionMsg({ok:false,text:"Enter your 4-digit PIN to confirm."}); return; }
     setActionBusy(true); setActionMsg(null);

@@ -8,7 +8,7 @@
 
 import Stripe from "stripe";
 import { randomInt } from "node:crypto";
-import { verifyPin } from "./_supa.js";
+import { verifyPin, tryTokenAuth } from "./_supa.js";
 
 // ── Stripe client (lazy singleton) ───────────────────────────────────────────
 let _stripe = null;
@@ -198,11 +198,40 @@ export async function sbAthletePatch(id, patch) {
   return Array.isArray(json) && json.length ? json[0] : json;
 }
 
-// ── Auth: PIN-verify a money-endpoint caller ─────────────────────────────────
-// The app has no real auth; matching the existing PIN login is the minimal,
-// consistent protection (strictly better than the currently-open endpoints).
-// Throws an Error with a `.status` so handlers can map it to an HTTP code.
-export async function verifyAthlete({ athleteId, pin }) {
+// ── Auth: verify a money-endpoint caller ─────────────────────────────────────
+// Token FIRST, PIN as fallback. These three billing endpoints were the last
+// gateways still demanding the plaintext PIN on every call — data/claude/push all
+// take the signed session token. Two costs, both real: ~100-250ms of bcrypt on
+// every checkout render (create-subscription re-runs on each plan/code change),
+// and the client had to keep the plaintext PIN in memory for the whole billing
+// flow just to satisfy these.
+//
+// `auth` is the same {role,id,token} blob every other gateway accepts. A token
+// that verifies loads the SAME athlete row verifyAthlete would have returned, so
+// nothing downstream changes. An absent/expired/forged token silently degrades to
+// the PIN path — tryTokenAuth returns null rather than throwing, exactly as in
+// api/data.js — so an old cached client keeps working unchanged.
+// Which athlete a session token entitles this call to act as, or null to fall back
+// to the PIN. Pure, and separated out because it IS the authorization rule for the
+// money endpoints: a coach token must never satisfy it, and a token must never be
+// usable to act on a DIFFERENT athleteId than the one it was minted for. Covered
+// in scripts/test-auth-logic.mjs.
+export function tokenAthleteId(auth, athleteId) {
+  const viaToken = tryTokenAuth(auth);
+  if (!viaToken || viaToken.role !== "athlete") return null;
+  if (athleteId && String(viaToken.id) !== String(athleteId)) return null;
+  return viaToken.id;
+}
+
+export async function verifyAthlete({ athleteId, pin, auth }) {
+  const tokenId = tokenAthleteId(auth, athleteId);
+  if (tokenId) {
+    const athlete = await sbAthleteGet(tokenId);
+    if (athlete) return athlete;
+    const e = new Error("Athlete not found");
+    e.status = 404;
+    throw e;
+  }
   if (!athleteId || pin === undefined || pin === null || pin === "") {
     const e = new Error("athleteId and pin are required");
     e.status = 400;
