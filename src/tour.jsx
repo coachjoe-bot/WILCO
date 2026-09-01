@@ -73,7 +73,7 @@ Tricep Pushdown 3x15 @ 45`,
 export const TOUR_SCRIPT = {
   pr: { exercise:"Bench Press", weight:190, unit:"lb" },
   session: 1,
-  reply: "Logged it. 190 on bench is a new max, that's the standard now. Rows and pushdowns in the book too. That's how a session should end.",
+  reply: "Workout Logged. Good job on that bench press personal record. I am updating your numbers to reflect the new max. Rows and pushdowns are in the book too.",
 };
 
 // ── COPY ─────────────────────────────────────────────────────────────────────
@@ -84,99 +84,133 @@ export const TOUR_SCRIPT = {
 //   parts   — tap-through text stages; the second lands with emphasis
 //   partTargets / interactive / noDim — scalars, or arrays indexed by part
 //   cta     — label of a button that must be pressed instead of tapping through
-export const athleteTourSteps = ({ free, chatFirst = false }) => free ? [
+// ── STEPS ────────────────────────────────────────────────────────────────────
+// One athlete tour (Will's 09-01 script). The old chat-first and legacy variants
+// are gone: the legacy one spotlit `builder-tab` and `quicklog-btn`, both of
+// which are retired surfaces, so it had been silently broken for every native
+// signup since chat-first shipped.
+//
+// Step fields, beyond the display ones documented above:
+//   enter   — {pane, tab, sub} the tour opens for them BEFORE the card shows.
+//             This is what lets the tour walk Memory's three subtabs and
+//             Progress's without the athlete hunting for anything. App.jsx
+//             applies it; nothing here touches app state.
+//   ring    — an extra emphasis ring, on top of the normal spotlight.
+//   stamp   — plays a full-screen stamp and auto-advances. No tap.
+//   sample  — this step is standing on fixture data (documentation only; the
+//             surfaces get their fixtures from App.jsx).
+export const athleteTourSteps = ({ free }) => free ? [
   { key:"chat", banner:"WILCO CHAT BOT", target:["chat","chat-input"], title:"TALK TO ME",
     parts:["WILCO is your AI strength coach. Text me like you'd text a real coach: workouts you finished, questions, a knee that's acting up. All of it goes in the box at the bottom."] },
-  { key:"thanks", banner:null, target:null, title:"THANKS FOR USING WILCO",
-    parts:["We hope you love it as much as we do.\nJoe"], cta:"Finish" },
-] : chatFirst ? [
-  // ── Chat-first tour (T59; web parity 08-29). The Builder tab and the Quick
-  // Log button no longer exist — the Builder is a chat mode and logging rides
-  // the workout bar — so this variant teaches THAT app. No scripted sheet demo:
-  // the old one is welded to the retired Quick Log sheet.
-  { key:"chat", banner:"WILCO CHAT BOT", target:["chat","chat-input"], title:"TALK TO ME",
-    parts:["WILCO is your AI strength coach. This chat is the whole app, really. Text me like you'd text a real coach: workouts you finished, questions, a knee that's acting up. All of it goes in the box at the bottom."] },
-
-  { key:"program", banner:"THE PROGRAM TAB", target:"program-btn", title:"YOUR PROGRAM",
-    parts:[
-      "Your program is your training plan: which days you train and exactly what you do on each of those days. If your coach is programming for you, it'll show up here. Got your own program already? Paste it in or drop in a screenshot.",
-      "Don't have one? Just ask me in chat and we'll build it together, right in the conversation.",
-    ] },
-
-  { key:"logging", banner:"LOGGING A WORKOUT", target:["chat","chat-input"], title:"HOW LOGGING WORKS", noDim:true,
-    parts:[
-      "When you're starting a session, today's workout slides in on a bar at the bottom of this chat, filled out from your program. Open it, fix anything that goes differently, and hit Finish Workout when you're done.",
-      "Prefer typing? Just tell me what you did in your own words. Either way, I log the whole session and catch your PRs.",
-    ] },
-
-  { key:"mylog", banner:"MY LOG", target:"mylog-btn", title:"MY LOG",
-    parts:["Every session you've logged lives here. And once a week, The Proof drops. The Proof is a news-feed overview of your training: you zoom out from the day to day, see which direction you're headed and how close you are to your goals, and have a conversation with WILCO over any changes you want to make."] },
-
-  { key:"progress", banner:"PROGRESS", target:"progress-btn", title:"PROGRESS",
-    parts:[
-      "Your numbers, rankings, strength standards and personal records are all stored here. When your program calls for a percentage or an estimated weight, I work it off your true 1-rep max if you've entered one, or off my best estimate built from what you've actually logged.",
-      "The more you log, the sharper this gets.",
-    ] },
-
-  { key:"thanks", banner:null, target:null, title:"THANKS FOR USING WILCO",
-    parts:["We hope you love it as much as we do.\nJoe"], cta:"Finish" },
+  { key:"thanks", banner:null, target:null, title:"THANKS FOR TRYING WILCO",
+    parts:["We hope you love it as much as we do.\n-Joe"], cta:"LET'S GO" },
 ] : [
-  { key:"chat", banner:"WILCO CHAT BOT", target:["chat","chat-input"], title:"TALK TO ME",
-    parts:["WILCO is your AI strength coach. This chat is the whole app, really. Text me like you'd text a real coach: workouts you finished, questions, a knee that's acting up. All of it goes in the box at the bottom."] },
+  // ── the program tab ──
+  { key:"program", banner:"THE PROGRAM TAB", target:"program-btn", title:null, interactive:true,
+    parts:["Let's start in the Program tab. This is the bread and butter WILCO runs off of."],
+    hint:"Tap Program" },
 
-  { key:"program", banner:"THE PROGRAM TAB", target:"program-btn", title:"YOUR PROGRAM",
+  { key:"programWhat", banner:"THE PROGRAM TAB", target:"program-doc", title:"YOUR PROGRAM", sample:true,
+    enter:{pane:"program", tab:"program"},
+    parts:["This is where your program will live. Your program is your training plan: which days you train, and exactly what you do on each of those days."] },
+
+  { key:"programPaste", banner:"THE PROGRAM TAB", target:"program-paste", title:null, sample:true,
+    parts:["If you already have a program you can paste it here or drop a screenshot of it, and I'll read it exactly as written."] },
+
+  { key:"memoryTab", banner:"THE PROGRAM TAB", target:"memory-tab", title:null, interactive:[false,true],
     parts:[
-      "Your program is your training plan: which days you train and exactly what you do on each of those days. If your coach is programming for you, it'll show up here. Got your own program already? Paste it in or drop in a screenshot.",
-      "Don't have one? No problem. You can build one right here.",
+      "Don't have a program, or don't know how to write one? That's fine, we'll get to it in a minute.",
+      "Right next to your program is your Memory tab, which contains everything I'll remember for you.",
     ],
-    cta:"Show me the builder →" },
+    hint:"Tap Memory" },
 
-  { key:"builder", banner:"THE PROGRAM BUILDER", target:"builder-tab", title:"TAKE YOUR TIME ON THIS ONE",
+  // ── memory, one subtab per card, each opened for them ──
+  { key:"memBlocks", banner:"MEMORY", target:"mem-blocks", title:null, sample:true, card:"bottom",
+    enter:{pane:"program", tab:"phases", sub:"blocks"},
+    parts:["Past Blocks includes your training history and every program you've run with WILCO."] },
+
+  { key:"memDrafts", banner:"MEMORY", target:"mem-drafts", title:null, sample:true, card:"bottom",
+    enter:{pane:"program", tab:"phases", sub:"drafts"},
+    parts:["Drafts is your parking garage. Any program, edit, or interview you didn't finish waits here until you come back to it."] },
+
+  { key:"memContext", banner:"MEMORY", target:"mem-context", title:null, sample:true, card:"bottom",
+    enter:{pane:"program", tab:"phases", sub:"context"},
+    parts:["Athlete Context is what I read before every single reply: your goals, your injuries, how you like to train, and anything you tell me to remember."] },
+
+  // ── building a program ──
+  // Closes the pane for them on the way out, the same courtesy the old hand-off
+  // step did (Will: no tap-the-X step).
+  { key:"buildStamp", banner:null, target:null, title:null, stamp:"build",
+    enter:{pane:null},
+    parts:[] },
+
+  { key:"builder", banner:"PROGRAM BUILDER", target:["tour-blueprint","chat"], title:"TAKE YOUR TIME ON THIS ONE",
+    parts:["Tell me what you're working toward, right here in chat, and we'll write it together. The more you give me, the better it fits."] },
+
+  // ── the workout ──
+  { key:"opener", banner:"TODAY'S WORKOUT", target:"start-workout-btn", title:null, interactive:true,
+    parts:["Each time you open the app, I'll tell you the workout for the day so you don't have to go looking for it."],
+    hint:"Tap Start Workout" },
+
+  { key:"bar", banner:"LOGGING A WORKOUT", target:"session-bar", title:null, interactive:true,
+    parts:["As you press Start Workout, the workout log will appear at the bottom of your screen."],
+    hint:"Tap the workout log" },
+
+  // noDim so the whole prefilled sheet stays readable — the point of the step is
+  // seeing what a filled-out session looks like.
+  // TWO PARTS, and the split is load-bearing. Part 0 dims nothing so the whole
+  // prefilled session is readable. Part 1 dims and spotlights Finish Workout.
+  // An interactive step can NEVER be noDim: the no-dim branch lays a transparent
+  // full-screen blocker over everything, which swallows the very tap the step is
+  // waiting for.
+  { key:"sheet", banner:null, target:"finish-btn", title:null, sample:true,
+    noDim:[true,false], interactive:[false,true], partTargets:[null,"finish-btn"],
     parts:[
-      "This is where you and I build your plan together. Tell me what you're working toward and I'll write the workouts for you. The more you tell me, the better the plan fits. \"Get stronger\" gives me almost nothing. \"I want to add 30 pounds to my squat by October, I can train 3 days a week, and I have a bad left knee\" gives me everything.",
-      "These are the workouts you'll actually be following. Take the time to make them yours.",
-    ] },
-
-  { key:"programClose", banner:"THE PROGRAM TAB", target:"program-close", title:null,
-    parts:["Once your program's in place, you're ready to log your first workout. Let's do one right now."],
-    cta:"Continue →" },
-
-  { key:"quicklog", banner:"QUICK LOG", target:"quicklog-btn", title:"⚡ QUICK LOG", interactive:true,
-    parts:["When you finish training, this button is how you log what you did."],
-    hint:"Tap it" },
-
-  // Inside the sheet. Part 0 shows the WHOLE sample log with nothing dimmed —
-  // the point is that they see what a filled-out log actually looks like. Part 1
-  // narrows the spotlight to the send button and waits for the real tap.
-  // No banner: the sheet's own header already reads "⚡ QUICK LOG · SAMPLE", and
-  // a pill on top of it just collides.
-  { key:"qlSheet", banner:null, target:"ql-send", title:null,
-    noDim:[true,false], interactive:[false,true], partTargets:[null,"ql-send"],
-    parts:[
-      "This is today's workout, already filled out for you. It's built from the program saved in your Program tab, plus anything you told me in chat that day. After you train, you open this, fix anything that went differently, and send it. Prefer typing? You can always just tell me your workout in the chat instead. This is just a shortcut.",
-      "This one's a sample workout. Go ahead, hit Send to Chat.",
+      "As you go through the workout, fill in numbers, make any adjustments, and tap Finish Workout to log it.",
+      "This one's a sample session. Go ahead and finish it.",
     ],
-    hint:"Tap Send to Chat" },
+    hint:"Tap Finish Workout" },
 
   { key:"script", banner:null, target:null, script:true, parts:[] },
 
-  // What just happened, as a tour card rather than a third chat bubble (Will):
-  // the tutorial explains itself instead of putting teaching text in Joe's mouth.
-  // noDim so the workout they just sent and Joe's reply stay readable behind it.
   { key:"logged", banner:"WILCO CHAT BOT", target:null, noDim:true, title:null,
-    parts:["See that? Sending it to chat logged the whole session and caught your PR. Anything else you tell me, injuries included, I take note of too."] },
+    parts:["Finishing the workout logged the whole session and caught your PR. Anything else you tell me, injuries included, I take note of too."] },
 
-  { key:"mylog", banner:"MY LOG", target:"mylog-btn", title:"MY LOG",
-    parts:["Every session you've logged lives here. And once a week, The Proof drops. The Proof is a news-feed overview of your training: you zoom out from the day to day, see which direction you're headed and how close you are to your goals, and have a conversation with WILCO over any changes you want to make."] },
+  // ── the numbers ──
+  { key:"benchmarks", banner:"PROGRESS", target:"prog-benchmarks", title:null, sample:true, card:"bottom",
+    enter:{pane:"progress", sub:"benchmarks"},
+    parts:["Your numbers live here. Benchmarks ranks your lifts against real strength standards for your age and bodyweight."] },
 
-  { key:"progress", banner:"PROGRESS", target:"progress-btn", title:"PROGRESS",
-    parts:[
-      "Your numbers, rankings, strength standards and personal records are all stored here. When your program calls for a percentage or an estimated weight, I work it off your true 1-rep max if you've entered one, or off my best estimate built from what you've actually logged.",
-      "The more you log, the sharper this gets.",
-    ] },
+  { key:"strength", banner:"PROGRESS", target:"prog-strength", title:null, sample:true, card:"bottom",
+    enter:{pane:"progress", sub:"strength"},
+    parts:["Strength tracks every lift you've logged over time and shows your progress."] },
 
-  { key:"thanks", banner:null, target:null, title:"THANKS FOR USING WILCO",
-    parts:["We hope you love it as much as we do.\nJoe"], cta:"Finish" },
+  { key:"prs", banner:"PROGRESS", target:"prog-prs", title:null, sample:true, card:"bottom",
+    enter:{pane:"progress", sub:"prs"},
+    parts:["PRs is every personal record you've set. You can enter any you already know manually as a starting point."] },
+
+  { key:"percent", banner:"PROGRESS", target:null, title:null, sample:true,
+    parts:["When your program calls for a percentage, I work it off your true one-rep max if you've given me one, or off my best estimate from what you've actually logged."] },
+
+  // ── finding your way back (Will, 09-01) ──
+  // Progress closes itself, they land on the chat, and they open My Log
+  // themselves. Draft 3 teleported them and they never learned to navigate.
+  { key:"navBack", banner:"MY LOG", target:"mylog-btn", title:null, interactive:true,
+    enter:{pane:null},
+    parts:["Closing a tab always brings you back here, to your chat. Everything else lives along the top. Tap My Log to see the session you just finished."],
+    hint:"Tap My Log" },
+
+  { key:"mylog", banner:"MY LOG", target:"mylog-entry", title:null, sample:true, card:"bottom",
+    enter:{pane:"log", sub:"workouts"},
+    parts:["Every session you've logged lives here."] },
+
+  { key:"proof", banner:"THE PROOF", target:"mylog-proof", title:null, sample:true, card:"bottom",
+    enter:{pane:"log", sub:"proof"},
+    parts:["Once a week, The Proof drops. It's a news-feed look at your training: you zoom out from the day to day, see which direction you're headed, and evaluate your progress and any changes you want to make."] },
+
+  { key:"thanks", banner:null, target:null, title:"THANKS FOR TRYING WILCO",
+    enter:{pane:null},
+    parts:["We hope you love it as much as we do.\n-Joe"], cta:"LET'S GO" },
 ];
 
 export const coachTourSteps = () => [
@@ -204,10 +238,68 @@ export const tourWelcome = (firstName, free) => free
 // Doubles as the app's welcome moment: it's the first thing a brand-new account
 // ever sees. Replay (from Settings) skips it entirely and starts the tour, so
 // the "welcome" framing only ever shows on a genuine first run.
+// Two stages (Will, 09-01). Stage 0 introduces Joe-bot with the chat lit behind
+// it and a ring around the composer, so a brand-new athlete learns where words
+// go whether or not they take the tour. Stage 1 is the actual offer. Splitting
+// them is why the intro copy can promise something before the question is asked.
+// Replay from Settings skips stage 0 — they have met Joe-bot already.
 export function TourOffer({ role="athlete", onStart, onDecline }) {
+  const [stage, setStage] = useState(role==="coach" ? 1 : 0);
+  const inputRect = useAnchorRect(stage===0 ? ["chat","chat-input"] : null);
+  const ringRect  = useAnchorRect(stage===0 ? "chat-input" : null);
   const body = role==="coach"
-    ? "Want a quick tour? I'll show you where everything lives on your dashboard."
-    : "Want a quick tour? I'll show you where everything lives.";
+    ? "Want a tutorial of WILCO? Give me two minutes and I'll show you where everything lives on your dashboard."
+    : "Want a tutorial of WILCO? Give me two minutes and I'll give you the rundown.";
+
+  // Stage 0: spotlight the chat, ring the composer, one card, tap to continue.
+  if (stage === 0) {
+    const pad = 2;
+    const hole = inputRect
+      ? { top:inputRect.top-pad, left:inputRect.left-pad, width:inputRect.width+pad*2, height:inputRect.height+pad*2 }
+      : null;
+    const panel = (extra) => ({ position:"fixed", background:DIM, zIndex:1201, ...extra });
+    const next = () => setStage(1);
+    return (
+      <>
+        {hole ? (
+          <>
+            <div style={panel({top:0,left:0,right:0,height:Math.max(0,hole.top)})} onClick={next}/>
+            <div style={panel({top:hole.top,left:0,width:Math.max(0,hole.left),height:hole.height})} onClick={next}/>
+            <div style={panel({top:hole.top,left:hole.left+hole.width,right:0,height:hole.height})} onClick={next}/>
+            <div style={panel({top:hole.top+hole.height,left:0,right:0,bottom:0})} onClick={next}/>
+            <div style={{position:"fixed",top:hole.top,left:hole.left,width:hole.width,height:hole.height,
+              background:"transparent",zIndex:1201}} onClick={next}/>
+          </>
+        ) : (
+          <div style={panel({inset:0})} onClick={next}/>
+        )}
+        {/* The composer gets its own, louder ring — Will asked for a glow around
+            the text box specifically, not just the chat region. */}
+        {ringRect && (
+          <div style={{position:"fixed",top:ringRect.top-4,left:ringRect.left-4,
+            width:ringRect.width+8,height:ringRect.height+8,borderRadius:14,
+            border:`2.5px solid ${T.accent}`,
+            boxShadow:`0 0 22px 5px ${T.accent}66`,
+            animation:"tourPulse 1.8s ease-in-out infinite",
+            pointerEvents:"none",zIndex:1202}}/>
+        )}
+        <div className="fade-up" onClick={next}
+          style={{position:"fixed",left:16,right:16,marginLeft:"auto",marginRight:"auto",
+            top:"32%",width:"100%",maxWidth:340,background:T.navy2,border:`1px solid ${T.border}`,
+            borderRadius:14,padding:"16px 18px",zIndex:1202,cursor:"pointer",
+            boxShadow:"0 12px 40px rgba(31,42,55,0.35)"}}>
+          <div style={{...DISP,fontSize:19,color:T.cyan,letterSpacing:2,marginBottom:6}}>JOE-BOT</div>
+          <div style={{color:T.text,fontSize:13.5,lineHeight:1.65}}>
+            I'm Joe-bot, your assistant coach. Text me the way you'd text a real coach: log a workout, ask a question, mention any injuries. I'm here to help.
+          </div>
+          <div style={{color:T.muted,fontSize:10.5,marginTop:10,letterSpacing:.5}}>Tap to continue</div>
+        </div>
+        <style>{`@keyframes tourPulse{0%,100%{box-shadow:0 0 22px 5px ${T.accent}66,0 0 0 0 ${T.accent}55}50%{box-shadow:0 0 22px 5px ${T.accent}66,0 0 0 9px ${T.accent}00}}`}</style>
+      </>
+    );
+  }
+
+  // Stage 1: the offer itself. Two buttons, brand navy and cream.
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(31,42,55,0.55)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
       <div className="fade-up" style={{width:"100%",maxWidth:360,background:T.navy2,border:`1px solid ${T.border}`,borderRadius:16,padding:22,textAlign:"center"}}>
@@ -216,11 +308,12 @@ export function TourOffer({ role="athlete", onStart, onDecline }) {
         <div style={{color:T.muted2,fontSize:13.5,lineHeight:1.6,marginTop:6,marginBottom:16}}>{body}</div>
         <button onClick={onStart}
           style={{width:"100%",background:T.btn,boxShadow:`0 0 12px ${T.glow}`,border:"none",color:T.onAccent,borderRadius:10,padding:"13px",cursor:"pointer",fontSize:15,fontWeight:700,...DISP,letterSpacing:2}}>
-          SHOW ME AROUND
+          START TUTORIAL
         </button>
+        {/* Cream, not a bare text link: Will asked for two real buttons. */}
         <button onClick={onDecline}
-          style={{width:"100%",background:"none",border:"none",color:T.muted,borderRadius:8,padding:"10px",cursor:"pointer",fontSize:12.5,marginTop:6}}>
-          No thanks
+          style={{width:"100%",background:T.navy3,border:`1px solid ${T.border}`,color:T.muted2,borderRadius:10,padding:"12px",cursor:"pointer",fontSize:14,fontWeight:600,marginTop:8,fontFamily:"'Inter'"}}>
+          I'm good
         </button>
       </div>
     </div>
@@ -282,6 +375,9 @@ export function TourSpotlight({ step, part, steps, stepIndex, onTap, onCta, onSk
   const interactive = atPart(step.interactive, part, false);
   const noDim = atPart(step.noDim, part, false);
   const rect = useAnchorRect(noDim ? null : target);
+  // Optional second ring, drawn tighter than the spotlight, for a step that
+  // wants one control emphasised inside a larger lit region.
+  const ringRect = useAnchorRect(step.ring || null);
   const pad = Array.isArray(target) || target === "chat" ? 2 : 6;
   const text = step.parts[Math.min(part, step.parts.length - 1)] || "";
   const lastPart = part >= step.parts.length - 1;
@@ -320,13 +416,36 @@ export function TourSpotlight({ step, part, steps, stepIndex, onTap, onCta, onSk
 
   // Card below the hole when there's room, above it when there's room up top,
   // centered otherwise (a hole that fills the screen — the chat step).
+  // WILL 09-01: the old fallback centred the card at 38% whenever neither side
+  // had 250px, which put it ON TOP of the very control it was describing —
+  // exactly what he caught on the opener (a tall bubble with three buttons under
+  // it) and on the log sheet. A card must never cover its own target. So when
+  // neither side fits outright, DOCK to whichever side has more room and let the
+  // target keep its space, instead of centring over it. Only a hole that is
+  // genuinely absent leaves the card centred.
   const vh = typeof window !== "undefined" ? window.innerHeight : 800;
+  const FITS = 250;   // room for the card at its usual height
+  const MIN  = 96;    // below this a docked card would sit off-screen
   let cardTop = "38%", cardBottom = null;
-  if (noDim) { cardTop = null; cardBottom = 16; }        // full screen visible; card sits at the bottom
+  // `card:"bottom"` overrides the geometry. Used where the spotlight sits at the
+  // top of a screen whose CONTENT is the point of the step — The Proof's
+  // masthead, the My Log entry — and a card docked under the tab would cover the
+  // very thing the athlete is being told to look at.
+  if (step.card === "bottom") { cardTop = null; cardBottom = 16; }
+  else if (step.card === "top") { cardTop = 84; }
+  else if (noDim) { cardTop = null; cardBottom = 16; }   // full screen visible; card sits at the bottom
   else if (hole) {
     const spaceBelow = vh - (hole.top + hole.height);
-    if (spaceBelow > 250) cardTop = hole.top + hole.height + 12;
-    else if (hole.top > 250) { cardTop = null; cardBottom = vh - hole.top + 12; }
+    const spaceAbove = hole.top;
+    if (spaceBelow > FITS) cardTop = hole.top + hole.height + 12;
+    else if (spaceAbove > FITS) { cardTop = null; cardBottom = vh - hole.top + 12; }
+    else if (Math.max(spaceBelow, spaceAbove) > MIN) {
+      // Neither side is roomy. Take the roomier one anyway and let the card
+      // scroll its own overflow, rather than covering the target.
+      if (spaceBelow >= spaceAbove) cardTop = hole.top + hole.height + 8;
+      else { cardTop = null; cardBottom = vh - hole.top + 8; }
+    }
+    // else: the hole fills the screen (the chat step) — centred is correct.
   }
 
   // The dim is FOUR PANELS around the hole, not one giant box-shadow spread off
@@ -352,6 +471,12 @@ export function TourSpotlight({ step, part, steps, stepIndex, onTap, onCta, onSk
           transition:"top .35s ease, left .35s ease, width .35s ease, height .35s ease",
           pointerEvents:"none",zIndex:1102}}/>
       )}
+      {ringRect && (
+        <div style={{position:"fixed",top:ringRect.top-4,left:ringRect.left-4,
+          width:ringRect.width+8,height:ringRect.height+8,borderRadius:14,
+          border:`2.5px solid ${T.accent}`,boxShadow:`0 0 22px 5px ${T.accent}66`,
+          pointerEvents:"none",zIndex:1103}}/>
+      )}
       {noDim ? (
         // Nothing dimmed (the whole sample log has to be readable), but the tour
         // still owns every tap.
@@ -375,6 +500,7 @@ export function TourSpotlight({ step, part, steps, stepIndex, onTap, onCta, onSk
           ...(cardTop!==null ? {top:cardTop} : {bottom:cardBottom}),
           width:"100%",maxWidth:340,background:T.navy2,border:`1px solid ${T.border}`,
           borderRadius:14,padding:"16px 18px",zIndex:1102,cursor:interactive?"default":"pointer",
+          maxHeight:"calc(100vh - 32px)",overflowY:"auto",
           boxShadow:"0 12px 40px rgba(31,42,55,0.35)"}}>
         {step.title && <div style={{...DISP,fontSize:19,color:T.cyan,letterSpacing:2,marginBottom:6}}>{step.title}</div>}
         <div style={{color:T.text,fontSize:13.5,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{text}</div>

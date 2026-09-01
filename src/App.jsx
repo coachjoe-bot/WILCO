@@ -108,6 +108,7 @@ import { decideTempWrite, tempTurnBefore, tempProgramFact, tempConfirmLine, plan
 // First-run app tour (spotlight coach-marks + scripted Quick Log demo). Pure
 // display: fixtures never touch real data — see tour.jsx header.
 import { TourOffer, TourSpotlight, athleteTourSteps, tourWelcome, tourInteractiveAt, TOUR_QL_FIXTURE, TOUR_SCRIPT } from "./tour.jsx";
+import { TOUR_PROGRAM_TEXT, TOUR_HISTORY, TOUR_MEMORY_ROWS, TOUR_GOALS, TOUR_BLOCKS, TOUR_BLOCK_LOGS, TOUR_DIGEST } from "./tourFixture.js";
 // Self-hosted OTA bootstrap (App Store build, build plan §1/§3/§6). No-op on
 // web/PWA — isNativeIOS() (imported above) is false there, so this is dormant
 // outside the Capacitor iOS wrapper.
@@ -6051,6 +6052,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [videoLoading,setVideoLoading] = useState(false);
   const [prStamp,setPrStamp] = useState(null);   // {exercise,weight,unit} → "NEW MAX" stamp overlay when a PR lands
   const [logStamp,setLogStamp] = useState(null); // {n} → "WORKOUT #N" stamp when a normal session logs
+  const [buildStamp,setBuildStamp] = useState(false); // tour only: "BUILDING A PROGRAM" phase-in
   // The WORKOUT #N stamp send() fired at parse time (stamp-first choreography,
   // Will 08-24): {msg, n, clearsAt}. finalizeWorkout consumes it so the same log
   // never stamps twice, and times the NEW MAX stamp to follow it.
@@ -6705,6 +6707,50 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     resolveTourDone();
     track("tour_skip","nav",{role:"athlete",at:"offer"});
   };
+  // ── DRIVEN NAVIGATION (Will 09-01) ────────────────────────────────────────
+  // The tour walks Memory's three subtabs and Progress's, and drops them back on
+  // the chat before My Log. Rather than growing tourCta into a branch per step,
+  // each step declares where it needs to be (`enter`) and this applies it. A
+  // step with no `enter` leaves the app exactly where the last one put it.
+  // (tourStep is declared above, with the rest of the tour state.)
+  const tourEnter = tourStep?.enter;
+  const tourEnterKey = tourEnter ? JSON.stringify(tourEnter) : "";
+  useEffect(()=>{
+    if(!tour || !tourEnter) return;
+    const { pane, tab, sub } = tourEnter;
+    // pane:null means "close whatever is open and go back to the chat".
+    if(pane===null){ setShowProgram(false); setShowProgress(false); setShowLog(false); return; }
+    if(pane==="program"){ setShowProgress(false); setShowLog(false); setShowProgram(true); if(tab) setProgramTab(tab); if(sub) setMemTab(sub); }
+    else if(pane==="progress"){ setShowProgram(false); setShowLog(false); setShowProgress(true); }
+    else if(pane==="log"){ setShowProgram(false); setShowProgress(false); setShowLog(true); }
+  },[tourEnterKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The stamp steps play themselves and move on. No tap, same as the script step.
+  useEffect(()=>{
+    if(!tour || tourStep?.stamp!=="build") return;
+    setBuildStamp(true);
+    const off = setTimeout(()=>setBuildStamp(false), 1900);
+    const go  = setTimeout(()=>{
+      const t = tourRef.current; if(!t) return;
+      setTour({...t, idx:t.idx+1, part:0});
+    }, 2200);
+    return ()=>{ clearTimeout(off); clearTimeout(go); };
+  },[tourStep?.key]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Which Progress / My Log subtab the current step wants. Passed as a prop so
+  // the modals stay in charge of their own state the rest of the time.
+  const tourSubTab = tour && tourEnter?.sub ? tourEnter.sub : null;
+  const tourProgressTab = tour && tourEnter?.pane==="progress" ? (tourEnter.sub==="prs"?"pr":tourEnter.sub) : null;
+  const tourLogTab = tour && tourEnter?.pane==="log" ? tourEnter.sub : null;
+
+  // ── SAMPLE DATA (see src/tourFixture.js) ──────────────────────────────────
+  // Display-only, for the length of the tour. Every one of these surfaces would
+  // otherwise be an empty state for a brand-new athlete, which is what the whole
+  // rebuild was for. Nothing is written; dropping `tour` restores their own data.
+  const tourOn = !!tour;
+  const demoHistory = tourOn ? TOUR_HISTORY : workoutHistory;
+  const demoDigest  = tourOn ? TOUR_DIGEST  : proofDigest;
+  const demoAthlete = tourOn ? {...athlete, program_text:TOUR_PROGRAM_TEXT} : athlete;
   // Tap anywhere on a passive step: next text part, then next step.
   const tapTour = () => {
     const t = tourRef.current; if(!t) return;
@@ -6734,6 +6780,20 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     const t = tourRef.current;
     if(t && t.steps[t.idx]?.key==="quicklog" && showQuickLog) setTour({...t, idx:t.idx+1, part:0});
   },[showQuickLog]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The two places the athlete drives under chat-first: opening the Program pane
+  // themselves (step 1) and opening the log sheet off the workout bar.
+  useEffect(()=>{
+    const t = tourRef.current;
+    if(t && t.steps[t.idx]?.key==="program" && showProgram) setTour({...t, idx:t.idx+1, part:0});
+  },[showProgram]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(()=>{
+    const t = tourRef.current;
+    if(t && t.steps[t.idx]?.key==="memoryTab" && programTab==="phases") setTour({...t, idx:t.idx+1, part:0});
+  },[programTab]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(()=>{
+    const t = tourRef.current;
+    if(t && t.steps[t.idx]?.key==="navBack" && showLog) setTour({...t, idx:t.idx+1, part:0});
+  },[showLog]); // eslint-disable-line react-hooks/exhaustive-deps
   // ── Lock-screen card → Quick Log (T49, Will 08-11) ─────────────────────────
   // Tapping the Live Activity opens wilco://quicklog. The native shell routes
   // that URL (AppDelegate → SessionCardRouter → SessionCardViewController) and
@@ -6813,6 +6873,39 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // exchange — the workout bubble, Joe's reply, the real NEW MAX stamp — with no
   // AI call and no writes. Each stage re-checks the tour is still alive (skip).
   const tourWait = (ms)=>new Promise(r=>setTimeout(r,ms));
+  // TOUR: "Start Workout" on the sample opener. Docks the sample session the
+  // same way a real start does, then hands the tour to the workout-bar step.
+  const tourStartWorkout = () => {
+    const t = tourRef.current; if(!t) return;
+    setSheetState({draft:TOUR_QL_FIXTURE.draft, notes:TOUR_QL_FIXTURE.notes});
+    setDockWorkout({title:"DAY 2 - BENCH"});
+    setPgOpen(false); setSheetOpen(false);
+    setTour({...t, idx:t.idx+1, part:0});
+  };
+  // TOUR: FINISH WORKOUT on the sample sheet. Plays the whole logged-a-session
+  // moment — the athlete's own bubble, both stamps in the real order, Joe's
+  // scripted reply — with no AI call and no writes.
+  const tourFinishSample = async () => {
+    const t0 = tourRef.current; if(!t0) return;
+    setSheetOpen(false); setDockWorkout(null); setSheetInfo(false);
+    setTour({...t0, idx:t0.idx+1, part:0});   // → script step (invisible blocker)
+    setTourChat([{role:"user",content:TOUR_QL_FIXTURE.draft}]);
+    await tourWait(700); if(!tourRef.current) return;
+    setTourTyping(true); await tourWait(900);
+    if(!tourRef.current){ setTourTyping(false); return; }
+    // Both stamps, in send()'s real order (Will 08-24): WORKOUT #N first, the
+    // reply held until it fades, then NEW MAX. T55: show the number a real log
+    // WOULD stamp, never a hardcoded #1.
+    setLogStamp({n:Math.max(TOUR_SCRIPT.session, headerSessionCount+1)}); setTimeout(()=>setLogStamp(null),2200);
+    await tourWait(2300); if(!tourRef.current){ setLogStamp(null); setTourTyping(false); return; }
+    setTourTyping(false);
+    setTourChat(c=>[...c,{role:"assistant",content:TOUR_SCRIPT.reply}]);
+    await tourWait(300); if(!tourRef.current) return;
+    setPrStamp(TOUR_SCRIPT.pr); setTimeout(()=>setPrStamp(null),2600);
+    await tourWait(2900); if(!tourRef.current){ setPrStamp(null); return; }
+    const t = tourRef.current; if(!t) return;
+    setTour({...t, idx:t.idx+1, part:0});     // → logged
+  };
   const tourQuickLogSend = async () => {
     const t0 = tourRef.current; if(!t0) return;
     setShowQuickLog(false);
@@ -6842,6 +6935,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   };
   const finishTour = () => {
     const t = tourRef.current;
+    // Close anything the tour drove open and drop every sample surface with it.
+    setShowProgram(false); setShowProgress(false); setShowLog(false);
+    setBuildStamp(false); setPrStamp(null); setLogStamp(null);
     setTour(null); setTourChat([]); setTourTyping(false);
     if(!t || t.replay) return;
     resolveTourDone();
@@ -6860,9 +6956,11 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     const s = t?.steps[t.idx];
     // Leave the app exactly as it was: close anything the tour itself opened,
     // and drop any stamp mid-flight so it can't outlive the overlay.
-    if(s && (s.key==="builder"||s.key==="programClose")) setShowProgram(false);
-    if(s && s.key==="qlSheet") setShowQuickLog(false);
-    setPrStamp(null); setLogStamp(null);
+    // Skip is the exit people forget. It has to undo exactly what finish does,
+    // or a skipped tour leaves sample data on screen over the athlete's account.
+    setShowProgram(false); setShowProgress(false); setShowLog(false);
+    setShowQuickLog(false); setSheetOpen(false);
+    setBuildStamp(false); setPrStamp(null); setLogStamp(null);
     setTour(null); setTourChat([]); setTourTyping(false);
     if(t && !t.replay){ resolveTourDone(); }
     track("tour_skip","nav",{role:"athlete",step:s?.key||"?",replay:!!t?.replay});
@@ -7154,6 +7252,15 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // closed. Native-first: all of it gates on CHAT_FIRST_ON.
   const [dockWorkout,setDockWorkout] = useState(null); // {title} — text lives in sheetState + the ql park
   const [sheetOpen,setSheetOpen] = useState(false);
+  // Tour: the athlete opens the log sheet off the workout bar themselves. Lives
+  // HERE, not with the other tour effects above, because sheetOpen is declared
+  // on the line above this one — reading it in a dep array any earlier is a
+  // temporal-dead-zone crash on mount, which takes the whole athlete view to
+  // the error boundary.
+  useEffect(()=>{
+    const t = tourRef.current;
+    if(t && t.steps[t.idx]?.key==="bar" && sheetOpen) setTour({...t, idx:t.idx+1, part:0});
+  },[sheetOpen]); // eslint-disable-line react-hooks/exhaustive-deps
   const [sheetState,setSheetState] = useState({draft:"",notes:""});
   const [sheetDate,setSheetDate] = useState("");       // "" = today, else YYYY-MM-DD (the tappable date)
   const [sheetBusy,setSheetBusy] = useState(false);
@@ -7325,6 +7432,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const finishWorkout = () => {
     const draft = sheetState.draft.trim();
     if(!draft || sheetBusy) return;
+    // TOUR: the sample session never reaches the parser, the gateway or the
+    // database. Same rails the old Quick Log demo ran on.
+    if(tourRef.current){ tourFinishSample(); return; }
     clearTimeout(cardSyncRef.current); // a queued card re-render must not outlive the card
     setSheetOpen(false); setDockWorkout(null); setSheetInfo(false);
     quickLogPending.current = draft;
@@ -10520,6 +10630,17 @@ ${VOICE_ATHLETE}`;
           </div>
         </div>
       )}
+      {/* TOUR: "BUILDING A PROGRAM" — the third stamp variant (Will 09-01).
+          Same press as WORKOUT #N and NEW MAX so the two moments read as one
+          family. Phases in and out on its own, no tap. */}
+      {buildStamp&&(
+        <div className="stampstage">
+          <div className="stamp hit" style={{borderColor:CA.accent,boxShadow:`0 0 40px ${CA.accent}`}}>
+            <div style={{...DISP,fontSize:22,letterSpacing:1,color:IS_DARK?"#fff":CA.accent,lineHeight:1.05,textAlign:"center"}}>BUILDING<br/>A PROGRAM</div>
+            <div style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:9,letterSpacing:1,color:CA.muted2,marginTop:8}}>WITH WILCO</div>
+          </div>
+        </div>
+      )}
       {/* Header */}
       <div ref={hdrRef} style={{background:`${CA.navy2}D9`,backdropFilter:"blur(8px)",WebkitBackdropFilter:"blur(8px)",borderBottom:IS_DARK?"1px solid rgba(120,150,210,.16)":`1px solid ${CA.border}`,paddingTop:"calc(10px + env(safe-area-inset-top, 0px))",paddingBottom:"10px",paddingLeft:"14px",paddingRight:"14px",display:"flex",flexDirection:"column",gap:10,flexShrink:0}}>
         {/* Row 1: identity */}
@@ -10748,7 +10869,7 @@ ${VOICE_ATHLETE}`;
                       both themes in their own colors. */}
                   {m.role==="assistant"&&openerChoicePending&&!dockWorkout&&i===messages.length-1&&(
                     <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:14,userSelect:"none",WebkitUserSelect:"none"}}>
-                      <button onClick={()=>answerOpenerChoice("yes")}
+                      <button data-tour="start-workout-btn" onClick={()=>answerOpenerChoice("yes")}
                         style={{background:CA.accent,border:"none",color:CA.onAccent,borderRadius:10,padding:"13px 16px",cursor:"pointer",fontSize:15,fontWeight:800,letterSpacing:.3,width:"100%",fontFamily:"'Inter'"}}>
                         Start Workout
                       </button>
@@ -10791,6 +10912,50 @@ ${VOICE_ATHLETE}`;
                 </div>
               </div>
             ))}
+            {/* TOUR: the sample opener. Same bubble and the same three buttons a
+                real morning shows, so what they learn here is what they'll see
+                tomorrow. Only Start Workout is live — the tour is on rails. */}
+            {/* TOUR: builder mode, shown not run. A blueprint strip filling in and
+                a numbered interview question are the two things that mark the
+                Builder apart from ordinary chat, which is exactly what Will
+                asked to have highlighted. Mounting the real Builder here would
+                fire a live AI interview mid-tutorial. */}
+            {tour&&tourStep?.key==="builder"&&(
+              <div className="fade-up" data-tour="tour-blueprint" style={{marginBottom:12,background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:12,padding:"10px 12px"}}>
+                <div style={{fontFamily:"ui-monospace,Menlo,monospace",fontSize:9,letterSpacing:1,color:CA.accent,fontWeight:700}}>PROGRAM BLUEPRINT</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:5,marginTop:7}}>
+                  {[["Goal · squat +30",true],["4 days",true],["Equipment ?",false],["Injuries ?",false]].map(([label,done])=>(
+                    <span key={label} style={{fontSize:10.5,border:`1px ${done?"solid":"dashed"} ${done?CA.accent:CA.line2}`,color:done?CA.accent:CA.muted,borderRadius:12,padding:"3px 8px"}}>{label}</span>
+                  ))}
+                </div>
+                <div style={{display:"flex",gap:8,alignItems:"flex-start",marginTop:11}}>
+                  <div style={{width:24,height:24,borderRadius:"50%",background:CA_AVATAR,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:"#fff",flexShrink:0}}>J</div>
+                  <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:"14px 14px 14px 4px",padding:"9px 12px",fontSize:13,lineHeight:1.6,color:CA.text}}>
+                    Question 3 of 9. What do you have to train with, a full gym or something smaller?
+                  </div>
+                </div>
+              </div>
+            )}
+            {tour&&tourStep?.key==="opener"&&(
+              <div className="fade-up" style={{marginBottom:12,display:"flex",justifyContent:"flex-start"}}>
+                <div style={{width:28,height:28,borderRadius:"50%",background:CA_AVATAR,boxShadow:`0 0 12px ${CA_GLOW}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#fff",flexShrink:0,marginRight:8,marginTop:2}}>J</div>
+                <div style={{maxWidth:"80%",padding:"10px 14px",borderRadius:"15px 15px 15px 4px",background:CA.navy2,border:`1px solid ${CA.border}`,color:IS_DARK?"#dde5f2":CA.text,fontSize:14,lineHeight:1.7,whiteSpace:"pre-wrap"}}>
+                  {`Here's today, Day 2 - Bench:\n\n${TOUR_QL_FIXTURE.draft}`}
+                  <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:14}}>
+                    <button data-tour="start-workout-btn" onClick={tourStartWorkout}
+                      style={{background:CA.accent,border:"none",color:CA.onAccent,borderRadius:10,padding:"13px 16px",cursor:"pointer",fontSize:15,fontWeight:800,letterSpacing:.3,width:"100%",fontFamily:"'Inter'"}}>
+                      Start Workout
+                    </button>
+                    <button disabled style={{background:`${CA.accent}14`,border:`2px solid ${CA.accent}`,color:CA.accent,borderRadius:10,padding:"12px 16px",fontSize:15,fontWeight:800,letterSpacing:.3,width:"100%",fontFamily:"'Inter'",opacity:.55,cursor:"default"}}>
+                      Not Now
+                    </button>
+                    <button disabled style={{background:`${CA.accent}14`,border:`2px solid ${CA.accent}`,color:CA.accent,borderRadius:10,padding:"12px 16px",fontSize:15,fontWeight:800,letterSpacing:.3,width:"100%",fontFamily:"'Inter'",opacity:.55,cursor:"default"}}>
+                      Different Workout
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
             {tourTyping&&(
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
                 <div style={{width:28,height:28,borderRadius:"50%",background:CA_AVATAR,boxShadow:`0 0 12px ${CA_GLOW}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#fff"}}>J</div>
@@ -11310,7 +11475,7 @@ ${VOICE_ATHLETE}`;
       {/* ── T58 chat-first: the workout bar (collapsed) ─────────────────────── */}
       {CHAT_FIRST_ON && dockWorkout && !sheetOpen && (
         <div style={{padding:"0 8px 6px",flexShrink:0}}>
-          <div onClick={()=>{setPgOpen(false); setSheetOpen(true);}} role="button" tabIndex={0}
+          <div data-tour="session-bar" onClick={()=>{setPgOpen(false); setSheetOpen(true);}} role="button" tabIndex={0}
             onKeyDown={e=>{ if(e.key==="Enter"){ setPgOpen(false); setSheetOpen(true); } }}
             style={{background:CA_BTN,color:CA.onAccent,borderRadius:12,padding:"10px 12px",display:"flex",alignItems:"center",gap:10,cursor:"pointer",boxShadow:`0 4px 14px ${CA_GLOW}`}}>
             <button onClick={e=>{e.stopPropagation();dismissDock();}} aria-label="Take it off the screen"
@@ -11379,7 +11544,7 @@ ${VOICE_ATHLETE}`;
               <button onClick={()=>setSheetInfo(v=>!v)} aria-label="What is this date for?"
                 style={{width:18,height:18,borderRadius:"50%",border:`1px solid ${CA.muted}`,background:"none",color:CA.muted,fontSize:10,lineHeight:1,padding:0,textAlign:"center",cursor:"pointer",flexShrink:0}}>i</button>
             </span>
-            <button onClick={finishWorkout} disabled={sheetBusy||!sheetState.draft.trim()}
+            <button data-tour="finish-btn" onClick={finishWorkout} disabled={sheetBusy||!sheetState.draft.trim()}
               style={{background:CA_BTN,color:CA.onAccent,border:"none",borderRadius:9,padding:"9px 14px",...DISP,fontSize:11.5,letterSpacing:0.5,cursor:(sheetBusy||!sheetState.draft.trim())?"not-allowed":"pointer",opacity:(sheetBusy||!sheetState.draft.trim())?0.6:1}}>
               Finish Workout
             </button>
@@ -11444,7 +11609,7 @@ ${VOICE_ATHLETE}`;
       )}
 
       {/* My Log Modal */}
-      {showLog&&<MyLogModal initialTab={myLogTab} workoutHistory={workoutHistory} athlete={athlete} onClose={()=>{setShowLog(false);setMyLogTab("workouts");}} proofDigest={proofDigest} onDigestRead={(d)=>setProofDigest(d)} onOpenProofChat={(past)=>{setShowLog(false);setChatDigest(past&&past.id?past:null);setShowProofChat(true);}} setWorkoutHistory={setWorkoutHistory} onSessionCountChanged={()=>syncSessionCountAfterChange(athlete,setAthlete)} onPainMarks={(m)=>setAthlete(prev=>({...prev,pain_marks:m}))}/>}
+      {showLog&&<MyLogModal initialTab={myLogTab} tourTab={tourLogTab} workoutHistory={demoHistory} athlete={athlete} onClose={()=>{setShowLog(false);setMyLogTab("workouts");}} proofDigest={demoDigest} onDigestRead={(d)=>setProofDigest(d)} onOpenProofChat={(past)=>{setShowLog(false);setChatDigest(past&&past.id?past:null);setShowProofChat(true);}} setWorkoutHistory={setWorkoutHistory} onSessionCountChanged={()=>syncSessionCountAfterChange(athlete,setAthlete)} onPainMarks={(m)=>setAthlete(prev=>({...prev,pain_marks:m}))}/>}
 
       {/* Program View Modal */}
       {showProgram&&(
@@ -11466,7 +11631,7 @@ ${VOICE_ATHLETE}`;
                   key stays `phases` so every deep link keeps working. Non-chat-
                   first keeps the old stacked PHASES pane as the fallback. */}
               {[["program","MY PROGRAM"],...(CHAT_FIRST_ON?[]:[["builder","BUILDER"]]),["phases",CHAT_FIRST_ON?"MEMORY":"PHASES"]].map(([k,label])=>(
-                <button key={k} data-tour={k==="builder"?"builder-tab":undefined} onClick={()=>setProgramTab(k)}
+                <button key={k} data-tour={k==="builder"?"builder-tab":(k==="phases"?"memory-tab":undefined)} onClick={()=>setProgramTab(k)}
                   style={{padding:"10px 14px",background:"none",border:"none",borderBottom:`2px solid ${programTab===k?CA.cyan:"transparent"}`,color:programTab===k?CA.cyan:CA.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'Inter'",transition:"color 0.15s",display:"flex",alignItems:"center",gap:5,whiteSpace:"nowrap"}}>
                   {label}
                   {/* The whole Builder system is beta — Builder, Drafts and Phases
@@ -11520,7 +11685,7 @@ ${VOICE_ATHLETE}`;
                 {CHAT_FIRST_ON&&(
                   <div style={{display:"flex",gap:6,padding:"12px 16px 0",flexShrink:0}}>
                     {[["blocks","Past Blocks"],["drafts","Drafts"],["context","Athlete Context"]].map(([k,label])=>(
-                      <button key={k} onClick={()=>setMemTab(k)}
+                      <button key={k} data-tour={`mem-${k}`} onClick={()=>setMemTab(k)}
                         style={{flex:1,background:memTab===k?CA.accent:"transparent",border:`1px solid ${memTab===k?CA.accent:CA.border}`,color:memTab===k?CA.onAccent:CA.muted,borderRadius:9,padding:"8px 4px",cursor:"pointer",fontSize:11,fontWeight:700,letterSpacing:0.5,fontFamily:"'Inter'",whiteSpace:"nowrap"}}>
                         {label}
                       </button>
@@ -11543,12 +11708,12 @@ ${VOICE_ATHLETE}`;
                         onSaveToProgram={applyBuilderText}/>
                     )}
                     {!CHAT_FIRST_ON&&<div style={{margin:"22px 0 16px",borderTop:`1px solid ${CA.border}`}}/>}
-                    {(!CHAT_FIRST_ON||memTab==="blocks")&&<ProgramBlocksPane athlete={athlete} viewer="athlete"/>}
+                    {(!CHAT_FIRST_ON||memTab==="blocks")&&<ProgramBlocksPane athlete={athlete} viewer="athlete" demo={tour?{blocks:TOUR_BLOCKS, logs:TOUR_BLOCK_LOGS.map(d=>Date.parse(d)).filter(Number.isFinite)}:null}/>}
                   </div>
                 )}
                 {CHAT_FIRST_ON&&memTab==="context"&&(
-                  <AthleteContextPane athlete={athlete} goals={athleteGoals}
-                    rows={memoryRows} setRows={setMemoryRows} legacyContext={athleteContext}/>
+                  <AthleteContextPane athlete={tour?demoAthlete:athlete} goals={tour?TOUR_GOALS:athleteGoals}
+                    rows={tour?TOUR_MEMORY_ROWS:memoryRows} setRows={tour?()=>{}:setMemoryRows} legacyContext={tour?null:athleteContext}/>
                 )}
               </div>
             )}
@@ -11690,15 +11855,26 @@ ${VOICE_ATHLETE}`;
                     </button>
                   </>);
                   return (<>
+                {/* TOUR ONLY (Will 09-01): a new athlete's program tab is empty,
+                    and walking them through an empty box teaches nothing. The
+                    sample sits above the real controls, labelled SAMPLE so
+                    nobody thinks a program was written for them, and vanishes
+                    with the tour. Nothing here is ever saved. */}
+                {tour&&(
+                  <div data-tour="program-doc" style={{border:`1px solid ${CA.border}`,borderRadius:12,padding:"10px 12px",background:CA.navy2}}>
+                    <div style={{fontFamily:"ui-monospace,Menlo,monospace",fontSize:9,letterSpacing:1,color:CA.amber,marginBottom:6}}>SAMPLE PROGRAM</div>
+                    <pre style={{color:CA.text,fontSize:12,lineHeight:1.7,fontFamily:"ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{TOUR_PROGRAM_TEXT}</pre>
+                  </div>
+                )}
                 <input ref={athletePhotoRef} type="file" accept="image/*" style={{display:"none"}} onChange={handleAthletePhotoProgram}/>
-                <button onClick={()=>athletePhotoRef.current?.click()} disabled={athletePhotoProcessing}
+                <button data-tour="program-paste" onClick={()=>athletePhotoRef.current?.click()} disabled={athletePhotoProcessing}
                   style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:10,padding:"9px 14px",cursor:"pointer",fontSize:13,textAlign:"left"}}>
                   {athletePhotoProcessing?"📷 Reading photo...":"📷 Upload a photo of your program"}
                 </button>
                 <textarea
                   value={athleteProgramText}
                   onChange={e=>setAthleteProgramText(e.target.value)}
-                  placeholder="Paste or type your program here, or use the photo upload above..."
+                  placeholder={"Nothing here yet. Paste your program, build it, or drop a screenshot of it, and I'll read it in exactly as written."}
                   rows={10}
                   style={{flex:1,minHeight:180,background:"rgba(58,123,255,0.03)",border:`1px solid ${athleteProgramText!==(athlete.program_text||"")?CA.accent:CA.line2}`,borderRadius:12,padding:"12px 14px",color:CA.text,fontSize:12.5,outline:"none",resize:"none",fontFamily:"ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",transition:"border-color 0.15s",...PAPER_GRID}}
                 />
@@ -11795,6 +11971,7 @@ ${VOICE_ATHLETE}`;
           onProofRefresh={(d)=>setProofDigest(d)}
           onLogout={onLogout}
           onInstallApp={()=>{setShowSettings(false);setShowInstall("manual");}}
+          tourTaken={!!athlete?.tour_done_at}
           onReplayTour={()=>{setShowSettings(false);startTour(true);}}
         />
       )}
@@ -11837,7 +12014,8 @@ ${VOICE_ATHLETE}`;
       {showProgress&&(
         <ProgressModal
           athlete={athlete}
-          workoutHistory={workoutHistory}
+          workoutHistory={demoHistory}
+          tourTab={tourProgressTab}
           onClose={()=>setShowProgress(false)}
         />
       )}
@@ -12685,11 +12863,13 @@ function CountUp({end, dur=800, style}) {
   return <span style={style}>{n}</span>;
 }
 
-function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead, onOpenProofChat, setWorkoutHistory, onSessionCountChanged, initialTab, onPainMarks}) {
+function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead, onOpenProofChat, setWorkoutHistory, onSessionCountChanged, initialTab, onPainMarks, tourTab}) {
   // initialTab is the notification deep link's landing tab (T51); every other
   // caller omits it and still opens on the workouts list.
   const [tab,setTab] = useState(initialTab || "workouts");
   const [editSession,setEditSession] = useState(null);
+  // Same seam as ProgressModal: the tour opens WORKOUTS then PROOF for them.
+  useEffect(()=>{ if(tourTab) setTab(tourTab); },[tourTab]);
   // Free = READ-ONLY history (Will's 08-19 ruling, wired in with the W18-3
   // trial): a free athlete — typically one whose 7-day trial lapsed — can still
   // look at every session they logged, but every write affordance (edit, pain
@@ -12852,7 +13032,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
           two. overflowX + nowrap so a third can never be stranded the same way. */}
       <div style={{display:"flex",borderBottom:`1px solid ${CA.border}`,flexShrink:0,overflowX:"auto"}}>
         {["workouts","proof",...(CREW_ENABLED&&athlete?.crew_allowed!==false?["crew"]:[])].map(t=>(
-          <button key={t} onClick={()=>setTab(t)}
+          <button key={t} data-tour={`mylog-${t}`} onClick={()=>setTab(t)}
             style={{padding:"10px 20px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?CA.cyan:"transparent"}`,color:tab===t?CA.cyan:CA.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'Inter'",transition:"color 0.15s",position:"relative",whiteSpace:"nowrap"}}>
             {t}
             {t==="proof"&&proofDigest&&!proofDigest.is_read&&<span style={{position:"absolute",top:8,right:8,width:6,height:6,borderRadius:"50%",background:CA.accent,display:"block"}}/>}
@@ -12957,7 +13137,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                   const durLabel = durSec>=300 ? (durSec>=3600 ? `${Math.floor(durSec/3600)}h ${Math.round((durSec%3600)/60)}m` : `${Math.round(durSec/60)} min`) : null;
 
                   return (
-                    <div key={i} style={{background:"rgba(58,123,255,0.03)",border:`1px solid ${CA.line2}`,borderRadius:12,padding:14,marginBottom:10}}>
+                    <div key={i} data-tour={i===0?"mylog-entry":undefined} style={{background:"rgba(58,123,255,0.03)",border:`1px solid ${CA.line2}`,borderRadius:12,padding:14,marginBottom:10}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
                           <div style={{width:6,height:6,borderRadius:"50%",background:runDotColor,flexShrink:0}}/>
@@ -13612,7 +13792,7 @@ export function ProgramDraftsPane({athlete, viewer="athlete", onSaveToProgram, o
 // building off a past phase is an explicit ask in the Builder by name). The
 // current card carries "Start next phase". Zero-history accounts backfill their
 // live program as an open phase on first view.
-export function ProgramBlocksPane({athlete, viewer="athlete"}){
+export function ProgramBlocksPane({athlete, viewer="athlete", demo=null}){
   const [blocks,setBlocks] = useState([]);
   const [logs,setLogs] = useState([]);               // workout timestamps → per-phase session counts
   const [loaded,setLoaded] = useState(false);
@@ -13629,6 +13809,10 @@ export function ProgramBlocksPane({athlete, viewer="athlete"}){
   const backfilledRef = useRef(false);
 
   const load = () => {
+    // TOUR: render the sample phases and touch nothing. Without this the pane
+    // would fetch the athlete's real (empty) history and then BACKFILL a phase
+    // row from the sample program — a genuine write, during a tutorial.
+    if(demo){ setBlocks(demo.blocks); setLogs(demo.logs); setLoaded(true); return; }
     sbRead("program_history",`?athlete_id=eq.${athlete.id}&order=applied_at.desc&limit=24&select=id,block_name,block_summary,block_recap,source,applied_at,completed_at,ends_at,program_text`)
       .then(r=>{ if(Array.isArray(r)) setBlocks(r); })
       .catch(()=>{})
@@ -13644,6 +13828,7 @@ export function ProgramBlocksPane({athlete, viewer="athlete"}){
   // left program_text live with no open phase FOREVER (chat coaching a program
   // Phases said didn't exist). Bail only when an OPEN block exists.
   useEffect(()=>{
+    if(demo) return;                       // never write while the tour is up
     if(!loaded||blocks.some(b=>!b.completed_at)||backfilledRef.current) return;
     const t=(athlete.program_text||"").trim();
     if(!t) return;
@@ -13887,7 +14072,7 @@ export function ProgramBlocksPane({athlete, viewer="athlete"}){
   );
 }
 
-function ProgressModal({athlete, workoutHistory, onClose}) {
+function ProgressModal({athlete, workoutHistory, onClose, tourTab}) {
   const [tab,setTab] = useState("benchmarks");
   const [search,setSearch] = useState("");
   const [manualRMs,setManualRMs] = useState([]);
@@ -13911,6 +14096,9 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   // Hold the charge-up until the manual 1RMs have loaded — otherwise a lift renders at
   // its ESTIMATED tier first, then jumps to its ACTUAL tier when the data lands, flashing
   // the wrong power-cell colour. Tube stays empty until then, then fills once, correctly.
+  // The tour drives this tab so it can walk Benchmarks then Strength then PRs
+  // without the athlete hunting for them (tour.jsx step `enter.sub`).
+  useEffect(()=>{ if(tourTab) setTab(tourTab); },[tourTab]);
   useEffect(()=>{ if(tab!=="benchmarks"||!rmLoaded){ setBenchGo(false); return; } const t=setTimeout(()=>setBenchGo(true),80); return ()=>clearTimeout(t); },[tab,rmLoaded]);
 
   const [prRows,setPrRows] = useState([]); // all-time prs rows — seed bests past the 100-workout history cap (A22)
@@ -14208,7 +14396,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
           MY LOG, but the bar keeps the fix so it can't happen again. */}
       <div style={{display:"flex",borderBottom:`1px solid ${CA.border}`,flexShrink:0,overflowX:"auto"}}>
         {["benchmarks","strength","running","pr"].map(t=>(
-          <button key={t} onClick={()=>setTab(t)}
+          <button key={t} data-tour={`prog-${t==="pr"?"prs":t}`} onClick={()=>setTab(t)}
             style={{padding:"10px 16px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?CA.cyan:"transparent"}`,color:tab===t?CA.cyan:CA.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,transition:"color 0.15s",whiteSpace:"nowrap"}}>
             {t==="pr"?"PRs":t}
           </button>
@@ -15578,7 +15766,7 @@ function ProfileCompletionModal({athlete, onClose, onSave}) {
 }
 
 // ─── SETTINGS MODAL ───────────────────────────────────────────────────────────
-function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogout, onInstallApp, onReplayTour}) {
+function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogout, onInstallApp, onReplayTour, tourTaken}) {
   const [coachName,setCoachName] = useState(athlete.coach_name||"");
   const [coachEmail,setCoachEmail] = useState(athlete.coach_email||"");
   const [weightUnit,setWeightUnit] = useState(athlete.weight_unit||"lbs");
@@ -15952,7 +16140,10 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
             moment it ends. */}
         {onReplayTour&&(
           <button onClick={onReplayTour} style={btn("transparent",CA.muted2,{border:`1px solid ${CA.border}`,fontSize:13,padding:"10px",letterSpacing:1,marginBottom:10})}>
-            Replay the App Tour
+            {/* "Replay" is wrong for an athlete who tapped "I'm good" at the
+                offer and never took it — resolving the offer marks it done
+                either way (Will 09-01). */}
+            {tourTaken?"Replay the App Tour":"Take the App Tour"}
           </button>
         )}
 
