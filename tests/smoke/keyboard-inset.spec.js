@@ -70,3 +70,40 @@ test("while the keyboard owns layout, a panned document snaps back to 0", async 
   });
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
 });
+
+// ─── 09-20: the focused field stays in view ───────────────────────────────────
+// The document clamp cancels iOS's own reveal-the-input pan, and padding the
+// shell shrinks every inner scroller from the bottom — so a field anywhere but
+// the very bottom ended up under the fold with the list parked at its top
+// ("I tap to type and it flies away", Will's phone). revealCaret() owes that
+// reveal back. Driven on the geometry harness (tests/harness/kb.html): the same
+// shell / log-sheet / full-screen-modal skeleton, mounted on the REAL hook.
+const caretVisible = (page, sel) => page.evaluate((sel) => {
+  const el = document.querySelector(sel), sc = el.closest("[data-sc]");
+  const box = sc.getBoundingClientRect(), r = el.getBoundingClientRect();
+  return { scrollTop: Math.round(sc.scrollTop), boxTop: box.top, boxBottom: box.bottom, top: r.top, bottom: r.bottom };
+}, sel);
+
+test("a lower form field is scrolled back above the keyboard", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 760 });
+  await page.goto("/tests/harness/kb.html#modal");
+  const field = page.locator("#f8");
+  await field.click();
+  await fakeKeyboard(page, true);
+  await expect.poll(async () => { const g = await caretVisible(page, "#f8"); return g.bottom <= g.boxBottom && g.top >= g.boxTop; }).toBe(true);
+  expect((await caretVisible(page, "#f8")).scrollTop).toBeGreaterThan(0);
+});
+
+test("a caret deep in the log sheet stays in view; a caret already in view is left alone", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 760 });
+  await page.goto("/tests/harness/kb.html#sheet");
+  const ta = page.locator("#sheetta");
+  // Caret on line 1: already visible once the keyboard is up → nothing moves.
+  await ta.click({ position: { x: 40, y: 20 } });
+  await fakeKeyboard(page, true);
+  await page.waitForTimeout(300);
+  expect((await caretVisible(page, "#sheetta")).scrollTop).toBe(0);
+  // Move the caret to line 10 (selectionchange path): the sheet scrolls to it.
+  await page.evaluate(() => { const t = document.querySelector("#sheetta"); const at = t.value.indexOf("Line 10"); t.setSelectionRange(at, at); });
+  await expect.poll(async () => (await caretVisible(page, "#sheetta")).scrollTop).toBeGreaterThan(0);
+});

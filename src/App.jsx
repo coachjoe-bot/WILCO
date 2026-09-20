@@ -23,6 +23,7 @@ import { ConsentFlow, TERMS_VERSION, PRIVACY_VERSION } from "./legal.jsx";
 // used below to gate the native OTA bootstrap and Face ID unlock — same
 // platform.js helper, shared by both the payments and App Store shell work.
 import { isNativeIOS } from "./platform.js";
+import { useKeyboardInset } from "./useKeyboardInset.js";
 // Background art imported THROUGH the bundler rather than referenced as
 // "/login-bg.jpg" out of public/. Absolute public paths are origin-dependent,
 // and the native OTA channel swaps the WKWebView's server base path to a
@@ -2553,77 +2554,6 @@ export function useOnline() {
 // in every browser we support; the message check covers the SW's own abort text.
 export const isNetworkError = (e) =>
   !!e && (e.name==="TypeError" || /network|failed to fetch|load failed|offline/i.test(e.message||""));
-
-// ─── iOS KEYBOARD GEOMETRY (T62) ─────────────────────────────────────────────
-// On iOS — Safari AND the WKWebView shell — the layout viewport NEVER shrinks
-// for the on-screen keyboard. The OS instead PANS the page to reveal the focused
-// input, and for viewport-height surfaces (the 100dvh chat shell, the fixed
-// full-screen Program modal) that pan is pure breakage: bottom composers wedge
-// mid-screen over grey dead space, the header scrolls off, and on WKWebView the
-// pan can REST after the keyboard closes (the leftover grey band). visualViewport
-// is the honest source of keyboard geometry: inset = the strip of layout
-// viewport the keyboard covers.
-//
-// Contract:
-//  - engage only while an editable element has focus in the tree this hook is
-//    mounted in (signup never mounts it and keeps its legitimate document
-//    scroll; a pinch-zoomed viewport must not read as a keyboard);
-//  - consumers pad their bottom by the inset so composers sit above the
-//    keyboard — flex geometry, never an html/body overflow lock (that clipped
-//    signup once) and never env(safe-area-inset-bottom) (47941e6);
-//  - while engaged, document scroll is clamped back to 0 so the OS pan can't
-//    dislodge the layout — inner overflow containers still scroll free;
-//  - when the keyboard closes the inset returns to 0 and one last clamp clears
-//    any leftover pan, so no phantom padding survives dismissal.
-function useKeyboardInset(){
-  const [inset,setInset] = useState(0);
-  useEffect(()=>{
-    const vv = typeof window!=="undefined" ? window.visualViewport : null;
-    if(!vv) return;
-    const editable = (el) => !!el && (el.tagName==="INPUT"||el.tagName==="TEXTAREA"||el.isContentEditable);
-    let engaged = editable(document.activeElement);
-    const read = () => {
-      const kb = engaged ? Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop)) : 0;
-      setInset(prev => Math.abs(prev-kb)<2 ? prev : kb);
-      // The clamp: while the keyboard owns layout (and once more as it leaves),
-      // the document stays at 0 — the pan is the bug, not the fix.
-      if((engaged||kb===0) && (window.scrollX||window.scrollY)) window.scrollTo(0,0);
-    };
-    const onFocusIn  = (e)=>{ engaged = editable(e.target); read(); };
-    // Focus hopping between inputs fires focusout→focusin in the same tick;
-    // deferring the disengage read keeps the padding from flapping to 0 between.
-    const onFocusOut = ()=>{ engaged = false; setTimeout(read, 80); };
-    // Mount clamp: the login screen legitimately document-scrolls under the
-    // keyboard, and on WKWebView that offset SURVIVES the switch into the
-    // shell — the clipped header + resting grey band right after login. The
-    // shell's layout owns the viewport, so entering it resets the document.
-    if(window.scrollX||window.scrollY) window.scrollTo(0,0);
-    // Resting-band clamp (native): Capacitor's contentInset "always" makes
-    // safe-area offsets LEGAL RESTING positions for the WKWebView scroll view,
-    // so a plain finger drag can leave the shell displaced with a grey band at
-    // either end — no keyboard involved. While this hook is mounted the
-    // document must never scroll (everything scrolls in inner containers), so
-    // any offset that SETTLES gets snapped back. Debounced past the gesture:
-    // fighting the rubber band mid-drag stutters, correcting the rest doesn't.
-    let settle = 0;
-    const onWinScroll = ()=>{
-      clearTimeout(settle);
-      settle = setTimeout(()=>{ if(window.scrollX||window.scrollY) window.scrollTo(0,0); }, 160);
-    };
-    window.addEventListener("scroll", onWinScroll);
-    vv.addEventListener("resize", read);
-    vv.addEventListener("scroll", read);
-    document.addEventListener("focusin", onFocusIn);
-    document.addEventListener("focusout", onFocusOut);
-    read();
-    return ()=>{
-      vv.removeEventListener("resize", read); vv.removeEventListener("scroll", read);
-      document.removeEventListener("focusin", onFocusIn); document.removeEventListener("focusout", onFocusOut);
-      window.removeEventListener("scroll", onWinScroll); clearTimeout(settle);
-    };
-  },[]);
-  return inset;
-}
 
 // ─── BUILD FRESHNESS HOOK + "UPDATE READY" PILL ──────────────────────────────
 // The pill renders at the app root (so it survives every view) but the thing it
