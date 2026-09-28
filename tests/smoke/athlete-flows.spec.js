@@ -278,3 +278,36 @@ test("MY LOG: a flare after 'resolved' shows again; resolving writes resolved_pa
   expect(marksWrite().body.data.pain_marks.knee.cleared_at).toBeTruthy();
   expect(marksWrite().body.data.resolved_pain).toBeUndefined(); // separate write
 });
+
+// ── T64 S2b item 10: the log-sheet focus note never talks about pain in an
+// area the ledger does not list as current. The founder's Sep 9 sheet said
+// "your pec's still lingering" from an undated profile field. Here the pec
+// flag is 40 days old (cleared by the ledger) and the profile still names it;
+// the model's note mentions it anyway; code drops that sentence.
+test("log sheet focus note: a cleared area never appears, the profile injury is background", async ({ page }) => {
+  const old = new Date(Date.now() - 40 * 86400000).toISOString();
+  const athlete = makeAthlete({ program_text: PROGRAM, injury_history: "Pec strain last spring" });
+  await mockApi(page, {
+    athlete,
+    dataReads: { workouts: [{ id: "w-old-pec", athlete_id: athlete.id, created_at: old, raw_message: "Bench 3x5 @ 185, pec hurt on bench",
+      parsed_data: { exercises: [{ name: "Bench Press", unit: "lbs", weight: 185, sets: 3, reps: 5 }], pain_flags: [{ area: "pec", description: "pec hurt on bench" }] } }] },
+  });
+  const prompts = [];
+  await page.route("**/api/claude", (route) => {
+    const body = route.request().postDataJSON() || {};
+    if (body.feature !== "quick_log_draft") return route.fallback();
+    prompts.push(JSON.stringify(body));
+    route.fulfill({ contentType: "application/json", body: JSON.stringify({ content: [{ type: "text", text: "Week 1, Day 1: Push. Heavy bench day.\nYour pec's still lingering, keep the bench smooth.\n===\n" + DRAFT }], usage: {} }) });
+  });
+
+  await loginAsAthlete(page, athlete);
+  await page.getByRole("button", { name: "Start Workout" }).click();
+  await expect(page.getByText(/Log it here when you're done/)).toBeVisible({ timeout: 20000 });
+  await page.getByText("Day 1 - Push", { exact: true }).first().click();
+  await expect(page.getByText(/Heavy bench day/).first()).toBeVisible({ timeout: 15000 });
+  await expect(page.getByText(/still lingering/)).toHaveCount(0);
+  const p = prompts.join("\n");
+  expect(p).toContain("CURRENT PAIN");
+  expect(p).toContain("undated background the athlete entered at signup");
+  expect(p).not.toContain("guard the affected areas");
+});
