@@ -147,7 +147,8 @@ console.log("short recap (T64 Fix 3b):");
   const { calls, deps } = harness(openBlock(PROGRAM));
   const originalAsk = deps.askClaude;
   let n = 0;
-  deps.askClaude = async (...args) => { n++; if (n === 2) throw new Error("unknown column block_recap_short"); return originalAsk(...args); };
+  // Identify the short-recap call by its own shape (120 tokens on Haiku), not by call order: the recap runs in the background since Fix 7a, so order is no longer fixed.
+  deps.askClaude = async (...args) => { n++; if (args[2] === 120 && /haiku/.test(String(args[4]))) throw new Error("unknown column block_recap_short"); return originalAsk(...args); };
   await snapshotProgramHistory({ athleteId: "a1", text: REWRITE, source: "coach_save" }, deps);
   await flush(); // recap runs in the background since Fix 7a (S1); the short recap rides the same task (S3)
   ok(recaps(calls).length === 1, "the full recap still lands even when the short-recap step throws");
