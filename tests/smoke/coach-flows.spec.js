@@ -169,3 +169,24 @@ test("a coach with 0 athletes walks every tab without crashing", async ({ page }
     await expect(page.getByRole("button", { name: "RELOAD", exact: true })).toHaveCount(0);
   }
 });
+
+// ── T64 S2: the coach sees the same pain truth as the athlete ───────────────
+// The athlete resolved the knee, then it flared a week later. Before T64 the
+// coach's ACTIVE PAIN FLAGS hid every future "knee" forever (exact-string
+// resolved_pain match) and counted "Knees" / "left knee" as different areas.
+test("coach athlete detail: a flare after the athlete's 'resolved' shows; old flags stay hidden; one area name", async ({ page }) => {
+  const coach = makeCoach();
+  const day = (n) => new Date(Date.now() - n * 86400000).toISOString();
+  const athlete = makeAthlete({ coach_id: coach.id, program_text: PROGRAM, resolved_pain: ["knees"], pain_marks: { knee: { cleared_at: day(6) } } });
+  const sq = [{ name: "Back Squat", sets: 3, reps: 5, weight: 225, unit: "lbs" }];
+  await mockApi(page, { athlete, coach, dataReads: { workouts: [
+    { id: "w-flare", athlete_id: athlete.id, created_at: day(1), raw_message: "left knee flared", parsed_data: { exercises: sq, pain_flags: [{ area: "left knee", description: "flared on squats" }] } },
+    { id: "w-flare2", athlete_id: athlete.id, created_at: day(2), raw_message: "knee ache", parsed_data: { exercises: sq, pain_flags: [{ area: "Knee", description: "ache on squats" }] } },
+    { id: "w-old", athlete_id: athlete.id, created_at: day(10), raw_message: "knees ache", parsed_data: { exercises: sq, pain_flags: [{ area: "Knees", description: "ache on squats" }] } },
+  ] } });
+  await loginAsCoach(page, coach);
+  await page.getByRole("button", { name: /^athletes$/i }).click();
+  await page.getByText(athlete.name).first().click();
+  await expect(page.getByText(/ACTIVE PAIN FLAGS \(2 sessions flagged\)/)).toBeVisible({ timeout: 10000 });
+  await expect(page.getByText("knee ×2")).toBeVisible();
+});

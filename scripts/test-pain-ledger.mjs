@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
   normArea, areasInText, classifyPain, painStatus, extractEvents, withMark, normalizeMarks,
-  ledgerBlock, preTurnPain, NEXT_MENTION_DEFAULT, dayKey, extractDuring,
+  ledgerBlock, preTurnPain, NEXT_MENTION_DEFAULT, dayKey, extractDuring, flagClearedFor,
   EPISODE_GAP_DAYS, CLEARED_CLEAN, OFFER_COOLDOWN_DAYS, SEV_SERIOUS, SEV_CHANGED, SEV_AWARE, SEV_DULL,
 } from "../src/painLedger.js";
 import { programPurpose } from "../src/programPurpose.js";
@@ -300,6 +300,11 @@ const one = (rows, d, area, extra) => st(rows, d, extra).find((r) => r.area === 
   eq(m1.knee.noted_at, "2026-09-01T00:00:00.000Z", "withMark stamps");
   eq(withMark(withMark({}, "pec", "declined_change"), "pec", "declined_change").pec.declined_change_count, 2, "declines count");
   eq(dayKey("2026-08-22T04:21:26Z", TZ), "2026-08-22", "day keys use the athlete's tz");
+  // MY LOG display rule (athlete view): resolved hides only flags at or before the clear
+  const mk = normalizeMarks({ knees: { cleared_at: "2026-09-03T12:00:00Z" } }, []);
+  eq(flagClearedFor("knee", "2026-09-01T12:00:00Z", mk), true, "MY LOG: flag before the resolve is hidden");
+  eq(flagClearedFor("left knee", "2026-09-10T12:00:00Z", mk), false, "MY LOG: a flare a week later shows again");
+  eq(flagClearedFor("pec", "2026-09-01T12:00:00Z", mk), false, "MY LOG: other areas untouched");
 }
 
 console.log(`\n${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ""}`);

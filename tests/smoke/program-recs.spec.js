@@ -120,56 +120,94 @@ test("rec bar ✕ asks (Will 09-01): Save to Drafts parks, Delete removes, backd
   expect(calls.find((c) => c.body?.op === "delete" && c.body?.table === "program_drafts")).toBeFalsy();
 });
 
-test("rec pattern gate: a first pain mention is NOTED (watched note), never a rec", async ({ page }) => {
+// ── T64 S2: pain runs on the PAIN LEDGER, one voice per turn ────────────────
+const chatSystem = (calls) => calls.filter((c) => /api\/claude/.test(c.url) && c.body && /mastermind_chat|joebot_chat/.test(c.body.feature || "")).map((c) => JSON.stringify(c.body)).join("\n");
+const painMarksWrite = (calls) => calls.find((c) => c.body?.op === "update" && c.body?.table === "athletes" && c.body?.data?.pain_marks);
+const painRow = (daysAgo, description) => ({ id: `pain-${daysAgo}`, athlete_id: "x", created_at: new Date(Date.now() - daysAgo * 86400000).toISOString(),
+  raw_message: description, parsed_data: { exercises: [], pain_flags: [{ area: "knee", description }] } });
+
+test("pain ledger: a first pain mention gets Joe's one line and NO app bubble, no rec", async ({ page }) => {
   const msg = "my knee felt a little cranky on squats today";
   const athlete = makeAthlete({ program_text: PROGRAM });
-  const { calls } = await mockApi(page, { athlete, chatReply: DRAFT_REPLY, parseResult: painParse(msg) });
+  const { calls } = await mockApi(page, { athlete, chatReply: DRAFT_REPLY, parseResult: { ...painParse(msg), pain_flags: [{ area: "knee", description: "a little cranky on squats" }] } });
   await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
 
   await page.getByPlaceholder(/Tell Coach Joe about your workout/).fill(msg);
   await page.getByRole("button", { name: "→" }).click();
-  await expect(page.getByText("Noted. One rough day doesn't change the plan", { exact: false })).toBeVisible({ timeout: 15000 });
+  await expect(page.getByText("Heavy bench day", { exact: false }).last()).toBeVisible({ timeout: 15000 });
+  await expect.poll(() => !!painMarksWrite(calls), { timeout: 10000 }).toBe(true);
+  await expect(page.getByText(/one rough day/i)).toHaveCount(0);
+  await expect(page.getByText(/twice now/i)).toHaveCount(0);
   await expect(page.getByText(/PROGRAM REC —/)).toHaveCount(0);
-
-  const noted = calls.find((c) => c.body?.op === "insert" && c.body?.table === "athlete_memory");
-  expect(noted).toBeTruthy();
-  expect(noted.body.data.content).toContain("Watching:");
-  expect(noted.body.data.content).toContain("(pain)");
+  expect(painMarksWrite(calls).body.data.pain_marks.knee.noted_at).toBeTruthy();
+  expect(painMarksWrite(calls).body.data.pain_marks.knee.offered_at).toBeFalsy();
+  const watch = calls.find((c) => c.body?.op === "insert" && c.body?.table === "athlete_memory" && /\(pain\)/.test(c.body?.data?.content || ""));
+  expect(watch).toBeFalsy(); // pain lives in the ledger now, not in watch notes
+  const sys = chatSystem(calls);
+  expect(sys).toContain("PAIN LEDGER");
+  expect(sys).toContain("knee: acknowledge_once");
 });
 
-test("rec pattern gate: a repeat on a watched issue drafts the rec and raises the bar", async ({ page }) => {
-  const msg = "knee is bugging me on squats again";
+test("pain ledger: a worsening pattern is Joe's single offer; the app drafts nothing and stamps offered_at", async ({ page }) => {
+  const msg = "knee was on fire on squats again, I stopped";
   const athlete = makeAthlete({ program_text: PROGRAM });
-  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-  const inTwoWeeks = new Date(Date.now() + 13 * 86400000).toISOString();
-  await mockApi(page, {
-    athlete, chatReply: DRAFT_REPLY, parseResult: painParse(msg),
-    dataReads: { athlete_memory: [{ id: "mem-1", athlete_id: athlete.id, status: "active",
-      content: `Watching: knee squats (pain) reported ${yesterday} - a repeat within 2 weeks earns a program rec`,
-      kind: "situational", expires_at: inTwoWeeks, updated_at: new Date().toISOString() }] },
-    recDraftReply: JSON.stringify({ title: "Knee - box squat swap", why: "Knee talked two sessions running.", duration: "2w",
-      swaps: [{ week: null, day: "Day 2 - Pull", find: "Deadlift 3x5 @ 275", replace: "Block Pull 3x5 @ 245" }] }),
+  const { calls } = await mockApi(page, {
+    athlete, chatReply: DRAFT_REPLY,
+    parseResult: { ...painParse(msg), pain_flags: [{ area: "knee", description: "on fire on squats, stopped" }] },
+    dataReads: { workouts: [painRow(2, "knee flared during squat"), painRow(4, "knee a little achy during squat")] },
   });
   await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
 
   await page.getByPlaceholder(/Tell Coach Joe about your workout/).fill(msg);
   await page.getByRole("button", { name: "→" }).click();
-  await expect(page.getByText("That's twice now", { exact: false })).toBeVisible({ timeout: 15000 });
-  await expect(page.getByText("PROGRAM REC — Knee - box squat swap").first()).toBeVisible({ timeout: 15000 });
+  await expect(page.getByText("Heavy bench day", { exact: false }).last()).toBeVisible({ timeout: 15000 });
+  await expect.poll(() => !!painMarksWrite(calls), { timeout: 10000 }).toBe(true);
+  expect(painMarksWrite(calls).body.data.pain_marks.knee.offered_at).toBeTruthy();
+  await expect(page.getByText(/PROGRAM REC —/)).toHaveCount(0);
+  await expect(page.getByText(/twice now|one rough day/i)).toHaveCount(0);
+  expect(calls.find((c) => c.body?.feature === "program_generate")).toBeFalsy();
+  expect(chatSystem(calls)).toContain("knee: offer_change_once");
 });
 
-test("rec pattern gate: clearly serious language skips the gate on the first report", async ({ page }) => {
-  const msg = "sharp pain in my knee on squats, had to stop the set";
+test("pain ledger: serious language drafts the protective rec and the app confirms once", async ({ page }) => {
+  const msg = "felt a pop in my knee on squats and it gave out";
   const athlete = makeAthlete({ program_text: PROGRAM });
-  await mockApi(page, {
-    athlete, chatReply: DRAFT_REPLY, parseResult: painParse(msg),
-    recDraftReply: JSON.stringify({ title: "Knee protection", why: "Sharp pain is a stop sign.", duration: "1w",
+  const { calls } = await mockApi(page, {
+    athlete, chatReply: DRAFT_REPLY,
+    parseResult: { ...painParse(msg), pain_flags: [{ area: "knee", description: "felt a pop, knee gave out on squats" }] },
+    recDraftReply: JSON.stringify({ title: "Knee protection", why: "A pop and a give-out is a stop sign.", duration: "1w",
       swaps: [{ week: null, day: "Day 2 - Pull", find: "Deadlift 3x5 @ 275", replace: "Hip Thrust 3x8 @ 185" }] }),
   });
   await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
 
   await page.getByPlaceholder(/Tell Coach Joe about your workout/).fill(msg);
   await page.getByRole("button", { name: "→" }).click();
-  await expect(page.getByText("not something to train through blind", { exact: false })).toBeVisible({ timeout: 15000 });
+  await expect(page.getByText("Drafted a program rec for your knee", { exact: false })).toBeVisible({ timeout: 15000 });
   await expect(page.getByText("PROGRAM REC — Knee protection").first()).toBeVisible({ timeout: 15000 });
+  await expect(page.getByText(/not something to train through blind/i)).toHaveCount(0);
+  expect(chatSystem(calls)).toContain("THIS MESSAGE reads as serious");
+  const gen = calls.find((c) => c.body?.feature === "program_generate");
+  expect(JSON.stringify(gen.body)).toContain("PAIN LEDGER");
+});
+
+test("watch rule (plateau): a repeat drafts the rec and the app confirms once", async ({ page }) => {
+  const msg = "bench has been stuck at 185 for weeks";
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const inTwoWeeks = new Date(Date.now() + 13 * 86400000).toISOString();
+  await mockApi(page, {
+    athlete, chatReply: DRAFT_REPLY, parseResult: { ...emptyParse, coach_flag: "plateau", general_notes: msg },
+    dataReads: { athlete_memory: [{ id: "mem-1", athlete_id: athlete.id, status: "active",
+      content: `Watching: bench (plateau) reported ${yesterday} - a repeat within 2 weeks earns a program rec`,
+      kind: "situational", expires_at: inTwoWeeks, updated_at: new Date().toISOString() }] },
+    recDraftReply: JSON.stringify({ title: "Bench - pause variation", why: "Stuck two weeks.", duration: "2w",
+      swaps: [{ week: null, day: "Day 1 - Push", find: "Bench Press 3x5 @ 185", replace: "Paused Bench 3x5 @ 175" }] }),
+  });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+
+  await page.getByPlaceholder(/Tell Coach Joe about your workout/).fill(msg);
+  await page.getByRole("button", { name: "→" }).click();
+  await expect(page.getByText("Drafted a program rec for that", { exact: false })).toBeVisible({ timeout: 15000 });
+  await expect(page.getByText("PROGRAM REC — Bench - pause variation").first()).toBeVisible({ timeout: 15000 });
+  await expect(page.getByText(/twice now/i)).toHaveCount(0);
 });
