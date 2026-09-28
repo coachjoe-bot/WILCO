@@ -28,6 +28,7 @@ import { computeGritSnapshot, TIER_NAMES, TIER_COLORS, getBenchKey, resolveLift 
 // the roster aggregations with THIS module; the client imports weekBounds from it so
 // both cut the identical Mon–Sun week.
 import { weekBounds } from "./coachAnalytics.js";
+import { normArea, normalizeMarks, flagClearedFor } from "./painLedger.js";
 // The Morning Brief — deterministic conversational beats (zero tokens to build;
 // Haiku only reacts when the coach free-types). See coach-dashboard-v2-spec §C.
 import { buildMorningBrief, decisionNote, briefWeekKey } from "./coachBrief.js";
@@ -1367,13 +1368,15 @@ function CoachDashboard({coach,onLogout}) {
     const m = new Map();
     // Array.isArray, not ||[]: resolved_pain is athlete-writable jsonb, and a
     // non-array value here crashed the whole coach dashboard (08-11, 4x).
-    athletes.forEach(a=>m.set(a.id,{anyPain:false,unresolvedPain:false,resolved:(Array.isArray(a.resolved_pain)?a.resolved_pain:[]).map(x=>String(x).toLowerCase())}));
+    // T64 S2: the pain ledger's dated "resolved" rule (pain_marks + legacy
+    // resolved_pain): a flare logged after the clear raises the ⚠ again.
+    athletes.forEach(a=>m.set(a.id,{anyPain:false,unresolvedPain:false,marks:normalizeMarks((a.pain_marks&&typeof a.pain_marks==="object")?a.pain_marks:{}, Array.isArray(a.resolved_pain)?a.resolved_pain:[])}));
     workouts.forEach(w=>{
       const e = m.get(w.athlete_id); if(!e) return;
       const flags = w.parsed_data?.pain_flags;
       if(flags?.length>0){
         e.anyPain = true;
-        if(!e.unresolvedPain&&flags.some(p=>!e.resolved.includes(p.area.toLowerCase()))) e.unresolvedPain = true;
+        if(!e.unresolvedPain&&flags.some(p=>p&&p.area&&!flagClearedFor(p.area, w.created_at, e.marks))) e.unresolvedPain = true;
       }
     });
     return m;
@@ -2228,7 +2231,7 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
       const parsed = prescByAth[a.id]?.parsed_json || null;
       const oneRMs = buildOneRMs(prByAth[a.id]||[], manByAth[a.id]||[]);
       const adherence = parsed ? compareProgramVsActual(parsed, thisWk, oneRMs) : null;
-      const injuries = aggregateInjuries([...lastWk,...thisWk]);
+      const injuries = aggregateInjuries([...lastWk,...thisWk], {marks:(a.pain_marks&&typeof a.pain_marks==="object")?a.pain_marks:{}, legacyResolved:Array.isArray(a.resolved_pain)?a.resolved_pain:[]});
       const hasProgram = !!(a.program_text && a.program_text.trim().length>10);
       const presDays = a.training_days_per_week || parsed?.blocks?.[0]?.days?.length || null;
       // adherence v2: exercise choice (50) > volume (30) > load (20), targets
@@ -4112,8 +4115,10 @@ function AthleteDetail({athlete,coachId,workouts,prs,requests=[],onResolveReques
   // athlete's ALL-TIME lazy-loaded history — hundreds of rows for a 55-session
   // athlete, thousands for a multi-year one. Direct input-latency win in the
   // surface coaches type in most.
-  const resolvedPainAreas = useMemo(()=>(Array.isArray(athlete.resolved_pain)?athlete.resolved_pain:[]).map(a=>String(a).toLowerCase()),[athlete.resolved_pain]);
-  const hasPain = useMemo(()=>workouts.some(w=>getPD(w).pain_flags?.some(p=>!resolvedPainAreas.includes(p.area.toLowerCase()))),[workouts,resolvedPainAreas]);
+  // T64 S2: same dated "resolved" rule as the athlete's MY LOG and the ledger.
+  const painMarksView = useMemo(()=>normalizeMarks((athlete.pain_marks&&typeof athlete.pain_marks==="object")?athlete.pain_marks:{}, Array.isArray(athlete.resolved_pain)?athlete.resolved_pain:[]),[athlete.pain_marks,athlete.resolved_pain]);
+  const openFlag = (p, w)=>p && p.area && !flagClearedFor(p.area, w.created_at, painMarksView);
+  const hasPain = useMemo(()=>workouts.some(w=>getPD(w).pain_flags?.some(p=>openFlag(p,w))),[workouts,painMarksView]);
   const sessionCount = useMemo(()=>groupIntoSessions(workouts).length,[workouts]);
   const tabs = ["overview","workouts","progress","program"];
 
@@ -4272,10 +4277,10 @@ function AthleteDetail({athlete,coachId,workouts,prs,requests=[],onResolveReques
               );
             })()}
             {(()=>{
-              const painLogs = workouts.filter(w=>w.parsed_data?.pain_flags?.some(p=>!resolvedPainAreas.includes(p.area.toLowerCase())));
+              const painLogs = workouts.filter(w=>w.parsed_data?.pain_flags?.some(p=>openFlag(p,w)));
               if(!painLogs.length) return null;
               const areaCounts = {};
-              painLogs.flatMap(w=>w.parsed_data.pain_flags.filter(p=>!resolvedPainAreas.includes(p.area.toLowerCase())).map(p=>p.area)).forEach(a=>areaCounts[a]=(areaCounts[a]||0)+1);
+              painLogs.flatMap(w=>w.parsed_data.pain_flags.filter(p=>openFlag(p,w)).map(p=>normArea(p.area).label||p.area)).forEach(a=>areaCounts[a]=(areaCounts[a]||0)+1);
               return (
                 <div style={{background:`${CA.red}10`,border:`1px solid ${CA.red}40`,borderRadius:12,padding:16,marginBottom:16}}>
                   <div style={{color:CA.red,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:8}}>ACTIVE PAIN FLAGS ({painLogs.length} sessions flagged)</div>

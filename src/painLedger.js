@@ -689,5 +689,6 @@ export function flagClearedFor(area, rowAt, marks) {
   if (!m || !m.cleared_at) return false;
   const t = rowAt instanceof Date ? rowAt.getTime() : Date.parse(rowAt);
   const c = Date.parse(m.cleared_at);
-  return Number.isFinite(t) && Number.isFinite(c) && t <= c;
+  if (!Number.isFinite(c)) return false;
+  return Number.isFinite(t) ? t <= c : true; // an undated row sits before any clear
 }

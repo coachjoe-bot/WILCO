@@ -30,6 +30,7 @@ import {
 import {
   groupIntoSessions as pcGroup, buildLiftHistory,
 } from "./proofcore.js";
+import { normArea, normalizeMarks, flagClearedFor } from "./painLedger.js";
 
 export const DAYMS = 86400000;
 const WK = 7 * 864e5;
@@ -121,8 +122,24 @@ export function weekFeelDistribution(workouts, wk, now = Date.now()) {
 }
 
 // ── #4 Overview: this-week pain flags ─────────────────────────────────────────
+// T64 S2: areas read through the pain ledger's taxonomy (knee/knees/left knee
+// = "knee"), and an area the athlete resolved is hidden only for flags logged
+// before the clear, so a flare after "resolved" reaches the coach.
 export function weekPainFlags(workouts, athletes, wk, now = Date.now()) {
-  const weekPain = []; workouts.filter(w => inWin(w, wk.start, now)).forEach(w => { const pf = pd(w).pain_flags; if (pf && pf.length) { const a = athletes.find(x => x.id === w.athlete_id); weekPain.push({ name: a?.name || "Athlete", areas: pf.map(p => p.area).join(", "), at: w.created_at }); } });
+  const marksFor = new Map();
+  const marksOf = (a) => {
+    if (!a) return {};
+    if (!marksFor.has(a.id)) marksFor.set(a.id, normalizeMarks((a.pain_marks && typeof a.pain_marks === "object") ? a.pain_marks : {}, Array.isArray(a.resolved_pain) ? a.resolved_pain : [], { now: new Date(now) }));
+    return marksFor.get(a.id);
+  };
+  const weekPain = [];
+  workouts.filter(w => inWin(w, wk.start, now)).forEach(w => {
+    const pf = pd(w).pain_flags;
+    if (!pf || !pf.length) return;
+    const a = athletes.find(x => x.id === w.athlete_id);
+    const areas = [...new Set(pf.filter(p => p && p.area && !flagClearedFor(p.area, w.created_at, marksOf(a))).map(p => normArea(p.area).label || String(p.area)))];
+    if (areas.length) weekPain.push({ name: a?.name || "Athlete", areas: areas.join(", "), at: w.created_at });
+  });
   return weekPain;
 }
 
