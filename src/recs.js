@@ -215,6 +215,56 @@ export function watchHit(memoryRows, flag, topic, now = new Date()) {
 export const SEVERE_RE = /\bsharp\b|\bsevere\b|\bcan'?t (finish|continue|move|lift|walk)\b|\bhad to (stop|quit|bail)\b|\bgave out\b|\bpop(ped)?\b|\btore|torn\b|\bshooting pain\b/i;
 export const isSevereReport = (msg) => SEVERE_RE.test(String(msg || ""));
 
+// ── athlete-facing fallback text (T64 Fix 3 + 3b) ────────────────────────────
+// recSummaryFallback below is what a Drafts-pane card or the rec sheet renders
+// when a row has no `summary` yet (every real rec on prod today, until Fix 3b
+// adds that field and the backfill runs) — built from the swap's own exercise
+// names, never the internal `why` (Fix 3b: `why` was doing two incompatible
+// jobs, the model's own rationale AND the only text rendered on the card, so
+// the athlete read "Will wants Monday's slot replaced with..." about their own
+// program). trimChars/capWords are shared with `summary`'s own cap in
+// validateRecPayload.
+
+// Trim to a character cap at a word boundary — never chop mid-word.
+function trimChars(s, maxChars) {
+  const t = String(s || "").trim();
+  if (t.length <= maxChars) return t;
+  return t.slice(0, maxChars).replace(/\s+\S*$/, "").trim();
+}
+// Cap at a WORD count (Will's rule for `summary`: 12 words or fewer) — the
+// model's own count is never authoritative (coach-brain doctrine: compute the
+// fact in code), so this is enforced here, not just described in the prompt.
+function capWords(s, maxWords) {
+  const t = String(s || "").trim().replace(/\s+/g, " ");
+  if (!t) return "";
+  const words = t.split(" ");
+  return words.length <= maxWords ? t : words.slice(0, maxWords).join(" ");
+}
+
+// A short, factual line for a rec row that predates `summary` (every real rec
+// on prod today) or whose generation skipped it: named exercises from what the
+// swaps actually replace, never the internal `why`. Pure and stable so the
+// same row always renders the same fallback line.
+const FIND_EXERCISE_RE = /^([A-Za-z][A-Za-z0-9'/\- ]*?)(?:\s+\d|\s*[:@]|$)/;
+export function recSummaryFallback(rec) {
+  if (!rec) return "";
+  const summary = String(rec.summary || "").trim();
+  if (summary) return summary;
+  const swaps = Array.isArray(rec.swaps) ? rec.swaps : [];
+  if (swaps.length) {
+    const names = swaps
+      .map((s) => { const m = FIND_EXERCISE_RE.exec(String(s?.find || "").trim()); return m ? m[1].trim() : ""; })
+      .filter(Boolean);
+    const uniq = [...new Set(names)];
+    if (uniq.length) {
+      const list = uniq.slice(0, 3).join(", ");
+      return `Changed ${list}${uniq.length > 3 ? " and more" : ""}.`;
+    }
+    return `${swaps.length} spot${swaps.length === 1 ? "" : "s"} changed in the program.`;
+  }
+  return String(rec.title || "").trim();
+}
+
 // ── rec payload shape (stored in program_drafts.blueprint.rec) ───────────────
 // { v:1, title, why, origin, duration, swaps:[{find,replace,week,day}],
 //   parked, appliedAt?, expiresAt? }

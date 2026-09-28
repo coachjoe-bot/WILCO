@@ -255,6 +255,11 @@ const ATHLETE_COL_ALLOW = {
     cols: new Set([
       "owner_type", "title", "status", "blueprint", "transcript",
       "draft_text", "provisional_goal", "scope", "updated_at",
+      // T64 Fix 3: non-destructive card hide. dismissed_at is a stamp, never a
+      // status — the row, its blueprint.rec.swaps, and any auto-revert clock
+      // stay exactly as they were. Additive column (20260928_program_drafts_
+      // dismissed_at.sql), applied to prod 2026-09-28.
+      "dismissed_at",
     ]),
     values: {
       owner_type: (v) => v === "athlete",
@@ -267,6 +272,9 @@ const ATHLETE_COL_ALLOW = {
       // gates — BOTH must know every status the app writes.
       status: (v) => ["interview", "draft", "applied", "rec", "rec_applied"].includes(v),
       scope: (v) => ["full", "short", "quick"].includes(v),
+      // T64 Fix 3: null clears a dismiss (not currently used by the client, but
+      // keeps the validator symmetric with every other timestamp column here).
+      dismissed_at: (v) => v === null || (typeof v === "string" && !Number.isNaN(Date.parse(v))),
     },
   },
   // T53: typed training preferences. The payload originates from an AI extraction

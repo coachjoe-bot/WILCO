@@ -75,7 +75,7 @@ import { CREW_ENABLED, MASTERMIND_ENABLED, CHAT_FIRST_ENABLED } from "./flags.js
 import { buildMastermindStatic } from "./ai/card.js";
 import { blueprintPct } from "./programBuilder.js";
 import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps } from "./memory.js";
-import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
+import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, recSummaryFallback, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
 
 // T58 rollout gates, resolved once per load. ?mastermind=1 / ?chatfirst=1 stay
 // as preview overrides for whenever a flag is off; the real switches live in
@@ -7275,10 +7275,15 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       try{
         const rows = await sbRead("program_drafts",`?athlete_id=eq.${athlete.id}&owner_type=eq.athlete&status=in.(\"rec\",\"rec_applied\")&order=updated_at.desc&limit=10`)||[];
         for(const row of rows){
+          // T64 Fix 3: the auto-revert clock runs on EVERY row here regardless
+          // of dismissed_at — a dismissed 1w/2w/3w rec still has to put the
+          // program back on schedule, it just stays out of the visible list.
           if(row.status==="rec_applied" && recExpired(row.blueprint?.rec)) await revertRecRow(row,{auto:true});
         }
         if(!recPending){
-          const live = rows.find(r=>r.status==="rec" && r.blueprint?.rec && !r.blueprint.rec.parked && !r.blueprint.rec.reverted);
+          // A dismissed staged rec must never resurrect the bar — dismiss on a
+          // still-open rec means "stop showing me this", same as parking it.
+          const live = rows.find(r=>r.status==="rec" && !r.dismissed_at && r.blueprint?.rec && !r.blueprint.rec.parked && !r.blueprint.rec.reverted);
           if(live) setRecPending({draftId:live.id, rec:live.blueprint.rec});
         }
       }catch(_){}
@@ -12734,7 +12739,10 @@ export function ProgramDraftsPane({athlete, viewer="athlete", onSaveToProgram, o
     // Program Recs (Will 08-28) ride the same rows; they surface here only for
     // the athlete under chat-first (the handlers arrive as props from that path).
     const statuses = onResumeRec ? '("interview","draft","rec","rec_applied")' : '("interview","draft")';
-    sbRead("program_drafts",`?athlete_id=eq.${athlete.id}&owner_type=eq.${ownerFilter}&status=in.${statuses}&order=updated_at.desc&select=*`)
+    // T64 Fix 3: a dismissed card is hidden here only — the row, its swaps and
+    // any auto-revert clock are untouched (see the boot effect and the auto-
+    // revert scan, which deliberately do NOT filter on dismissed_at).
+    sbRead("program_drafts",`?athlete_id=eq.${athlete.id}&owner_type=eq.${ownerFilter}&status=in.${statuses}&dismissed_at=is.null&order=updated_at.desc&select=*`)
       .then(r=>{ if(Array.isArray(r)) setDrafts(r); })
       .catch(()=>{})
       .finally(()=>setLoaded(true));
@@ -12780,8 +12788,25 @@ export function ProgramDraftsPane({athlete, viewer="athlete", onSaveToProgram, o
     setBusy(false);
   };
 
+  // T64 Fix 3: hide a card WITHOUT touching the program — applied recs had no
+  // way off this list short of "Revert now" (destructive to the live program),
+  // so the list just filled up. Stamps dismissed_at only: program_text stays
+  // byte-identical, the row and its swaps/revert data stay intact, and the
+  // boot scan still runs the auto-revert clock on it (see above). No confirm —
+  // Will's spec: this is non-destructive, so it doesn't need one.
+  const dismissRow = async (d) => {
+    if(busy) return;
+    setBusy(true); setErr("");
+    try {
+      await sbUpdateWhere("program_drafts",`?id=eq.${d.id}`,{dismissed_at:new Date().toISOString()});
+      setDrafts(prev=>prev.filter(x=>x.id!==d.id));
+    } catch(e){ setErr("Couldn't hide that, try again."); }
+    setBusy(false);
+  };
+
   const sub = {fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:9,letterSpacing:2,color:CA.muted,textTransform:"uppercase",marginBottom:8};
   const card = {border:`1px solid ${CA.border}`,borderRadius:12,padding:13,background:CA.navy3,marginBottom:10};
+  const dismissBtn = {background:"none",border:"none",color:CA.faint,fontSize:15,lineHeight:1,cursor:"pointer",padding:"3px 5px",marginRight:2,flexShrink:0,fontFamily:"'Inter'"};
   const miniBtn = (active,color=CA.accent) => ({background:active?`${color}20`:"transparent",border:`1px solid ${active?color:CA.border}`,color:active?color:CA.muted,borderRadius:8,padding:"5px 11px",cursor:"pointer",fontSize:11.5,fontWeight:600,fontFamily:"'Inter'"});
 
   // ── Replace-confirm view (the diff gate) ────────────────────────────────────
@@ -12827,9 +12852,11 @@ export function ProgramDraftsPane({athlete, viewer="athlete", onSaveToProgram, o
         {recRows.map(d=>{
           const r = recOf(d); if(!r) return null;
           const applied = d.status==="rec_applied";
+          const fallbackLine = recSummaryFallback(r);
           return (
             <div key={d.id} style={card}>
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,flexWrap:"wrap"}}>
+                <button onClick={()=>dismissRow(d)} disabled={busy} aria-label="Dismiss this card" title="Hide this card" style={dismissBtn}>✕</button>
                 <span style={{...DISP,fontSize:15,letterSpacing:1,color:CA.text}}>{d.title||"PROGRAM REC"}</span>
                 <span style={{background:applied?`${CA.green}18`:`${CA.accent}18`,border:`1px solid ${applied?CA.green:CA.accent}55`,color:applied?CA.green:CA.accent,borderRadius:6,padding:"1px 8px",fontSize:9.5,letterSpacing:1,textTransform:"uppercase"}}>
                   {applied?"Applied":r.reverted?"Reverted":"Rec"}
@@ -12838,7 +12865,7 @@ export function ProgramDraftsPane({athlete, viewer="athlete", onSaveToProgram, o
               </div>
               <div style={{color:CA.muted2,fontSize:12,lineHeight:1.55,marginBottom:10}}>
                 {r.swaps.length} {r.swaps.length===1?"spot":"spots"} · {durationLabel(r.duration)}{applied&&r.expiresAt?` · reverts ${fmtD(r.expiresAt)}`:""}
-                {r.why?` — ${String(r.why).slice(0,110)}${String(r.why).length>110?"…":""}`:""}
+                {fallbackLine?` — ${fallbackLine}`:""}
               </div>
               <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
                 {!applied&&onResumeRec&&<button onClick={()=>onResumeRec(d)} style={miniBtn(true)}>Open</button>}
@@ -12871,6 +12898,7 @@ export function ProgramDraftsPane({athlete, viewer="athlete", onSaveToProgram, o
       {builderRows.map(d=>(
         <div key={d.id} style={card}>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,flexWrap:"wrap"}}>
+            <button onClick={()=>dismissRow(d)} disabled={busy} aria-label="Dismiss this card" title="Hide this card" style={dismissBtn}>✕</button>
             <span style={{...DISP,fontSize:15,letterSpacing:1,color:CA.text}}>
               {d.title||(d.status==="interview"?"INTERVIEW IN PROGRESS":"PROGRAM DRAFT")}
             </span>
