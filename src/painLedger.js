@@ -250,10 +250,17 @@ export function extractEvents(rows, { tz, checkIns = [] } = {}) {
   for (const w of rows || []) {
     const pd = pdOf(w);
     const flags = Array.isArray(pd.pain_flags) ? pd.pain_flags : [];
-    if (!flags.length) continue;
+    // "feels fine now" rides its own parser field so no pain reader mistakes it
+    // for a pain flag (the coach push fires on any pain_flags entry)
+    const cleared = Array.isArray(pd.pain_cleared) ? pd.pain_cleared : [];
+    if (!flags.length && !cleared.length) continue;
     const day = rowDay(w, tz);
     if (!day) continue;
     const at = Date.parse(w.created_at) || keyMs(day);
+    for (const c of cleared) {
+      const a = normArea(c && (c.area || c));
+      if (a.key) events.push({ type: "cleared", day, at, area: a.key, side: a.side, source: "log", rowId: w.id });
+    }
     for (const f of flags) {
       if (!f || !f.area) continue;
       const a = normArea(f.area);
@@ -577,7 +584,7 @@ export function ledgerBlock(records, { protects = [], turn = null } = {}) {
   const open = (records || []).filter((r) => r.state !== "cleared");
   const lines = [];
   for (const r of open) {
-    const now = r.fresh && r.speak !== "none" ? ` Already mentioned today: ${r.speak}.` : "";
+    const now = r.fresh && r.speak !== "none" && !(turn && turn.verdicts && turn.verdicts[r.area]) ? ` Already mentioned today: ${r.speak}.` : "";
     const nm = r.nextMention || NEXT_MENTION_DEFAULT;
     lines.push(`- ${r.summary}${now} If this message mentions it: ${nm.same} when it sounds as bad or worse than last time, ${nm.milder} when milder, address_now for serious language.`);
   }
@@ -587,6 +594,7 @@ export function ledgerBlock(records, { protects = [], turn = null } = {}) {
     lines.length ? lines.join("\n") : "- No open pain areas.",
     `- Any other area: first mention = acknowledge_once. Serious language (sharp, pop, gave out, numbness, can't bear weight) = address_now.`,
     prot.length ? `- The current program already protects: ${prot.join(", ")}. Never propose changing the program for pain there.` : null,
+    turn && turn.areas && turn.areas.length ? turnLine(turn) : null,
     turn && turn.serious ? `- THIS MESSAGE reads as serious (${turn.areas.map(areaLabel).join(", ") || "unnamed area"}). Address it now in one or two plain lines. The app will stage a protective program rec after your reply; say that one is coming, never that the program already changed.` : null,
     "Verdicts: none = say nothing about it. acknowledge_once = one calm line inside your reply, then move on. offer_change_once = one line offering to adjust the program if they want; you do not draft it unless they say yes. address_now = speak to it directly. The app posts no pain bubbles of its own.",
   ].filter(Boolean);
@@ -601,4 +609,85 @@ export function preTurnPain(message) {
   const t = clean(text);
   const serious = areas.length > 0 && isSeriousText(text) && PAIN_WORDS.test(t);
   return { areas, serious: !!serious };
+}
+
+// ── one call per chat turn ───────────────────────────────────────────────────
+// Joe's context (before the reply) and the post-parse code (after it) both call
+// this with the same inputs, so they reach the same verdict (AI contract rule 4).
+// When the parse is already in hand (log-shaped messages hold the reply behind
+// the parse) the message's own pain flags ride in as a synthetic row and the
+// verdict per area is exact; otherwise the areas named in the text get their
+// nextMention verdict, and serious language is address_now.
+export function ledgerTurn({ rows = [], marks = {}, legacyResolved = [], protects = [], now = new Date(), tz, message = "", parsed = null, checkIns = [] } = {}) {
+  const pre = preTurnPain(message);
+  const flags = (parsed && Array.isArray(parsed.pain_flags)) ? parsed.pain_flags.filter((f) => f && f.area) : [];
+  const base = painStatus({ rows, marks, legacyResolved, protects, now, tz, checkIns });
+  const verdicts = {};
+  let records = base;
+  let serious = pre.serious;
+  if (parsed) {
+    const synthetic = { id: "__turn__", created_at: (now instanceof Date ? now : new Date(now)).toISOString(), raw_message: message, parsed_data: { ...parsed, log_date: null } };
+    const withTurn = painStatus({ rows: [synthetic, ...rows], marks, legacyResolved, protects, now, tz, checkIns });
+    const turnEvents = extractEvents([synthetic], { tz }).filter((e) => e.type === "mention");
+    for (const e of turnEvents) {
+      const r = withTurn.find((x) => x.area === e.area);
+      if (r) verdicts[e.area] = r.speak;
+      if (e.severity >= SEV_SERIOUS) serious = true;
+    }
+    records = withTurn;
+  } else {
+    for (const a of pre.areas) {
+      const r = base.find((x) => x.area === a);
+      const nm = r ? r.nextMention : NEXT_MENTION_DEFAULT;
+      verdicts[a] = pre.serious ? "address_now" : nm.same;
+    }
+  }
+  if (serious) for (const a of Object.keys(verdicts)) verdicts[a] = "address_now";
+  const areas = Object.keys(verdicts);
+  return { records, turn: { areas, serious: !!serious && areas.length > 0, verdicts, exact: !!parsed } };
+}
+
+// The line naming THIS message's verdicts, for the block.
+export function turnLine(turn) {
+  if (!turn || !turn.areas.length) return "";
+  const parts = turn.areas.map((a) => `${areaLabel(a)}: ${(turn.verdicts || {})[a] || (turn.serious ? "address_now" : "acknowledge_once")}`);
+  return turn.exact
+    ? `- THIS MESSAGE mentions pain. Verdict per area (final): ${parts.join("; ")}.`
+    : `- THIS MESSAGE may mention pain (${turn.areas.map(areaLabel).join(", ")}). If it is real pain and not training soreness, use: ${parts.join("; ")}.`;
+}
+
+// ── after the parse: what code does with this turn's pain (pure plan) ────────
+// Joe is the only voice on a first report or a pattern: this plan posts NO pain
+// bubble. It stamps the marks (noted_at always, offered_at when the verdict was
+// an offer) and drafts a protective rec ONLY on address_now (a serious report).
+// The one app line allowed is the truthful confirmation after a rec is staged.
+export function painFollowUpPlan(turn, now = new Date()) {
+  const stamps = [];
+  let draftRec = false;
+  for (const a of (turn && turn.areas) || []) {
+    const v = turn.verdicts[a];
+    stamps.push({ area: a, field: "noted_at" });
+    if (v === "offer_change_once") stamps.push({ area: a, field: "offered_at" });
+    if (v === "address_now") draftRec = true;
+  }
+  return { stamps, draftRec: draftRec && !!(turn && turn.serious), bubble: null, at: (now instanceof Date ? now : new Date(now)).toISOString() };
+}
+
+export function applyStamps(marks, stamps, now = new Date()) {
+  return (stamps || []).reduce((m, s) => withMark(m, s.area, s.field, now), marks || {});
+}
+
+// The one truthful line after a protective rec actually staged.
+export const recStagedLine = (areas) => `Drafted a program rec for your ${(areas || []).map(areaLabel).join(" and ") || "report"}. It's at the bottom of your screen, open it when you're ready.`;
+
+// Display rule for a single stored pain flag (MY LOG, coach roster, proof):
+// hidden only when its area has a clear dated AT OR AFTER the flag's row. A flag
+// logged after the clear is a flare and shows again. `marks` should be the
+// normalizeMarks() output so legacy resolved_pain strings count too.
+export function flagClearedFor(area, rowAt, marks) {
+  const m = (marks || {})[normArea(area).key];
+  if (!m || !m.cleared_at) return false;
+  const t = rowAt instanceof Date ? rowAt.getTime() : Date.parse(rowAt);
+  const c = Date.parse(m.cleared_at);
+  return Number.isFinite(t) && Number.isFinite(c) && t <= c;
 }

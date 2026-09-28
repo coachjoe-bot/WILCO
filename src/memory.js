@@ -34,12 +34,32 @@ export const estTokens = (s) => Math.ceil(String(s || "").length / 4);
 // its "respond only in" tail).
 const BEHAVIOR_RE = /\b(ignore|disregard|forget)\b[^.!?]{0,40}\b(rules|instructions|guidelines)\b|\byou (must|should|will) (always|never)\b|\bact as\b|\bpretend to be\b|\brespond (only )?(in|with)\b|\bchange your (tone|persona|personality|behavior)\b|\bsystem prompt\b/i;
 
+// T64 S2: pain belongs to the ledger (src/painLedger.js), program changes to a
+// staged rec. The founder's Sep 1 turn saved "Knees have flagged on squat volume
+// three times ... front squat pulled from program this block" — a wrong count
+// and a change nobody made — and later turns read it back as fact. Memory now
+// refuses (a) pain tallies and pattern claims and (b) any claim that the program
+// was changed or a plan is in effect. Code-authored "Watching:" notes are exempt.
+const PAIN_AREA_WORDS = /\b(pain|hurt\w*|ache\w*|sore\w*|flar\w*|flag\w*|tweak\w*|strain\w*|injur\w*|knees?|pecs?|shoulders?|back|hips?|elbows?|wrists?|ankles?|hamstrings?|quads?|calf|calves|neck|groin|achilles|shins?|glutes?|chest)\b/i;
+const TALLY_RE = /\b(twice|once again|three times|four times|five times|\d+ times|(two|three|four|five|six|several|multiple|repeated)\b[^.!?]{0,24}\b(times|sessions|weeks|flags|flare[- ]?ups|mentions|reports)|(second|third|fourth|fifth) (time|week|session|flag)|keeps? (flaring|flagging|coming back)|again and again|a pattern|pattern of|flagged \w+ (times|sessions))\b/i;
+const PROGRAM_CLAIM_RE = /\b(pulled|removed|swapped|replaced|dropped|cut|taken out|took out|subbed|switched|benched)\b[^.!?]{0,60}\b(program|rotation|block|plan|schedule)\b|\b(program|plan|block|schedule)\b[^.!?]{0,40}\b(changed|updated|modified|adjusted|rewritten|reworked)\b|\bplan (is )?(in effect|in place|active|running)\b|\b(train[- ]around|deload|protective|modified) (plan|week|block)\b[^.!?]{0,30}\b(in effect|in place|active|started|running)\b/i;
+export const LEDGER_OWNS_PAIN = "Not saved: pain counts and patterns live in the app's pain ledger, which already tracks every mention with its date and degree. Program changes exist only when a rec is staged.";
+export function ledgerRejects(text) {
+  const t = String(text || "");
+  if (/^Watching:/.test(t)) return null;
+  if (PAIN_AREA_WORDS.test(t) && TALLY_RE.test(t)) return "pain_tally";
+  if (PROGRAM_CLAIM_RE.test(t)) return "program_claim";
+  return null;
+}
+
 export function validateFact({ content, kind, expires_at } = {}) {
   const text = String(content || "").replace(/\s+/g, " ").trim();
   if (!text) return { ok: false, reason: "empty" };
   if (text.length > MEMORY_MAX_LEN) return { ok: false, reason: "too_long" };
   if (!["pinned", "contextual", "situational"].includes(kind)) return { ok: false, reason: "bad_kind" };
   if (BEHAVIOR_RE.test(text)) return { ok: false, reason: "behavior_instruction" };
+  const ledger = ledgerRejects(text);
+  if (ledger) return { ok: false, reason: ledger, toolResult: LEDGER_OWNS_PAIN };
   if (kind === "situational") {
     const t = Date.parse(expires_at || "");
     if (!Number.isFinite(t)) return { ok: false, reason: "situational_needs_expiry" };

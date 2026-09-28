@@ -228,6 +228,8 @@ const one = (rows, d, area, extra) => st(rows, d, extra).find((r) => r.area === 
   // athlete says "knee feels great now"
   const great = [row("2026-09-01", [{ area: "knee", description: "knee ache during squat" }], sq(100)), row("2026-09-04", [{ area: "knee", description: "knee feels great now", status: "cleared" }], sq(100))];
   eq(one(great, "2026-09-04", "knee").state, "cleared", "'knee feels great now' clears it");
+  const great3 = [great[0], { ...row("2026-09-04", [], sq(100)), parsed_data: { pain_flags: [], pain_cleared: [{ area: "knee", description: "feels great now" }], exercises: sq(100) } }];
+  eq(one(great3, "2026-09-04", "knee").state, "cleared", "parser pain_cleared field clears it");
   const great2 = [great[0], row("2026-09-04", [{ area: "knee", description: "knee feels great now" }], sq(100))];
   eq(one(great2, "2026-09-04", "knee").state, "cleared", "classifier reads 'feels great now' on an old row too");
 
