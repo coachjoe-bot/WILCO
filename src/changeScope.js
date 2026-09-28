@@ -159,7 +159,7 @@ const wordToNum = (w) => {
   return Number.isFinite(n) ? n : null;
 };
 
-export function changeScope({ message = "", extractedText = "", programShape = null, today = new Date(), tz = null } = {}) {
+function scopeFromWords({ message = "", extractedText = "", programShape = null, today = new Date(), tz = null } = {}) {
   const msg = String(message || "");
   const perWeek = (programShape && Number.isFinite(programShape.trainingDaysPerWeek) && programShape.trainingDaysPerWeek >= 1)
     ? programShape.trainingDaysPerWeek : null;
@@ -316,4 +316,26 @@ export function changeScope({ message = "", extractedText = "", programShape = n
   // confidence tells the caller this was a guess, not a read, so it can let
   // the model ask rather than assert.
   return finish(1, "low", "unclear");
+}
+
+// The exported gate. Words are read two ways and code decides (AI contract,
+// rule 1 and rule 4): the phrase signals above are exact but have a long tail
+// of wordings they miss ("Wed through next Tuesday", "in a boot for a month");
+// the parser reads sentences well but must not decide alone. So:
+//   - a phrase signal with real confidence wins, including "today only";
+//   - when the phrases are UNCLEAR, the parser's stated span (temp_span_days,
+//     sensed from the athlete's own words, null when no duration was stated)
+//     fills in;
+//   - nothing stated anywhere stays one day, low confidence, and Joe asks.
+export function changeScope({ parserDays = null, ...rest } = {}) {
+  const words = scopeFromWords(rest);
+  const n = Number(parserDays);
+  if (words.confidence === "low" && Number.isInteger(n) && n >= 2) {
+    const out = { days: clampDays(n), confidence: "medium", signal: "parser_span" };
+    const perWeek = rest.programShape && Number.isFinite(rest.programShape.trainingDaysPerWeek) && rest.programShape.trainingDaysPerWeek >= 1
+      ? rest.programShape.trainingDaysPerWeek : null;
+    if (perWeek) out.trainingDays = Math.max(0, Math.min(out.days, Math.round(out.days * perWeek / 7)));
+    return out;
+  }
+  return words;
 }
