@@ -10,7 +10,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { FOLLOWUP_PRIORITY, classifyFollowUp, arbitrateFollowUp, claimGuard, findClaims, TRUTHFUL_NO_CHANGE } from "../src/replyGuards.js";
-import { ledgerTurn, painFollowUpPlan, withMark, recStagedLine } from "../src/painLedger.js";
+import { ledgerTurn, painFollowUpPlan, withMark, recStagedLine, keepPainRec, ledgerBlock } from "../src/painLedger.js";
 import { validateFact, ledgerRejects } from "../src/memory.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -64,9 +64,23 @@ const rp = JSON.parse(fs.readFileSync(join(here, "../tests/replay/bug2-pain-voic
   eq(claimGuard("I'm adding that to your memory so I don't forget.").changed, false, "memory talk is not a program claim");
   eq(claimGuard("I haven't changed anything in your program.").changed, false, "a negation is not a claim");
   eq(claimGuard("Nice work, 120 moved fast. Keep the same plan Friday.").changed, false, "plain coaching passes");
+  ok(claimGuard("That's not a training-through-it situation. I'm staging a change to get squat volume off that knee.").changed, "'I'm staging a change' with no rec staged is caught (real-AI pass 09-28)");
+  eq(claimGuard("I'm staging a change to get squat volume off that knee.", { toolCalls: [{ name: "propose_program_rec" }] }).changed, false, "'I'm staging a change' passes when the rec really staged");
   eq(findClaims("I'm pulling front squat out of the rotation. I've also swapped dips for push-ups.").length, 2, "two claims found");
   const two = claimGuard("Solid day.\n\nI'm pulling front squat out of the rotation. I've also swapped dips for push-ups for the block.");
   eq(two.text, `Solid day.\n\n${TRUTHFUL_NO_CHANGE}`, "two claims collapse to one truthful line");
+}
+
+// ── 2b. Joe's own pain rec reads the ledger (real-AI pass 09-28) ───────────
+{
+  const none = { areas: ["knee"], verdicts: { knee: "none" }, serious: false };
+  eq(keepPainRec(none, "Back squat 3x5 @ 220, stopped after set 2 again, knee was on fire"), false, "verdict none + no ask: Joe's pain rec is dropped");
+  eq(keepPainRec({ areas: ["knee"], verdicts: { knee: "offer_change_once" } }, "knee was on fire, stopped"), false, "offer verdict: Joe offers, he does not stage");
+  eq(keepPainRec({ areas: ["knee"], verdicts: { knee: "address_now" }, serious: true }, "felt a pop"), true, "address_now: the rec stands");
+  eq(keepPainRec(none, "knee is on fire again, can you change my squat day?"), true, "an explicit ask in words: the rec stands");
+  eq(keepPainRec(none, "knee flared, can you work around it this week"), true, "'work around it' is an ask");
+  eq(keepPainRec({ areas: [], verdicts: {} }, "swap monday and tuesday"), true, "not a pain turn: not the ledger's call");
+  eq(keepPainRec(none, "had to take it easy, knee was on fire"), false, "'take it easy' is not an ask");
 }
 
 // ── 3. the three real rows through the new turn ─────────────────────────────
@@ -91,6 +105,10 @@ const rp = JSON.parse(fs.readFileSync(join(here, "../tests/replay/bug2-pain-voic
   eq(lt.records.find((r) => r.area === "knee").mentions, 4, "founder Sep 1: the block's history line counts the 4 mentions BEFORE this message");
   const rec = lt.recordsWithTurn.find((r) => r.area === "knee");
   ok(rec.summary.includes("5 mentions"), `founder Sep 1: the ledger counts 5 real mentions, not Joe's 3 (${rec.summary})`);
+  const blk = ledgerBlock(lt.records, { turn: lt.turn });
+  ok(blk.includes("5 mentions in this stretch") && blk.includes("(This message included.) Verdict for this message: none"), "block: this message's area shows counts including it, with its verdict");
+  ok(blk.includes("A program change was already offered Aug 25"), "block: the prior offer is named so 'none' reads as a decision");
+  ok(blk.includes("Never say first, second or third time"), "block forbids ordinal counting");
   // serious report: a rec is drafted, the app confirms once after staging
   const ser = ledgerTurn({ rows: [], now: new Date("2026-09-01T16:00:00Z"), message: "felt a pop in my knee and it gave out", parsed: { pain_flags: [{ area: "knee", description: "felt a pop, knee gave out" }] } });
   const sp = painFollowUpPlan(ser.turn);

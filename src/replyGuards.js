@@ -60,6 +60,8 @@ const CLAIM_RES = [
   new RegExp(`\\b(?:i'?ve|i have|we'?ve|we have|i|we)\\s+(?:(?:just|already|also|now|gone and|went ahead and)\\s+)?(?:${PAST_VERBS})\\b`, "i"),
   /\b(?:your|the) (?:program|plan|block|schedule)\s+(?:is|has been|was|now)\s+(?:updated|changed|adjusted|rewritten|modified|reworked)\b/i,
   /\bi'?ll (?:swap|pull|replace|remove|change|update|adjust|put|move|drop|sub|switch)\b[^.!?]*\b(?:program|rotation|block|in its place)\b/i,
+  // "I'm staging a change", "I'm drafting a rec" with no rec staged this turn
+  /\b(?:i'?m|i am|i'?ve|i have)\s+(?:just\s+)?(?:staging|staged|drafting|drafted|putting together|put together|building|built|writing|written|queuing|queued)\s+(?:a|an|the|you a)?\s*(?:protective\s+|small\s+|quick\s+)?(?:change|changes|rec|recommendation|swap|adjustment|tweak|program change)\b/i,
 ];
 
 export function findClaims(text) {

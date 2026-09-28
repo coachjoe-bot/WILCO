@@ -467,7 +467,8 @@ function computeRecord(area, allEvents, sessions, { today, tz, mark = {}, protec
     area, side, label: areaLabel(area), state, trend, lastSeverity, peakSeverity,
     firstAt: first.day, lastAt: last.day, daysSince, mentions: ms.length, mentions14d,
     cleanSessionsSince: cleanSince, addressedByProgram, dismissed,
-    offeredAt: Number.isFinite(offeredAt) ? new Date(offeredAt).toISOString() : null,
+    offeredAt: Number.isFinite(offeredAt) ? new Date(offeredAt).toISOString() : null, offeredRecently,
+    offeredDay: Number.isFinite(offeredAt) ? dayKey(new Date(offeredAt), tz) : null,
     gapBefore: ep.gapBefore, reopenedBy: ep.reopenedBy,
     lastDuring: last.during || null, stoppedSession: !!last.stoppedSession,
     speak, policy, fresh: last.day === today, checkIn,
@@ -499,6 +500,7 @@ export function summarize(r) {
     : "holding steady";
   let s = r.state === "cleared" ? `${L}: ${bits.join("; ")}. Reads cleared.` : `${L}: ${bits.join("; ")}. Reads ${r.state}, ${dir}.`;
   if (r.addressedByProgram) s += " The current program already works around it.";
+  if (r.offeredRecently && r.state !== "cleared") s += ` A program change was already offered ${fmtDay(r.offeredDay)}; it stays their call, do not offer or stage one again.`;
   return s;
 }
 
@@ -581,8 +583,17 @@ export function isAreaCleared(area, record) {
 // ── the turn's PAIN LEDGER block (chat context) ─────────────────────────────
 // One line per open area with its verdict and what a new mention today becomes.
 export function ledgerBlock(records, { protects = [], turn = null } = {}) {
-  const open = (records || []).filter((r) => r.state !== "cleared");
+  // Areas THIS message mentions show the picture including this message (right
+  // counts), with the turn's verdict; every other open area shows history and
+  // what a mention would become.
+  const turnAreas = new Set(turn && turn.exact ? turn.areas || [] : []);
+  const withTurn = (turn && turn.recordsWithTurn) || [];
+  const open = (records || []).filter((r) => r.state !== "cleared" && !turnAreas.has(r.area));
   const lines = [];
+  for (const a of turnAreas) {
+    const r = withTurn.find((x) => x.area === a);
+    if (r) lines.push(`- ${r.summary} (This message included.) Verdict for this message: ${turn.verdicts[a]}.`);
+  }
   for (const r of open) {
     const now = r.fresh && r.speak !== "none" && !(turn && turn.verdicts && turn.verdicts[r.area]) ? ` Already mentioned today: ${r.speak}.` : "";
     const nm = r.nextMention || NEXT_MENTION_DEFAULT;
@@ -596,7 +607,7 @@ export function ledgerBlock(records, { protects = [], turn = null } = {}) {
     prot.length ? `- The current program already protects: ${prot.join(", ")}. Never propose changing the program for pain there.` : null,
     turn && turn.areas && turn.areas.length ? turnLine(turn) : null,
     turn && turn.serious ? `- THIS MESSAGE reads as serious (${turn.areas.map(areaLabel).join(", ") || "unnamed area"}). Address it now in one or two plain lines. The app will stage a protective program rec after your reply; say that one is coming, never that the program already changed.` : null,
-    "Verdicts: none = say nothing about it. acknowledge_once = one calm line inside your reply, then move on. offer_change_once = one line offering to adjust the program if they want; you do not draft it unless they say yes. address_now = speak to it directly. The app posts no pain bubbles of its own.",
+    "Verdicts: none = say nothing about it beyond what the session needs, no program talk about that area, even if it sounds worse. acknowledge_once = one calm line inside your reply, then move on. offer_change_once = one line offering to adjust the program if they want; you do not draft it unless they say yes. address_now = speak to it directly. Call propose_program_rec for pain ONLY when a line here says address_now or the athlete asks for a change in this message; the app drops any other pain rec. Never say first, second or third time. The app posts no pain bubbles of its own.",
   ].filter(Boolean);
   return `${head}\n${tail.join("\n")}`;
 }
@@ -637,7 +648,9 @@ export function ledgerTurn({ rows = [], marks = {}, legacyResolved = [], protect
     // the block's per-area lines describe history BEFORE this message (the
     // turn line carries this message's verdict); post-parse readers that need
     // the updated picture (the rec drafter) use recordsWithTurn
-    return { records: base, recordsWithTurn: withTurn, turn: finishTurn(verdicts, serious, true) };
+    const t = finishTurn(verdicts, serious, true);
+    Object.defineProperty(t, "recordsWithTurn", { value: withTurn, enumerable: false });
+    return { records: base, recordsWithTurn: withTurn, turn: t };
   } else {
     for (const a of pre.areas) {
       const r = base.find((x) => x.area === a);
@@ -697,4 +710,18 @@ export function flagClearedFor(area, rowAt, marks) {
   const c = Date.parse(m.cleared_at);
   if (!Number.isFinite(c)) return false;
   return Number.isFinite(t) ? t <= c : true; // an undated row sits before any clear
+}
+
+// ── Joe's own propose_program_rec on a pain turn (AI contract rule 4) ───────
+// The ledger decided first (before the reply); Joe's tool call decides second
+// and must read it. A pain rec from Joe stands only when this turn's verdict is
+// address_now for some area, or the athlete asked for a change in words.
+// Real-AI pass 09-28: with the verdict "none" (offered yesterday, 14-day quiet)
+// Joe staged a rec himself in 4 of 5 runs.
+const ASKS_CHANGE_RE = /\b(change|adjust|swap|modify|update|fix|rework|switch|replace|sub)\b[^.!?]{0,40}\b(program|plan|workouts?|squats?|bench|deadlifts?|day|days|session|lifts?|block|week)\b|\b(can|could|would|will) you\b[^.!?]{0,30}\b(change|adjust|swap|drop|replace|work around|take out|pull)\b|\b(work|train|program) around (it|my|the)\b/i;
+export const asksForChange = (message) => ASKS_CHANGE_RE.test(String(message || ""));
+export function keepPainRec(turn, message) {
+  if (!turn || !turn.areas || !turn.areas.length) return true; // not a pain turn: not the ledger's call
+  if (turn.areas.some((a) => turn.verdicts[a] === "address_now")) return true;
+  return asksForChange(message);
 }

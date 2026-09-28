@@ -77,7 +77,7 @@ import { blueprintPct } from "./programBuilder.js";
 import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps } from "./memory.js";
 import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
 import { performedBlock } from "./turnFacts.js";
-import { ledgerTurn, ledgerBlock, normArea, painFollowUpPlan, applyStamps, recStagedLine, withMark, normalizeMarks, flagClearedFor } from "./painLedger.js";
+import { ledgerTurn, ledgerBlock, normArea, painFollowUpPlan, applyStamps, recStagedLine, withMark, normalizeMarks, flagClearedFor, keepPainRec } from "./painLedger.js";
 import { programPurpose, purposeLine } from "./programPurpose.js";
 import { classifyFollowUp, arbitrateFollowUp } from "./replyGuards.js";
 
@@ -9128,6 +9128,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // turn would resurrect the logger for a workout that just ended (Will
         // 08-28) — dropped deterministically here, not just discouraged in the
         // prompt.
+        // T64 S2: the pain ledger decided before the reply; Joe's own pain rec
+        // stands only on address_now or an explicit ask (keepPainRec). Dropped
+        // calls are logged so the contradiction class stays visible.
+        if(painTurn && masterToolCalls.some(tc=>tc.name==="propose_program_rec") && !keepPainRec(painTurn.turn, msg)){
+          reportError("ai", new Error("propose_program_rec dropped: pain verdict not address_now"), {severity:"info", error_type:"pain_rec_dropped", component:"painLedger", meta:{verdicts:painTurn.turn.verdicts}});
+          for(let i=masterToolCalls.length-1;i>=0;i--) if(masterToolCalls[i].name==="propose_program_rec") masterToolCalls.splice(i,1);
+        }
         let rest = masterToolCalls.filter(tc=>tc.name!=="set_position" && tc.name!=="propose_preference"
           && !(fromQuickLog && (tc.name==="prefill_log_sheet" || tc.name==="pin_session_card" || tc.name==="show_start_buttons")));
         // T62 AUTO-PIN (Will 08-31): a prefill without a pin means the model
