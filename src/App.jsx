@@ -77,7 +77,7 @@ import { blueprintPct } from "./programBuilder.js";
 import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps } from "./memory.js";
 import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
 import { performedBlock } from "./turnFacts.js";
-import { ledgerTurn, ledgerBlock, normArea, painFollowUpPlan, applyStamps, recStagedLine, withMark, normalizeMarks, flagClearedFor, keepPainRec } from "./painLedger.js";
+import { ledgerTurn, ledgerBlock, normArea, painFollowUpPlan, applyStamps, recStagedLine, withMark, normalizeMarks, flagClearedFor, keepPainRec, painStatus, currentPainAreas, currentPainLines, painNoteGuard, areaLabel } from "./painLedger.js";
 import { programPurpose, purposeLine } from "./programPurpose.js";
 import { classifyFollowUp, arbitrateFollowUp } from "./replyGuards.js";
 
@@ -1959,9 +1959,10 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
   // (src/painLedger.js), with a verdict per area; Joe speaks per the verdict and
   // never counts, dates or pattern-matches pain himself. send() computes the
   // turn once (opts.painTurn) so the post-parse step reads the same verdicts.
+  let painLt = null; // also read by the INJURY HISTORY line below (current pain comes from here)
   try{
-    const lt = opts.painTurn || painTurnFor({athlete, workoutHistory, message, parsed: opts.parsedLog||null});
-    pastContext += `\n\n${ledgerBlock(lt.records, {protects: lt.protects, turn: lt.turn})}`;
+    painLt = opts.painTurn || painTurnFor({athlete, workoutHistory, message, parsed: opts.parsedLog||null});
+    pastContext += `\n\n${ledgerBlock(painLt.records, {protects: painLt.protects, turn: painLt.turn})}`;
   }catch(_){ /* the ledger is additive; a failure means no block, never a crash */ }
 
   // Deterministic per-lift "last done" index over the FULL history the client
@@ -2089,9 +2090,13 @@ ${athlete.weight_unit==="kg"?"This athlete works in KG. State every weight you s
     const goalLines = athleteGoals.map(g=>g.goal_text||"").filter(Boolean).slice(0,3).join(" | ");
     goalsContext = `\n\nATHLETE GOALS: ${goalLines}\nKeep these goals in view when giving advice and programming.`;
   }
-  // Injury context from profile
+  // Injury context from profile. T64 S2b: injury_history is an undated field
+  // from signup; it used to carry "suggest alternatives for any exercises that
+  // aggravate these areas" on EVERY turn, which invited pain talk forever. It is
+  // background now; what hurts today comes from the ledger (new/open/active/serious).
   if(athlete.injury_history){
-    goalsContext += `\n\nINJURY HISTORY: ${athlete.injury_history}\nFactor this into recommendations: suggest alternatives for any exercises that aggravate these areas.`;
+    const cur = painLt ? currentPainAreas(painLt.records).map(areaLabel) : [];
+    goalsContext += `\n\nINJURY HISTORY (undated background the athlete entered at signup; it says nothing about how they feel now): ${athlete.injury_history}\nCurrent pain comes only from the PAIN LEDGER block. Areas open right now: ${cur.length?cur.join(", "):"none"}.`;
   }
 
   // Athlete context from monthly recaps
@@ -7103,7 +7108,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       const { notes:newNotes, log } = splitQuickLogReply(revised);
       const t = log ? draftInUnit(log, athlete.weight_unit) : log;
       if(t){
-        const nextNotes = newNotes===null ? sheetState.notes : newNotes;
+        const nextNotes = newNotes===null ? sheetState.notes : qlGuardNotes(newNotes, ctx);
         setSheetState({draft:t, notes:nextNotes});
         setDockWorkout(w=>w?{title:dockTitleOf(t)}:w);
         try{ qlSave(athlete.id, workoutHistory, {draft:t, notes:nextNotes, undoStack:[], prebuilt:true}); }catch(_){}
@@ -11537,7 +11542,16 @@ const buildQuickLogContext = (athlete, workoutHistory, manualRMs, messages, goal
       const day = effectiveDate(w).toLocaleDateString("en-US",{month:"short",day:"numeric"});
       return `(${day}) ${w.bot_reply.replace(/\s+/g," ").trim().slice(0,300)}`;
     }).join("\n\n");
-  return { program, programFromChat, sessionLines, rmLines, chatLines, goalLines, injury, ctxNotes, formReviews, whereYouAre, position };
+  // T64 S2b: CURRENT pain for the focus note comes from the ledger, never from
+  // the undated profile field. painAreas is also the code guard's allow-list:
+  // a note sentence about pain in any other area is dropped (qlGuardNotes).
+  let painLines = "", painAreas = [];
+  try{
+    const lt = painTurnFor({athlete, workoutHistory, message:""});
+    painLines = currentPainLines(lt.records);
+    painAreas = currentPainAreas(lt.records);
+  }catch(_){ /* no ledger = no current pain named; the guard then drops all pain talk */ }
+  return { program, programFromChat, sessionLines, rmLines, chatLines, goalLines, injury, ctxNotes, formReviews, whereYouAre, position, painLines, painAreas };
 };
 
 const QL_DRAFT_SYS = `You prefill workout logs for an athlete in a fitness app. Based on their training program, recent logged sessions, known 1RMs, goals, saved context, injuries, and form reviews, produce (1) a SHORT focus note explaining the point of today's session, then (2) the log message itself.
@@ -11547,7 +11561,7 @@ Output exactly two sections separated by a line containing only "===" :
 SECTION 1: TODAY'S FOCUS (shown to the athlete for reference; never sent to chat). Keep it SHORT: a few lines, scannable in two seconds. This is the MEANING behind today's programming, NOT a sourcing breakdown. Do NOT show per-exercise weight math, percentages-times-1RM arithmetic, or "→ round to" reasoning. Include, in this order, ONLY what genuinely applies:
 - ONE line naming the day and its intent: the block/week/day label plus what kind of session it is (e.g. "Block II, Week 2, Day 1: Push A. Heavy bench day." or "Week 2, Day 3: Legs A. Squat-focused, moderate volume.").
 - If the program schedules percentages or a climb for the KEY lift, state the STRUCTURE in one short line (e.g. "Bench climbs 67→89% of your 275 max." or "Top set around 85% today."). One line, key lift(s) only, never every exercise.
-- Up to 2 short coaching notes that give the session MEANING, drawn ONLY from the athlete's GOALS, SAVED CONTEXT, INJURY HISTORY, or RECENT FORM REVIEWS, and ONLY when they relate to a movement that appears in TODAY'S session. Examples: "This is your biggest mover toward the 315 bench goal." / "Keep the core braced on the deficit deadlifts, protects the low back you tweaked." / "Last form check on squats: knees caving on the drive, cue them out." Cite a note only if it maps to today's lifts; if nothing relevant applies, omit this entirely. Never invent a goal, cue, or injury that isn't in the provided context.
+- Up to 2 short coaching notes that give the session MEANING, drawn ONLY from the athlete's GOALS, SAVED CONTEXT, CURRENT PAIN, or RECENT FORM REVIEWS, and ONLY when they relate to a movement that appears in TODAY'S session. Examples: "This is your biggest mover toward the 315 bench goal." / "Keep the core braced on the deficit deadlifts, easy on the low back." (only when the low back is listed under CURRENT PAIN) / "Last form check on squats: knees caving on the drive, cue them out." Cite a note only if it maps to today's lifts; if nothing relevant applies, omit this entirely. Never mention pain in an area CURRENT PAIN does not list, and never use INJURY HISTORY for the note. Never invent a goal, cue, or injury that isn't in the provided context.
 Write these as plain short lines, coach-to-athlete. No headers, no bullets-with-labels, no math.
 
 ===
@@ -11614,7 +11628,7 @@ const QL_EDIT_SYS = `You revise a prefilled workout-log draft per an athlete's i
 Rules:
 - SECTION ORDER IS FIXED and never reverses: when you output two sections, section 1 (above the "===") is ALWAYS the short prose focus note and section 2 (below it) is ALWAYS the log — the day-label line and the exercise lines. The log NEVER goes above the separator. The athlete can only edit section 2, so putting the workout in section 1 locks them out of their own numbers.
 - Apply the instruction; keep everything else in the draft unchanged.
-- If the instruction names a DIFFERENT program day ("I did day 2"), rebuild BOTH sections for that day and output them in the draft format: the SHORT focus note (day + intent, key-lift structure in one line, up to 2 relevant coaching notes drawn only from the provided goals/context/injury/form reviews, NO per-exercise sourcing math, NO percentages arithmetic), then a line containing only "===", then the log, using the weight hierarchy (a SET working weight in the program FIRST with no tag; else a percentage resolved off a BASE in this order — a training number/TM/reference max the program itself states for that lift, else the lift's "(actual 1RM)" cheat-sheet entry, else its "(est.)" entry — rounded to the nearest 5 lbs and tagged "(75%)"; else RPE resolved off the lift's "(actual 1RM)" else "(est.)" cheat-sheet entry and tagged "(RPE 8)", or "@ ___ (RPE 8)" when the lift has no cheat-sheet entry; else last time tagged "(last time)"; else a "___" fill-in blank; resolved pounds ALWAYS first, never derive off an estimate when a program training number or actual 1RM exists, and never guess). This is the ONLY case where you output a focus note.
+- If the instruction names a DIFFERENT program day ("I did day 2"), rebuild BOTH sections for that day and output them in the draft format: the SHORT focus note (day + intent, key-lift structure in one line, up to 2 relevant coaching notes drawn only from the provided goals/context/current pain/form reviews, never pain in an area CURRENT PAIN does not list, NO per-exercise sourcing math, NO percentages arithmetic), then a line containing only "===", then the log, using the weight hierarchy (a SET working weight in the program FIRST with no tag; else a percentage resolved off a BASE in this order — a training number/TM/reference max the program itself states for that lift, else the lift's "(actual 1RM)" cheat-sheet entry, else its "(est.)" entry — rounded to the nearest 5 lbs and tagged "(75%)"; else RPE resolved off the lift's "(actual 1RM)" else "(est.)" cheat-sheet entry and tagged "(RPE 8)", or "@ ___ (RPE 8)" when the lift has no cheat-sheet entry; else last time tagged "(last time)"; else a "___" fill-in blank; resolved pounds ALWAYS first, never derive off an estimate when a program training number or actual 1RM exists, and never guess). This is the ONLY case where you output a focus note.
 - A weight the athlete CHANGED in the draft is what they did, not a new percentage base: keep the prescription's tag as-is and never re-derive other lines from an edited weight.
 - For every other instruction (weight tweaks, sets/reps changes, adding or removing exercises), output ONLY the revised log: no focus note, no "===".
 - PRESERVE the source tag: when a line already carries a "(75%)" / "(RPE 8)" / "(last time)" tag and your edit doesn't change what set that weight, keep the tag. The resolved pounds always come FIRST, the tag in parentheses after.
@@ -11635,7 +11649,12 @@ Rules:
 const qlTodayStr = () => new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"});
 const qlCtxBlock = (ctx) => `${ctx.programFromChat
   ? `PROGRAM (NOT a saved program: this is what Joe wrote for the athlete in the conversation below, and it is usually a SINGLE session for today rather than a multi-week block. Build today's log from it AS WRITTEN. Do NOT try to place it in a week/block, do NOT advance it forward by any number of sessions, and do NOT invent later days for it; the WHERE YOU ARE block below is history for context only, not a position inside this):\n${ctx.program}`
-  : `PROGRAM:\n${ctx.program||"(none)"}`}\n\nCONVERSATION THIS SESSION (what the athlete already told Joe today; HONOR any program day or exercise change stated here over your own inference):\n${ctx.chatLines||"(nothing said yet)"}\n\nWHERE YOU ARE (today's session is ALREADY RESOLVED for you: the app tracks it. Use it as given; do NOT recompute it from the calendar, from the program's printed block dates, or from the exercises in their history):\n${ctx.whereYouAre||"(nothing logged yet, start at the program's first day, Week 1)"}\n\nRECENT SESSIONS (newest first):\n${ctx.sessionLines||"(none logged yet)"}\n\n1RM CHEAT SHEET:\n${ctx.rmLines||"(none known)"}\n\nGOALS (for the focus note, cite only if a goal maps to a lift in today's session):\n${ctx.goalLines||"(none stated)"}\n\nSAVED CONTEXT (preferences/history worth knowing, use only if relevant to today's lifts):\n${ctx.ctxNotes||"(none)"}\n\nINJURY HISTORY (guard the affected areas; note it only if today's lifts touch them):\n${ctx.injury||"(none)"}\n\nRECENT FORM REVIEWS (past video-check cues, cite one only if it names a movement in today's session):\n${ctx.formReviews||"(none)"}`;
+  : `PROGRAM:\n${ctx.program||"(none)"}`}\n\nCONVERSATION THIS SESSION (what the athlete already told Joe today; HONOR any program day or exercise change stated here over your own inference):\n${ctx.chatLines||"(nothing said yet)"}\n\nWHERE YOU ARE (today's session is ALREADY RESOLVED for you: the app tracks it. Use it as given; do NOT recompute it from the calendar, from the program's printed block dates, or from the exercises in their history):\n${ctx.whereYouAre||"(nothing logged yet, start at the program's first day, Week 1)"}\n\nRECENT SESSIONS (newest first):\n${ctx.sessionLines||"(none logged yet)"}\n\n1RM CHEAT SHEET:\n${ctx.rmLines||"(none known)"}\n\nGOALS (for the focus note, cite only if a goal maps to a lift in today's session):\n${ctx.goalLines||"(none stated)"}\n\nSAVED CONTEXT (preferences/history worth knowing, use only if relevant to today's lifts):\n${ctx.ctxNotes||"(none)"}\n\nCURRENT PAIN (from the app's pain ledger, the only source for how anything feels now; note an area only if it is listed here AND today's lifts load it):\n${ctx.painLines||"(none)"}\n\nINJURY HISTORY (undated background the athlete entered at signup; not current pain, never mention it in the note):\n${ctx.injury||"(none)"}\n\nRECENT FORM REVIEWS (past video-check cues, cite one only if it names a movement in today's session):\n${ctx.formReviews||"(none)"}`;
+
+// T64 S2b: code has the last word on pain in the focus note. Any sentence about
+// pain in an area the ledger does not list as current is dropped (the founder's
+// Sep 9 sheet said "your pec's still lingering" about a pec the ledger had quiet).
+const qlGuardNotes = (notes, ctx) => (typeof notes==="string" && notes) ? painNoteGuard(notes, ctx?.painAreas||[]) : notes;
 
 // ─── "BUILD ME A PROGRAM" ────────────────────────────────────────────────────
 // The saved program is the athlete's single most-referenced artifact — it's
@@ -11743,7 +11762,8 @@ async function generateQuickLogDraft({athlete, workoutHistory, messages, goals, 
         // A rest day answers with the bare token REST_DAY — don't flash that into
         // the focus-note box on the way to the rest-day screen.
         if(acc.trim().startsWith("REST_DAY")) return;
-        onProgress(streamQuickLogReply(acc));
+        const p = streamQuickLogReply(acc);
+        onProgress({...p, notes: qlGuardNotes(p.notes, ctx)});
       } : undefined,
     });
   }catch(_streamErr){
@@ -11754,7 +11774,7 @@ async function generateQuickLogDraft({athlete, workoutHistory, messages, goals, 
   const t = (text||"").trim();
   if(!t || t==="REST_DAY") return { ctx, rest:true, notes:"", draft:"" };
   const { notes, log } = splitQuickLogReply(t);
-  return { ctx, rest:false, notes: notes===null ? "" : notes, draft: log };
+  return { ctx, rest:false, notes: notes===null ? "" : qlGuardNotes(notes, ctx), draft: log };
 }
 
 function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals, contextNotes, onClose, onAddProgram, onSend, demo}) {
@@ -11944,7 +11964,9 @@ function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals,
       // A two-section reply means the day changed and the worksheet was rebuilt
       // to match; a plain reply is a log-only tweak (worksheet stays put) — which
       // is exactly why splitQuickLogReply returns null, not "", for "no section".
-      const { notes:newNotes, log:t } = splitQuickLogReply(revised);
+      const split = splitQuickLogReply(revised);
+      const t = split.log;
+      const newNotes = split.notes===null ? null : qlGuardNotes(split.notes, ctx);
       if(t && (t!==draft.trim() || (newNotes!==null && newNotes!==notes))){
         setUndoStack(prev=>[...prev,{draft,notes}]);
         setDraft(t);
