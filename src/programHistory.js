@@ -74,6 +74,37 @@ const RECAP_SYS =
   "written there. Joe's voice: direct, warm, no hype, no markdown, no headers. If there are no " +
   "logs, say the block has no logged training and leave it at that — never invent results.";
 
+// T64 Fix 3b (Will 09-28): the full recap above is written for the AI (the
+// Builder's block-handoff context) and Will found it too long to read on the
+// Past Blocks card. This condenses it into ONE short, plain, second-person
+// line for the athlete — the full text stays intact behind a "More" tap in
+// the render, and is still what the Builder reads. Runs AFTER the full recap
+// so it has real prose to condense rather than re-deriving from raw logs.
+const RECAP_SHORT_SYS =
+  "Condense this closing training-block recap into ONE short line for the athlete reading their own " +
+  "history, 40 words or fewer, hard limit. Second person (\"you\"), plain facts and numbers only: what " +
+  "was trained, what moved, where the goal stands. No coach-voice flourishes, no filler, no headers, " +
+  "no quotes around the output. Every load keeps its unit (kg or lbs) exactly as written in the recap.";
+
+const capWords40 = (s) => {
+  const words = String(s || "").trim().replace(/\s+/g, " ").split(" ").filter(Boolean);
+  return words.length <= 40 ? words.join(" ") : words.slice(0, 40).join(" ");
+};
+
+// A short, athlete-facing line for a Past Blocks card: the stored short recap
+// when one exists, else the first two sentences of the full recap (every row
+// saved before this shipped, or a short-generation that failed), else nothing.
+// Pure and exported so the render and the tests share one funnel.
+export function recapShortFallback(block) {
+  const { block_recap_short, block_recap } = block || {};
+  const short = String(block_recap_short || "").trim();
+  if (short) return short;
+  const full = String(block_recap || "").trim();
+  if (!full) return "";
+  const sentences = full.match(/[^.!?]+[.!?]+/g) || [full];
+  return sentences.slice(0, 2).join(" ").replace(/\s+/g, " ").trim();
+}
+
 // Compact one-line-per-session digest of logged training inside a date range.
 // Pure formatting (exported for tests); the AI never sees raw rows.
 export function digestWorkouts(rows) {
@@ -138,7 +169,20 @@ async function closeBlock(athleteId, row, deps, completedAtOverride = null) {
       `TRAINING LOGGED DURING THE BLOCK:\n${digest || "(no logged sessions)"}`;
     const recap = await askClaude(RECAP_SYS, user, 600, [], "claude-sonnet-5", "program_summary");
     const text = (recap || "").trim();
-    if (text) await sbUpdateWhere("program_history", `?id=eq.${row.id}`, { block_recap: text.slice(0, 1500) });
+    if (text) {
+      await sbUpdateWhere("program_history", `?id=eq.${row.id}`, { block_recap: text.slice(0, 1500) });
+      // T64 Fix 3b: the short athlete-facing line is its OWN best-effort write,
+      // deliberately separate from the one above — block_recap_short is a new
+      // nullable column (20260928_program_history_block_recap_short.sql) that
+      // this session does NOT apply to prod (SHIP DARK FIRST in the handoff),
+      // so this call can fail with "unknown column" until it's applied without
+      // ever costing the real recap write. The render falls back to the first
+      // two sentences of the full recap until this lands (recapShortFallback).
+      try {
+        const short = capWords40(((await askClaude(RECAP_SHORT_SYS, text, 120, [], "claude-haiku-4-5", "program_summary")) || "").trim());
+        if (short) await sbUpdateWhere("program_history", `?id=eq.${row.id}`, { block_recap_short: short });
+      } catch (_) {}
+    }
   } catch (e) { console.error("[history] block recap failed:", e?.message || e); }
 }
 

@@ -179,6 +179,24 @@ const PROG2 = [
   eq(bad.ok, false, "tiny finds rejected (min length)");
   const clamped = validateRecPayload({ title: "t", duration: "permanent", swaps: [{ find: "Recovery bench 3x5", replace: "y" }] });
   eq(clamped.rec.duration, "block", "unknown duration (incl. 'permanent') clamps to block");
+
+  // T64 Fix 3b: title/summary/why are three separate contracts now.
+  const longTitle = "A".repeat(80);
+  const titled = validateRecPayload({ title: longTitle, duration: "block", swaps: [{ find: "Recovery bench 3x5", replace: "y" }] });
+  ok(titled.rec.title.length <= 40, "title is tightened to the tool schema's 40-char cap, not 60");
+
+  const longSummary = "Will wants Monday's slot replaced with what he actually logged on Monday last week instead";
+  const withSummary = validateRecPayload({
+    title: "Front squat cap held", summary: longSummary,
+    why: "internal reasoning", duration: "block", swaps: [{ find: "Recovery bench 3x5 at 140", replace: "Floor press 3x5" }],
+  });
+  eq(withSummary.rec.summary.split(" ").length, 12, "summary hard-caps at 12 words (not just described in the prompt)");
+  ok(longSummary.startsWith(withSummary.rec.summary), "the cap trims from the end at a word boundary, never mid-word");
+  ok(!withSummary.rec.summary.includes("instead"), "the 13th+ word never survives the cap");
+
+  const noSummary = validateRecPayload({ title: "t", why: "internal", duration: "block", swaps: [{ find: "Recovery bench 3x5", replace: "y" }] });
+  eq(noSummary.rec.summary, "", "summary defaults to empty, never undefined, when the model omits it");
+  ok(!("why" in noSummary.rec) || typeof noSummary.rec.why === "string", "why still round-trips for the AI-context path even though it's never rendered");
 }
 
 // 8 ── athlete-facing fallback chain (T64 Fix 3): summary, else swaps, else title — NEVER why

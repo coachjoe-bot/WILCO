@@ -91,7 +91,7 @@ export const CHAT_FIRST_ON = CHAT_FIRST_ENABLED || urlFlag("chatfirst");
 import { validatePref, normalizePrefs, describePref, prefsPromptLines, nextSignalState, clearedSignal } from "./trainingPrefs.js";
 import { parseBlockInfo, stripBlockInfo } from "./programContract.js";
 import { lineDiff, findPlacement, mergeGuard, mergeSystemPrompt } from "./programDiff.js";
-import { snapshotProgramHistory, startNextBlock, closeCurrentBlock, setBlockEnd, blockPromptState, parseTimeline, dateToIso, refreshOpenBlockRecap } from "./programHistory.js";
+import { snapshotProgramHistory, startNextBlock, closeCurrentBlock, setBlockEnd, blockPromptState, parseTimeline, dateToIso, refreshOpenBlockRecap, recapShortFallback } from "./programHistory.js";
 // First-run app tour (spotlight coach-marks + scripted Quick Log demo). Pure
 // display: fixtures never touch real data — see tour.jsx header.
 import { TourOffer, TourSpotlight, athleteTourSteps, tourWelcome, tourInteractiveAt, TOUR_QL_FIXTURE, TOUR_SCRIPT } from "./tour.jsx";
@@ -7095,7 +7095,6 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [recPending,setRecPending] = useState(null);   // {draftId, rec} — the bar's rec
   const [recOpen,setRecOpen] = useState(false);
   const [recBusy,setRecBusy] = useState(false);
-  const [recWhyOpen,setRecWhyOpen] = useState(false);
   // The bar's ✕ never acts silently (Will 09-01): it asks Save to Drafts or
   // Delete. Backdrop tap cancels and the rec stays live.
   const [recExitAsk,setRecExitAsk] = useState(false);
@@ -7127,7 +7126,6 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       const draftId = Array.isArray(back)&&back[0]?.id || null;
       if(!parked){
         setRecPending({draftId, rec:clean});
-        setRecWhyOpen(true);
         if(open){ setSheetOpen(false); setPgOpen(false); setRecOpen(true); }
       }
       try{ track("program_rec_staged","ai",{origin:clean.origin}); }catch(_){}
@@ -7189,7 +7187,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       const edited = p.rec.edited ? "\nLines the athlete hand-edited (change ONLY if the instruction explicitly says so): " + p.rec.swaps.map((s,i)=>`#${i+1}`).join(" ") : "";
       const next = await draftRecJSON({
         programText: athlete.program_text||"",
-        context: `CURRENT REC (revise this, keep what the instruction doesn't touch):\n${JSON.stringify({title:p.rec.title, why:p.rec.why, duration:p.rec.duration, swaps:p.rec.swaps})}${edited}`,
+        context: `CURRENT REC (revise this, keep what the instruction doesn't touch):\n${JSON.stringify({title:p.rec.title, summary:p.rec.summary, why:p.rec.why, duration:p.rec.duration, swaps:p.rec.swaps})}${edited}`,
         instruction: ins,
         origin: p.rec.origin,
       });
@@ -7247,7 +7245,6 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     }
     const un = {...rec, parked:false};
     setRecPending({draftId:row.id, rec:un});
-    setRecWhyOpen(true);
     setShowProgram(false); setSheetOpen(false); setPgOpen(false); setRecOpen(true);
     sbUpdateWhere("program_drafts",`?id=eq.${row.id}`,{status:"rec", blueprint:{rec:un}, updated_at:new Date().toISOString()}).catch(()=>{});
   };
@@ -10539,7 +10536,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           bar when they stack; stacks ABOVE the program bar) ─────────────────── */}
       {CHAT_FIRST_ON && recPending && !recOpen && (
         <div style={{padding:"0 8px 6px",flexShrink:0}}>
-          <div onClick={()=>{setSheetOpen(false); setPgOpen(false); setRecOpen(true); setRecWhyOpen(true);}} role="button" tabIndex={0}
+          <div onClick={()=>{setSheetOpen(false); setPgOpen(false); setRecOpen(true);}} role="button" tabIndex={0}
             onKeyDown={e=>{ if(e.key==="Enter"){ setSheetOpen(false); setPgOpen(false); setRecOpen(true); } }}
             style={{background:CA.navy2,color:CA.accent,border:`1.5px solid ${CA.accent}`,borderRadius:12,padding:"10px 12px",display:"flex",alignItems:"center",gap:10,cursor:"pointer"}}>
             <button onClick={e=>{e.stopPropagation();setRecExitAsk(true);}} aria-label="Close the program rec"
@@ -10590,15 +10587,15 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             <span aria-hidden style={{fontSize:12,opacity:.85}}>▼</span>
           </div>
           <div style={{flex:1,overflowY:"auto",padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
-            {/* WHY — collapsible so the edits get the room (Will's Q4 call) */}
-            <div onClick={()=>setRecWhyOpen(v=>!v)} role="button" tabIndex={0} aria-label="Why this change"
-              style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:10,padding:"8px 11px",cursor:"pointer"}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:9,fontWeight:700,letterSpacing:1.2,color:CA.accent,textTransform:"uppercase"}}>
-                <span>Why this change</span><span aria-hidden>{recWhyOpen?"▴":"▾"}</span>
-              </div>
-              {recWhyOpen
-                ? <div style={{marginTop:5,fontSize:12,lineHeight:1.55,color:CA.muted2}}>{recPending.rec.why||"Joe drafted this from what you told him."}</div>
-                : <div style={{marginTop:3,fontSize:11,color:CA.muted,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{(recPending.rec.why||"").slice(0,80)}</div>}
+            {/* T64 Fix 3b: athlete-facing SUMMARY only, static (a summary is one
+                short factual line by construction, nothing to expand). `why` is
+                the model's own reasoning for later revisions — internal only,
+                never rendered here (that's the bug this strip used to have:
+                "Will wants Monday's slot replaced..." read like a note to the
+                AI, because it was one). */}
+            <div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:10,padding:"8px 11px"}}>
+              <div style={{fontSize:9,fontWeight:700,letterSpacing:1.2,color:CA.accent,textTransform:"uppercase",marginBottom:4}}>What changed</div>
+              <div style={{fontSize:12,lineHeight:1.55,color:CA.muted2}}>{recSummaryFallback(recPending.rec)}</div>
             </div>
             <div style={{fontSize:9,fontWeight:700,letterSpacing:1.2,color:CA.muted,textTransform:"uppercase",paddingLeft:2}}>What changes · {recPending.rec.swaps.length} {recPending.rec.swaps.length===1?"spot":"spots"}</div>
             {/* T62 (Will 08-31): every spot is a PAIR — the struck old line, and
@@ -11480,14 +11477,15 @@ No markdown, no commentary outside the two sections.`;
 // can't locate verbatim and uniquely. Surgical by construction.
 const REC_DRAFT_SYS = `You draft a PROGRAM REC for a strength app: a small, surgical, staged change to an athlete's saved training program. You NEVER rewrite the program - you name exact text to replace, and the app performs the replacement mechanically.
 Return ONLY valid JSON, no markdown:
-{"title":string,"why":string,"duration":"1w"|"2w"|"3w"|"block","swaps":[{"week":number|null,"day":string|null,"find":string,"replace":string}]}
+{"title":string,"summary":string,"why":string,"duration":"1w"|"2w"|"3w"|"block","swaps":[{"week":number|null,"day":string|null,"find":string,"replace":string}]}
 Rules:
 - Each swap's "find" is text copied VERBATIM from the program - exact characters, spacing, punctuation - and long enough to be unique at its spot. Never paraphrase or reformat it.
 - "week": the week number the found text sits in (null if the program has no week structure). "day": the weekday word or day label on that line (null if none). When the SAME text appears in more than one week and all should change, emit one swap per week, each tagged with its week.
 - "replace" is the complete new text for that exact spot, written in the program's own style. To ADD something to a day, "find" the existing text and include it plus the addition in "replace".
 - The smallest change that does the job, proportionate to the problem, never drastic. NEVER touch text outside the problem or the ask. Keep the athlete's stated goal intact.
 - Loads: keep the program's own loading language. When building from a LOGGED workout, carry the logged exercises, sets, reps and loads EXACTLY as logged; recompute percentages only when the athlete asked for progression, using the program's stated maxes, and then show weight and percent together.
-- "why": 1-3 plain sentences in Coach Joe's voice tying the change to what the athlete said or logged. Quote their words where it helps. No em dashes.
+- "summary": ONE short factual line the athlete reads on the card, 12 words or fewer. States WHAT changed, nothing else - no reasoning, no naming the athlete ("Will wants..."), no third person. Example: "Swapped Monday's front squat and pulls with Tuesday's bench and dips."
+- "why": 1-3 plain sentences of YOUR OWN reasoning, for your own reference only if the athlete later asks to revise this rec. The athlete never sees this text, so it may name them and explain the reasoning freely. Quote their words where it helps. No em dashes.
 - "duration": "1w"|"2w"|"3w" for things that should heal or pass, "block" when it should ride out the block. Nothing else exists.
 - "title": max 40 chars, plain, names the change ("Left pec - floor press swap").
 If no safe surgical change exists, return {"title":"","why":"<one sentence saying why not>","duration":"block","swaps":[]}.`;
@@ -12974,6 +12972,10 @@ export function ProgramBlocksPane({athlete, viewer="athlete"}){
   const [editingName,setEditingName] = useState(null); // phase id being renamed
   const [nameInput,setNameInput] = useState("");
   const [delArm,setDelArm] = useState(null);         // past-phase id armed for delete
+  // T64 Fix 3b: past-block recaps read too long (Will) — the card shows a
+  // short athlete-facing line by default; tapping "More" reveals the full
+  // AI-context recap for that one card. Per-card, not global: a set of ids.
+  const [recapOpen,setRecapOpen] = useState(()=>new Set());
   const backfilledRef = useRef(false);
 
   const load = () => {
@@ -13147,11 +13149,28 @@ export function ProgramBlocksPane({athlete, viewer="athlete"}){
           {b.block_summary||firstLine(b.program_text)}
         </div>
       )}
-      {b.block_recap&&(
-        <div style={{border:`1px solid ${CA.border}`,borderLeft:`2px solid ${CA.accent}`,borderRadius:8,background:"rgba(58,123,255,0.05)",padding:"8px 11px",color:CA.muted2,fontSize:12,lineHeight:1.6,whiteSpace:"pre-wrap"}}>
-          {b.block_recap}
-        </div>
-      )}
+      {b.block_recap&&(()=>{
+        // T64 Fix 3b: the CURRENT block's recap is already the short, ongoing-
+        // voice paragraph (ONGOING_RECAP_SYS, 2-4 sentences) — show it whole,
+        // same as always. A PAST block's recap is the full AI-context version,
+        // which is what read too long; show the short line, full text behind
+        // "More" (skip the toggle entirely when they're already the same text).
+        const shortText = isCurrent ? "" : recapShortFallback(b);
+        const full = String(b.block_recap||"");
+        const isOpen = recapOpen.has(b.id);
+        const showFull = isCurrent || isOpen || !shortText || shortText===full.trim();
+        return (
+          <div style={{border:`1px solid ${CA.border}`,borderLeft:`2px solid ${CA.accent}`,borderRadius:8,background:"rgba(58,123,255,0.05)",padding:"8px 11px",color:CA.muted2,fontSize:12,lineHeight:1.6}}>
+            <div style={{whiteSpace:"pre-wrap"}}>{showFull?full:shortText}</div>
+            {!showFull&&(
+              <button onClick={()=>setRecapOpen(prev=>new Set(prev).add(b.id))}
+                style={{background:"none",border:"none",color:CA.accent,fontSize:11,fontWeight:600,cursor:"pointer",padding:"6px 0 0",fontFamily:"'Inter'"}}>
+                More
+              </button>
+            )}
+          </div>
+        );
+      })()}
       {isCurrent&&(
         <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:2}}>
           {nextArm?(

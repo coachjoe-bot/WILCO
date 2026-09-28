@@ -266,11 +266,14 @@ export function recSummaryFallback(rec) {
 }
 
 // ── rec payload shape (stored in program_drafts.blueprint.rec) ───────────────
-// { v:1, title, why, origin, duration, swaps:[{find,replace,week,day}],
+// { v:1, title, summary, why, origin, duration, swaps:[{find,replace,week,day}],
 //   parked, appliedAt?, expiresAt? }
 export function validateRecPayload(rec) {
   if (!rec || typeof rec !== "object") return { ok: false, reason: "empty" };
-  const title = String(rec.title || "").trim().slice(0, 60);
+  // Tightened to the tool schema's own 40-char cap (a 60-char validator cap
+  // next to a 40-char prompt cap is how the 44/47-char titles on prod happened).
+  const title = trimChars(rec.title, 40);
+  const summary = trimChars(capWords(rec.summary, 12), 110);
   const why = String(rec.why || "").trim().slice(0, 500);
   const duration = REC_DURATIONS.includes(rec.duration) ? rec.duration : "block";
   const swaps = (Array.isArray(rec.swaps) ? rec.swaps : [])
@@ -282,5 +285,5 @@ export function validateRecPayload(rec) {
     }))
     .filter((s) => s.find && s.find.length >= 4);
   if (!title || !swaps.length) return { ok: false, reason: !title ? "no_title" : "no_swaps" };
-  return { ok: true, rec: { v: 1, title, why, origin: String(rec.origin || "ask").slice(0, 20), duration, swaps, parked: !!rec.parked } };
+  return { ok: true, rec: { v: 1, title, summary, why, origin: String(rec.origin || "ask").slice(0, 20), duration, swaps, parked: !!rec.parked } };
 }
