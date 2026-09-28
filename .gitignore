@@ -26,3 +26,4 @@ ios/.build/
 ios/DerivedData/
 scripts/gauntlet/.gauntlet-accounts.json
 .env.qa
+live-pain-pass-results.json

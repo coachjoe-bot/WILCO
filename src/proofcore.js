@@ -77,6 +77,7 @@ export { epley1RM };
 
 // T55: conversion comes from the single-source units module.
 import { toLbs } from "./units.js";
+import { normArea, classifyPain, normalizeMarks, flagClearedFor } from "./painLedger.js";
 
 // Working sets of a logged exercise: prefer set_details (excluding warm-ups), else the
 // flat sets/reps/weight. Mirrors the client so the digest, plateau flags, volume, and
@@ -133,15 +134,29 @@ const liftsMatch = (a, b) => {
 };
 
 // ── injuries: aggregate pain flags across a window ────────────────────────────
+// T64 S2: one taxonomy and one "resolved" rule with the pain ledger
+// (src/painLedger.js). Areas group through normArea ("knee", "knees", "left
+// knee" are one area). `resolved` is either the legacy resolved_pain array
+// (undated strings: cleared before today) or {marks, legacyResolved, now} with
+// the dated athletes.pain_marks. A flag is hidden only when its area was
+// cleared AT OR AFTER the flag's row, so a flare after "resolved" shows again,
+// for the athlete, the proof letter and the coach. Training soreness is not pain.
 export const aggregateInjuries = (sessions, resolved = []) => {
-  const resolvedSet = new Set((resolved || []).map((r) => String(r).toLowerCase()));
+  const spec = Array.isArray(resolved) || resolved == null ? { marks: {}, legacyResolved: resolved || [] } : resolved;
+  const marks = normalizeMarks(spec.marks || {}, spec.legacyResolved || [], { now: spec.now || new Date(), tz: spec.tz });
   const counts = {};
   for (const g of sessions) {
-    const flags = g.flatMap((e) => getPD(e).pain_flags || []);
-    for (const f of flags) {
-      const area = String(f.area || "").toLowerCase();
-      if (!area || resolvedSet.has(area)) continue;
-      counts[area] = (counts[area] || 0) + 1;
+    for (const e of g) {
+      const pd = getPD(e);
+      for (const f of pd.pain_flags || []) {
+        if (!f || !f.area) continue;
+        const a = normArea(f.area);
+        if (!a.key) continue;
+        if (classifyPain({ description: f.description, area: f.area }).kind === "soreness" && !f.severity) continue;
+        if (flagClearedFor(f.area, effectiveDate(e), marks)) continue;
+        const label = a.label || a.key;
+        counts[label] = (counts[label] || 0) + 1;
+      }
     }
   }
   const recurring = Object.entries(counts).filter(([, n]) => n >= 2).map(([area, count]) => ({ area, count }));

@@ -75,6 +75,13 @@ check("pain appearing only last week reads as clearing",
 check("more flags than last week reads as worsening",
   painTrend([[{ parsed_data: { exercises: [], pain_flags: [{ area: "knee" }, { area: "hip" }] } }]], painSession("knee")).direction, "worsening");
 check("no pain either week reads as steady", painTrend([], []).direction, "steady");
+// T64 S2: one taxonomy + the ledger's dated "resolved" rule (a flare shows again)
+const dated = (area, at) => [[{ created_at: at, parsed_data: { exercises: [ex("Back Squat", 3, 5, 225)], pain_flags: [{ area, description: "ache on squats" }] } }]];
+check("knee / knees / left knee are one area", aggregateInjuries([[...dated("knee", "2026-09-01T12:00:00Z")[0], ...dated("Knees", "2026-09-02T12:00:00Z")[0], ...dated("left knee", "2026-09-03T12:00:00Z")[0]]]).counts, { knee: 3 });
+check("a flag BEFORE a dated clear stays hidden", aggregateInjuries(dated("knee", "2026-09-01T12:00:00Z"), { marks: { knee: { cleared_at: "2026-09-05T00:00:00Z" } } }).counts, {});
+check("a flare AFTER a dated clear shows again", aggregateInjuries(dated("knees", "2026-09-10T12:00:00Z"), { marks: { knee: { cleared_at: "2026-09-05T00:00:00Z" } } }).counts, { knee: 1 });
+check("legacy resolved string: a flag logged today (after the undated clear) shows", aggregateInjuries(dated("knee", new Date().toISOString()), ["knee"]).counts, { knee: 1 });
+check("training soreness is not counted as pain", aggregateInjuries([[{ created_at: "2026-09-17T12:00:00Z", parsed_data: { pain_flags: [{ area: "legs", description: "too sore for today's workout" }] } }]]).counts, {});
 
 console.log("\nclassifyTiers — strengths vs weaknesses:");
 const agg = (n, t) => ({ name: n, avgTier: t });

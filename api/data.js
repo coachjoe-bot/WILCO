@@ -187,6 +187,21 @@ const ATHLETE_OWN_COL = {
 // allowlisted or the write is rejected: a hard server-side boundary independent of
 // what the client (or an AI extractor parsing free-text chat) sends. Columns NOT
 // listed are denied; tables not in this map keep plain row-only scoping.
+// T64 S2: athletes.pain_marks shape guard. Plain object of area keys, each an
+// object of known stamp fields (ISO strings or null) and a small decline count.
+const PAIN_MARK_FIELDS = new Set(["cleared_at", "dismissed_at", "offered_at", "asked_at", "noted_at", "declined_change_count", "legacy"]);
+export const validPainMarks = (v) => {
+  if (v === null) return true;
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  const keys = Object.keys(v);
+  if (keys.length > 40 || JSON.stringify(v).length > 8000) return false;
+  return keys.every((k) => typeof k === "string" && k.length > 0 && k.length <= 40 && v[k] && typeof v[k] === "object" && !Array.isArray(v[k])
+    && Object.entries(v[k]).every(([f, x]) => PAIN_MARK_FIELDS.has(f) && (
+      f === "declined_change_count" ? Number.isInteger(x) && x >= 0 && x <= 99
+      : f === "legacy" ? typeof x === "boolean"
+      : x === null || (typeof x === "string" && x.length <= 40 && Number.isFinite(Date.parse(x))))));
+};
+
 const ATHLETE_COL_ALLOW = {
   // T58 mastermind memory: the model writes these through tool handlers, so pin
   // the vocabulary server-side — content bounded, kind/status enums, expires_at
@@ -231,12 +246,16 @@ const ATHLETE_COL_ALLOW = {
       // T57-B: recovery email, self-serve add/fix — 29 of 53 athletes signed up
       // name-only and could never PIN-recover. Format-guarded in `values`.
       "email",
+      // T64 S2: the pain ledger's marks ({areaKey: {cleared_at, dismissed_at,
+      // offered_at, asked_at, noted_at, declined_change_count}}). Value-guarded.
+      "pain_marks",
     ]),
     // Value guards: an athlete may only ever DOWNGRADE their own tier to "free"
     // (paid tiers are granted server-side by Stripe), never self-grant pro/elite.
     values: {
       tier: (v) => v === "free",
       email: (v) => typeof v === "string" && /^\S+@\S+\.\S+$/.test(v.trim()) && v.trim().length <= 200,
+      pain_marks: (v) => validPainMarks(v),
     },
   },
   // A filed request is AI-extracted from free-text chat — pin down what the athlete

@@ -346,3 +346,31 @@ test("T64 Fix 4: a genuine multi-day away situation still gets a real temp progr
   expect(write).toBeTruthy();
   expect(write.body.data.temp_program_text).toContain("DB Squat");
 });
+
+// ── T64 S2: MY LOG uses the pain ledger's dated resolve ─────────────────────
+// Resolved, then a flare a week later: the old flag stays hidden, the flare
+// shows, and "resolved" writes BOTH the legacy array and a dated pain_marks
+// stamp (two writes, so a gateway that doesn't know pain_marks can't sink the
+// legacy one).
+test("MY LOG: a flare after 'resolved' shows again; resolving writes resolved_pain + pain_marks", async ({ page }) => {
+  const day = (n) => new Date(Date.now() - n * 86400000).toISOString();
+  const athlete = makeAthlete({ total_sessions_logged: 2, resolved_pain: ["knee"], pain_marks: { knee: { cleared_at: day(6) } } });
+  const sq = [{ name: "Back Squat", sets: 3, reps: 5, weight: 225, unit: "lbs" }];
+  const { calls } = await mockApi(page, { athlete, dataReads: { workouts: [
+    { id: "w-flare", athlete_id: athlete.id, created_at: day(1), raw_message: "squats, left knee flared", parsed_data: { exercises: sq, pain_flags: [{ area: "left knee", description: "flared on squats" }] } },
+    { id: "w-old", athlete_id: athlete.id, created_at: day(10), raw_message: "squats, knee ache", parsed_data: { exercises: sq, pain_flags: [{ area: "Knees", description: "ache on squats" }] } },
+  ] } });
+  await loginAsAthlete(page, athlete);
+  await page.getByRole("button", { name: "MY LOG" }).click();
+  await expect(page.getByText("MY WORKOUT LOG")).toBeVisible();
+  await expect(page.getByText("⚠ left knee")).toBeVisible({ timeout: 10000 });
+  await expect(page.getByText("⚠ Knees")).toHaveCount(0);
+  await page.getByRole("button", { name: /resolved/ }).first().click();
+  await expect(page.getByText("⚠ left knee")).toHaveCount(0);
+  const marksWrite = () => calls.find((c) => c.body?.op === "update" && c.body?.table === "athletes" && c.body?.data?.pain_marks);
+  await expect.poll(() => !!marksWrite(), { timeout: 10000 }).toBe(true);
+  const legacy = calls.find((c) => c.body?.op === "update" && c.body?.table === "athletes" && Array.isArray(c.body?.data?.resolved_pain));
+  expect(legacy).toBeTruthy();
+  expect(marksWrite().body.data.pain_marks.knee.cleared_at).toBeTruthy();
+  expect(marksWrite().body.data.resolved_pain).toBeUndefined(); // separate write
+});

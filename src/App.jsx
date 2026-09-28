@@ -77,6 +77,10 @@ import { blueprintPct } from "./programBuilder.js";
 import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps } from "./memory.js";
 import { activeGoals, goalsToSupersede, sameGoalText } from "./goals.js";
 import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, recSummaryFallback, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
+import { performedBlock } from "./turnFacts.js";
+import { ledgerTurn, ledgerBlock, normArea, painFollowUpPlan, applyStamps, recStagedLine, withMark, normalizeMarks, flagClearedFor, keepPainRec } from "./painLedger.js";
+import { programPurpose, purposeLine } from "./programPurpose.js";
+import { classifyFollowUp, arbitrateFollowUp } from "./replyGuards.js";
 
 // T58 rollout gates, resolved once per load. ?mastermind=1 / ?chatfirst=1 stay
 // as preview overrides for whenever a flag is off; the real switches live in
@@ -1647,7 +1651,8 @@ const parseWorkout = async (message, name, sport, knownNames = []) => {
   "exercises":[{"name":string,"sets":number|null,"reps":number|null,"rep_scheme":string|null,"time_per_set_seconds":number|null,"weight":number|null,"unit":"lbs"|"kg"|"bodyweight","added_weight":number|null,"assist_weight":number|null,"resistance":string|null,"load_basis":"each"|"total"|null,"rpe":number|null,"rir":number|null,"percent_1rm":number|null,"tempo":string|null,"technique":"drop"|"rest_pause"|"cluster"|"myo"|"amrap"|null,"to_failure":boolean|null,"superset_group":string|null,"feel":"easy"|"good"|"hard"|null,"notes":string|null,"set_details":[{"weight":number,"reps":number,"warmup":boolean}]|null}],
   "run_data":{"run_type":"easy"|"tempo"|"interval"|"long_run"|"race"|"recovery"|"fartlek"|null,"distance_miles":number|null,"distance_km":number|null,"duration_minutes":number|null,"pace_per_mile":string|null,"pace_per_km":string|null,"heart_rate_avg":number|null,"heart_rate_max":number|null,"intervals":[{"repeat":number|null,"distance":string|null,"time":string|null,"pace":string|null,"rest":string|null}]|null,"notes":string|null}|null,
   "practice_data":{"practice_type":"practice"|"game"|"scrimmage"|"conditioning"|"skill_work"|"film"|"walkthrough"|null,"sport":string|null,"duration_minutes":number|null,"intensity":"light"|"moderate"|"high"|"very_high"|null,"notes":string|null}|null,
-  "pain_flags":[{"area":string,"description":string}],
+  "pain_flags":[{"area":string,"description":string,"severity":1|2|3|4|null,"character":string|null,"onset":"gradual"|"sudden"|null,"during":string|null}],
+  "pain_cleared":[{"area":string,"description":string}],
   "pr_attempts":[{"exercise":string,"weight":number,"reps":number,"achieved":boolean}],
   "session_feel":"great"|"good"|"average"|"rough"|null,
   "context_request":{"is_explicit":boolean,"note":string|null,"is_injury":boolean,"weight_lbs":number|null}|null,
@@ -1709,6 +1714,7 @@ Rules:
 - "pr_attempts": include an entry with reps:1 and achieved:true whenever the athlete reports an ACTUAL (not estimated) 1-rep max for a lift — either because they just performed a true 1RM single in this session, OR because they are simply telling you their current actual max for a lift (e.g. "my real squat max is 405", "current bench 1RM is 275", "just hit a 315 deadlift max"). This applies even if no other exercises were logged in the message. If they describe a failed attempt at a 1RM, set achieved:false.
 - FAILED / MISSED ATTEMPTS (critical): a weight the athlete FAILED, MISSED, or didn't complete ("attempted 285 and missed", "failed 315", "couldn't lock out 225", "no-lifted the third attempt") is NOT a performed set. Record it ONLY as a pr_attempts entry with achieved:false — NEVER as an entry or set in "exercises", never in set_details, never as the top-set weight. Completed work in the same message still logs normally (e.g. "hit 275, then missed 285" → the 275 single goes in exercises AND pr_attempts achieved:true; the 285 appears ONLY in pr_attempts achieved:false). A failed weight must never appear anywhere that reads as work performed.
 - PARTIAL COMPOUND LIFTS: when a compound lift is partly made and partly missed, the MADE part is real performed work and must be credited as its own exercise at that weight. "Hit the clean but missed the jerk at 125" → "Clean" 1x1 @ 125 goes in exercises, AND "Clean and Jerk" 125 goes in pr_attempts achieved:false; the compound itself never appears in exercises. Same logic for any sequenced compound. This only applies when the athlete clearly states the earlier movement was COMPLETED — a clean caught but never stood up is a missed clean, and ambiguity stays a plain miss (pr_attempts achieved:false only).
+- "pain_flags": one entry per body area the athlete reports CURRENT pain, discomfort or a tweak in (two areas = two entries). You are a sensor: record what they said, never what should happen next. "area" = the body part in their words ("left knee", "pec"). "description" = a short paraphrase of what they said. Optional, fill only from their words: "severity" 1 = aware (tight, slight, "a little"), 2 = dull or lingering, 3 = bad enough to change or cut the session (stopped early, dropped the weight, "on fire"), 4 = serious (sharp, sudden, a pop, gave out, numbness, could not bear weight); "character" = their word for it (sharp, dull, tight, burning); "onset" = "sudden" only for a specific moment it happened, else "gradual"; "during" = the lift it was felt on, if named. "pain_cleared": areas they say feel fine NOW after hurting before ("knee feels great now", "pec didn't bother me at all") go here, never in pain_flags. Normal training soreness, DOMS, stiffness and fatigue ("legs are sore from yesterday", "too sore today", "tired") are NOT pain: leave pain_flags empty for them.
 - "coach_flag": set "pain" when the message reports CURRENT physical pain/discomfort/a tweak tied to training — not normal post-workout soreness/fatigue. Set "plateau" when they say a specific lift has been stuck/stalled for weeks despite real effort — not a single off day. Set "equipment" when equipment required for their programmed work is unavailable/broken and it's actually blocking that work — not just a passing mention. Otherwise leave null. At most one value; pick the one that best matches.
 - "preference_request": populate ONLY when the athlete states a DURABLE preference about how their training should be written going forward — not a one-off request for today. Allowed values by field: loading_language = "percent+rpe"|"percent"|"rpe"|"climb_singles"|"fixed_weight" ("stop giving me RPE, just percentages" → {"field":"loading_language","value":"percent"}; "I'd rather work up to a heavy single than chase percentages" → "climb_singles"). max_update_policy = "infer"|"declared_only"|"pr_single_only" ("only change my max when I actually hit a single" → "pr_single_only"). testing_style = "final_week"|"test_day"|"retest_cycle". session_minutes_cap = integer 15-240 ("keep my workouts under an hour" → 60). movements_per_day_cap = integer 2-15. accessory_load = "programmed"|"athlete_choice" ("let me pick my own accessory weights" → "athlete_choice"). ONE field per message (pick the clearest); the value MUST be from the allowed set or null. This is a proposal the app confirms with the athlete — populate it even if phrased casually, but never from a question or a hypothetical.`;
   const nowD = new Date();
@@ -1938,6 +1944,24 @@ ${Object.entries(JOEBOT_SPORTS).map(([k,v])=>`- ${k}: ${v}`).join("\n")}`;
 // static persona block for the unified card (src/ai/card.js), attaches the
 // server-registered toolset, and injects the fact store; everything else
 // (dynamic tail, streaming, history window) is shared with the legacy path.
+// T64 S2: one pain-ledger read per turn. Joe's context (before the reply) and
+// the coach_flag follow-up (after the parse) call this with the same athlete and
+// history, so the two agree on the verdict (AI contract rule 4). protects = what
+// the program (or a live temp program) already works around.
+const painTurnFor = ({athlete, workoutHistory, message, parsed=null, now=new Date()}) => {
+  const protects = [...new Set([
+    ...programPurpose(athlete?.program_text||"").protects,
+    ...programPurpose(athlete?.temp_program_text||"").protects,
+  ])];
+  const lt = ledgerTurn({
+    rows: workoutHistory||[],
+    marks: (athlete?.pain_marks && typeof athlete.pain_marks==="object") ? athlete.pain_marks : {},
+    legacyResolved: Array.isArray(athlete?.resolved_pain) ? athlete.resolved_pain : [],
+    protects, now, message, parsed,
+  });
+  return {...lt, protects};
+};
+
 const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athleteGoals=[], athleteContext=null, onDelta=null, opts={}) => {
   // Both call sites pass `history` already ending with the current message, and
   // the current message is appended again explicitly in userMsg below — so the
@@ -1964,8 +1988,12 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
 
   // Improved history context with explicit dates so bot can answer "what did I do Monday" etc.
   let pastContext = "";
-  if(workoutHistory?.length>0){
-    const recent = workoutHistory.slice(0,10).map(w=>{
+  // T64 S2: filter BEFORE slicing (same fix resolveLogCorrection carries).
+  // workoutHistory holds a row for every chat message, so "the last 10" used to
+  // be mostly Q&A rows. Real logged work only: lifts, runs, practices, PR notes.
+  const loggedRows = (workoutHistory||[]).filter(w=>w?.parsed_data?.exercises?.length || w?.parsed_data?.run_data || w?.parsed_data?.practice_data?.practice_type || w?.parsed_data?.pr_attempts?.length);
+  if(loggedRows.length>0){
+    const recent = loggedRows.slice(0,10).map(w=>{
       const d = effectiveDate(w);   // backdated logs answer "what did I do Monday" on their real day
       const dateStr = d.toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric",year:"numeric"})+" at "+d.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit",hour12:true});
       const runD = w.parsed_data?.run_data;
@@ -1982,12 +2010,21 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
         parts.push(w.parsed_data.exercises.map(e=>`${e.name} ${formatSetDetails(e)}${e.feel?" ("+e.feel+")":""}`).join(", "));
       }
       const activityStr = parts.length>0 ? parts.join(" + ") : w.raw_message?.slice(0,120)||"";
-      const pain = w.parsed_data?.pain_flags?.map(p=>p.area).join(", ")||"";
+      // Raw per-row PAIN: annotations are gone: the PAIN LEDGER block below is
+      // the one home for pain state (T64 S2, AI contract rule 2).
       const feel = w.parsed_data?.session_feel?` | Session feel: ${w.parsed_data.session_feel}`:"";
-      return `• ${dateStr}: ${activityStr}${pain?" | PAIN: "+pain:""}${feel}`;
+      return `• ${dateStr}: ${activityStr}${feel}`;
     }).filter(Boolean).join("\n");
     pastContext = `\n\nATHLETE WORKOUT HISTORY (most recent first):\n${recent}\nWhen asked what they did on a specific day or recently, reference these exact dates and numbers.`;
   }
+  // T64 S2: the PAIN LEDGER block. Pain state is computed once, in code
+  // (src/painLedger.js), with a verdict per area; Joe speaks per the verdict and
+  // never counts, dates or pattern-matches pain himself. send() computes the
+  // turn once (opts.painTurn) so the post-parse step reads the same verdicts.
+  try{
+    const lt = opts.painTurn || painTurnFor({athlete, workoutHistory, message, parsed: opts.parsedLog||null});
+    pastContext += `\n\n${ledgerBlock(lt.records, {protects: lt.protects, turn: lt.turn})}`;
+  }catch(_){ /* the ledger is additive; a failure means no block, never a crash */ }
 
   // Deterministic per-lift "last done" index over the FULL history the client
   // holds — not just the 10 most-recent workouts above. This turns "what did I do
@@ -2058,6 +2095,12 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
       const lines = prCheckLines(pl.exercises, byEx, athlete.weight_unit);
       if(lines.length) prCheckContext = `\n\nPR CHECK — THIS MESSAGE'S LOG (computed by the app from their records; these verdicts are FINAL — never re-derive, re-convert, or re-compare the numbers yourself):\n${lines.map(l=>`- ${l}`).join("\n")}\nA line marked NEW PR is confirmed above their previous best: open the reply with genuine, specific celebration scaled to how central that lift is to their sport (a weightlifter's snatch or clean and jerk PR is a headline day, not a footnote), then coach. Never describe a NEW PR weight as under, below, or "right under" anything.`;
     }catch(_){ /* verdicts are additive — a failure just means no block */ }
+    // T64 S2 (bug 5): what was PERFORMED, from set_details. Joe called a logged
+    // 5x3 "a clean double" because only the plan's 5x2 was in front of him.
+    try{
+      const perf = performedBlock(pl.exercises, {displayUnit: athlete.weight_unit, planText: athlete.temp_program_text || athlete.program_text || ""});
+      if(perf) prCheckContext += `\n\n${perf}`;
+    }catch(_){ /* additive */ }
   }
 
   // Resolved program position — the SAME resolver Quick Log trusts (src/
@@ -7025,7 +7068,12 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       try{
         if(tc.name==="remember_fact"){
           const v = validateFact(tc.input||{});
-          if(!v.ok) continue;
+          // T64 S2: pain tallies and program-change claims belong to the pain
+          // ledger / a staged rec, never to memory (v.toolResult says so). The
+          // tool loop is single-pass (api/claude.js relays tool_use, no result
+          // round trip), so the refusal is logged; the PAIN LEDGER block tells
+          // Joe up front.
+          if(!v.ok){ if(v.toolResult) reportError("ai", new Error(`remember_fact refused: ${v.reason}`), {severity:"info", error_type:"memory_ledger_refusal", component:"executeMasterTools"}); continue; }
           const dup = findDuplicate(memoryRows, v.content);
           const stamp = new Date().toISOString();
           if(dup){
@@ -9174,6 +9222,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // the legacy path (flag off = no toolset = the model can't call anything).
       const masterToolCalls = [];
       const masterOpts = MASTERMIND_ON ? {mastermind:true, memoryRows, pureLog:fromQuickLog, parsedLog:parsedForReply, onToolUse:(tc)=>masterToolCalls.push(tc)} : {parsedLog:parsedForReply};
+      // T64 S2: the pain ledger's read of this turn, computed ONCE — Joe's
+      // context gets it now, the coach_flag follow-up reads the same verdicts.
+      const painTurn = (()=>{ try{ return painTurnFor({athlete:updatedAthlete, workoutHistory, message:msg, parsed:parsedForReply}); }catch(_){ return null; } })();
+      if(painTurn) masterOpts.painTurn = painTurn;
       try {
         reply = await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext,applyDelta,masterOpts);
       } catch(_streamErr){ /* fall through to the one-shot call below */ }
@@ -9240,6 +9292,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // turn would resurrect the logger for a workout that just ended (Will
         // 08-28) — dropped deterministically here, not just discouraged in the
         // prompt.
+        // T64 S2: the pain ledger decided before the reply; Joe's own pain rec
+        // stands only on address_now or an explicit ask (keepPainRec). Dropped
+        // calls are logged so the contradiction class stays visible.
+        if(painTurn && masterToolCalls.some(tc=>tc.name==="propose_program_rec") && !keepPainRec(painTurn.turn, msg)){
+          reportError("ai", new Error("propose_program_rec dropped: pain verdict not address_now"), {severity:"info", error_type:"pain_rec_dropped", component:"painLedger", meta:{verdicts:painTurn.turn.verdicts}});
+          for(let i=masterToolCalls.length-1;i>=0;i--) if(masterToolCalls[i].name==="propose_program_rec") masterToolCalls.splice(i,1);
+        }
         let rest = masterToolCalls.filter(tc=>tc.name!=="set_position" && tc.name!=="propose_preference"
           && !(fromQuickLog && (tc.name==="prefill_log_sheet" || tc.name==="pin_session_card" || tc.name==="show_start_buttons")));
         // T62 AUTO-PIN (Will 08-31): a prefill without a pin means the model
@@ -9266,9 +9325,30 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // as their own follow-up bubbles (the reply is already on screen). finalReply
       // still accumulates them so the persisted bot_reply keeps the full record.
       let finalReply = reply;
-      const followUp = (note)=>{
-        finalReply = finalReply + "\n\n" + note;
-        setMessages(prev=>[...prev,{role:"assistant",content:note}]);
+      // T64 S2 (AI contract rule 5): followUp is a per-turn ARBITER. At most ONE
+      // app bubble per turn; the priority table is FOLLOWUP_PRIORITY in
+      // src/replyGuards.js (action confirmations first). A higher-priority note
+      // replaces the one shown; a lower one is dropped and logged to error_events
+      // (kinds only, never copy) so we can see what was suppressed.
+      const fuTurn = {shown:null};
+      const followUp = (note, kind)=>{
+        const k = kind || classifyFollowUp(note);
+        const verdict = arbitrateFollowUp(fuTurn.shown, k);
+        if(verdict==="drop"){
+          reportError("ai", new Error(`followUp dropped: ${k} behind ${fuTurn.shown.kind}`), {severity:"info", error_type:"followup_suppressed", component:"followUp", meta:{dropped:k, kept:fuTurn.shown.kind}});
+          return;
+        }
+        const obj = {role:"assistant",content:note};
+        if(verdict==="replace"){
+          const old = fuTurn.shown;
+          reportError("ai", new Error(`followUp replaced: ${old.kind} by ${k}`), {severity:"info", error_type:"followup_suppressed", component:"followUp", meta:{dropped:old.kind, kept:k}});
+          finalReply = finalReply.replace("\n\n" + old.note, "\n\n" + note);
+          setMessages(prev=>prev.map(m=>m===old.obj ? obj : m));
+        } else {
+          finalReply = finalReply + "\n\n" + note;
+          setMessages(prev=>[...prev,obj]);
+        }
+        fuTurn.shown = {kind:k, note, obj};
       };
 
       // ── Log corrections (mistyped / erroneous data in an ALREADY-LOGGED entry).
@@ -9605,12 +9685,36 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // routed his unlocked program to a coach request).
       // One offer per flag per session (coachFlagOfferedRef, shared across both
       // branches), and never stacked on top of another pending confirm chip.
+      // ── T64 S2: PAIN LEDGER, after the parse ────────────────────────────────
+      // Joe is the only voice on a first report or a pattern (he spoke per the
+      // PAIN LEDGER block in his context). Code records the verdict in the marks
+      // (noted_at always, offered_at on an offer) and drafts a protective rec
+      // ONLY on a serious report. The mention itself is recorded by the row's
+      // pain_flags. No "one rough day" / "that's twice now" bubbles, ever.
+      let painPlan = null, painTurnUsed = null;
+      if((parsed.pain_flags?.length || parsed.coach_flag==="pain") && !parsed.log_correction?.is_mistake_fix){
+        try{
+          painTurnUsed = parsed.pain_flags?.length
+            ? ((painTurn && painTurn.turn.exact) ? painTurn : painTurnFor({athlete:updatedAthlete, workoutHistory, message:msg, parsed}))
+            : painTurn;
+          painPlan = painTurnUsed ? painFollowUpPlan(painTurnUsed.turn) : null;
+          if(painPlan && painPlan.stamps.length){
+            const marks = applyStamps((updatedAthlete.pain_marks && typeof updatedAthlete.pain_marks==="object") ? updatedAthlete.pain_marks : {}, painPlan.stamps);
+            setAthlete(prev=>({...prev, pain_marks:marks}));
+            sbUpdate("athletes", updatedAthlete.id, {pain_marks:marks})
+              .catch(e=>reportError("sync", e, {error_type:"pain_marks_write", component:"painLedger"}));
+          }
+        }catch(_){ /* the ledger is additive; never blocks the turn */ }
+      }
+      // Pain that is not serious drafts nothing and offers nothing from the app:
+      // Joe already spoke per the ledger verdict; the athlete asks for a change.
+      const painQuiet = parsed.coach_flag==="pain" && !(painPlan && painPlan.draftRec);
       const lockedBranchFired = wantsProgramWrite && updatedAthlete.program_locked;
       // A7: computed from what THIS send actually did — the state variables in this
       // closure are stale (cleared chips still read non-null, so "my knee hurts on
       // squats" typed over a Replace chip never got its coach-request offer).
       const noOtherOfferPending = !chipSetThisSend;
-      if(!lockedBranchFired && parsed.coach_flag && updatedAthlete.coach_id
+      if(!lockedBranchFired && parsed.coach_flag && !painQuiet && updatedAthlete.coach_id
          && updatedAthlete.program_locked
          && !coachFlagOfferedRef.current[parsed.coach_flag]
          && noOtherOfferPending){
@@ -9625,7 +9729,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             : `If that equipment keeps being a problem, the fix belongs in the program. Here's the request I'd send your coach:\n\n"${draft.suggestion}"\n\nWant me to send it?`;
           followUp(offerCopy);
         } catch(e){}
-      } else if(!lockedBranchFired && hasProgram && !updatedAthlete.program_locked && parsed.coach_flag
+      } else if(!lockedBranchFired && hasProgram && !updatedAthlete.program_locked && parsed.coach_flag && !painQuiet
          && !coachFlagOfferedRef.current[parsed.coach_flag]
          && noOtherOfferPending){
         coachFlagOfferedRef.current[parsed.coach_flag] = true;
@@ -9636,11 +9740,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           // clearly serious pain language, or an explicit ask (which never
           // routes through coach_flag at all). Circumstances shift — one odd
           // day is allowed to be one odd day.
+          // T64 S2: pain reaches here ONLY when the ledger reads it serious
+          // (painQuiet gates the branch); Joe was told a rec is coming. Plateau
+          // and equipment keep the watch-note rule, now silent on a first report.
           try {
             const flag = parsed.coach_flag;
-            const severe = flag==="pain" && isSevereReport(msg);
-            const repeat = watchHit(memoryRows, flag, msg);
-            if(!severe && !repeat){
+            const draftIt = flag==="pain" ? !!(painPlan && painPlan.draftRec) : watchHit(memoryRows, flag, msg);
+            if(!draftIt){
               const topic = topicTokens(msg).join(" ") || msg.replace(/\s+/g," ").trim().slice(0,40);
               const note = buildWatchNote(flag, topic);
               const v = validateFact(note);
@@ -9649,23 +9755,21 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
                 const row = Array.isArray(ins)?ins[0]:ins;
                 if(row && row.id) setMemoryRows(rows=>[row,...rows]);
               }
-              followUp(flag==="pain"
-                ? "Noted. One rough day doesn't change the plan, I'll keep an eye on it. Shows up again and we'll do something about it."
-                : flag==="plateau"
-                ? "Logged it. I'm watching that lift now. If it's still stuck next week we change something."
-                : "Noted. One session without the gear isn't worth rewriting anything, but if it keeps being a problem I'll draft a program fix.");
+              // no bubble: Joe is the one voice on a first report
             } else {
-              followUp(severe
-                ? "That's not something to train through blind. I'm drafting a program rec for it, it'll be at the bottom of your screen in a second. Open it whenever."
-                : "That's twice now, so it's a pattern, not a fluke. I'm drafting a program rec for it, it'll be at the bottom of your screen. Open it whenever.");
+              const purpose = programPurpose(updatedAthlete.program_text||"");
+              const painAreas = flag==="pain" ? (painTurnUsed?.turn.areas||[]) : [];
+              const ledgerLines = painAreas.map(a=>(painTurnUsed.recordsWithTurn||painTurnUsed.records||[]).find(r=>r.area===a)).filter(Boolean).map(r=>`- ${r.summary}`).join("\n");
               const rec = await draftRecJSON({
                 programText: updatedAthlete.program_text||"",
-                context: `WHAT THE ATHLETE REPORTED (trigger flag: ${flag}${severe?", clearly serious":", second report on this issue within two weeks"}):\n"${msg}"`,
-                instruction: "Draft the smallest protective or corrective change for this.",
+                context: `WHAT THE ATHLETE REPORTED (trigger flag: ${flag}${flag==="pain"?", clearly serious":", second report on this issue within two weeks"}):\n"${msg}"${purposeLine(purpose)?`\n\nPROGRAM PURPOSE (from the program's own words): ${purposeLine(purpose)}`:""}${ledgerLines?`\n\nPAIN LEDGER (computed by the app):\n${ledgerLines}`:""}`,
+                instruction: `Draft the smallest protective or corrective change for this.${purpose.protects.length?` Never change what the program already does to protect: ${purpose.protects.join(", ").replace(/_/g," ")}.`:""}`,
                 origin: flag,
               });
-              if(!rec || !(await stageRec(rec))){
-                followUp("Couldn't line a clean change up just now. Tell me exactly what you want different and I'll draft it properly.");
+              if(rec && (await stageRec(rec))){
+                followUp(flag==="pain" ? recStagedLine(painAreas) : "Drafted a program rec for that. It's at the bottom of your screen, open it when you're ready.", "action_done");
+              } else {
+                followUp("I couldn't draft that change just now. Tell me what you want different and I'll draft it properly.");
               }
             }
           } catch(e){}
@@ -11076,7 +11180,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
       )}
 
       {/* My Log Modal */}
-      {showLog&&<MyLogModal initialTab={myLogTab} workoutHistory={workoutHistory} athlete={athlete} onClose={()=>{setShowLog(false);setMyLogTab("workouts");}} proofDigest={proofDigest} onDigestRead={(d)=>setProofDigest(d)} onOpenProofChat={(past)=>{setShowLog(false);setChatDigest(past&&past.id?past:null);setShowProofChat(true);}} setWorkoutHistory={setWorkoutHistory} onSessionCountChanged={()=>syncSessionCountAfterChange(athlete,setAthlete)}/>}
+      {showLog&&<MyLogModal initialTab={myLogTab} workoutHistory={workoutHistory} athlete={athlete} onClose={()=>{setShowLog(false);setMyLogTab("workouts");}} proofDigest={proofDigest} onDigestRead={(d)=>setProofDigest(d)} onOpenProofChat={(past)=>{setShowLog(false);setChatDigest(past&&past.id?past:null);setShowProofChat(true);}} setWorkoutHistory={setWorkoutHistory} onSessionCountChanged={()=>syncSessionCountAfterChange(athlete,setAthlete)} onPainMarks={(m)=>setAthlete(prev=>({...prev,pain_marks:m}))}/>}
 
       {/* Program View Modal */}
       {showProgram&&(
@@ -12290,7 +12394,7 @@ function CountUp({end, dur=800, style}) {
   return <span style={style}>{n}</span>;
 }
 
-function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead, onOpenProofChat, setWorkoutHistory, onSessionCountChanged, initialTab}) {
+function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead, onOpenProofChat, setWorkoutHistory, onSessionCountChanged, initialTab, onPainMarks}) {
   // initialTab is the notification deep link's landing tab (T51); every other
   // caller omits it and still opens on the workouts list.
   const [tab,setTab] = useState(initialTab || "workouts");
@@ -12335,11 +12439,22 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
       return [...new Set([...lower(athlete.resolved_pain), ...lower(JSON.parse(localStorage.getItem(painKey)||"[]"))])];
     }catch{return lower(athlete.resolved_pain);}
   });
+  // T64 S2: "resolved" writes a dated cleared_at into the pain ledger's marks
+  // (so a flare AFTER it shows again, for the athlete and the coach) and keeps
+  // writing the legacy resolved_pain array for older readers. Two writes on
+  // purpose: a gateway that doesn't know pain_marks yet must not sink the
+  // legacy one.
+  const [painMarks,setPainMarks] = useState(()=>(athlete.pain_marks && typeof athlete.pain_marks==="object") ? athlete.pain_marks : {});
+  const painMarksView = useMemo(()=>normalizeMarks(painMarks, resolvedPain),[painMarks,resolvedPain]);
   const resolvePain = async (area) => {
     const updated=[...new Set([...resolvedPain,area.toLowerCase()])];
+    const marks = withMark(painMarks, area, "cleared_at");
+    setPainMarks(marks);
     setResolvedPain(updated);
+    onPainMarks && onPainMarks(marks);
     try{localStorage.setItem(painKey,JSON.stringify(updated));}catch(_){}
     try{await sbUpdate("athletes",athlete.id,{resolved_pain:updated});}catch(_){}
+    try{await sbUpdate("athletes",athlete.id,{pain_marks:marks});}catch(e){ reportError("sync", e, {error_type:"pain_marks_write", component:"resolvePain"}); }
   };
   // Timeline data = the recent working set plus any older rows the athlete has paged in.
   // Grouping the whole thing is the expensive step; memoize it once and reuse for both
@@ -12515,8 +12630,10 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                   });
                   const allPainFlags = session.entries.flatMap(e=>{
                     const pd = typeof e.parsed_data==="string"?(()=>{try{return JSON.parse(e.parsed_data);}catch{return {};}})():(e.parsed_data||{});
-                    return pd.pain_flags||[];
+                    // T64 S2: carry the row time so a flag after a clear shows again
+                    return (pd.pain_flags||[]).filter(p=>p&&p.area).map(p=>({...p, _at:e.created_at}));
                   });
+                  const openPainFlags = allPainFlags.filter(p=>!flagClearedFor(p.area, p._at, painMarksView));
                   const sessionFeel = session.entries.slice().reverse().find(e=>{
                     const pd = typeof e.parsed_data==="string"?(()=>{try{return JSON.parse(e.parsed_data);}catch{return {};}})():(e.parsed_data||{});
                     return pd.session_feel;
@@ -12598,9 +12715,9 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                           </tbody>
                         </table>
                       )}
-                      {allPainFlags.filter(p=>!resolvedPain.includes(p.area.toLowerCase())).length>0&&(
+                      {openPainFlags.length>0&&(
                         <div style={{display:"flex",flexWrap:"wrap",gap:5,marginTop:6}}>
-                          {allPainFlags.filter(p=>!resolvedPain.includes(p.area.toLowerCase())).map((p,pi)=>(
+                          {openPainFlags.map((p,pi)=>(
                             <div key={pi} style={{display:"flex",alignItems:"center",gap:4,background:"rgba(239,68,68,0.12)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:6,padding:"3px 8px"}}>
                               <span style={{color:CA.red,fontSize:11}}>⚠ {p.area}</span>
                               {!readOnly&&<button onClick={()=>resolvePain(p.area)} title="Mark resolved: hides from active view" style={{background:"none",border:"none",color:"#64748b",cursor:"pointer",fontSize:10,padding:"0 2px",lineHeight:1}}>✓ resolved</button>}

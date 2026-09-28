@@ -85,6 +85,16 @@ const wk = weekBounds(NOW);
   ];
   const p = weekPainFlags(rows, roster, wk, NOW);
   check("pain: week window + area join", p.map(x => ({ name: x.name, areas: x.areas })), [{ name: "Ava", areas: "knee, hip" }]);
+  // T64 S2: one taxonomy + the ledger's dated resolve. Resolved in MY LOG, then
+  // a flare a week later: the coach sees the flare, not the resolved flag.
+  const Ar = { ...A, pain_marks: { knee: { cleared_at: at(9) } } };
+  const rows2 = [
+    wo(A.id, at(10), { pain_flags: [{ area: "knees" }] }),               // before the clear
+    wo(A.id, at(0, 9), { pain_flags: [{ area: "left knee" }, { area: "Knee" }] }), // flare after it
+  ];
+  check("pain: knees / left knee / Knee read as one area", weekPainFlags(rows2, [Ar, B], wk, NOW).map(x => x.areas), ["knee"]);
+  const Ar2 = { ...A, pain_marks: { knee: { cleared_at: at(0, 10) } } };
+  check("pain: a flag before the athlete's clear stays hidden", weekPainFlags(rows2, [Ar2, B], wk, NOW), []);
 }
 
 // ── teamMovers: avg e1RM delta this week vs last, positive only ───────────────
