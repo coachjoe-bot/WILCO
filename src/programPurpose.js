@@ -14,12 +14,16 @@ import { areasInText } from "./painLedger.js";
 
 // Protective language: a deload/recovery/rehab note, an explicit "no X",
 // "until it settles", "if it talks", "still lingering", "protect", "easy on".
-const PROTECT_RE = /\b(deload|de-load|recover(y|ing)?|rehab\w*|prehab\w*|protect\w*|avoid\w*|easy on|go easy|back off|pain[- ]free|no (heavy |deep |more )?(squat\w*|pull\w*|press\w*|bench\w*|running|jump\w*|overhead|dips?|lunges?|deadlift\w*)|until (it|the \w+|that|they) (settles?|clears?|calms?)|if (the|your|my) \w+ (talks|barks|hurts|flares)|still (lingering|talking|barking|sore|tender)|lingering|tender|sensitive|irritated|flare[- ]?ups?|train(ing)? around|work(ing)? around|spare|careful with|stay off|keep \w+ (quiet|calm))\b/i;
+const PROTECT_RE = /\b(deload|de-load|recover(y|ing)?|rehab\w*|prehab\w*|protect\w*|avoid\w*|easy on|go easy|back off|\w+[- ]friendly|no (heavy |deep |more |added )?(squat\w*|pull\w*|press\w*|bench\w*|running|jump\w*|plyo\w*|overhead|dips?|lunges?|deadlift\w*|load\w*|single[- ]leg)|until (?:the |your |my |it |that )?[\w ]{0,20}?(settles?|clears?|calms?|resolves?|heals?|feels (?:right|good|fine))|if (the|your|my) \w+ (talks|barks|hurts|flares)|still (lingering|talking|barking|sore|tender)|tender|irritated|flare[- ]?ups?|train(ing)? around|work(ing)? around|spare|careful with|stay off|keep \w+ (quiet|calm)|quiet (weeks?|days?)|give the \w+ (a |some |two |three |a few )?(quiet|rest|break|time)|active issue|restore \w+ (mobility|stability))\b/i;
 
-// Lines that are only a list of exercises are not protective notes even when a
-// lift name carries a body word ("terminal knee extensions" on a recovery day is
-// covered by the day header, which the window catches).
-const EXERCISE_LINE = /^\s*[*•-]\s/;
+// Lift jargon that carries a body word but names no sore area.
+const JARGON = /\b(rear[- ]foot|front[- ]foot|lead foot|single[- ]leg|split stance|toes? to bar|hip hinge|knee[- ]to[- ]chest)\b/gi;
+
+// A header line ("WEEK 1 ... DELOAD", "Day 3 - Active Recovery") can carry the
+// protective word for the line right under it ("Knees, upper back and
+// shoulders."). Only headers pass their language down; cues inside exercise
+// lines never chain.
+const isHeader = (l) => l.length <= 80 && (/^(week|wk|day|mon|tue|wed|thu|fri|sat|sun|block|phase|focus|goal|intent)\b/i.test(l) || (l === l.toUpperCase() && /[A-Z]/.test(l)));
 
 const hash = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return (h >>> 0).toString(36) + ":" + s.length; };
 const CACHE = new Map();
@@ -36,19 +40,17 @@ export function programPurpose(programText) {
   let goal = null;
   const iIdx = lines.findIndex((l) => /^(intent|goal|goals|purpose)\b[:\s]*$/i.test(l));
   if (iIdx >= 0) goal = lines.slice(iIdx + 1).find((l) => l && !/^[A-Z ]{4,}$/.test(l)) || null;
-  if (!goal) { const g = lines.find((l) => /^(intent|goal|purpose)\s*[:—-]\s*\S/i.test(l)); if (g) goal = g.replace(/^(intent|goal|purpose)\s*[:—-]\s*/i, ""); }
+  if (!goal) { const g = lines.find((l) => /^(intent|goal|purpose)(?: of the (?:block|program))?\s*[:—-]?\s+\S/i.test(l)); if (g) goal = g.replace(/^(intent|goal|purpose)(?: of the (?:block|program))?\s*[:—-]?\s*/i, ""); }
 
   const protects = new Set();
   const notes = [];
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
-    if (!l || EXERCISE_LINE.test(l)) continue;
-    const areas = areasInText(l);
+    if (!l) continue;
+    const areas = areasInText(l.replace(JARGON, " "));
     if (!areas.length) continue;
-    // protective language in the line itself or the header right above it
-    // ("WEEK 1 ... DELOAD" then "Knees, upper back and shoulders.")
     const prev = lines[i - 1] || "";
-    if (PROTECT_RE.test(l) || (PROTECT_RE.test(prev) && !EXERCISE_LINE.test(prev))) {
+    if (PROTECT_RE.test(l) || (isHeader(prev) && PROTECT_RE.test(prev))) {
       areas.forEach((a) => protects.add(a));
       notes.push(l.slice(0, 160));
     }

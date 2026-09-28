@@ -54,7 +54,7 @@ const AREA_TABLE = [
   ["neck", /\b(neck|cervical)\b/],
   ["pec", /\b(pecs?|peck|pectorals?|pectoralis|chest|sternum)\b/],
   ["shoulder", /\b(shoulders?|sholders?|shoudlers?|rotator ?cuff|supraspinatus|infraspinatus|labrum|ac joint|delts?|deltoids?)\b/],
-  ["elbow", /\b(elbows?|tennis elbow|golfer'?s elbow|tricep(s)? tendon|olecranon)\b/],
+  ["elbow", /\b(elbows?|tennis elbow|golfer'?s elbow|tricep(s)? tendon|bicep(s)? tendon|distal bicep|olecranon)\b/],
   ["wrist", /\b(wrists?|carpal)\b/],
   ["forearm", /\b(forearms?|brachioradialis)\b/],
   ["groin", /\b(groin|adductors?|inner thigh)\b/],
@@ -107,7 +107,7 @@ export const areaLabel = (key) => AREA_LABELS[key] || String(key || "");
 // Every known area named in a free text ("knees flared, and my pec too" -> knee, pec).
 // Lift names that contain body words ("back squat", "chest-supported row") are
 // not areas; strip them before scanning free text.
-const LIFT_PHRASES = /\b(toes? to bar|back squats?|back extensions?|back raises?|hip thrusts?|hip mobility|hip (ab|ad)ductors?|knee extensions?|terminal knee|calf raises?|shoulder press(es)?|leg press(es)?|chest[- ]?supported|chest press|neck bridges?|behind the neck|wrist curls?|knees? to (elbow|chest)|hanging knee raises?)\b/g;
+const LIFT_PHRASES = /\b(back[- ]off( sets?)?|back to|back and forth|(come|coming|came|get|getting|go|going|went|bring|bringing|ease|easing|build|building|dial|dialing|dialled) (it |them |things )?back|back (in|into|on|down|up|at it)|toes? to bar|back squats?|back extensions?|back raises?|hip thrusts?|hip mobility|hip (ab|ad)ductors?|knee extensions?|terminal knee|calf raises?|shoulder press(es)?|leg press(es)?|chest[- ]?supported|chest press|neck bridges?|behind the neck|wrist curls?|knees? to (elbow|chest)|hanging knee raises?)\b/g;
 export function areasInText(text) {
   let t = ` ${clean(text).replace(LIFT_PHRASES, " ")} `;
   const out = [];
