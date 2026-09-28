@@ -5,7 +5,7 @@
 // pin, and the WORKOUT #N stamp — so "tests pass" and "works in the gym" stop
 // being different claims.
 import { test, expect } from "@playwright/test";
-import { mockApi, makeAthlete, loginAsAthlete, pushupParse } from "./mocks.js";
+import { mockApi, makeAthlete, loginAsAthlete, pushupParse, emptyParse } from "./mocks.js";
 
 const PROGRAM = "Day 1 - Push\nBench Press 3x5 @ 185\nDips 3x8\n\nDay 2 - Pull\nRow 3x8 @ 135";
 const DRAFT = "Day 1 - Push\nBench Press 3x5 @ 185\nDips 3x8";
@@ -249,4 +249,100 @@ test("an athlete WITH an email never sees the banner", async ({ page }) => {
   await loginAsAthlete(page, athlete);
   await expect(page.getByPlaceholder(/Tell Coach Joe/)).toBeVisible({ timeout: 15000 });
   await expect(page.getByText(/Add a recovery email/)).toHaveCount(0);
+});
+
+// ─── T64 Fix 1: a stated end date that disagrees with the block's own text ────
+// raises a deterministic two-tap confirm — never a silent overwrite, and never
+// a model call deciding which number wins. Will's real 08-24 incident: he said
+// "Sep 7", the block's own text said Sep 5, and the app kept his number with no
+// reconciliation. Dates below are computed relative to "now" (never hardcoded)
+// so the test never depends on the real wall-clock date, and both are well
+// outside the wrap-up card's own 7-day window so that unrelated card never
+// fires and confuses the assertions.
+test("T64 Fix 1: a conflicting stated end date raises the two-tap confirm, and the athlete's pick is scoped to the open block's id", async ({ page }) => {
+  const now = Date.now();
+  const iso = (days) => new Date(now + days * 86400000).toISOString().slice(0, 10);
+  const textEnd = iso(25);   // the block's own declared end
+  const statedEnd = iso(30); // what the athlete says in chat — genuinely different
+  const BLOCK_PROGRAM = `BLOCK 1 — ROAD TO 315\nRuns: ${iso(-5)} to ${textEnd}\n\nDay 1 - Squat\nBack Squat 5x5 @225`;
+  const openBlock = { id: "smoke-open-block-1", applied_at: new Date(now - 5 * 86400000).toISOString(), completed_at: null, ends_at: null, program_text: BLOCK_PROGRAM };
+  const athlete = makeAthlete({ program_text: BLOCK_PROGRAM });
+  const spanParse = { ...emptyParse, program_block_span: { weeks: null, end_date: statedEnd, repeating: false } };
+  const { calls } = await mockApi(page, {
+    athlete, parseResult: spanParse,
+    dataReads: { program_history: () => [openBlock] },
+  });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+
+  await page.getByPlaceholder(/Tell Coach Joe about your workout/).fill(`No my program wraps up ${statedEnd}`);
+  await page.getByRole("button", { name: "→" }).click();
+
+  // The deterministic confirm message + its two buttons, not a model-decided answer.
+  await expect(page.getByText(/Your program says/)).toBeVisible({ timeout: 15000 });
+  const useBtn = page.getByRole("button", { name: /^Use /, exact: false });
+  const keepBtn = page.getByRole("button", { name: /^Keep /, exact: false });
+  await expect(useBtn).toBeVisible();
+  await expect(keepBtn).toBeVisible();
+
+  // Nothing is written until a tap picks a side.
+  expect(calls.find((c) => c.body?.op === "update" && c.body?.table === "athletes" && c.body?.data?.program_block_span)).toBeFalsy();
+
+  await useBtn.click();
+  await expect(page.getByText(/Locked in/)).toBeVisible({ timeout: 10000 });
+  const write = calls.find((c) => c.body?.op === "update" && c.body?.table === "athletes" && c.body?.data?.program_block_span);
+  expect(write).toBeTruthy();
+  // Scoped to the open block's OWN id — the exact leak Fix 1 closes: an answer
+  // recorded with no block tie (or the wrong one) can never be read back for a
+  // different block later.
+  expect(write.body.data.program_block_span.blockId).toBe(openBlock.id);
+  expect(write.body.data.program_block_span.endsAt).toBe(statedEnd);
+});
+
+// ─── T64 Fix 4: a today-only change never becomes a temp program ─────────────
+// Will's real 09-02 incident: he scoped his message to "today's workout", Joe's
+// own reply correctly treated it as one session, and the code wrote a full temp
+// program underneath that reply anyway. is_temp_program_update alone (the
+// classifier's flag) must no longer be sufficient — the deterministic
+// changeScope gate decides.
+test("T64 Fix 4: a message scoped to today never writes a temp program, even when the classifier flags it", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM, temp_program_text: null });
+  const msg = "I don't have my weightlifting shoes with me so I'm subbing push press for snatch balance in place of today's workout.";
+  const parseResult = { ...emptyParse, is_temp_program_update: true };
+  const { calls } = await mockApi(page, {
+    athlete, parseResult,
+    chatReply: "One session without the gear isn't worth rewriting anything. Want me to lock this in as today's swap?",
+  });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+
+  await page.getByPlaceholder(/Tell Coach Joe about your workout/).fill(msg);
+  await page.getByRole("button", { name: "→" }).click();
+  await expect(page.getByText(/One session without the gear/)).toBeVisible({ timeout: 15000 });
+
+  // No temp program written, no coach-audit row, and never a claim Joe didn't make.
+  await expect(page.getByText(/I've set (?:you up with )?a temporary program/)).toHaveCount(0);
+  expect(calls.find((c) => c.body?.op === "update" && c.body?.table === "athletes" && "temp_program_text" in (c.body?.data || {}))).toBeFalsy();
+  expect(calls.find((c) => c.body?.op === "insert" && c.body?.table === "program_modifications")).toBeFalsy();
+});
+
+test("T64 Fix 4: a genuine multi-day away situation still gets a real temp program", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM, temp_program_text: null });
+  const msg = "I'm at a hotel this week with no gear, just dumbbells.";
+  const parseResult = { ...emptyParse, is_temp_program_update: true };
+  const { calls } = await mockApi(page, {
+    athlete, parseResult,
+    chatReply: "Got it, dumbbells only for the week. I'll get you a plan set up.",
+  });
+  // extractProgramText hits a SEPARATE feature (program_extract) from the
+  // visible reply — give it its own response so the write's "did anything real
+  // get extracted" guard (tempText !== reply) has something to pass.
+  await aiByFeature(page, { program_extract: "Day 1 - Full Body\nDB Squat 4x8\nDay 2 - Full Body\nDB Row 4x8\nDay 3 - Full Body\nDB Press 4x8" });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+
+  await page.getByPlaceholder(/Tell Coach Joe about your workout/).fill(msg);
+  await page.getByRole("button", { name: "→" }).click();
+  await expect(page.getByText(/I've set a temporary program/)).toBeVisible({ timeout: 15000 });
+
+  const write = calls.find((c) => c.body?.op === "update" && c.body?.table === "athletes" && c.body?.data?.temp_program_text);
+  expect(write).toBeTruthy();
+  expect(write.body.data.temp_program_text).toContain("DB Squat");
 });
