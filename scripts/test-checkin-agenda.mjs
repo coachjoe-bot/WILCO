@@ -164,6 +164,12 @@ console.log("one question per turn (live finding 09-28):");
   const tangent = advanceAgenda(A, st, { message: "why do my knees click?", parsed: parseAgendaTurn(J({ reply: "Clicking without pain is usually gas in the joint. Does it hurt when it clicks?", covered: [], next: null }), A.map((i) => i.id)) });
   ok(/Does it hurt/.test(tangent.reply), "athlete asked something: Joe's clarifying question may stay on a held turn");
   ok(composeReply({ reply: "Plain fallback? yes.", malformed: true }, null) === "Plain fallback? yes.", "malformed fallback text is never rewritten");
+  // live finding: the re-ask cap covered the item the model was asking again;
+  // its stale ask must not show next to the code's own next question
+  const capped = { ...st, pending: "injury", asked: { weight: 1, injury: MAX_ASKS_PER_ITEM } , covered: ["weight"] };
+  const cr = advanceAgenda(A, capped, { message: "I was sick all week", parsed: parseAgendaTurn(J({ reply: "Being sick explains it.", ask: "Anything banged up I should know about?", covered: [], next: "injury" }), ["injury", "goal", "recovery"]) });
+  ok(cr.state.covered.includes("injury") && cr.ask && cr.ask.id === "goal", "re-ask cap covers the item and code asks the next one");
+  ok(cr.reply === "Being sick explains it." && !/banged up/.test(cr.reply), `stale ask dropped: one question total (${cr.reply})`);
   const endAns = advanceAgenda(A, { ...st, pending: "injury" }, { message: "nah that's it", parsed: null, endIntent: true });
   ok(endAns.state.covered.includes("injury") && endAns.finished, "'nah that's it' answers the pending item and ends");
 }

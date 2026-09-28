@@ -223,7 +223,10 @@ export function advanceAgenda(agenda, state, { message, parsed, endIntent = fals
   // A held turn (no next) keeps the reply's own question only when the athlete
   // just asked something back (a clarifying question is fair there).
   const keepQ = !pending && /\?\s*$/.test(String(message || "").trim());
-  return { state: { covered: [...covered], asked, pending, answers }, reply: keepQ ? p.reply : composeReply(p, pending && !ask ? byId.get(pending) : null), ask, finished: false, reason: "continue" };
+  // the model's "ask" only stands for the item code accepted as next (an ask
+  // for an item this turn covered, e.g. by the re-ask cap, is dropped)
+  const pp = pending && pending === p.next ? p : { ...p, ask: null, next: null };
+  return { state: { covered: [...covered], asked, pending, answers }, reply: keepQ ? p.reply : composeReply(pp, pending && !ask && !pp.ask ? byId.get(pending) : null), ask, finished: false, reason: "continue" };
 }
 
 // The turn's text: the reaction (question sentences dropped: the one question

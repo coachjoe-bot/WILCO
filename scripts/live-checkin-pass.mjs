@@ -104,6 +104,13 @@ const RUNS = +(process.env.RUNS || 5);
 for (const name of order) {
   const sc = SCENARIOS[name];
   for (let run = 1; run <= RUNS; run++) {
+    // stay inside the /api/claude limiter (100 per 15 min per user)
+    for (;;) {
+      const since = encodeURIComponent(new Date(Date.now() - 15 * 60000).toISOString());
+      const used = (await rest(`rate_limits?key=eq.claude:athlete:${QA}&created_at=gte.${since}&select=id`)).length;
+      if (used <= 80) break;
+      console.log(`limiter: ${used}/100 in window, waiting`); await sleep(60000);
+    }
     await cleanup();
     await sc.setup();
     if (!sc.chat) await rest("proof_digests", { method: "POST", body: JSON.stringify(digestRow(sc.bank)) });
