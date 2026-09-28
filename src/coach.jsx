@@ -2857,14 +2857,16 @@ function MorningBrief({D,athletes,changeRequests,coach,school,briefContext,onOpe
       const contextBlock=recentNotes.length?`\nCoach's recent context:\n${recentNotes.map(n=>`- ${n}`).join("\n")}`:"";
       if(!viaChip&&isAskingBack(t)){
         // Coach asked back — answer briefly, stay on the question. (Haiku, ~250 tok)
-        const sys=`You are WILCO, a strength coach's AI assistant, mid morning-brief. Answer the coach's question directly in 1-2 sentences, grounded in the team read, then stop. Team read: ${D.activeCount}/${athletes.length} trained this week, ${D.prThisWk} true PRs, team adherence ${D.teamAdh??"n/a"}%.${contextBlock}`;
+        const sys=`${WILCO_COACH_VOICE}
+You are mid morning-brief. Answer the coach's question directly, grounded in the team read, then stop. Team read: ${D.activeCount}/${athletes.length} trained this week, ${D.prThisWk} true PRs, team adherence ${D.teamAdh??"n/a"}%.${contextBlock}`;
         const reply=gateText("coach", await askClaude(sys,`You asked them: "${beat.question.text}"\nThe coach replied: "${t}"`,250,[],"claude-haiku-4-5","coach_brief"));
         setQMsgs(m=>({...m,[beat.id]:[...(m[beat.id]||[]),{role:"wilco",text:reply||"Your call either way."}]}));
         setBusy(false); return;
       }
       if(!viaChip){
         // One-sentence reaction before moving on (Haiku, ~160 tok) — chips skip AI entirely.
-        const sys=`You are WILCO, a strength coach's AI assistant. React to the coach's answer in ONE short, direct sentence: acknowledge it and note one concrete implication if there is one. No follow-up question. Team: ${D.activeCount}/${athletes.length} trained this week, adherence ${D.teamAdh??"n/a"}%.${contextBlock}`;
+        const sys=`${WILCO_COACH_VOICE}
+React to the coach's answer briefly and directly: acknowledge it and note one concrete implication if there is one. No follow-up question. Team: ${D.activeCount}/${athletes.length} trained this week, adherence ${D.teamAdh??"n/a"}%.${contextBlock}`;
         const reply=gateText("coach", await askClaude(sys,`Q: "${beat.question.text}"\nCoach: "${t}"`,160,[],"claude-haiku-4-5","coach_brief"));
         if(reply) setQMsgs(m=>({...m,[beat.id]:[...(m[beat.id]||[]),{role:"wilco",text:reply}]}));
       }
@@ -3295,7 +3297,8 @@ function CoachCheckin({digest, team, coach, onRead}){
     if(isAskingBack(t)){
       setBusy(true);
       try{
-        const sys=`You are WILCO, a strength coach's AI assistant. The coach asked a question mid-check-in. Answer it directly and briefly (1-3 sentences), grounded in the team read, then stop. Don't move on. ${teamCtx()}`;
+        const sys=`${WILCO_COACH_VOICE}
+The coach asked a question mid-check-in. Answer it directly, grounded in the team read, then stop. Don't move on. ${teamCtx()}`;
         // Haiku, matching the Morning Brief's ask-back twin (coach.jsx ~2201) —
         // identical job (answer briefly from the team read, then stop) at ~10x
         // lower cost per turn in the usage_costs ledger.
@@ -3313,7 +3316,8 @@ function CoachCheckin({digest, team, coach, onRead}){
     if(!thin){
       setBusy(true);
       try{
-        const sys=`You are WILCO, a strength coach's AI assistant, mid-check-in with the coach. React to their answer in ONE short, natural sentence: acknowledge or reflect it like a real conversation. Do NOT ask a question, no lists, no emoji. ${teamCtx()}`;
+        const sys=`${WILCO_COACH_VOICE}
+You are mid-check-in with the coach. React to their answer briefly and naturally, like a real conversation. Do NOT ask a question, no lists, no emoji. ${teamCtx()}`;
         const reply=gateText("coach", await askClaude(sys, `You asked: "${q.text}"\nThey answered: "${t}"`, 160, [], "claude-haiku-4-5", "coach_checkin"));
         if(reply&&reply.trim()) setMsgs(m=>[...m,{role:"wilco",text:reply.trim()}]);
       }catch{}
