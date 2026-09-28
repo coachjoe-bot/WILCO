@@ -1,0 +1,29 @@
+{
+  "bug": "T64 S2b item 1: the founder's own words for what the ledger must be able to say read back as 'active, holding steady'",
+  "source": "Will 09-28: \"injured 3 weeks ago, had lingering pain the last two weeks and reported dull pain today, seems to be headed in the right direction.\" Scenario built by the orchestrator from that sentence (not a real athlete's rows).",
+  "tz": "America/New_York",
+  "now": "2026-09-28T18:00:00Z",
+  "rows": [
+    {"id": "fx-0907", "created_at": "2026-09-07T16:00:00Z", "raw_message": "Bench 3x5 @ 225. Sharp pull in my left pec on bench, had to stop.",
+     "parsed_data": {"exercises": [{"name": "Bench Press", "unit": "lbs", "weight": 225, "sets": 3, "reps": 5}], "pain_flags": [{"area": "left pec", "description": "sharp pull in pec on bench, had to stop"}]}},
+    {"id": "fx-0912", "created_at": "2026-09-12T16:00:00Z", "raw_message": "Incline DB bench 3x8 @ 60. Pec still lingering on incline.",
+     "parsed_data": {"exercises": [{"name": "Incline DB Bench", "unit": "lbs", "weight": 60, "sets": 3, "reps": 8}], "pain_flags": [{"area": "pec", "description": "pec still lingering on incline"}]}},
+    {"id": "fx-0917", "created_at": "2026-09-17T16:00:00Z", "raw_message": "Dips 3x8. Lingering, felt it on dips.",
+     "parsed_data": {"exercises": [{"name": "Dips", "unit": "bodyweight", "weight": 0, "sets": 3, "reps": 8}], "pain_flags": [{"area": "pec", "description": "lingering, felt it on dips"}]}},
+    {"id": "fx-0922", "created_at": "2026-09-22T16:00:00Z", "raw_message": "Bench 3x5 @ 185",
+     "parsed_data": {"exercises": [{"name": "Bench Press", "unit": "lbs", "weight": 185, "sets": 3, "reps": 5}], "pain_flags": []}},
+    {"id": "fx-0928", "created_at": "2026-09-28T16:00:00Z", "raw_message": "Bench 3x5 @ 205. Dull pec on bench today, not bad.",
+     "parsed_data": {"exercises": [{"name": "Bench Press", "unit": "lbs", "weight": 205, "sets": 3, "reps": 5}], "pain_flags": [{"area": "pec", "description": "dull pec on bench today, not bad"}]}}
+  ],
+  "expect": {
+    "area": "pec",
+    "trend": "improving",
+    "speak": "none",
+    "summary": "Pec: sharp 3 weeks ago (Sep 7), lingering since, dull today. Headed the right way."
+  },
+  "invariants": [
+    "trend is improving: the latest degree (dull) is two steps under the peak (sharp) three weeks back, the athlete said 'not bad', and the bench load rose 185 -> 205",
+    "the summary gives the degree trajectory in time order with relative time, and carries no mention count",
+    "a pain-free log the next turn gets no pec talk from Joe (verdict none); 'how's my pec doing?' is answered from this line, direction included"
+  ]
+}
