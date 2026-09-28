@@ -427,8 +427,15 @@ const answerForBlock = (spanAnswer, blockId) =>
 // says nothing at all, is not. This is the exact gap in Will's 08-24 incident:
 // Joe's own reply named the program's real end (Sep 5) in the same breath as
 // accepting Will's "Sep 7," and nothing reconciled the two. `stated` is the
-// parser's raw program_block_span shape: {weeks, end_date, repeating}.
-export function blockSpanConflict({ programText, stated } = {}) {
+// parser's raw program_block_span shape: {weeks, end_date, repeating}. `appliedAt`
+// (the open block's own applied_at) is optional but load-bearing for the common
+// real-world shape: most programs are numbered weeks with NO printed end date at
+// all (Will's real block included — parseBlockSpan reads it as weeks:3, not an
+// explicit date), so a same-type-only comparison (weeks-vs-weeks, date-vs-date)
+// would miss the exact case this fix exists for. With appliedAt, a weeks-only
+// text side and a date-only stated side (or vice versa) are both anchored to the
+// block's own start and compared as dates.
+export function blockSpanConflict({ programText, stated, appliedAt = null } = {}) {
   if (!stated) return null;
   const fromText = parseBlockSpan(programText);
   if (!fromText.known) return null; // the text doesn't answer this itself — nothing to contradict
@@ -444,6 +451,21 @@ export function blockSpanConflict({ programText, stated } = {}) {
   }
   if (stated.weeks && fromText.weeks && stated.weeks !== fromText.weeks) {
     return { textSide: fromText, statedSide: stated };
+  }
+  // Cross-type comparison, anchored to the block's own start. A few days of slop
+  // is normal week-boundary rounding (which weekday a "3-week block" technically
+  // lands on), not a real disagreement — only a gap wider than that counts.
+  const applied = appliedAt ? new Date(appliedAt) : null;
+  if (applied && !Number.isNaN(applied.getTime())) {
+    const impliedEnd = (weeks) => { const d = new Date(applied); d.setUTCDate(d.getUTCDate() + weeks * 7); return d; };
+    if (stated.end_date && !fromText.endDate && fromText.weeks) {
+      const diffDays = Math.abs((new Date(`${stated.end_date}T12:00:00Z`) - impliedEnd(fromText.weeks)) / 86400000);
+      if (diffDays > 2) return { textSide: fromText, statedSide: stated };
+    }
+    if (stated.weeks && !stated.end_date && fromText.endDate) {
+      const diffDays = Math.abs((new Date(`${fromText.endDate}T12:00:00Z`) - impliedEnd(stated.weeks)) / 86400000);
+      if (diffDays > 2) return { textSide: fromText, statedSide: stated };
+    }
   }
   return null;
 }

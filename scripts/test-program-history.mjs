@@ -440,6 +440,38 @@ console.log("Fix 1 — wrapCardEligible:");
   ok(r.show === true, "resolves a date from the weeks-only answer");
   ok(new Date(r.endsAt).toISOString().slice(0, 10) === "2026-09-05", "5 weeks from the block's OWN applied_at (Aug 1), not from now");
 }
+{
+  // GAP HUNTER: athlete with zero history rows — no program_history row at all
+  // for this athlete (a brand-new account, or one that predates the table).
+  // Both eligibility functions must degrade to "nothing to show/ask", never throw.
+  ok(wrapCardEligible({ openBlock: null, programText: PROGRAM, spanAnswer: null }).show === false,
+    "no program_history row at all → card never shows");
+  ok(wrapCardEligible({ openBlock: null, programText: PROGRAM, spanAnswer: null }).reason === "no_open_block",
+    "reason is explicit, not a silent false");
+  ok(blockSpanNeedsAsk({ openBlock: null, programText: PROGRAM, spanAnswer: null }) === false,
+    "no open block → never asks (nothing to pin the answer to)");
+}
+
+console.log("Fix 1 — blockSpanConflict cross-type (text states WEEKS, athlete states a DATE, or vice versa):");
+{
+  // This is the shape of Will's REAL program (a numbered-week block with no
+  // printed end date — parseBlockSpan reads "Duration: 3 Weeks" as weeks:3, never
+  // an endDate) crossed with his real answer shape (a calendar date, "sept 7th").
+  // The same-type-only checks above (weeks-vs-weeks, date-vs-date) never compare
+  // these two — this is the exact gap that let his real Sep 7 answer through.
+  const appliedAt = "2026-08-17T00:00:00Z"; // block's own start
+  ok(blockSpanConflict({ programText: DURATION_TEXT, stated: { weeks: null, end_date: "2026-10-01", repeating: false }, appliedAt })?.textSide.weeks === 3,
+    "text says 3 weeks (~Sep 7), athlete's stated date is weeks later → conflict, cross-type");
+  ok(blockSpanConflict({ programText: DURATION_TEXT, stated: { weeks: null, end_date: "2026-09-07", repeating: false }, appliedAt }) === null,
+    "text's 3-week estimate lands within 2 days of the stated date → normal week-boundary slop, not a conflict");
+  ok(blockSpanConflict({ programText: DURATION_TEXT, stated: { weeks: null, end_date: "2026-09-07", repeating: false } }) === null,
+    "no appliedAt supplied → cross-type check is skipped entirely (never a false positive from a missing anchor)");
+  // Reverse direction: text states an explicit date (RUNS_RE contract style),
+  // athlete states a week count that disagrees once anchored to the block start.
+  const RUNS_TEXT = "Runs: 2026-08-17 to 2026-09-05\nDay 1 - Squat\nBack Squat 5x5 @225";
+  const conflict = blockSpanConflict({ programText: RUNS_TEXT, stated: { weeks: 6, end_date: null, repeating: false }, appliedAt });
+  ok(conflict && conflict.textSide.endDate === "2026-09-05", "text's explicit end date vs a disagreeing stated week count → conflict, cross-type reverse");
+}
 
 // ── phase names + retire's completedAt override ──────────────────────────────
 console.log("phase names + retire:");

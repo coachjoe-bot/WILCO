@@ -431,14 +431,22 @@ export function buildBrief({ athlete, thisWeekSessions, lastWeekSessions, monthS
     weekAhead: (() => {
       const programText = athlete.temp_program_text || athlete.program_text || "";
       if (!programText.trim()) return null;
-      // The span answer only counts for the block it was given about: `appliedAt` pins
-      // it, so starting a new block drops it and Joe asks again — which is right, since
-      // the next block's length is a different question.
+      // T64 Fix 1: the span answer only counts for the block it was given about,
+      // scoped by program_history.id (`blockId`) — not the old `appliedAt` vs
+      // `athletes.program_started_on` comparison, which was vacuous (that column
+      // is never written, so the guard always passed and any block's answer
+      // leaked into every later one). An answer with no blockId at all (written
+      // before this fix shipped) is nobody's answer now — it's dropped rather
+      // than grandfathered in, since there's no way to know which block it was
+      // really about. Starting a new block naturally re-asks.
       const span = athlete.program_block_span || null;
-      const spanAnswer = span && (!span.appliedAt || !athlete.program_started_on || span.appliedAt === athlete.program_started_on) ? span : null;
+      const spanAnswer = span && span.blockId && athlete.program_open_block_id && span.blockId === athlete.program_open_block_id ? span : null;
       const wa = weekAheadFor({
         programText,
-        startedOn: athlete.program_started_on || null,
+        // T64 Fix 1: athletes.program_started_on is never written; the real
+        // anchor is the open block's own applied_at, attached by the caller
+        // (api/trigger-proof-feed.js) alongside program_open_block_id.
+        startedOn: athlete.program_open_block_applied_at || null,
         override: athlete.program_position_override || null,
         sessions: thisWeekSessions.map((s) => sessionDate(s)),
         // program_history.ends_at — the planned end date of the OPEN block, and the

@@ -2034,7 +2034,12 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
       .sort((a,b)=>b-a);
     const pos = currentPosition({
       programText: athlete.temp_program_text || athlete.program_text || "",
-      startedOn: programStartedOn || athlete.program_started_on || null,
+      // T64 Fix 1: athletes.program_started_on is never written (grep confirms
+      // zero write sites) — it was dead as a position-anchor fallback long
+      // before this fix, so it's dropped rather than left half-alive.
+      // programStartedOn (from getJoeCtx, keyed on program_history.applied_at)
+      // is the real anchor.
+      startedOn: programStartedOn || null,
       override: athlete.program_position_override || null,
       sessions: chatSessions,
     });
@@ -9353,7 +9358,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           const openRows = await sbRead("program_history",`?athlete_id=eq.${athlete.id}&order=applied_at.desc&limit=1&select=id,applied_at,completed_at,program_text`).catch(()=>[]);
           const openBlk = (Array.isArray(openRows)&&openRows[0]&&!openRows[0].completed_at) ? openRows[0] : null;
           if(openBlk){
-            const conflict = blockSpanConflict({programText: openBlk.program_text || updatedAthlete.program_text || "", stated: s});
+            const conflict = blockSpanConflict({programText: openBlk.program_text || updatedAthlete.program_text || "", stated: s, appliedAt: openBlk.applied_at});
             if(conflict){
               const programSide = {endDate: conflict.textSide.endDate||null, weeks: conflict.textSide.repeating?null:(conflict.textSide.weeks||null), repeating: conflict.textSide.repeating};
               const statedSide = {endDate: s.end_date||null, weeks: validWeeks, repeating: s.repeating===true};
@@ -9500,8 +9505,19 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       try {
         const after = (updatedAthlete.program_text || "").trim();
         const justSaved = after && after !== programTextBefore;
-        if(justSaved && !updatedAthlete.program_block_span && !parseBlockSpan(after).known){
-          followUp(`One thing before I build off this: does it run for a set stretch (a block with an end date), or is it the same week on repeat for now? Knowing lets me tell you what's coming each week instead of guessing.`);
+        if(justSaved && !parseBlockSpan(after).known){
+          // T64 Fix 1: an old span answer only counts for the block it was given
+          // about. A program that was JUST saved gets a fresh block_history row —
+          // the athlete's answer to a PRIOR block's "does this end?" must never
+          // silently count as an answer for THIS one (same leak wrapCardEligible
+          // guards against, at the "should we even ask" moment rather than the
+          // "should we show a stale date" moment).
+          const freshRows = await sbRead("program_history",`?athlete_id=eq.${athlete.id}&order=applied_at.desc&limit=1&select=id,completed_at`).catch(()=>[]);
+          const freshOpen = (Array.isArray(freshRows)&&freshRows[0]&&!freshRows[0].completed_at) ? freshRows[0] : null;
+          const answeredForThisBlock = freshOpen && updatedAthlete.program_block_span?.blockId === freshOpen.id;
+          if(!answeredForThisBlock){
+            followUp(`One thing before I build off this: does it run for a set stretch (a block with an end date), or is it the same week on repeat for now? Knowing lets me tell you what's coming each week instead of guessing.`);
+          }
         }
       } catch(_){}
 
@@ -10584,6 +10600,21 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
             Keep current
           </button>
         </div>
+      ):blockSpanConflictPending?(
+        /* T64 Fix 1: the athlete's stated block end disagreed with what the
+           program's own text already says. Two taps, no model call — whichever
+           the athlete picks gets written scoped to this block's id. */
+        <div className="no-sb" style={{padding:"0 14px 4px",display:"flex",gap:6,overflowX:"auto",flexShrink:0,alignItems:"center",flexWrap:"nowrap"}}>
+          <span style={{color:CA.muted,fontSize:12,flexShrink:0}}>↑</span>
+          <button onClick={()=>confirmBlockSpanConflict(true)}
+            style={{background:`${CA.accent}20`,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+            Use {spanSideLabel(blockSpanConflictPending.stated)}
+          </button>
+          <button onClick={()=>confirmBlockSpanConflict(false)}
+            style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+            Keep {spanSideLabel(blockSpanConflictPending.program)}
+          </button>
+        </div>
       ):selfChangePending?(
         selfChangePending.phase==="editing"?(
           <div style={{padding:"0 14px 8px",display:"flex",flexDirection:"column",gap:6,flexShrink:0}}>
@@ -11486,7 +11517,10 @@ const buildQuickLogContext = (athlete, workoutHistory, manualRMs, messages, goal
   // stated day outranks both. The model is told not to re-derive it.
   const position = currentPosition({
     programText: program,
-    startedOn: programStartedOn || athlete.program_started_on || null,
+    // T64 Fix 1: athletes.program_started_on is never written — dropped as a
+    // fallback (see the matching comment in getJoeBotReply's positionContext).
+    // The caller here already resolves programStartedOn from program_history.
+    startedOn: programStartedOn || null,
     override: athlete.program_position_override || null,
     // One timestamp per real SESSION, not per row — two messages logged an hour apart
     // are one session and must advance the day once.
