@@ -49,19 +49,28 @@ export const TRUTHFUL_NO_CHANGE = "I haven't changed your program. Say the word 
 
 const CHANGE_VERBS = "pull|pulling|swap|swapping|replac(?:e|ing)|remov(?:e|ing)|drop(?:ping)?|tak(?:e|ing)|cut(?:ting)?|mov(?:e|ing)|put(?:ting)?|chang(?:e|ing)|adjust(?:ing)?|add(?:ing)?|sub(?:bing)?|switch(?:ing)?|modify(?:ing)?|rework(?:ing)?|rewrit(?:e|ing)|scal(?:e|ing) back|deload(?:ing)?|program(?:ming)? in";
 const PAST_VERBS = "swapped|changed|updated|pulled|removed|replaced|adjusted|dropped|added|moved|cut|switched|modified|rewritten|rewrote|reworked|put|subbed|taken|took|scaled back|deloaded|programmed";
-const PROGRAMISH = /\b(program|rotation|block|plan|schedule|split|in its place|out of|for the rest|this week'?s|next week|monday|tuesday|wednesday|thursday|friday|saturday|sunday|day \d|week \d|going forward|from now on)\b|\bfor an?\b|\bwith an?\b|\bfor (?:a|the)\b/i;
+// Words that tie a change verb to the program. S2b (09-28): "for now", "this
+// week", "from your program" and a trailing "out" ("I took front squat out.")
+// were missing, so past-tense claims slipped through.
+const PROGRAMISH = /\b(program|rotation|block|plan|schedule|split|in its place|out of|for the rest|this week(?:'?s)?|next week|for now|monday|tuesday|wednesday|thursday|friday|saturday|sunday|day \d|week \d|going forward|from now on)\b|\bfor an?\b|\bwith an?\b|\bfor (?:a|the)\b|\bfrom (?:your|the|this)\b|\bout(?: for)?\b[.!]?\s*$/i;
 // "swapped dips for push-ups": a swap naming its replacement is a program claim
 const SWAP_FOR = /\b(swapp|replac|subb|switch)\w*\b[^.!?]*\bfor\b/i;
 const NEGATED = /\b(not|nothing|never|no need|no reason|if you want|if you'd like|want me to|say the word|should i|could|would|i'?d)\b|n't\b/i;
 const OFF_TOPIC = /\b(memory|remember|note|notes|log|logged|lock screen|card|reminder)\b/i;
+// Verbs from the change list used for looking, not changing.
+const DESCRIPTIVE = /\b(?:took|take|taking) a (?:look|peek|second|minute|glance)\b|\bpulled up\b|\bput together (?:a|your) (?:summary|recap)\b/i;
 
+// ctx: true = the sentence must also tie the verb to the program (PROGRAMISH or
+// a swap naming its replacement); false = the shape alone is a claim.
 const CLAIM_RES = [
-  new RegExp(`\\b(?:i'?m|i am|we'?re|we are)\\s+(?:(?:going to|gonna|also|now|just)\\s+)?(?:${CHANGE_VERBS})\\b`, "i"),
-  new RegExp(`\\b(?:i'?ve|i have|we'?ve|we have|i|we)\\s+(?:(?:just|already|also|now|gone and|went ahead and)\\s+)?(?:${PAST_VERBS})\\b`, "i"),
-  /\b(?:your|the) (?:program|plan|block|schedule)\s+(?:is|has been|was|now)\s+(?:updated|changed|adjusted|rewritten|modified|reworked)\b/i,
-  /\bi'?ll (?:swap|pull|replace|remove|change|update|adjust|put|move|drop|sub|switch)\b[^.!?]*\b(?:program|rotation|block|in its place)\b/i,
+  { ctx: true, re: new RegExp(`\\b(?:i'?m|i am|we'?re|we are)\\s+(?:(?:going to|gonna|also|now|just)\\s+)?(?:${CHANGE_VERBS})\\b`, "i") },
+  { ctx: true, re: new RegExp(`\\b(?:i'?ve|i have|we'?ve|we have|i|we)\\s+(?:(?:just|already|also|now|gone and|went ahead and)\\s+)?(?:${PAST_VERBS})\\b`, "i") },
+  // a decision announced as done: "Let's drop front squats from your program going forward."
+  { ctx: true, re: new RegExp(`\\blet'?s\\s+(?:just\\s+)?(?:${CHANGE_VERBS})\\b`, "i") },
+  { ctx: false, re: /\b(?:your|the) (?:program|plan|block|schedule)\s+(?:is|has been|was|now)\s+(?:updated|changed|adjusted|rewritten|modified|reworked)\b/i },
+  { ctx: false, re: /\bi'?ll (?:swap|pull|replace|remove|change|update|adjust|put|move|drop|sub|switch)\b[^.!?]*\b(?:program|rotation|block|in its place)\b/i },
   // "I'm staging a change", "I'm drafting a rec" with no rec staged this turn
-  /\b(?:i'?m|i am|i'?ve|i have)\s+(?:just\s+)?(?:staging|staged|drafting|drafted|putting together|put together|building|built|writing|written|queuing|queued)\s+(?:a|an|the|you a)?\s*(?:protective\s+|small\s+|quick\s+)?(?:change|changes|rec|recommendation|swap|adjustment|tweak|program change)\b/i,
+  { ctx: false, re: /\b(?:i'?m|i am|i'?ve|i have)\s+(?:just\s+)?(?:staging|staged|drafting|drafted|putting together|put together|building|built|writing|written|queuing|queued)\s+(?:a|an|the|you a)?\s*(?:protective\s+|small\s+|quick\s+)?(?:change|changes|rec|recommendation|swap|adjustment|tweak|program change)\b/i },
 ];
 
 export function findClaims(text) {
@@ -71,8 +80,9 @@ export function findClaims(text) {
     const sents = p.split(/(?<=[.!?])\s+/);
     sents.forEach((s, si) => {
       const clean = s.replace(/[’]/g, "'");
-      if (NEGATED.test(clean) || OFF_TOPIC.test(clean)) return;
-      const hit = CLAIM_RES.some((re, i) => re.test(clean) && (i >= 2 || PROGRAMISH.test(clean) || SWAP_FOR.test(clean)));
+      // a question is an offer, never a claim
+      if (NEGATED.test(clean) || OFF_TOPIC.test(clean) || DESCRIPTIVE.test(clean) || /\?\s*$/.test(clean)) return;
+      const hit = CLAIM_RES.some(({ re, ctx }) => re.test(clean) && (!ctx || PROGRAMISH.test(clean) || SWAP_FOR.test(clean)));
       if (hit) out.push({ para: pi, sent: si, text: s });
     });
   });

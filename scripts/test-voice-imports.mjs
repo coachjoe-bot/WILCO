@@ -56,7 +56,7 @@ const GATED = [
   ["src/App.jsx", /analysis = gateText\("video_review"/, "video review"],
   ["src/App.jsx", /gateFields\("rec", v\.rec/, "program rec title/summary/why"],
   ["src/App.jsx", /gateText\("ql_note"/, "log-sheet focus note"],
-  ["src/App.jsx", /renderGate\(sp\.notes\)/, "log-sheet focus note mid-stream"],
+  ["src/App.jsx", /renderGate\(gn\)/, "log-sheet focus note mid-stream"],
   ["src/App.jsx", /gateText\("memory", plan\.reply\)/, "memory ask-Joe reply"],
   ["src/programHistory.js", /gateText\("recap"/, "recaps"],
   ["src/programBuilder.js", /gateText\("builder"/, "builder interviewer"],

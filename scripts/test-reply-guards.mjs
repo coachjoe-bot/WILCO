@@ -71,6 +71,62 @@ const rp = JSON.parse(fs.readFileSync(join(here, "../tests/replay/bug2-pain-voic
   eq(two.text, `Solid day.\n\n${TRUTHFUL_NO_CHANGE}`, "two claims collapse to one truthful line");
 }
 
+// ── 2a. S2b item 9: past-tense and decision claims (orchestrator, 09-28) ────
+{
+  const MUST_REWRITE = [
+    "I took front squat out.",
+    "I pulled front squat from your program.",
+    "I removed dips for now.",
+    "I dropped the clean pulls this week.",
+    "Let's drop front squats from your program going forward.",
+    "I've taken snatch pulls off Thursday.",
+    "I cut the dips for now.",
+    "I took the dips out of Monday.",
+    "We dropped front squat for the rest of the block.",
+    "Let's swap bench for floor press this week.",
+    "Let's pull front squat out for a week.",
+    "I removed the jumps from this block.",
+    "I've dropped your squat volume for now.",
+    "Front squat's gone. I pulled it for the week.",
+    "Good session. I took the clean pulls out, so Tuesday is just front squat.",
+  ];
+  for (const s of MUST_REWRITE) {
+    const g = claimGuard(s, { toolCalls: [], appWrites: {} });
+    ok(g.changed && g.text.includes(TRUTHFUL_NO_CHANGE), `rewrite: ${JSON.stringify(s)} (got ${JSON.stringify(g.text)})`);
+  }
+  const MUST_PASS = [
+    "Want me to pull front squat?",
+    "I'd pull front squat for a week if it keeps up.",
+    "You swapped Monday and Tuesday last week.",
+    "Your program already has you off squats until Friday.",
+    "Should we drop front squats for a week?",
+    "Let's drop front squats for a week?",
+    "Let's see how it feels Friday.",
+    "Let's keep front squat in and see how the knee does.",
+    "You dropped the weight on set 3, smart call.",
+    "You took the dips out yourself on Monday, good call.",
+    "I took a look at your week 2 numbers and they're climbing.",
+    "I pulled up your last three bench sessions.",
+    "Your program already takes front squat out this week.",
+    "I'd drop the dips for now if they keep bugging you.",
+    "If you want, I can take front squat out for a week.",
+    "Take the clean pulls out if they bother it, your call.",
+    "I haven't taken anything out of your program.",
+    "The program took dips out in week 1 already.",
+    "Let's go, 120 moved fast.",
+    "I dropped a note in your memory about the knee.",
+  ];
+  for (const s of MUST_PASS) {
+    const g = claimGuard(s, { toolCalls: [], appWrites: {} });
+    ok(!g.changed, `pass: ${JSON.stringify(s)} (got ${JSON.stringify(g.text)})`);
+  }
+  // true claims when a rec WAS staged this turn
+  for (const s of MUST_REWRITE.slice(0, 5)) {
+    eq(claimGuard(s, { toolCalls: [{ name: "propose_program_rec", input: {} }] }).changed, false, `staged rec: ${JSON.stringify(s)} passes`);
+    eq(claimGuard(s, { appWrites: { rec: true } }).changed, false, `app-staged rec: ${JSON.stringify(s)} passes`);
+  }
+}
+
 // ── 2b. Joe's own pain rec reads the ledger (real-AI pass 09-28) ───────────
 {
   const none = { areas: ["knee"], verdicts: { knee: "none" }, serious: false };

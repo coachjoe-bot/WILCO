@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import {
   normArea, areasInText, classifyPain, painStatus, extractEvents, withMark, normalizeMarks,
   ledgerBlock, preTurnPain, NEXT_MENTION_DEFAULT, dayKey, extractDuring, flagClearedFor,
+  ledgerTurn, currentPainAreas, painNoteGuard,
   EPISODE_GAP_DAYS, CLEARED_CLEAN, OFFER_COOLDOWN_DAYS, SEV_SERIOUS, SEV_CHANGED, SEV_AWARE, SEV_DULL,
 } from "../src/painLedger.js";
 import { programPurpose } from "../src/programPurpose.js";
@@ -80,7 +81,8 @@ const has = (s, sub, name) => ok(String(s).includes(sub), `${name} (missing ${JS
   eq(extractDuring("Pretty significant pain during bench press, possible strain"), "bench press", "during stops at the comma");
   eq(extractDuring("knees were on fire during Front Squat"), "front squat", "'on fire' is not a lift");
   eq(extractDuring("I decided to snatch instead of back squat to save my knees"), "back squat", "'instead of X' names the avoided lift");
-  eq(classifyPain({ area: "shoulders", description: "a little sore" }).kind, "soreness", "'a little sore' is soreness");
+  eq(classifyPain({ area: "shoulders", description: "a little sore" }).kind, "pain", "S2b item 3: sore shoulders (joint, no training cause) is pain");
+  eq(classifyPain({ area: "shoulders", description: "a little sore" }).severity, SEV_AWARE, "S2b item 3: 'a little sore' joint = degree 1");
 }
 
 // ── 3. the founder's fixture ─────────────────────────────────────────────────
@@ -118,16 +120,17 @@ const at = (d) => {
 
   const a18 = at("2026-08-18");
   eq([a18.knee.state, a18.knee.trend], ["new", "steady"], "Aug 18 knee: new, steady");
-  has(a18.knee.summary, "back Aug 17 after 9 weeks quiet", "Aug 18 knee summary names the return");
+  eq(a18.knee.summary, "Knee: back yesterday (Aug 17) after 9 weeks quiet, bad enough to change the session. Just noted.", "Aug 18 knee summary names the return");
   eq(said("2026-08-17", "knee").speak, "acknowledge_once", "Aug 17 knee mention: acknowledge once");
   eq([a18.pec.state, a18.pec.trend], ["active", "steady"], "Aug 18 pec: active, steady");
   eq(said("2026-08-18", "pec").speak, "none", "Aug 18 pec (second mention, not worsening): tracked silently");
-  has(a18.pec.summary, "back Jul 27 after 5 weeks quiet", "Aug 18 pec summary");
+  has(a18.pec.summary, "back 3 weeks ago (Jul 27) after 5 weeks quiet", "Aug 18 pec summary");
 
   const a25 = at("2026-08-25");
   eq([a25.knee.state, a25.knee.trend], ["active", "worsening"], "Aug 25 knee: active, worsening");
   eq(said("2026-08-25", "knee").speak, "offer_change_once", "Aug 25 knee: worsening pattern earns ONE offer");
-  has(a25.knee.summary, "it keeps coming up in the last two weeks", "Aug 25 knee summary reads frequency in words");
+  has(a25.knee.summary, "back 8 days ago (Aug 17) after 9 weeks quiet, bad enough to change the session", "Aug 25 knee summary starts where it started");
+  has(a25.knee.summary, "mild since, bad enough to change the session today. Getting worse.", "Aug 25 knee summary: trajectory then direction");
   eq([a25.knee.mentions, a25.knee.mentions14d], [3, 3], "Aug 25 knee: counts stay on the record");
   eq([a25.pec.state, a25.pec.trend], ["easing", "improving"], "Aug 25 pec: easing, improving (a clean incline session)");
   ok(a25.marks.knee && a25.marks.knee.offered_at, "Aug 25 offer stamped");
@@ -154,7 +157,7 @@ const at = (d) => {
 
   const s21 = at("2026-09-21");
   eq([s21.pec.state, s21.pec.trend], ["new", "steady"], "Sep 21 pec: new episode");
-  has(s21.pec.summary, "back Sep 21 after 5 weeks quiet", "Sep 21 pec: back after 5 weeks quiet");
+  has(s21.pec.summary, "back today after 5 weeks quiet", "Sep 21 pec: back after 5 weeks quiet");
   eq(said("2026-09-21", "pec").speak, "acknowledge_once", "Sep 21 pec: acknowledge once");
   eq(s21.knee.state, "easing", "Sep 21 knee: easing");
 
@@ -243,12 +246,14 @@ const one = (rows, d, area, extra) => st(rows, d, extra).find((r) => r.area === 
   has(rf.summary, "after it had cleared", "summary says it came back after clearing");
   eq(one(flare.slice(0, 1), "2026-09-05", "knee", { marks }).state, "cleared", "before the flare it reads cleared");
   // legacy resolved_pain (no timestamp): cleared before today; a later event reopens
-  eq(one(flare.slice(0, 1), "2026-09-05", "knee", { legacyResolved: ["knees"] }).state, "cleared", "legacy resolved string clears");
+  eq(one(flare.slice(0, 1), "2026-09-20", "knee", { legacyResolved: ["knees"] }).state, "cleared", "legacy resolved string clears mentions older than 14 days");
+  const lv = one(flare.slice(0, 1), "2026-09-05", "knee", { legacyResolved: ["knees"] });
+  eq([lv.state !== "cleared", lv.speak], [true, "none"], "S2b item 7: a legacy area mention inside 14 days is visible, tracked silently");
   const legacyNow = new Date("2026-09-10T08:00:00-04:00");
   const flareToday = [flare[0], { ...flare[1], created_at: "2026-09-10T14:00:00Z" }];
   const lm = normalizeMarks({}, ["knees"], { now: legacyNow, tz: TZ });
   const rl = painStatus({ rows: flareToday, marks: lm, now: endOf("2026-09-10"), tz: TZ }).find((r) => r.area === "knee");
-  eq(rl.state, "new", "legacy resolved + pain event after the mark reopens the area");
+  eq([rl.state, rl.speak], ["active", "none"], "S2b item 7: legacy resolved + mentions inside 14 days: visible, tracked silently");
 
   // six clean sessions with no mention
   const six = [row("2026-09-01", [{ area: "knee", description: "knee ache during back squat" }], sq(100))];
@@ -307,6 +312,151 @@ const one = (rows, d, area, extra) => st(rows, d, extra).find((r) => r.area === 
   eq(flagClearedFor("knee", "2026-09-01T12:00:00Z", mk), true, "MY LOG: flag before the resolve is hidden");
   eq(flagClearedFor("left knee", "2026-09-10T12:00:00Z", mk), false, "MY LOG: a flare a week later shows again");
   eq(flagClearedFor("pec", "2026-09-01T12:00:00Z", mk), false, "MY LOG: other areas untouched");
+}
+
+// ── 5. S2b: the orchestrator's scenarios (09-28) ────────────────────────────
+{
+  const lbRow = (day, { pain = [], ex = [], msg = "", chat = false, cleared = [] } = {}) => ({
+    id: `b-${day}-${Math.random().toString(36).slice(2, 6)}`, created_at: `${day}T16:00:00Z`,
+    raw_message: msg || pain.map((p) => p.description).join(". ") || "log",
+    parsed_data: { exercises: chat ? [] : ex.map(([name, weight, sets = 3, reps = 5, unit = "lbs"]) => ({ name, weight, unit, sets, reps })), pain_flags: pain, pain_cleared: cleared },
+  });
+  const asOf = (rows, d, extra = {}) => painStatus({ rows, now: new Date(`${d}T18:00:00Z`), tz: TZ, ...extra });
+
+  // Item 1: the founder's own example (replay case)
+  const rp = JSON.parse(fs.readFileSync(join(here, "../tests/replay/founder-example-trajectory.json"), "utf8"));
+  const recA = painStatus({ rows: rp.rows, now: new Date(rp.now), tz: rp.tz }).find((r) => r.area === rp.expect.area);
+  eq(recA.trend, rp.expect.trend, "item 1: founder example reads improving");
+  eq(recA.speak, rp.expect.speak, "item 1: founder example is tracked silently");
+  eq(recA.summary, rp.expect.summary, "item 1: founder example summary, trajectory in time order");
+  ok(!/\d+ (mentions|times)|twice|once|second|third/.test(recA.summary), "item 1: summary is count-free");
+  // each piece of evidence on its own is enough to read the direction
+  const noWords = rp.rows.map((r) => r.id === "fx-0928" ? { ...r, raw_message: "Bench 3x5 @ 205. Dull pec on bench today.", parsed_data: { ...r.parsed_data, pain_flags: [{ area: "pec", description: "dull pec on bench today" }] } } : r);
+  eq(painStatus({ rows: noWords, now: new Date(rp.now), tz: rp.tz })[0].trend, "improving", "item 1: degree falling from a peak 3 weeks back reads improving without softener words");
+  const flatDegree = [
+    lbRow("2026-09-10", { pain: [{ area: "pec", description: "dull pec on bench" }], ex: [["Bench Press", 185]] }),
+    lbRow("2026-09-14", { pain: [{ area: "pec", description: "dull pec on bench" }], ex: [["Bench Press", 185]] }),
+    lbRow("2026-09-18", { pain: [{ area: "pec", description: "dull pec on bench" }], ex: [["Bench Press", 205]] }),
+  ];
+  eq(asOf(flatDegree, "2026-09-18")[0].trend, "improving", "item 1: rising load on the lift that hurt, same degree, reads improving");
+  const flatNoLoad = flatDegree.map((r, i) => i === 2 ? lbRow("2026-09-18", { pain: [{ area: "pec", description: "dull pec on bench" }], ex: [["Bench Press", 185]] }) : r);
+  eq(asOf(flatNoLoad, "2026-09-18")[0].trend, "worsening", "item 1: same degree, same load, no words, coming up more often: worsening (frequency, degree not falling)");
+  eq(asOf(flatNoLoad.slice(1), "2026-09-18")[0].trend, "steady", "item 1: two mentions, same degree, same load, no words: steady");
+  const softer = flatNoLoad.map((r, i) => i === 2 ? lbRow("2026-09-18", { pain: [{ area: "pec", description: "pec on bench, way less than last week" }], ex: [["Bench Press", 185]] }) : r);
+  eq(asOf(softer, "2026-09-18")[0].trend, "improving", "item 1: 'way less' softener reads improving");
+  eq(classifyPain({ area: "pec", description: "not as bad as last time" }).direction, -1, "softener: not as bad");
+  eq(classifyPain({ area: "pec", description: "barely there" }).direction, -1, "softener: barely");
+  eq(classifyPain({ area: "pec", description: "feels better" }).direction, -1, "softener: better");
+  eq(classifyPain({ area: "knee", description: "getting worse" }).direction, 1, "hardener: getting worse");
+  eq(classifyPain({ area: "knee", description: "more than last time" }).direction, 1, "hardener: more than last time");
+  eq(classifyPain({ area: "knee", description: "no worse than before" }).direction, 0, "'no worse' is not a hardener");
+  eq(classifyPain({ area: "knee", description: "dull ache" }).direction, 0, "no words, no direction");
+
+  // Item 2: a second mention that says it is worse reads worsening, one offer
+  const F = [
+    lbRow("2026-09-24", { pain: [{ area: "knees", description: "knees flaring on front squat" }], ex: [["Front Squat", 225]] }),
+    lbRow("2026-09-26", { pain: [{ area: "knee", description: "knee flaring again on front squat, worse" }], ex: [["Front Squat", 225]] }),
+  ];
+  const rF = asOf(F, "2026-09-26").find((r) => r.area === "knee");
+  eq([rF.state, rF.trend, rF.speak], ["active", "worsening", "offer_change_once"], "item 2: 'worse' on the second mention = worsening, one offer");
+  eq(asOf(F, "2026-09-26", { protects: ["knee"] }).find((r) => r.area === "knee").speak, "none", "item 2: program protects the knee: no offer");
+  eq(asOf(F, "2026-09-26", { marks: { knee: { offered_at: "2026-09-20T12:00:00Z" } } }).find((r) => r.area === "knee").speak, "none", "item 2: offered 6 days ago: no offer");
+  // the pre-parse verdict (chat streams before the parser) agrees
+  const preF = asOf(F.slice(0, 1), "2026-09-26")[0];
+  eq(preF.nextMention.worse, "offer_change_once", "item 2: nextMention.worse = offer");
+  const ltF = ledgerTurn({ rows: F.slice(0, 1), now: new Date("2026-09-26T18:00:00Z"), tz: TZ, message: "knee flaring again on front squat, worse" });
+  eq(ltF.turn.verdicts.knee, "offer_change_once", "item 2: pre-parse turn verdict reads 'worse' in the raw message");
+  const ltF2 = ledgerTurn({ rows: F.slice(0, 1), now: new Date("2026-09-26T18:00:00Z"), tz: TZ, message: "knee flaring again on front squat, worse", parsed: { pain_flags: [{ area: "knee", description: "knee flaring again on front squat, worse" }] } });
+  eq(ltF2.turn.verdicts.knee, "offer_change_once", "item 2: exact (parsed) turn verdict = offer");
+
+  // Item 3: soreness vs pain
+  eq(classifyPain({ area: "ankle", description: "ankle sore rolling it on a run" }).kind, "pain", "item 3: a sore joint with an incident word is pain");
+  ok(classifyPain({ area: "ankle", description: "ankle sore rolling it on a run" }).severity <= SEV_DULL, "item 3: degree 1-2");
+  eq(classifyPain({ area: "knee", description: "knee is sore" }).kind, "pain", "item 3: sore knee (joint) is pain");
+  eq(classifyPain({ area: "wrist", description: "wrist a little sore" }).severity, SEV_AWARE, "item 3: sore wrist, 'a little' = 1");
+  eq(classifyPain({ area: "achilles", description: "achilles sore" }).kind, "pain", "item 3: sore tendon is pain");
+  eq(classifyPain({ area: "elbow", description: "elbow sore after curls" }).kind, "pain", "item 3: sore elbow is pain");
+  eq(classifyPain({ area: "hip", description: "hip sore" }).kind, "pain", "item 3: sore hip is pain");
+  eq(classifyPain({ area: "shoulder", description: "shoulder joint sore" }).kind, "pain", "item 3: sore shoulder joint is pain");
+  eq(classifyPain({ area: "hamstring", description: "tweaked my hamstring, sore" }).kind, "pain", "item 3: incident word on a muscle is pain");
+  eq(classifyPain({ area: "calf", description: "pulled my calf, pretty sore" }).kind, "pain", "item 3: 'pulled my calf' is pain");
+  eq(classifyPain({ area: "ankle", description: "landed wrong, ankle sore" }).kind, "pain", "item 3: 'landed wrong' is pain");
+  eq(classifyPain({ area: "legs", description: "too sore for today's workout" }).kind, "soreness", "item 3: founder Sep 17 legs stays soreness");
+  eq(classifyPain({ area: "quads", description: "quads sore from yesterday" }).kind, "soreness", "item 3: sore quads from yesterday = soreness");
+  eq(classifyPain({ area: "chest", description: "chest sore in a good way" }).kind, "soreness", "item 3: sore chest in a good way = soreness");
+  eq(classifyPain({ area: "lats", description: "DOMS in my lats" }).kind, "soreness", "item 3: DOMS = soreness");
+  eq(classifyPain({ area: "glutes", description: "glutes sore, foam rolled them" }).kind, "soreness", "item 3: foam rolling is not an incident");
+  eq(classifyPain({ area: "delts", description: "delts sore from press day" }).kind, "soreness", "item 3: sore delts from training = soreness");
+  eq(classifyPain({ area: "hamstrings", description: "hamstrings sore after pulling 405" }).kind, "soreness", "item 3: 'pulling 405' is a lift, not an incident");
+
+  // Item 4 (scenario G): a cleared episode stays on the record as cleared
+  const G = [
+    lbRow("2026-09-20", { pain: [{ area: "ankle", description: "ankle sore rolling it on a run" }], ex: [["Run", 0, 1, 1, "bodyweight"]] }),
+    lbRow("2026-09-24", { chat: true, msg: "ankle feels great now", cleared: [{ area: "ankle" }] }),
+  ];
+  const rG = asOf(G, "2026-09-25");
+  eq(rG.length, 1, "item 4: one record for the cleared ankle");
+  eq([rG[0].state, rG[0].checkIn.ask], ["cleared", false], "item 4: cleared, no check-in ask");
+  has(rG[0].summary, "Cleared", "item 4: summary says cleared");
+  const G2 = [...G, lbRow("2026-10-02", { pain: [{ area: "ankle", description: "ankle aching on the run" }], ex: [["Run", 0, 1, 1, "bodyweight"]] })];
+  has(asOf(G2, "2026-10-02")[0].summary, "after it had cleared", "item 4: a later flare says it came back after it had cleared");
+  eq(asOf(G, "2026-11-30").length, 0, "item 4: past the record horizon the cleared record drops off");
+
+  // Item 5: "new" only near the first mention
+  const C = [lbRow("2026-09-01", { pain: [{ area: "knees", description: "knees achy during back squat" }], ex: [["Back Squat", 315]] }),
+    ...["2026-09-04", "2026-09-08", "2026-09-11"].map((d) => lbRow(d, { ex: [["Back Squat", 185]] }))];
+  eq(asOf(C, "2026-09-03")[0].state, "new", "item 5: two days after the first mention: new");
+  const rC = asOf(C, "2026-09-12")[0];
+  eq(rC.state, "open", "item 5: 11 days, no mention, no clean evidence: open (not new)");
+  eq(rC.speak, "none", "item 5: open is tracked silently");
+  has(rC.summary, "Still open", "item 5: wording says it is still open");
+  eq(rC.checkIn.tone, "status", "item 5: check-in still asks how it is");
+
+  // Item 6: serious wording
+  const E = [lbRow("2026-09-20", { pain: [{ area: "low back", description: "back a little tight" }], ex: [["Deadlift", 405]] }),
+    lbRow("2026-09-27", { pain: [{ area: "lower back", description: "felt a pop in my back on deadlift, sharp pain" }], ex: [["Deadlift", 405]] })];
+  const rE = asOf(E, "2026-09-27", { marks: { low_back: { dismissed_at: "2026-09-21T12:00:00Z" } } })[0];
+  eq([rE.state, rE.speak], ["serious", "address_now"], "item 6: serious overrides a dismissal");
+  ok(!/serious, serious/i.test(rE.summary), `item 6: no doubled word (${rE.summary})`);
+  has(rE.summary, "Serious, needs attention.", "item 6: serious sentence");
+
+  // Item 7: legacy resolved_pain (no timestamps)
+  const D = [lbRow("2026-08-20", { pain: [{ area: "shoulder", description: "shoulder pinching on overhead press" }], ex: [["Overhead Press", 135]] }),
+    lbRow("2026-09-25", { pain: [{ area: "right shoulder", description: "shoulder pinching again on press" }], ex: [["Overhead Press", 135]] })];
+  const rD = asOf(D, "2026-09-26", { legacyResolved: ["shoulder"] })[0];
+  ok(rD.state !== "cleared", `item 7: a mention inside 14 days in a legacy-resolved area is visible (got ${rD.state})`);
+  eq(rD.speak, "none", "item 7: tracked silently");
+  eq(asOf(D, "2026-10-20", { legacyResolved: ["shoulder"] })[0].state, "cleared", "item 7: older mentions stay cleared");
+  const Dser = [...D.slice(0, 1), lbRow("2026-09-25", { pain: [{ area: "shoulder", description: "sharp pain, felt a pop in my shoulder" }], ex: [["Overhead Press", 135]] })];
+  eq(asOf(Dser, "2026-09-26", { legacyResolved: ["shoulder"] })[0].speak, "address_now", "item 7: serious still addressed");
+  eq(asOf(D.slice(0, 1), "2026-08-22", { legacyResolved: ["shoulder"] })[0].speak, "none", "item 7: legacy area, fresh mention: none");
+  // seeded marks (the one-time SQL: cleared_at = ship moment minus 14 days, legacy true) read the same
+  const seeded = { shoulder: { cleared_at: "2026-09-14T12:00:00Z", legacy: true } };
+  const rDs = asOf(D, "2026-09-26", { marks: seeded })[0];
+  eq([rDs.state !== "cleared", rDs.speak], [true, "none"], "item 7: seeded legacy mark reads the same");
+  const after = [...D, lbRow("2026-10-10", { pain: [{ area: "shoulder", description: "shoulder aching on press" }], ex: [["Overhead Press", 135]] })];
+  eq(asOf(after.filter((r) => r.created_at >= "2026-10"), "2026-10-10", { marks: seeded })[0].speak, "acknowledge_once", "item 7: a mention well after the seed is a normal first mention");
+  eq(withMark(seeded, "shoulder", "cleared_at", new Date("2026-10-01T00:00:00Z")).shoulder.legacy, undefined, "item 7: a real resolve drops the legacy flag");
+
+  // Item 8: sides
+  eq(normArea("L knee").side, "left", "item 8: L knee");
+  eq(normArea("R shoulder").side, "right", "item 8: R shoulder");
+  eq(normArea("rt knee").side, "right", "item 8: rt knee");
+  eq(normArea("lt pec").side, "left", "item 8: lt pec");
+  eq(normArea("knee (L)").side, "left", "item 8: (L)");
+  eq(normArea("(R) elbow").side, "right", "item 8: (R)");
+  eq(normArea("both knees").side, "both", "item 8: both knees");
+  eq(normArea("bilateral knee pain").side, "both", "item 8: bilateral");
+  eq(normArea("L knee").key, "knee", "item 8: side letter does not break the key");
+  eq(normArea("lower back").side, null, "item 8: 'lower' is not L");
+
+  // Item 10: current pain for the log sheet + the focus-note guard
+  const cur = currentPainAreas([...asOf(G, "2026-09-25"), ...asOf(F, "2026-09-26")]);
+  eq(cur, ["knee"], "item 10: current pain = new/open/active/serious only (cleared ankle left out)");
+  eq(painNoteGuard("Week 2, Day 1: bench day. Your pec's still lingering, keep it smooth.", []), "Week 2, Day 1: bench day.", "item 10: a pain note about a non-current area is removed");
+  eq(painNoteGuard("Front squat day. Knees out on the drive.", []), "Front squat day. Knees out on the drive.", "item 10: a form cue that names a body part stays");
+  eq(painNoteGuard("Front squat day. Go easy if the knee flares.", ["knee"]), "Front squat day. Go easy if the knee flares.", "item 10: a current area may be noted");
+  eq(painNoteGuard("Bench day.\nProtects the low back you tweaked.", ["knee"]), "Bench day.", "item 10: line-split notes are guarded too");
 }
 
 console.log(`\n${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ""}`);
