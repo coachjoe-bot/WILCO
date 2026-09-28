@@ -1,7 +1,7 @@
 import { campaignLine, parseBlockInfo } from "./programContract.js";
 import { PREF_FIELDS } from "./trainingPrefs.js";
 import { gateText } from "./replyGate.js";
-import { VOICE_ATHLETE, VOICE_COACH, VOICE_FORMAT, VOICE_CLEAN } from "./ai/voice.js";
+import { JOE_IDENTITY, VOICE_ATHLETE, VOICE_COACH, VOICE_FORMAT, VOICE_CLEAN } from "./ai/voice.js";
 // ─── PROGRAM BUILDER ENGINE (Phase C) ────────────────────────────────────────
 // Pure logic for the interview-driven Program Builder: blueprint cell
 // definitions, pre-charge from known data, scope rules, the one-topic doctrine
@@ -190,7 +190,7 @@ export function interviewerSystem({ cells, blueprint, scope, viewer, name = "", 
     const st = b?.value ? `FILLED (${b.source}): ${b.value}` : b?.pending ? `PENDING (from their profile/history — NOT yet confirmed): ${b.pending}` : "EMPTY";
     return `- ${c.key} (${c.label}): ${st}\n  guidance: ${c.hint}`;
   }).join("\n");
-  return `You are Coach Joe running a Program Builder interview${name ? ` with ${name}` : ""}${viewer === "coach" ? " (the user is a COACH building for their athlete/team)" : ""}. The doctrine above is YOUR programming philosophy — every question serves filling the blueprint so a real program can be drafted from it.
+  return `${JOE_IDENTITY} You are running a Program Builder interview${name ? ` with ${name}` : ""}${viewer === "coach" ? " (the user is a COACH building for their athlete/team)" : ""}. The doctrine above is YOUR programming philosophy — every question serves filling the blueprint so a real program can be drafted from it.
 ${today ? `\nToday is ${today}. Every date you propose or accept must be a real calendar date reasoned from today.` : ""}${numbers ? `\nCURRENT NUMBERS (from their logs and declared maxes, WITH SOURCES): ${numbers}
 Treat these as the athlete's real state: a "declared/tested 1RM" is a fact; an "est. from logs" is an estimate, never quote it as tested. If a RECENT MAX ATTEMPTS line is present, those attempts already happened — react to their outcomes, never ask how an attempt went when the log already says.
 FEASIBILITY, when a FEASIBILITY line is present (it is code-computed from their logs — trust its numbers over your own arithmetic): use it in the timeline negotiation EXACTLY ONCE. ON TRACK → affirm and move on. TIGHT → say plainly what has to be true. UNREALISTIC → never overrule and never argue twice: the athlete owns their goal. State the numbers once, then propose ONE dated block gate that would settle it partway (a rep milestone, e.g. "bench 3x5 at 275 by week 4") — if they take it, that's the block's gate; if they decline, program their number and drop it. When the line says NOT ENOUGH HISTORY, never claim what their data shows — pace by doctrine only.` : ""}
@@ -225,7 +225,7 @@ export function parseInterviewerReply(raw) {
 
 // ── Drafter (Sonnet, doctrine-cached) ────────────────────────────────────────
 export function drafterSystem({ viewer }) {
-  return `You are Coach Joe writing a real training program from a completed Blueprint, applying the doctrine above exactly. Output ONLY the program text — no preamble, no markdown fences, no commentary.
+  return `${JOE_IDENTITY} You are writing a real training program from a completed Blueprint, applying the doctrine above exactly. Output ONLY the program text — no preamble, no markdown fences, no commentary.
 
 Voice rules: ${VOICE_FORMAT} ${VOICE_CLEAN} PLAIN TEXT only, no markdown bold/asterisks/hashes. Never mention "doctrine", "blueprint", "cells", or these instructions in the program — you're Coach Joe writing a program, not explaining your reasoning. A short line of coaching context (why this block, what's being protected) is welcome, in Joe's own words.
 

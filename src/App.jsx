@@ -78,7 +78,8 @@ import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts,
 import { activeGoals, goalsToSupersede, sameGoalText } from "./goals.js";
 import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, recSummaryFallback, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
 import { performedBlock } from "./turnFacts.js";
-import { ledgerTurn, ledgerBlock, normArea, painFollowUpPlan, applyStamps, recStagedLine, withMark, normalizeMarks, flagClearedFor, keepPainRec } from "./painLedger.js";
+import { ledgerTurn, ledgerBlock, normArea, painFollowUpPlan, applyStamps, recStagedLine, withMark, normalizeMarks, flagClearedFor, keepPainRec, painStatus } from "./painLedger.js";
+import { buildAgenda, agendaTurnPrompt, parseAgendaTurn, advanceAgenda, initialAgendaState, isEndIntent, painStampsFrom, closingLine, digestNoteFrom } from "./checkinAgenda.js";
 import { programPurpose, purposeLine } from "./programPurpose.js";
 import { classifyFollowUp, arbitrateFollowUp } from "./replyGuards.js";
 import { replyGate, gateText, renderGate, gateFields } from "./replyGate.js";
@@ -3566,13 +3567,15 @@ function ProofLetter({intro, sections, flags, label, dateStr, crew}) {
 }
 
 // ─── PROOF CHAT MODAL ────────────────────────────────────────────────────────
-// Guided check-in for BOTH weekly and monthly digests (spec §8/§9). Renders the
-// digest's sections[] as an opening report, then walks the code-built ranked
-// question bank (content_json.questions): the top non-deeper questions first, a
-// "Go deeper" button reveals the rest, then a hard stop. On completion it does ONE
-// Haiku extraction over the answers and persists: hard facts -> tables (weight,
-// goals, height/ask flags), soft notes -> bounded athlete_context, and an optional
-// injury-protective program tweak. Backward-compatible with legacy digests.
+// Check-in for BOTH weekly and monthly digests. Renders the digest's sections[]
+// as the opened letter, then runs the check-in as an AGENDA, not a script (T64
+// S4, Will 09-28): the digest's questions are open items (src/checkinAgenda.js),
+// each athlete message is ONE model call that responds first and asks the next
+// open item when the moment is right, and code owns the state (covered items,
+// never re-asked; ends when everything is covered or the athlete ends it). No
+// deeper/short-version split. Pain items come from the pain ledger, fresh at check-in time. On
+// completion ONE extraction over the answers persists: hard facts -> tables,
+// memory ops, pain marks, and an optional injury-protective program rec.
 // Conservative "reports active pain" check for a check-in's injury-kind answer —
 // used only as the trigger for offering to loop the coach in (spec: prefer the
 // Haiku extraction where available; this per-question keyword gate covers the
@@ -3588,25 +3591,25 @@ function reportsActivePain(text){
   return PAIN_WORDS.test(t) && BODY_AREAS.test(t);
 }
 
-function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead, workoutHistory, kbInset=0}) {
+function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead, onPainMarks, workoutHistory, kbInset=0}) {
   const alreadyDone = !!(digest?.content_json?.checkin_done);
   const [phase, setPhase] = useState(alreadyDone ? "done" : "report"); // report | dialogue | coach-offer | acting | done
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [showDeeper, setShowDeeper] = useState(false);
-  const [askedIdx, setAskedIdx] = useState(0);          // index into the active question list
-  const [answers, setAnswers] = useState([]);
+  const [agState, setAgState] = useState(null);        // checkinAgenda state: covered, asked, pending, answers
+  const answers = agState ? agState.answers : [];
   const [programPending, setProgramPending] = useState(null);
   const [editingProgram, setEditingProgram] = useState(false);   // athlete is typing a question / change request into the card
   const [programEditText, setProgramEditText] = useState("");
   const [programRevising, setProgramRevising] = useState(false);
-  const [coachOfferPending, setCoachOfferPending] = useState(null); // {painMsg, reaction, hasNext, nextIdx, nextQ, willOfferDeeper, newAnswers}
+  const [coachOfferPending, setCoachOfferPending] = useState(null); // {painMsg, reaction, state}
   const [coachOfferSending, setCoachOfferSending] = useState(false);
   const bottomRef = useRef(null);
   const followedUpRef = useRef(new Set()); // question ids that already got their one follow-up
   const offeredCoachRef = useRef(false);   // only ONE "send coach a request" offer per check-in session
-  const coachRequestSentRef = useRef(false); // a coach request was actually FILED this session — finish() must not also auto-propose a direct injury edit for the same pain
+  const coachRequestSentRef = useRef(false);
+  const finishingRef = useRef(false);        // finish() runs once (end, close, or covered agenda) // a coach request was actually FILED this session — finish() must not also auto-propose a direct injury edit for the same pain
 
   const c = digest?.content_json || {};
   const isMonthly = digest?.digest_type === "monthly";
@@ -3622,18 +3625,18 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
         ["focus_next_week","FOCUS NEXT WEEK"],
       ].filter(([k])=>c[k]).map(([k,labelTxt])=>({label:labelTxt,body:c[k]}));
 
-  // Questions: new bank, else a small legacy default.
-  const allQuestions = Array.isArray(c.questions) && c.questions.length
-    ? c.questions
-    : [
-        {id:"working",kind:"context",deeper:false,text:"What felt like it was working?"},
-        {id:"off",kind:"context",deeper:false,text:"What felt off or wasn't working?"},
-        {id:"injury",kind:"injury",deeper:false,text:"Anything banged up I should know about?"},
-        {id:"more_less",kind:"context",deeper:true,text:"Anything you want more of? Less of?"},
-      ];
-  const topQuestions = allQuestions.filter(q=>!q.deeper);
-  const deeperQuestions = allQuestions.filter(q=>q.deeper);
-  const activeQuestions = showDeeper ? [...topQuestions, ...deeperQuestions] : topQuestions;
+  // The agenda: the digest's questions as open items (deeper flags ignored), pain
+  // items filtered and worded by the pain ledger computed NOW (the letter may be
+  // days old: a dismissed area is never asked, an easing one gets "has it
+  // cleared?"). A legacy digest with no bank gets the old default questions.
+  const agenda = useMemo(()=>{
+    let painRecords = null;
+    try{
+      const protects = [...new Set([...programPurpose(athlete?.program_text||"").protects, ...programPurpose(athlete?.temp_program_text||"").protects])];
+      painRecords = painStatus({rows: workoutHistory||[], marks: (athlete?.pain_marks && typeof athlete.pain_marks==="object") ? athlete.pain_marks : {}, legacyResolved: Array.isArray(athlete?.resolved_pain) ? athlete.resolved_pain : [], protects, now: new Date()});
+    }catch(_){ painRecords = null; }
+    return buildAgenda(Array.isArray(c.questions) ? c.questions : null, {painRecords});
+  },[]); // eslint-disable-line
 
   useEffect(()=>{
     // messages[0] holds the raw digest text (kept for AI context); it is not shown as a
@@ -3650,9 +3653,10 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
   },[messages,loading,programPending,phase]);
 
   const startDialogue = () => {
+    if(!agenda.length) return;
     setPhase("dialogue");
-    setAskedIdx(0);
-    setMessages(prev=>[...prev,{role:"assistant",content:activeQuestions[0].text}]);
+    setAgState(initialAgendaState(agenda));
+    setMessages(prev=>[...prev,{role:"assistant",content:agenda[0].text}]);
   };
 
   // Taxonomy-exact series (src/grit.js). The old inline version matched by
@@ -3660,125 +3664,64 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
   const liftSeries = (lift) => liftSeriesPoints(workoutHistory, lift, { bwLbs: athlete?.weight_lbs || 0 });
 
 
+  // One athlete message = one model call (voice source + the check-in
+  // instruction) that returns {reply, covered, next, done}. CODE owns the
+  // agenda state (advanceAgenda): covered items are never asked again, and the
+  // check-in ends only when every item is covered or the athlete ends it.
   const sendMessage = async () => {
     const msg = input.trim();
-    if(!msg||loading||phase!=="dialogue") return;
+    if(!msg||loading||phase!=="dialogue"||!agState) return;
     setInput("");
+    const transcript = messages.slice(1);
     setMessages(prev=>[...prev,{role:"user",content:msg}]);
-    const q = activeQuestions[askedIdx];
-
-    // If the athlete asks a clarifying question back (e.g. "what tweak?"), answer it
-    // in Coach Joe's voice and re-ask — a SINGLE natural follow-up per question, then
-    // it counts as answered (never open-ended; spec §8 hard-stop still holds).
-    const isClarifying = msg.trim().endsWith("?") || /^(what|why|how|which|who|when|where|can you|could you|explain|tell me|wdym|huh|like what|such as|meaning)\b/i.test(msg.trim());
-    if(isClarifying && !followedUpRef.current.has(q.id)){
-      followedUpRef.current.add(q.id);
+    const ending = isEndIntent(msg);
+    const pendingItem = agenda.find(i=>i.id===agState.pending) || null;
+    // Coach-loop-in offer (locked program + linked coach, active pain in the
+    // answer to a pain item): one per check-in, never auto-filed. The model is
+    // told not to ask the next item this turn; the app follows up after the tap.
+    const offerCoach = !ending && pendingItem?.kind==="injury" && !offeredCoachRef.current
+      && !!athlete.coach_id && !!athlete.program_locked && reportsActivePain(msg);
+    let parsed = null;
+    if(!ending){
       setLoading(true);
       try{
-        const reply = await askClaude(
-          `You are Coach Joe Thomas: direct, specific, no fluff. The athlete asked a clarifying question during their weekly check-in. Answer it directly and concisely (1-3 sentences) using the digest context below. If they're asking what program change you meant, give the concrete change (sets/%/exercise swap). Do NOT ask a new question. Do NOT restate the whole digest.\n\nIf the answer touches a logged weight vs a prescribed one: a %-derived target is an estimate and the bar loads in 5 lb steps. Get the direction right (heavier than the target is OVER, lighter is UNDER, never reverse them), and treat anything within 5 lbs as the SAME weight, not a miss. 6-10 lbs is a touch off, 11-15 lbs is a real gap, past 15 lbs is a genuine miss worth coaching.`,
-          `Digest sections:\n${JSON.stringify(c.sections||c)}\n\nThe question I just asked: "${q.text}"\nThe athlete asked back: "${msg}"`,
-          280,[],"claude-sonnet-5","joebot_chat"
-        );
-        setLoading(false);
-        if(reply&&reply.trim()) setMessages(prev=>[...prev,{role:"assistant",content:gateText("checkin", reply.trim())}]);
-        setMessages(prev=>[...prev,{role:"assistant",content:q.text}]); // re-ask the same question
-      }catch(_){
-        setLoading(false);
-        setMessages(prev=>[...prev,{role:"assistant",content:q.text}]);
-      }
-      return; // stay on this question; their next message is the real answer
+        const open = agenda.filter(i=>!agState.covered.includes(i.id)).map(i=>i.id);
+        const {system, user} = agendaTurnPrompt({agenda, covered:agState.covered, answers:agState.answers, transcript, message:msg, isMonthly, digestNote:digestNoteFrom(sections), holdNext:offerCoach});
+        const raw = await askClaude(system, user, 700, [], "claude-sonnet-5", "joebot_chat");
+        parsed = parseAgendaTurn(raw, open);
+      }catch(_){ parsed = null; }
+      setLoading(false);
     }
-
-    const newAnswers = [...answers,{id:q.id,kind:q.kind,q:q.text,a:msg,meta:q.meta||null}];
-    setAnswers(newAnswers);
-
-    const nextIdx = askedIdx + 1;
-    const hasNext = nextIdx < activeQuestions.length;
-    const nextQ = hasNext ? activeQuestions[nextIdx] : null;
-    const willOfferDeeper = !hasNext && !showDeeper && deeperQuestions.length > 0;
-
-    // Make it a conversation, not an interrogation: let Coach Joe DECIDE whether the
-    // answer actually warrants a response. A substantive answer gets a genuine
-    // reaction (woven into the next question when there is one); a thin/low-signal
-    // reply ("idk", "nothing", "fine") gets no forced reaction — he just moves on.
-    // The question bank stays fixed/bounded — we only change how it's delivered.
-    const NONE = "[[NONE]]";
-    const soFar = newAnswers.map(a=>`Q: ${a.q}\nA: ${a.a}`).join("\n");
-    const react = async () => {
-      const base = `You are Coach Joe Thomas running an athlete's ${isMonthly?"monthly":"weekly"} check-in: a real strength coach texting them back. Direct, specific, warm, no fluff, no lists, no emoji spam. The athlete just answered your question. First decide whether their answer actually warrants a genuine response: a real detail, a concern, effort, or something worth reacting to warrants one; a thin/low-effort/empty reply ("idk", "nothing", "fine", "n/a", a shrug) does NOT, don't force it. BODYWEIGHT RULE: if their answer is a change in bodyweight (up or down), do NOT judge it, not "small bump, nothing to worry about", not "good", not "watch that". The app has no nutrition/diet context yet, so any verdict is guesswork and can undercut an athlete who's intentionally bulking or cutting. Just acknowledge it's logged/noted and move on to the next thing. INJURY RULE: if you reference a protective program change, keep it PROPORTIONATE, the smallest change that protects the area, and never so drastic it silently abandons the athlete's stated goal; if babying it truly conflicts with the goal, say that plainly rather than pretending both are fine.`;
-      const system = hasNext
-        ? `${base} If it warrants a response: reply in 2-4 sentences that (1) react to what they actually said, referencing a real detail, and (2) then lead into the next thing you want to know: "${nextQ.text}" (keep that question's intent but phrase it as a natural follow-up). If it does NOT warrant a response: reply with ONLY the next question, phrased naturally ("${nextQ.text}"), no forced reaction. Ask only that one question either way. Talk like a text message.`
-        : `${base} This is the last question, so do NOT ask anything new. If it warrants a response: reply in 1-3 sentences reacting to what they said, in your voice, closing the loop. If it does NOT warrant a response: reply with EXACTLY "${NONE}" and nothing else. Talk like a text message.`;
-      try{
-        const r = await askClaude(
-          system,
-          `Digest flags: ${JSON.stringify(c.flags||{})}\n\nCheck-in so far:\n${soFar}\n\nThe question you just asked: "${q.text}"\nTheir answer: "${msg}"`,
-          // 320, not 170: the reaction is up to 4 sentences AND weaves in the next
-          // question, which at 170 got cut off mid-word ("running on f[umes]").
-          320,[],"claude-sonnet-5","joebot_chat"
-        );
-        return (r&&r.trim())?gateText("checkin", r.trim()):"";
-      }catch(_){ return ""; }
-    };
-
-    setLoading(true);
-    let reaction = await react();
-    setLoading(false);
-    if(reaction===NONE || reaction.includes(NONE)) reaction = "";
-
-    // Coach-loop-in offer: an injury-kind answer that reports ACTIVE pain, for an
-    // athlete whose program is LOCKED by a coach. T55 (Will 08-17): this used to
-    // gate on coach_id alone, which routed athletes who OWN their program into a
-    // coach request they never wanted — the same misroute as the chat branch. The
-    // rule now matches changeRequest.js's single-source table: locked → coach
-    // request; unlocked → the athlete self-serves (chat offers that path). Pain
-    // still reaches a linked coach through the injury notification. Joe's normal
-    // reaction (eased volume, exercise swaps) shows first; this is a follow-up
-    // interstitial, never a replacement. One offer per check-in, never auto-filed —
-    // the athlete must tap "Send to coach".
-    const offerCoach = q.kind==="injury" && !offeredCoachRef.current
-      && !!athlete.coach_id && !!athlete.program_locked && reportsActivePain(msg);
+    const step = advanceAgenda(agenda, agState, {message:msg, parsed, endIntent:ending});
+    setAgState(step.state);
+    const reply = gateText("checkin", step.reply||"");
+    if(reply) setMessages(prev=>[...prev,{role:"assistant",content:reply}]);
+    if(step.finished){ await finish(step.state.answers, {early: step.reason==="athlete_ended", state: step.state}); return; }
     if(offerCoach){
       offeredCoachRef.current = true;
-      if(reaction) setMessages(prev=>[...prev,{role:"assistant",content:reaction}]);
-      const area = (msg.match(BODY_AREAS)||[])[0] || "that";
-      setMessages(prev=>[...prev,{role:"assistant",content:`Want me to send Coach a request to adjust your program for that ${area.toLowerCase()}?`}]);
-      setCoachOfferPending({painMsg:msg, reaction, hasNext, nextIdx, nextQ, willOfferDeeper, newAnswers});
+      const area = pendingItem?.pain?.label || (msg.match(BODY_AREAS)||[])[0] || "that";
+      setMessages(prev=>[...prev,{role:"assistant",content:`Want me to send Coach a request to adjust your program for that ${String(area).toLowerCase()}?`}]);
+      setCoachOfferPending({painMsg:msg, reaction:reply, state:step.state});
       setPhase("coach-offer");
       return;
     }
-
-    if(hasNext){
-      setAskedIdx(nextIdx);
-      // The reply is either "reaction + next question" or just the next question;
-      // fall back to the plain scripted question if the call came back empty so the
-      // flow never stalls.
-      setMessages(prev=>[...prev,{role:"assistant",content:reaction||nextQ.text}]);
-    } else if(willOfferDeeper){
-      if(reaction) setMessages(prev=>[...prev,{role:"assistant",content:reaction}]);
-      setMessages(prev=>[...prev,{role:"assistant",content:"That's the short version. Want to go deeper, or wrap it here?"}]);
-      setPhase("deeper-offer");
-    } else {
-      if(reaction) setMessages(prev=>[...prev,{role:"assistant",content:reaction}]);
-      await finish(newAnswers);
+    // The model left nothing to answer: code asks the next open item plainly.
+    if(step.ask) setMessages(prev=>[...prev,{role:"assistant",content:step.ask.text}]);
+    else if(!reply){
+      const it = agenda.find(i=>i.id===step.state.pending) || agenda.find(i=>!step.state.covered.includes(i.id));
+      if(it) setMessages(prev=>[...prev,{role:"assistant",content:it.text}]);
     }
   };
 
-  // Resume question progression after the coach-offer interstitial resolves —
-  // exactly the same branching sendMessage would have done, just deferred.
+  // After the coach-offer interstitial resolves: the next open item, asked
+  // plainly (the model was told to hold it), or the finish when none is left.
   const resumeAfterCoachOffer = async (pending) => {
-    const {hasNext, nextIdx, nextQ, willOfferDeeper, newAnswers} = pending;
-    if(hasNext){
-      setAskedIdx(nextIdx);
-      setMessages(prev=>[...prev,{role:"assistant",content:nextQ.text}]);
-      setPhase("dialogue");
-    } else if(willOfferDeeper){
-      setMessages(prev=>[...prev,{role:"assistant",content:"That's the short version. Want to go deeper, or wrap it here?"}]);
-      setPhase("deeper-offer");
-    } else {
-      await finish(newAnswers);
-    }
+    const st = pending.state || agState;
+    const next = agenda.find(i=>!st.covered.includes(i.id));
+    if(!next){ await finish(st.answers, {state: st}); return; }
+    setAgState({...st, pending: next.id, asked: {...st.asked, [next.id]: (st.asked[next.id]||0)+1}});
+    setMessages(prev=>[...prev,{role:"assistant",content:next.text}]);
+    setPhase("dialogue");
   };
 
   // Athlete tapped "Send to coach" / "No thanks" on the pain-offer interstitial.
@@ -3815,18 +3758,23 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
     await resumeAfterCoachOffer(pending);
   };
 
-  const goDeeper = () => {
-    setShowDeeper(true);
-    setPhase("dialogue");
-    const nextIdx = topQuestions.length; // first deeper question
-    setAskedIdx(nextIdx);
-    setMessages(prev=>[...prev,{role:"assistant",content:deeperQuestions[0].text}]);
-  };
-
-  const finish = async (finalAnswers) => {
+  const finish = async (finalAnswers, opts={}) => {
+    if(finishingRef.current) return;
+    finishingRef.current = true;
     setPhase("acting");
     setLoading(true);
     const qaText = finalAnswers.map(a=>`[${a.kind}] Q: ${a.q}\nA: ${a.a}`).join("\n\n");
+    // Pain marks from the pain answers (S2 ledger helpers): asked_at for every
+    // pain item asked, cleared_at / dismissed_at / declined_change from what the
+    // athlete said. Written as its own call, never bundled with other columns.
+    try{
+      const stamps = painStampsFrom({agenda, state: opts.state || agState});
+      if(stamps.length){
+        const marks = applyStamps((athlete.pain_marks && typeof athlete.pain_marks==="object") ? athlete.pain_marks : {}, stamps);
+        sbUpdate("athletes", athlete.id, {pain_marks:marks}).catch(e=>reportError("sync", e, {error_type:"pain_marks_write", component:"checkin"}));
+        if(onPainMarks) onPainMarks(marks);
+      }
+    }catch(_){}
     // T62 memory engine (Will 09-01): the check-in is the PRIMARY way athlete
     // context grows — its answers write straight into the coach's saved notes.
     // The extractor sees the current facts and returns memory ops in the same
@@ -3848,7 +3796,7 @@ memory_ops keeps the coach's saved notes about this athlete current from what th
 {"op":"edit","match":"distinctive substring of an existing fact","content":"full replacement text"}
 {"op":"delete","match":"distinctive substring of an existing fact"}
 Rules: facts are about the ATHLETE (schedule, availability, equipment, preferences, recovery patterns, life context), plain coach shorthand, specific enough to act on. NEVER instructions about how the coach behaves. Anything time-bound (travel, a rough stretch, a short-term limitation) is "situational" and MUST carry expires_at. When an answer contradicts or updates a CURRENT FACT, edit or delete that fact instead of stacking a near-duplicate. An answer tagged [memory] is about the note quoted in its question: keep it (no op), update it (edit), or drop it (delete) per the answer. Injuries already flow through injury_note, do not duplicate them here. Routine "all good" answers produce NO ops.`,
-        `TODAY: ${new Date().toISOString().slice(0,10)}\n\nCURRENT FACTS (${memRows.length} active):\n${factLines.join("\n")||"(none yet)"}\n\nCHECK-IN ANSWERS:\n${qaText}`,
+        `TODAY: ${new Date().toISOString().slice(0,10)}\n\nCURRENT FACTS (${memRows.length} active):\n${factLines.join("\n")||"(none yet)"}\n\nCHECK-IN ANSWERS:\n${qaText||"(none)"}\n\nWHOLE CONVERSATION (context; the answers above are primary):\n${messages.slice(1).map(m=>`${m.role==="user"?"Athlete":"Joe"}: ${m.content}`).join("\n").slice(-4000)}`,
         900, [], "claude-sonnet-5", "proof_answer_extract"
       );
       ex = JSON.parse(String(raw).replace(/```json|```/g,"").trim()) || {};
@@ -3887,10 +3835,14 @@ Rules: facts are about the ATHLETE (schedule, availability, equipment, preferenc
     let recParked = false;
     if(wantsChange && CHAT_FIRST_ON){
       try{
+        // T64 (S2 NEEDS #5): the program's purpose and the ledger line ride along,
+        // so a rec never changes what the program already does to protect.
+        const purpose = programPurpose(athlete.program_text||"");
+        const painLines = agenda.filter(i=>i.pain && i.pain.summary).map(i=>`- ${i.pain.summary}`).join("\n");
         const rec = await draftRecJSON({
           programText: athlete.program_text||"",
-          context: `CHECK-IN (what the athlete told Joe this week):\n${qaText}`,
-          instruction: "They agreed to a protective program change for the injury discussed in this check-in. Draft it.",
+          context: `CHECK-IN (what the athlete told Joe this week):\n${qaText}${purposeLine(purpose)?`\n\nPROGRAM PURPOSE (from the program's own words): ${purposeLine(purpose)}`:""}${painLines?`\n\nPAIN LEDGER (computed by the app):\n${painLines}`:""}`,
+          instruction: `They agreed to a protective program change for the injury discussed in this check-in. Draft it.${purpose.protects.length?` Never change what the program already does to protect: ${purpose.protects.join(", ").replace(/_/g," ")}.`:""}`,
           origin: "checkin",
         });
         if(rec){
@@ -3922,17 +3874,22 @@ Rules: facts are about the ATHLETE (schedule, availability, equipment, preferenc
       }catch(_){}
     }
 
-    const closing = recParked
-      ? "That's a wrap. I drafted the program change we talked about, it's parked under Program, Memory, in Drafts. Open it whenever you're ready, or delete it there if you change your mind."
-      : ex.injury_note
-      ? "Logged it. I'll keep that front of mind. Keep putting in the work."
-      : "That's a wrap. Keep putting in the work.";
+    const closing = closingLine({recParked, early: !!opts.early});
     setLoading(false);
     setMessages(prev=>[...prev,{role:"assistant",content:closing}]);
 
     if(CHAT_FIRST_ON || !wantsChange || !setProgramPending){
       await persistAndClose(finalAnswers, ex, null);
     }
+  };
+
+  // Closing the modal mid-conversation ends the check-in (Will 09-28: the athlete
+  // can end it): what was answered is kept, unasked items are simply left.
+  const closeCheckin = () => {
+    if((phase==="dialogue"||phase==="coach-offer") && answers.length && !finishingRef.current){
+      finish(answers, {early:true, state:agState}).catch(()=>{});
+    }
+    onClose();
   };
 
   const applyProgramChange = async (apply) => {
@@ -4009,7 +3966,7 @@ Rules: facts are about the ATHLETE (schedule, availability, equipment, preferenc
       <style>{GS}</style>
       <div style={{background:CA.navy2,borderBottom:`1px solid ${CA.border}`,paddingTop:"calc(12px + env(safe-area-inset-top, 0px))",paddingBottom:"12px",paddingLeft:"16px",paddingRight:"16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
         <div style={{...kick(NEWS.ink3),fontSize:10}}>{isMonthly?"Monthly":"Weekly"} Edition · {athlete.name}</div>
-        <button onClick={onClose} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:13}}>✕ Close</button>
+        <button onClick={closeCheckin} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:8,padding:"6px 14px",cursor:"pointer",fontSize:13}}>✕ Close</button>
       </div>
 
       <div style={{flex:1,overflowY:"auto",padding:"16px",display:"flex",flexDirection:"column",gap:10}}>
@@ -4095,26 +4052,26 @@ Rules: facts are about the ATHLETE (schedule, availability, equipment, preferenc
           </div>
         )}
 
-        {phase==="report"&&!loading&&activeQuestions.length>0&&(
+        {phase==="report"&&!loading&&agenda.length>0&&(
           <div className="proof-drop" style={{background:`linear-gradient(180deg,${CA.navy3},${CA.navy2})`,border:`1px solid ${CA.accent}73`,borderRadius:14,padding:15,marginTop:6}}>
             <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:8}}>
               <div style={{width:30,height:30,borderRadius:"50%",background:CA.accent,display:"flex",alignItems:"center",justifyContent:"center",...DISP,fontSize:15,color:CA.onAccent,flexShrink:0}}>J</div>
               <div>
-                <div style={{fontSize:12,fontWeight:700,color:CA.text}}>Coach Joe has {topQuestions.length} question{topQuestions.length===1?"":"s"}</div>
+                <div style={{fontSize:12,fontWeight:700,color:CA.text}}>Coach Joe wants to check in</div>
                 <div style={{fontSize:10,color:CA.muted}}>{isMonthly?"Monthly":"Weekly"} check-in · ~2 min</div>
               </div>
             </div>
-            <div style={{fontSize:13,lineHeight:1.5,color:IS_DARK?"#c7d2e0":CA.muted2,marginBottom:12}}>{activeQuestions[0].text}</div>
+            <div style={{fontSize:13,lineHeight:1.5,color:IS_DARK?"#c7d2e0":CA.muted2,marginBottom:12}}>{agenda[0].text}</div>
             <button onClick={startDialogue} style={{width:"100%",padding:12,borderRadius:10,border:"none",cursor:"pointer",background:CA.accent,color:CA.onAccent,...DISP,fontSize:15,letterSpacing:2,textAlign:"center"}}>
               START CHECK-IN →
             </button>
           </div>
         )}
 
-        {phase==="deeper-offer"&&!loading&&(
-          <div style={{display:"flex",gap:8,marginTop:4}}>
-            <button onClick={goDeeper} style={{flex:1,background:CA.accent,color:CA.onAccent,border:"none",borderRadius:10,padding:"11px",fontWeight:700,...DISP,letterSpacing:1,fontSize:14,cursor:"pointer"}}>Go deeper →</button>
-            <button onClick={()=>finish(answers)} style={{flex:1,background:"transparent",color:CA.muted,border:`1px solid ${CA.border}`,borderRadius:10,padding:"11px",cursor:"pointer",fontSize:13}}>Wrap it here</button>
+        {/* A digest with nothing on the agenda: no check-in, just mark it read. */}
+        {phase==="report"&&!loading&&agenda.length===0&&!alreadyDone&&(
+          <div style={{textAlign:"center",marginTop:8}}>
+            <button onClick={()=>persistAndClose([], {}, null)} style={{background:"transparent",color:CA.accent,border:`1px solid ${CA.accent}`,borderRadius:10,padding:"11px 28px",cursor:"pointer",fontSize:14,fontWeight:700,...DISP,letterSpacing:1}}>Done ✓</button>
           </div>
         )}
 
@@ -11610,6 +11567,7 @@ ${VOICE_ATHLETE}`;
           onClose={()=>{setShowProofChat(false);setChatDigest(null);}}
           onContextSaved={(ctx)=>setAthleteContext(ctx)}
           onDigestRead={(d)=>{ if(!chatDigest) setProofDigest(d); }}
+          onPainMarks={(m)=>setAthlete(prev=>({...prev,pain_marks:m}))}
         />
       )}
 

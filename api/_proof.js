@@ -13,6 +13,7 @@
 
 import crypto from "node:crypto";
 import { gateText, JOE_IDENTITY, VOICE_ATHLETE, VOICE_COACH } from "./_voice.js";
+import { normArea } from "./_painLedger.js";
 import {
   getPD, isRealSession, groupIntoSessions, epley1RM, buildLiftHistory,
   detectPlateaus, aggregateInjuries, computeRankMovement, compareProgramVsActual,
@@ -83,6 +84,23 @@ Rules: sets/reps are the prescribed working sets per session. pct_by_week is %1R
   return parsed;
 }
 
+// ─── PAIN LEDGER READS (T64 S4) ───────────────────────────────────────────────
+// brief.pain is the ledger (src/painLedger.js painStatus, computed in
+// trigger-proof-feed). An injury PLAN is written only for an area that still
+// needs one: serious, new or active, not dismissed, not already protected by the
+// program. Easing, quiet, cleared, dismissed or protected areas get no plan.
+export const planEligible = (r) => !!r && ["serious", "new", "active"].includes(r.state) && !r.dismissed && !r.addressedByProgram;
+const painRecFor = (pain, areaText) => {
+  const key = normArea(String(areaText || "")).key;
+  return key ? (pain || []).find((r) => r.area === key) || null : null;
+};
+export function painQuestionTextFor(r) {
+  const label = r.label || r.area;
+  if (r.checkIn?.tone === "serious") return `That ${label} sounded serious. Where is it at right now, and has anyone looked at it?`;
+  if (r.checkIn?.tone === "cleared_yet") return `Has the ${label} cleared up?`;
+  return `How's the ${label} feeling this week?`;
+}
+
 // ─── CONDITIONAL QUESTION BANK (§8) ───────────────────────────────────────────
 // Built in CODE (deterministic, never open-ended, hard stop). Ranked; `deeper:true`
 // items are hidden behind "Go deeper". `kind` tells the client how to persist the
@@ -106,12 +124,35 @@ export function buildQuestionBank(brief, athlete, opts = {}) {
     const bw = brief.identity.bodyweight ? `${brief.identity.bodyweight} lbs` : "what we have on file";
     q.push({ id: "weight", kind: "weight", deeper: false, text: `Bodyweight still ${bw}, or has it moved?` });
   }
-  // 2. injury status — same area the digest addresses
+  // 2. injury status. T64 S4: with the pain ledger in the brief, the ledger
+  // decides: ask about each area whose checkIn.ask is true (up to 2), worded by
+  // its tone ("has it cleared?" for easing/quiet, direct for serious); the
+  // change question only when checkIn.askChange. Same {id, kind, deeper, meta,
+  // text} shape, so the old index-walking client runs it unchanged.
+  const pain = Array.isArray(brief.pain) ? brief.pain : null;
+  if (pain) {
+    const askable = pain.filter((r) => r.checkIn && r.checkIn.ask).slice(0, 2);
+    if (!askable.length) q.push({ id: "injury", kind: "injury", deeper: false, text: `Anything banged up I should know about?` });
+    askable.forEach((r, i) => {
+      q.push({ id: i === 0 ? "injury" : `injury_${r.area}`, kind: "injury", deeper: false, meta: { area: r.label, area_key: r.area, tone: r.checkIn.tone }, text: painQuestionTextFor(r) });
+      if (r.checkIn.askChange) {
+        const focusRec = painRecFor(pain, opts.activeInjury);
+        const change = focusRec && focusRec.area === r.area ? injuryChange : null;
+        q.push({
+          id: i === 0 ? "injury_apply" : `injury_apply_${r.area}`, kind: "injury_apply", deeper: false,
+          meta: { area: r.label, area_key: r.area, change: change || null },
+          text: change
+            ? `To protect that ${r.label}: ${change.replace(/\.\s*$/, "")}. Apply it next week, keep it as written, or adjust?`
+            : `Want me to adjust the program around the ${r.label}, or keep it as written?`,
+        });
+      }
+    });
+  } else
   q.push(activeInjury
     ? { id: "injury", kind: "injury", deeper: false, meta: { area: activeInjury }, text: `That ${activeInjury}: cleared, lingering, or still sharp?` }
     : { id: "injury", kind: "injury", deeper: false, text: `Anything banged up I should know about?` });
   // 3. injury plan apply (only if active injury) — state the SPECIFIC change
-  if (activeInjury) {
+  if (!pain && activeInjury) {
     q.push({
       id: "injury_apply", kind: "injury_apply", deeper: false,
       meta: { area: activeInjury, change: injuryChange || null },
@@ -197,8 +238,11 @@ export function buildQuestionBank(brief, athlete, opts = {}) {
   // 6. recovery
   q.push({ id: "recovery", kind: "context", deeper: false, text: `Recovery this week: dialed, flat, or running on fumes?` });
 
-  // ── go deeper ──
-  q.push({ id: "niggles", kind: "context", deeper: true, text: `Low back, knees, anything nagging: managing it, or is it behind you?` });
+  // ── former "go deeper" items: still flagged deeper:true for OLD clients (they
+  // hide them behind their button); the T64 client ignores the flag and treats
+  // the whole bank as one agenda. With the ledger in the brief, pain questions
+  // come from it, so the catch-all "niggles" item is not emitted.
+  if (!Array.isArray(brief.pain)) q.push({ id: "niggles", kind: "context", deeper: true, text: `Low back, knees, anything nagging: managing it, or is it behind you?` });
   if (athlete.height_finalized === false) {
     q.push({ id: "height", kind: "height", deeper: true, text: `Any change in height since we last checked?` });
   } else {
@@ -293,6 +337,7 @@ You are writing this week's Proof Feed digest. Return ONLY JSON with these keys 
 - program_load: where loads track vs prescribed %. null if no program. If the brief has a "prep" object (warm-up/cool-down check-offs from Quick Log), fold ONE short clause about the habit into week_vs_week or program_load when it's notable either way ("warmed up 5 of 5, that's pro behavior" or "warm-ups checked on 1 of 4, that's how tweaks happen"), never a whole section, never mentioned when prep is null.
 - prs_progress: new PRs / block bests from the athlete's own log (the "prs" list in the brief). null if none.
 - rank_movement: ONLY if the brief's GRIT RANK note describes real movement (a tier-up, a Strength Score change worth naming, or a new best on a ranked/benchmarked lift): call out the SPECIFIC lift(s) and tier by name (e.g. "Back Squat pushed you into STRONG territory"). If it's their first-ever check-in (no prior snapshot), you may state their current rank once but never claim "movement." If nothing changed, null.
+- PAIN LEDGER: when the brief carries "pain" (the app's pain ledger, final), an injury plan exists ONLY for an area whose state is serious, new or active AND is not dismissed AND not addressedByProgram. Easing, quiet or cleared areas, dismissed areas, and areas the program already protects get NO injury_plan, injury_focus or injury_change (null), at most a plain mention inside week_vs_week that it is easing. Never count flags or name dates beyond the ledger's summary line.
 - injury_plan: ONLY if an injury is active: a warning PLUS the LEAST-restrictive concrete change that protects the area while keeping the athlete moving toward their stated goal. Match the change to the severity in the PAIN TREND note: a single "clearing"/one-off flag warrants a small tweak (add prehab, swap ONE variation, trim a top set), NOT a big load cut; reserve aggressive load caps (e.g. dropping to ~80% for weeks) for WORSENING or recurring pain only. Never reflexively slash loads. Any exercise swap MUST name exactly what it replaces and on which day/slot (e.g. "swap flat bench for floor press in Thursday's main pressing slot"), never a floating "add floor press" with no home. Crucially, weigh the injury against the athlete's goals: if the protective change is compatible with the goal, keep pushing toward it and say so; if babying the area for weeks genuinely CONFLICTS with the goal timeline (you can't take it easy AND hit the number on schedule), say that honestly and talk about managing expectations / shifting the timeline, do NOT pretend they can do both. Else null.
 - injury_focus: if an injury is active, the SINGLE body area you are addressing (e.g. "left pec", "right knee"). MUST be the same area injury_plan and focus_next_week talk about, pick one and stay consistent across all three. Else null.
 - injury_change: if an injury is active, the SPECIFIC change you'd make, concrete enough to apply verbatim: name exercises, sets/reps, and where it slots in (which day / what it replaces). Keep it PROPORTIONATE to the pain (see injury_plan), the smallest change that protects the area, not the biggest. No vague "a small tweak", and no floating swap without a home. Else null.
@@ -314,6 +359,16 @@ Adapt to WHATEVER program the athlete runs, do not assume a long, multi-week per
 
   const raw = await deps.askClaudeServer({ system, user, maxTokens: 1400, feature: "proof_weekly", attribution: deps.attribution });
   const obj = parseJsonLoose(raw) || {};
+  // T64 S4: the ledger has the last word on whether a plan exists (enforced in
+  // code, not trusted to the prompt): no plan for an easing, quiet, cleared,
+  // dismissed or program-protected area.
+  if (Array.isArray(brief.pain)) {
+    const focus = painRecFor(brief.pain, obj.injury_focus);
+    const anyEligible = brief.pain.some(planEligible);
+    if (!anyEligible || (obj.injury_focus && focus && !planEligible(focus))) {
+      obj.injury_plan = null; obj.injury_focus = null; obj.injury_change = null;
+    }
+  }
 
   const sections = sectionsFrom(obj, [
     { key: "week_vs_week", label: "THIS WEEK VS LAST" },
