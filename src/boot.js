@@ -25,7 +25,7 @@
 // part of the running build) and the document's script/preload/stylesheet tags.
 // Either alone would be enough in practice; together they survive a bundler
 // changing how the entry is referenced.
-import { LBS_PER_KG } from "./units.js";
+import { LBS_PER_KG, rewriteLoads } from "./units.js";
 import { effectiveTier } from "./tiers.js";
 
 export function runningAssetPaths(doc, moduleUrl) {
@@ -205,29 +205,24 @@ export function openerEligibleFor(a) {
 // Bodyweight ("+25"), rep-only ("3x20") and timed ("3x60s") lines have no "@ N"
 // and pass through untouched.
 export function displayWeights(text, unit = "lbs") {
-  let out = String(text || "");
   // T55: kg athletes get kg numbers. Program prescriptions are lbs unless a line
   // says otherwise, so in kg mode every implied-lbs load converts ONCE from the
   // program's number (working loads round to 2.5 kg — no decimal barbell math).
+  // T64 Fix 6: the actual conversion + "does this need converting at all" logic
+  // now lives in the single tokenizer src/units.js exports (rewriteLoads) — see
+  // its header for why (the old bare-number regex only recognized "lbs", never
+  // "lb", so "@ 45lb" became "@ 20 kglb"). This function is now just the
+  // source-reordering policy on top of that shared engine.
   const kg = unit === "kg";
   const cv = (w) => (kg ? String(Math.round((Number(w) / LBS_PER_KG) / 2.5) * 2.5) : String(w));
   const u = kg ? "kg" : "lbs";
-  // "@ N (source)": a %/RPE source leads; anything else (last time) trails.
-  out = out.replace(/@\s*(\d+(?:\.\d+)?)\s*\(([^)]+)\)/g, (_m, w, source) => {
+  return rewriteLoads(text, u, cv, ({ converted, perSide, source }) => {
+    if (source === undefined) return `@ ${converted} ${u}${perSide}`;
+    // "@ N (source)": a %/RPE source leads; anything else (last time) trails.
     const s = source.trim();
     const lead = /%/.test(s) || /^(rpe|rir)\b/i.test(s);
-    return lead ? `@ ${s} (${cv(w)} ${u})` : `@ ${cv(w)} ${u} (${s})`;
+    return lead ? `@ ${s} (${converted} ${u}${perSide})` : `@ ${converted} ${u}${perSide} (${s})`;
   });
-  // A bare "@ N" (program stated the pounds) gets a unit — but never a number that
-  // already carries lbs/kg, a following paren, or a % sign (a just-led percentage).
-  // (?![.\d]) forces the WHOLE number: when the unit lookahead fails on "7.5 kg"
-  // the engine backtracks and would happily match "@ 7" (the "." satisfies \b),
-  // convert the integer part again and strand ".5 kg" — Will's phone, 08-28:
-  // "@ 2.5 kg.5 kg.5 kg". A partial match is never a match.
-  out = out.replace(/@\s*(\d+(?:\.\d+)?)(?![.\d])(?!\s*(?:lbs\b|kgs?\b|%|\())/gi, (_m, w) => `@ ${cv(w)} ${u}`);
-  // In kg mode, loads the program wrote explicitly as lbs convert too.
-  if (kg) out = out.replace(/@\s*(\d+(?:\.\d+)?)\s*lbs\b/gi, (_m, w) => `@ ${cv(w)} kg`);
-  return out;
 }
 
 // The chat-first sheet + lock-screen card show the draft ITSELF (it stays
@@ -243,15 +238,14 @@ export function displayWeights(text, unit = "lbs") {
 // draft-engine numbers are lbs unless a line says otherwise.
 export function draftInUnit(text, unit = "lbs") {
   if (unit !== "kg") return String(text || "");
+  // T64 Fix 6: same shared tokenizer as displayWeights (see src/units.js), just
+  // without the source-reordering — the sheet/card draft stays number-FIRST
+  // (Will's contract: it's the editable, loggable draft) whether or not it
+  // carries a "(source)".
   const cv = (w) => String(Math.round((Number(w) / LBS_PER_KG) / 2.5) * 2.5);
-  let out = String(text || "");
-  out = out.replace(/@\s*(\d+(?:\.\d+)?)\s*lbs\b/gi, (_m, w) => `@ ${cv(w)} kg`);
-  // Bare "@ N" (implied lbs): converts unless the number already carries a unit
-  // or IS a percentage. (?![.\d]) forces the whole number — without it, a failed
-  // unit lookahead on "@ 7.5 kg" backtracked to "@ 7" and re-converted the
-  // integer part, stranding ".5 kg" fragments on every pass (Will 08-28).
-  out = out.replace(/@\s*(\d+(?:\.\d+)?)(?![.\d])(?!\s*(?:lbs\b|kgs?\b|%))/gi, (_m, w) => `@ ${cv(w)} kg`);
-  return out;
+  return rewriteLoads(text, "kg", cv, ({ converted, perSide, source }) =>
+    source === undefined ? `@ ${converted} kg${perSide}` : `@ ${converted} kg${perSide} (${source.trim()})`
+  );
 }
 
 // Frame the resolved draft as a session to RUN, not a log to type. The draft's

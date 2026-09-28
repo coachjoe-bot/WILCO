@@ -62,6 +62,30 @@ eq(displayWeights("Bench 3x5 @ 185 (75%)", "kg"), "Bench 3x5 @ 75% (85 kg)", "kg
 eq(displayWeights("Squat 5x3 @ 100kg", "kg"), "Squat 5x3 @ 100kg", "already-kg lines pass through");
 eq(displayWeights("Row 3x8 @ 135 lbs", "kg"), "Row 3x8 @ 60 kg", "explicit-lbs lines convert in kg mode");
 
+// 4c ── T64 Fix 6: the "lb" (singular)/multi-value/unit-spelling regression suite.
+// BUG 6 (diagnosis C): the old regex's "already tagged" lookahead only knew
+// "lbs" (plural), so "@ 45lb" converted the number AND left "lb" stitched onto
+// the output — "@ 20 kglb". Every fuzz case from the diagnosis report plus the
+// plan's gap hunters, locked in permanently.
+eq(displayWeights("Incline DB Bench 3x8 @ 45lb", "kg"), "Incline DB Bench 3x8 @ 20 kg", "T64/BUG6 the exact live repro: singular no-space lb");
+eq(displayWeights("Incline DB Bench 3x8 @ 45 lb", "kg"), "Incline DB Bench 3x8 @ 20 kg", "T64/BUG6 singular spaced lb");
+eq(displayWeights("Incline DB Bench 3x8 @ 45 lb/hand", "kg"), "Incline DB Bench 3x8 @ 20 kg/hand", "T64/BUG6 per-hand qualifier kept, not duplicated");
+eq(displayWeights("Incline DB Bench 3x8 @ 45lb DBs", "kg"), "Incline DB Bench 3x8 @ 20 kg DBs", "T64/BUG6 trailing free text kept, one space");
+eq(displayWeights("Incline DB Bench 3x8 @ 45#", "kg"), "Incline DB Bench 3x8 @ 20 kg", "T64/BUG6 gym-slang # for lbs");
+eq(displayWeights("Incline DB Bench 3x8 @ 45 pounds", "kg"), "Incline DB Bench 3x8 @ 20 kg", "T64/BUG6 spelled-out pounds");
+eq(displayWeights("@ 100/110/120lb", "kg"), "@ 45/50/55 kg", "T64/BUG6 multi-value slash chain, one unit at the end");
+eq(displayWeights("@ 40-45lb", "kg"), "@ 17.5-20 kg", "T64/BUG6 dash-range chain");
+eq(displayWeights("Squat 5x3 @ 60/80/90/100/100kg", "kg"), "Squat 5x3 @ 60/80/90/100/100kg", "T64/BUG6 already-kg multi-value chain passes through untouched");
+eq(displayWeights("@ BW+25lb", "kg"), "@ BW+25lb", "T64/BUG6 bodyweight-plus never matches the @N pattern");
+eq(displayWeights("135 x 5", "kg"), "135 x 5", "T64/BUG6 sets x reps with no @ is never touched");
+eq(displayWeights("@ 20kg", "lbs"), "@ 20kg", "T64/BUG6 an explicit-kg load for an lbs athlete stays kg (no reverse conversion)");
+eq(displayWeights("Bench 3x8 @ 70%", "kg"), "Bench 3x8 @ 70%", "T64/BUG6 a bare percentage is never a load");
+eq(displayWeights("@ 20 kglb", "kg"), "@ 20 kg", "T64/BUG6 HEALS the corrupted artifact — number stays (already converted), stray unit dropped");
+eq(displayWeights("@ 20 kglbs", "kg"), "@ 20 kg", "T64/BUG6 heals the pluralized corrupted artifact too");
+eq(draftInUnit(draftInUnit("Incline DB Bench 3x8 @ 45lb", "kg"), "kg"), "Incline DB Bench 3x8 @ 20 kg", "T64/BUG6 double application of the live-repro line is a no-op, never a compounding re-convert");
+eq(draftInUnit("@ 20 kglb", "kg"), "@ 20 kg", "T64/BUG6 draftInUnit heals the corrupted artifact the same way");
+eq(draftInUnit(draftInUnit("@ 20 kglb", "kg"), "kg"), "@ 20 kg", "T64/BUG6 double-heal is stable");
+
 // 4b ── draftInUnit: the SHEET/CARD converter — number-FIRST shape preserved
 // (the text stays the editable, loggable draft), explicit kg suffix, idempotent.
 eq(draftInUnit("Bench 3x5 @ 185 (75%)", "kg"), "Bench 3x5 @ 85 kg (75%)", "kg draft keeps number-first, converts, tags kg");
