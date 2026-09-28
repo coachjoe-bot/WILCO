@@ -92,6 +92,7 @@ import { validatePref, normalizePrefs, describePref, prefsPromptLines, nextSigna
 import { parseBlockInfo, stripBlockInfo } from "./programContract.js";
 import { lineDiff, findPlacement, mergeGuard, mergeSystemPrompt } from "./programDiff.js";
 import { snapshotProgramHistory, startNextBlock, closeCurrentBlock, setBlockEnd, blockPromptState, parseTimeline, dateToIso, refreshOpenBlockRecap, buildBlockSpanAnswer, blockSpanConflict, blockSpanNeedsAsk, wrapCardEligible } from "./programHistory.js";
+import { changeScope } from "./changeScope.js";
 // First-run app tour (spotlight coach-marks + scripted Quick Log demo). Pure
 // display: fixtures never touch real data — see tour.jsx header.
 import { TourOffer, TourSpotlight, athleteTourSteps, tourWelcome, tourInteractiveAt, TOUR_QL_FIXTURE, TOUR_SCRIPT } from "./tour.jsx";
@@ -1662,7 +1663,7 @@ Rules:
 - Set is_program_update:true ONLY when the athlete is handing you their TRAINING PROGRAM / PLAN to save — a FORWARD-LOOKING prescription for future sessions (usually multiple days or weeks: "here's my program", "my new plan/split", "put me on this") AND the actual program content is present in the message. A past-tense WORKOUT LOG of what they just did is NOT a program update — even a full multi-exercise one with sets, reps and weights, and even a clean formatted Quick Log day list. Tell them apart by INTENT and tense: a program is what they WILL do (a plan); a log is what they DID ("did", "got", "hit today", "just finished", "logged"). Do NOT set it for content-free requests ("update my program", "save that"), and do NOT set it for a single day's session. When unsure, treat it as a LOG, not a program.
 - Set program_append:true when the athlete explicitly asks you to ADD the content in THIS message onto their existing saved program — "add this to my program", "add this to my program tab", "put this in my program", "append this to my plan", "tack this onto my program". The program content to add must be present in the message. This is ADDITIVE (extends the program), never a replacement — do NOT set it for a normal workout log, and if they're handing over a whole new program to save, that's is_program_update instead.
 - Set program_create_request:true when the athlete asks YOU to CREATE, WRITE, BUILD, DESIGN, or GENERATE a training program/plan FOR them and does NOT paste their own — "make me a program", "build me a program", "can you write me a plan", "design me a workout program", "I need a program, can you make one". This is them asking you to AUTHOR it, distinct from is_program_update (where they hand you an already-written program). Set it even if the request is short or details are still being gathered.
-- Set is_temp_program_update:true when the athlete has described their available equipment or conditions for a non-standard training situation (hotel, cruise, travel, beach, limited equipment, injury restrictions). Must include actual condition info — NOT set just because they mention traveling or ask what to do.
+- Set is_temp_program_update:true when the athlete has described their available equipment or conditions for a non-standard training situation that covers TWO OR MORE training days or sessions (hotel, cruise, travel, beach, limited equipment, injury restrictions stated as ongoing — "until Thursday", "this week", "for a few days", "traveling for a week"). Must include actual condition info — NOT set just because they mention traveling or ask what to do. Do NOT set it for a change scoped to ONE session ("today", "this workout", "tonight's lift") — that is a log-sheet swap for today only, not a program change; say so plainly in your reply (offer to adjust today's sheet) and never claim you've set up a temporary program when you haven't. Genuinely unclear whether it's a one-off or ongoing: ask directly ("just today, or is this a longer thing?") in your reply rather than guessing either way.
 - "program_block_span": populate when the athlete says HOW LONG their program runs, or that it doesn't end. Set "repeating":true for "it just repeats", "same week every week", "no end date", "I run it until I change it", "ongoing". Set "weeks" for a stated length ("it's a 6 week block", "8 weeks"). Set "end_date" ("YYYY-MM-DD", resolved against TODAY'S DATE above) for a stated finish ("it ends August 30", "last week is the 30th", "through the end of the month"). Set only what they actually say; leave the rest null. This is usually them ANSWERING a question about whether their block has an end — but take it wherever they volunteer it. Do NOT populate it from a date range printed in a program they pasted; only from the athlete's own words. Leave null otherwise.
 - "program_position_claim": populate when the athlete states WHERE THEY ARE in their program — "I'm on week 3", "this is day 2", "I'm starting week 4 today", "today's day 1", "I'm on week 2 day 3". Set only the parts they actually state (week alone, day alone, or both); leave the other null. This is the athlete correcting or confirming their position, and it OVERRIDES what the app worked out, so only populate it when they genuinely assert their position — NOT when they ask a question about it ("what day am I on?"), and NOT from a day LABEL in a workout log ("Push A" is the session's name, not a claim about week or day number). Leave null otherwise.
 - Set is_program_revert:true when the athlete signals they are returning to their normal training environment ("I'm back", "home now", "back at the gym", "back to normal", "cruise is over", etc.).
@@ -9707,7 +9708,24 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // modified here, only temporarily superseded in what Joe coaches from. The
       // coach keeps full control — AthleteDetail shows the Field Mode banner with an
       // "End temp program" button, and the note filed below puts it in their brief.
-      if(parsed.is_temp_program_update && !fromQuickLog){
+      // T64 Fix 4: is_temp_program_update fires on ANY equipment/condition
+      // mention, one session or ten — the classifier has no notion of duration.
+      // Two deterministic guards, neither a new model judgment call, both
+      // additive to the existing v1 flag pipeline (is_temp_program_update stays
+      // on parseWorkout; this never becomes a second decision path):
+      //  (a) changeScope reads the athlete's own words and only allows the
+      //      write when the change spans 2+ training days.
+      //  (b) if Joe already called prefill_log_sheet THIS SAME TURN, that IS
+      //      his deliberate today-only call — the flag is dropped rather than
+      //      a legacy branch overriding a call he already made, the same way a
+      //      prefill/pin call is already dropped on a finished sheet log a few
+      //      lines above. This is exactly Will's real 08-24 case: Joe's own
+      //      reply correctly judged "one session without the gear isn't worth
+      //      rewriting anything" and offered the sheet swap — the bug was the
+      //      code beneath him claiming a temp program he never promised.
+      const tempScope = changeScope({message: msg, today: new Date()});
+      const joeAlreadyHandledToday = MASTERMIND_ON && masterToolCalls.some(tc=>tc.name==="prefill_log_sheet");
+      if(parsed.is_temp_program_update && !fromQuickLog && tempScope.days>=2 && !joeAlreadyHandledToday){
         try {
           const tempText = await extractProgramText(reply);
           // extractProgramText now returns null on an empty extraction (the raw-input
@@ -9746,6 +9764,11 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           }
         } catch(e){}
       }
+      // days<2, or Joe already handled it via prefill_log_sheet: no write, no
+      // program_modifications row, no "✈️ Got it, I've set a temporary program"
+      // bubble. Joe's own reply (already on screen before any of this code
+      // runs) is the athlete's entire answer — it no longer gets contradicted
+      // by a hardcoded claim underneath it.
 
       // Revert — athlete is back, clear temp program
       if(parsed.is_program_revert && updatedAthlete.temp_program_text && !fromQuickLog){

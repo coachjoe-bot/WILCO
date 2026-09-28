@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { currentPosition } from "../src/programPosition.js";
 import { blockSpanConflict, blockSpanNeedsAsk, wrapCardEligible, buildBlockSpanAnswer } from "../src/programHistory.js";
+import { changeScope } from "../src/changeScope.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const replayDir = join(here, "..", "tests", "replay");
@@ -77,6 +78,23 @@ console.log("\nFix 1 replay — wraps-up-sept7-0824:");
   check("block 1 itself is confirmed closed (sanity check on the fixture)", !!blk1Closed.completed_at);
   check("block 2 still gets asked fresh (its own question, not answered by block 1)",
     blockSpanNeedsAsk({ openBlock: blk2, programText: blk2.program_text, spanAnswer: answer }) === true);
+}
+
+// ─── Fix 4 — today-only change never becomes a temp program (09-02 incident) ──
+console.log("\nFix 4 replay — no-shoes-0902:");
+{
+  const c = load("no-shoes-0902.json");
+  const scope = changeScope({ message: c.athleteMessage.text, today: new Date(c.athleteMessage.at) });
+  check("FIX: Will's real 'today's workout' message resolves to 1 day", scope.days === c.expect.days);
+  check("high confidence — 'today's workout' is an explicit, unambiguous scope", scope.confidence === c.expect.confidence);
+  // The App.jsx write gate is `parsed.is_temp_program_update && !fromQuickLog &&
+  // tempScope.days>=2 && !joeAlreadyHandledToday` — with days===1 the write
+  // branch (and its hardcoded "temporary program" bubble) never runs, whatever
+  // the classifier's own is_temp_program_update flag says. That's the exact
+  // contradiction in the real incident: Joe's own reply already correctly
+  // scoped it to one session; only the deterministic gate needs to agree.
+  const wouldWrite = scope.days >= 2;
+  check("FIX: the temp-program write branch is gated off — never fires for this message", wouldWrite === c.expect.tempProgramWriteShouldFire);
 }
 
 console.log(`\n${fail === 0 ? "✓" : "✗"} replay (S1): ${pass} passed, ${fail} failed`);
