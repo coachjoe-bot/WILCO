@@ -258,5 +258,20 @@ for (const message of singleDayParaphrases) {
   ok(r.days === 1, `SINGLE-DAY PARAPHRASE must stay 1: "${message}" → days=${r.days}, confidence=${r.confidence}, signal=${r.signal}`);
 }
 
+// ── Parser span fills in when the phrases are unclear (integration) ─────────
+console.log("\nchangeScope — parser span fallback:");
+{
+  const mon = new Date("2026-09-28T14:00:00-04:00");
+  const c = (message, parserDays) => changeScope({ message, today: mon, tz: "America/New_York", parserDays });
+  ok(c("visiting family Wed through next Tuesday, they have a garage gym", 7).days >= 2, "unclear phrase + parser says 7 days must be multi-day");
+  ok(c("visiting family Wed through next Tuesday, they have a garage gym", 7).signal === "parser_span", "the signal must name the parser");
+  ok(c("I'm in a boot for a month, upper body only", 30).days >= 2, "a month in a boot must be multi-day");
+  ok(c("hotel gym only has dumbbells", null).days === 1, "no duration anywhere must stay one day");
+  ok(c("hotel gym only has dumbbells", 1).days === 1, "parser says one day must stay one day");
+  ok(c("I don't have my weightlifting shoes with me, doing push press in place of today's workout", 5).days === 1, "a clear today-only phrase must beat the parser");
+  ok(c("rack is broken until Thursday", null).days >= 2, "a clear phrase needs no parser");
+  ok(c("forgot my belt", "lots").days === 1, "a junk parser value must be ignored");
+}
+
 console.log(`\n${fail === 0 ? "✓" : "✗"} change-scope: ${fail === 0 ? "all checks" : fail + " checks"} ${fail === 0 ? "passed" : "failed"}.`);
 process.exit(fail === 0 ? 0 : 1);

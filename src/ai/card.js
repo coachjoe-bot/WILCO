@@ -9,6 +9,10 @@
 // contract doc) and reruns scripts/test-mastermind.mjs, or states "no AI
 // impact" in the PR. Never describe app capabilities inline in a prompt again.
 //
+// HOW AI AND CODE DIVIDE THE WORK: docs/AI-CONTRACT.md. Read it before changing
+// anything the AI says or does. Code owns facts and validation, Joe owns
+// judgment and acts only through tools, the parser only senses.
+//
 // buildMastermindStatic() must stay BYTE-STABLE across calls (prompt caching):
 // nothing athlete-specific, nothing time-specific in here.
 

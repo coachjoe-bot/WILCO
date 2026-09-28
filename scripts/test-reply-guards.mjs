@@ -181,5 +181,16 @@ const rp = JSON.parse(fs.readFileSync(join(here, "../tests/replay/bug2-pain-voic
   eq(ledgerRejects("Watching: squat (pain) reported 2026-09-01 - a repeat within 2 weeks earns a program rec"), null, "code watch notes are exempt");
 }
 
+// ── integration additions (orchestrator's independent probe, 09-28) ─────────
+{
+  const none = { toolCalls: [], appWrites: {} };
+  const staged = { toolCalls: [{ name: "propose_program_rec", input: {} }], appWrites: {} };
+  for (const s of ["I staged a rec for that.", "Front squat's out for now.", "Dips are out of the rotation.", "I went ahead and swapped your Tuesday squat for leg press.", "We're pulling front squat this block."])
+    ok(claimGuard(s, none).changed === true, `unstaged claim must be rewritten: ${s}`);
+  for (const s of ["Your call, but I'd leave it.", "You're out of town for now, so keep it simple.", "Knees are out of the woods.", "That lift is out of your range for now, build to it.", "I staged nothing, the plan stands.", "Want me to pull front squat?"])
+    ok(claimGuard(s, none).changed === false, `not a claim, must pass: ${s}`);
+  ok(claimGuard("I staged a rec to swap front squat for leg press.", staged).changed === false, "a true claim passes when the rec was staged this turn");
+}
+
 console.log(`\n${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ""}`);
 process.exit(fail ? 1 : 0);

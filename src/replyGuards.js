@@ -70,6 +70,10 @@ const CLAIM_RES = [
   { ctx: false, re: /\b(?:your|the) (?:program|plan|block|schedule)\s+(?:is|has been|was|now)\s+(?:updated|changed|adjusted|rewritten|modified|reworked)\b/i },
   { ctx: false, re: /\bi'?ll (?:swap|pull|replace|remove|change|update|adjust|put|move|drop|sub|switch)\b[^.!?]*\b(?:program|rotation|block|in its place)\b/i },
   // "I'm staging a change", "I'm drafting a rec" with no rec staged this turn
+  // bare past tense: "I staged a rec for that." (integration, 09-28)
+  { ctx: false, re: /\bi\s+(?:just\s+)?(?:staged|drafted|queued|built|wrote|put together)\s+(?:a|an|the|you a)\s+(?:protective\s+|small\s+|quick\s+)?(?:change|rec|recommendation|swap|adjustment|tweak|program change)\b/i },
+  // no subject at all: "Front squat's out for now." / "Dips are out of the rotation."
+  { ctx: false, re: /\b[a-z][\w' -]{2,40}?(?:'s| is| are)\s+out\s+(?:for now|for (?:the|this) (?:week|block)|of (?:the|your) (?:program|rotation|block|plan))\b/i },
   { ctx: false, re: /\b(?:i'?m|i am|i'?ve|i have)\s+(?:just\s+)?(?:staging|staged|drafting|drafted|putting together|put together|building|built|writing|written|queuing|queued)\s+(?:a|an|the|you a)?\s*(?:protective\s+|small\s+|quick\s+)?(?:change|changes|rec|recommendation|swap|adjustment|tweak|program change)\b/i },
 ];
 
