@@ -20,7 +20,7 @@ const g = (t, ctx) => gateText("test", t, ctx);
 console.log("banned words (Will's examples):");
 eq(g("Damn, sorry you got hit with that."), "Sorry you got hit with that.", "screenshot 8 opener");
 eq(g("That's a damn good lift."), "That's a good lift.", "intensifier");
-eq(g("Damn."), "", "a reply that was only a curse leaves nothing");
+eq(g("Damn."), "Got it.", "a reply that was only a curse never renders as an empty bubble");
 eq(g("Damn that was heavy."), "That was heavy.", "sentence-opening intensifier, no comma");
 eq(g("That's rough, damn."), "That's rough.", "trailing interjection keeps the period");
 eq(g("Rough, damn, but you showed up."), "Rough, but you showed up.", "mid-sentence interjection");
@@ -123,6 +123,30 @@ eq(g(""), "", "empty safe");
 ok(scrubProfanity("clean words").removed.length === 0, "scrub: nothing removed from clean text");
 ok(Array.isArray(globalThis.__WILCO_GATE__) && globalThis.__WILCO_GATE__.length > 0, "reports ride the in-memory ring for QA drivers");
 ok(!globalThis.__WILCO_GATE__.some((x) => x.surface === "chat_stream"), "stream frames are not recorded (settle is)");
+
+// ── integration additions (orchestrator's independent probe, 09-28) ─────────
+{
+  const g = (s) => scrubProfanity(s).text;
+  const pairs = [
+    ["You kicked ass today.", "You crushed it today."],
+    ["WTF was that last rep.", "What was that last rep."],
+    ["Heck of a pull.", "A great pull."],
+    ["No bs, that was your best squat.", "No nonsense, that was your best squat."],
+    ["Freaking strong.", "Strong."],
+    ["Dang, close.", "Close."],
+    ["That was a b*tch of a workout.", "That was a tough workout."],
+    ["Damn.", "Got it."],
+    ["DAMN! That's a PR!", "That's a PR!"],
+  ];
+  for (const [inp, want] of pairs) {
+    const out = g(inp);
+    ok(!hasBannedWord(out), `no banned word left: ${inp} -> ${out}`);
+    ok(out.trim().length > 0, `never an empty reply: ${inp}`);
+    if (want) ok(out === want, `${inp} -> ${out} (want ${want})`);
+  }
+  for (const s of ["Let's assess your classic lifts, then pass on the mass phase.", "The Hoover Dam workout was fun.", "Hellenic club meet is Saturday.", "Shoot, missed that one.", "3x5 @ 80% then 2x3 @ 85%.", "Pick a day*: Mon or Tue. *either works", "Use the #2 plates.", "Check the heckler off your list."])
+    ok(g(s) === s, `innocent text untouched: ${s} -> ${g(s)}`);
+}
 
 console.log(`\nreply-gate: ${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

@@ -46,6 +46,13 @@ const PHRASES = [
   [/\bhalf[- ]?assed\b/gi, "half-hearted"],
   [/\bhalf[- ]?ass(?:ing)?\b/gi, (m) => (/ing$/i.test(m) ? "cutting corners on" : "cut corners on")],
   [/\b(?:shit|crap)\s+happens\b/gi, "it happens"],
+  // integration (09-28): verb forms, euphemisms, initialisms and masked spellings
+  [/\ba\s+(?:bitch|b[*@#$]+[a-z]*ch)\s+of\s+an?\b/gi, (m) => (/^A/.test(m) ? "A tough" : "a tough")],
+  [/\bkick(ed|s|ing)?\s+ass\b/gi, (m, f) => (f === "ed" ? "crushed it" : f === "s" ? "crushes it" : f === "ing" ? "crushing it" : "crush it")],
+  [/\bwtf\b(?=\s+[a-z])/gi, (m) => (/^W/.test(m) ? "What" : "what")],
+  [/\b(?:a|one)\s+heck\s+of\s+an?\b/gi, "a great"],
+  [/\bheck\s+of\s+an?\b/gi, (m) => (/^H/.test(m) ? "A great" : "a great")],
+  [/\bno\s+bs\b/gi, (m) => (/^N/.test(m) ? "No nonsense" : "no nonsense")],
   [/\b(?:kick|bad)[- ]?ass(?:ery)?\b/gi, "strong"],
   [/\bpissed(?:\s+off)?\b/gi, "frustrated"],
   [/\bpiss(?:es|ing)?\s+(me|you|him|her|them)\s+off\b/gi, (m, who) => `${/^pissing/i.test(m) ? "frustrating" : /^pisses/i.test(m) ? "frustrates" : "frustrate"} ${who}`],
@@ -64,19 +71,23 @@ const PHRASES = [
 ];
 // A sentence-opening (or standalone) interjection, followed by punctuation,
 // the end, or a new sentence: cut it and let the next word open the sentence.
-const INTERJ = "(?:holy|oh|aw|ah)\\s+(?:shit|crap|hell|fuck|damn)|god\\s*damn(?:\\s+it)?|goddamm?it|damn\\s+it|dammit|damn|shit|crap|hell|fuck(?:\\s+me)?|wtf|screw\\s+(?:it|that)|son\\s+of\\s+a\\s+bitch";
+const INTERJ = "(?:holy|oh|aw|ah)\\s+(?:shit|crap|hell|fuck|damn)|dang(?:\\s+it)?|heck|god\\s*damn(?:\\s+it)?|goddamm?it|damn\\s+it|dammit|damn|shit|crap|hell|fuck(?:\\s+me)?|wtf|screw\\s+(?:it|that)|son\\s+of\\s+a\\s+bitch";
 const INTERJ_RE = new RegExp(`(^|[.!?]\\s+|\\n[ \\t]*|,\\s*)(?:${INTERJ})\\b[ \\t]*(?:([,!.:;]+)|(?=\\n|$))[ \\t]*`, "gi");
 
 // What is left: intensifiers and stray words. Removed with their trailing space.
 const WORDS = [
-  [/\b(?:god\s*damn(?:ed)?|damn(?:ed)?|fucking|fuckin'?|effing|motherfucking)\s+(?=[a-z0-9])/gi, CUT],
+  [/\b(?:god\s*damn(?:ed)?|damn(?:ed)?|fucking|fuckin'?|effing|effin'?|freaking|freakin'?|frickin[g']?|friggin[g']?|motherfucking)\s+(?=[a-z0-9])/gi, CUT],
+  // masked spellings: b*tch, sh*t, f***, d@mn
+  [/(?<![a-z0-9])(?:[a-z]+[*@#$]+[a-z]+[a-z*@#$]*|[a-z][*@#$]{2,})(?![a-z0-9])!*/gi, CUT],
+  [/\b(?:dang|heck|bs)\b!*/gi, CUT],
   [/\b(?:shit|crap|fuck|fucked|fucker|damn|dammit|goddamn|hell|ass|asshole|bitch|wtf|bastard|motherfucker)\b!*/gi, CUT],
 ];
 
 // Detection (for the report): any banned token at all.
 const BANNED_RE = /\b(?:damn(?:ed|it)?|dammit|god\s*damn\w*|goddam+it|hell|helluva|crap(?:py)?|ass(?:es|hole|holes)?|badass|kick-?ass|half-?assed|shit(?:ty|s)?|bullshit|fuck(?:ed|ing|in|er|s)?|motherfuck\w*|bitch(?:es|ing|ed)?|pissed|piss(?:es|ing)?|sucks|sucked|sucky|screwed up|screw (?:it|that)|wtf|bastard)\b/i;
 
-export const hasBannedWord = (text) => BANNED_RE.test(String(text || ""));
+const BANNED_EXTRA_RE = /\b(?:dang|heck|bs|effin'?|freakin[g']?|frickin[g']?|friggin[g']?)\b|(?<![a-z0-9])(?:[a-z]+[*@#$]+[a-z]+[a-z*@#$]*|[a-z][*@#$]{2,})(?![a-z0-9])/i;
+export const hasBannedWord = (text) => { const s = String(text || ""); return BANNED_RE.test(s) || BANNED_EXTRA_RE.test(s); };
 
 function capAfterCut(s) {
   // capitalize the first letter after a cut at a sentence start
@@ -104,7 +115,7 @@ function tidy(s) {
 // the original sentence opened capitalized. Only positions we touched.
 export function scrubProfanity(text) {
   const src = String(text ?? "");
-  if (!src || !BANNED_RE.test(src)) return { text: src, removed: [] };
+  if (!src || !hasBannedWord(src)) return { text: src, removed: [] };
   const removed = [];
   const note = (m) => { removed.push(m.trim()); };
   let s = src;
@@ -125,6 +136,8 @@ export function scrubProfanity(text) {
   s = tidy(s);
   // A sentence that became empty ("Damn." alone) leaves nothing behind.
   s = s.replace(/^[.!?]+\s*/gm, "").replace(/\s+([.!?])\1+/g, "$1");
+  // A reply that was nothing BUT a banned word must not render as an empty bubble.
+  if (!s.trim() && src.trim()) s = "Got it.";
   return { text: s, removed };
 }
 
