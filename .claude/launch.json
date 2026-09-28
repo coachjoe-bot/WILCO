@@ -8,6 +8,12 @@
       "port": 5174
     },
     {
+      "name": "s3-dev",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vite", "--port", "5193", "--strictPort"],
+      "port": 5193
+    },
+    {
       "name": "wilco-dev-api",
       "runtimeExecutable": "node",
       "runtimeArgs": ["--env-file=.env", "scripts/dev-server.mjs"],
