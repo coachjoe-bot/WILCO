@@ -1,0 +1,26 @@
+{
+  "description": "Will's real 08-24 incident (T64 diagnosis A, BUG 1). He typed 'No my program wraps up sept 7th' against BLOCK 1 ('ROAD TO 315'), whose own text declares it runs Aug 17 to Sep 5 (explicit end date, matching its real Week 3 header 'Aug 31 to Sep 5, heavy week'). Joe's own reply named Sep 5 in the same breath as accepting Will's Sep 7, and nothing reconciled the two. The app then stored Sep 7 on the ATHLETE row with no tie to Block 1 at all, so it silently survived into Block 2 (applied 2026-09-09) — which is what let a wrong 'wraps up' date leak into a program it was never about.",
+  "blockOne": {
+    "id": "4beeb64a-real-block-1",
+    "programText": "BLOCK 1 — ROAD TO 315\nRuns: 2026-08-17 to 2026-09-05\n\nWEEK 1 — Aug 17 to Aug 23\nDay 1 - Squat\nBack Squat 5x5 @225\n\nWEEK 2 — Aug 24 to Aug 30\nDay 1 - Squat\nBack Squat 5x3 @245\n\nWEEK 3 — Aug 31 to Sep 5, heavy week\nDay 1 - Squat\nBack Squat 3x3 @265",
+    "appliedAt": "2026-08-16T22:54:04.413Z",
+    "completedAt": "2026-09-04T19:54:46.000Z"
+  },
+  "athleteMessage": {
+    "text": "No my program wraps up sept 7th",
+    "at": "2026-08-24T03:49:06.000Z",
+    "parsedSpan": { "weeks": null, "end_date": "2026-09-07", "repeating": false }
+  },
+  "blockTwo": {
+    "id": "62c16d4b-real-block-2",
+    "programText": "WEEK 1\nDay 1 - Push\nBench Press 3x5 @185\nDay 2 - Pull\nBarbell Row 3x8",
+    "appliedAt": "2026-09-09T21:12:54.705Z",
+    "completedAt": null
+  },
+  "expect": {
+    "conflictDetected": true,
+    "conflictTextEndDate": "2026-09-05",
+    "answerScopedToBlockOneId": "4beeb64a-real-block-1",
+    "blockTwoEligibility": { "show": false, "reason": "no_end_known" }
+  }
+}

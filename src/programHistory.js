@@ -25,7 +25,7 @@
 // import back would be a cycle). React-free; block-decision logic unit tested by
 // scripts/test-program-history.mjs.
 import { lineDiff } from "./programDiff.js";
-import { currentPosition } from "./programPosition.js";
+import { currentPosition, parseBlockSpan, programTextIdentity } from "./programPosition.js";
 import { parseBlockInfo, stripBlockInfo } from "./programContract.js";
 
 // Fraction of the COMBINED line count that changed between two program texts.
@@ -126,17 +126,12 @@ export function digestWorkouts(rows) {
   return s.length <= 3200 ? s : `${s.slice(0, 1600)}\n…\n${s.slice(-1600)}`;
 }
 
-// Close an open block row: stamp completed_at, then best-effort generate the
-// recap from the logs that fell inside the block. The stamp must land even when
-// the recap fails (recap is AI + extra reads; the close is the source of truth).
-// completedAtOverride: "retire" ends a phase at the LAST WORKOUT logged under
-// it, not at the moment the button was tapped.
-async function closeBlock(athleteId, row, deps, completedAtOverride = null) {
+// The recap itself: a Sonnet call plus two reads, a second or several. Split out
+// of closeBlock (T64 Fix 7a) so the close's ROW WRITES — which is what the next
+// chat turn's position read actually depends on — never wait on it. Fire-and-
+// forget from closeBlock; never awaited on any save's critical path.
+async function generateBlockRecap(athleteId, row, completedAt, deps) {
   const { sbRead, sbUpdateWhere, askClaude } = deps;
-  const completedAt = (completedAtOverride && !Number.isNaN(Date.parse(completedAtOverride)))
-    ? new Date(completedAtOverride).toISOString()
-    : new Date().toISOString();
-  await sbUpdateWhere("program_history", `?id=eq.${row.id}`, { completed_at: completedAt });
   try {
     const from = row.applied_at ? `&created_at=gte.${encodeURIComponent(row.applied_at)}` : "";
     const [logs, goals] = await Promise.all([
@@ -184,6 +179,28 @@ async function closeBlock(athleteId, row, deps, completedAtOverride = null) {
       } catch (_) {}
     }
   } catch (e) { console.error("[history] block recap failed:", e?.message || e); }
+}
+
+// Close an open block row: stamp completed_at (the ONLY part anything downstream
+// waits on), then kick off the recap in the background. completedAtOverride:
+// "retire" ends a phase at the LAST WORKOUT logged under it, not at the moment
+// the button was tapped.
+//
+// T64 Fix 7a: this used to AWAIT the whole recap (a Sonnet call plus two reads)
+// before returning, which meant a chat message sent seconds after a program save
+// could race a still-in-flight close — the very next block's row wasn't inserted
+// yet, so "what's today" read the OLD block's start date. The recap is real work
+// but nothing except the athlete's Past Blocks tab needs it fast; the position
+// system only needs the completed_at stamp and the new row's applied_at, both of
+// which are now on the critical path and nothing else is.
+async function closeBlock(athleteId, row, deps, completedAtOverride = null) {
+  const { sbUpdateWhere } = deps;
+  const completedAt = (completedAtOverride && !Number.isNaN(Date.parse(completedAtOverride)))
+    ? new Date(completedAtOverride).toISOString()
+    : new Date().toISOString();
+  await sbUpdateWhere("program_history", `?id=eq.${row.id}`, { completed_at: completedAt });
+  generateBlockRecap(athleteId, row, completedAt, deps).catch((e) => console.error("[history] block recap failed:", e?.message || e));
+  return completedAt;
 }
 
 // Live status paragraph for the OPEN block — the current-phase card's answer to
@@ -249,9 +266,13 @@ export async function refreshOpenBlockRecap({ athleteId }, deps) {
 
 // Fire-and-forget from every program_text save path (never await it on the save's
 // critical path, never let it throw into the caller). deps = {sbRead, sbInsert,
-// sbUpdateWhere, askClaude} from App.jsx.
+// sbUpdateWhere, askClaude, onBlockStart} from App.jsx. onBlockStart(text,
+// startedOn), when given, fires the MOMENT this function knows the current
+// block's start — before the Haiku summary call or the row insert — so the
+// caller can prime its own chat-context cache synchronously instead of racing a
+// DB read against this still-in-flight write (T64 Fix 7a).
 export async function snapshotProgramHistory({ athleteId, text, source, forceNewBlock = false, startsAt = null, endsAt = null, blockName = null }, deps) {
-  const { sbRead, sbInsert, askClaude } = deps;
+  const { sbRead, sbInsert, askClaude, onBlockStart } = deps;
   const t = (text || "").trim();
   const rows = await sbRead(
     "program_history",
@@ -284,11 +305,23 @@ export async function snapshotProgramHistory({ athleteId, text, source, forceNew
   if (!isNewBlock) {
     // Same block, evolved text. applied_at and source stay those of the block's
     // first save; per-tweak provenance already lives in program_modifications.
+    // The start hasn't moved, but prime anyway — a chat turn racing THIS save
+    // must see the (unchanged) start under the NEW text's identity, not fall
+    // through to a cache miss that re-reads a row this same write is touching.
+    if (onBlockStart) { try { onBlockStart(t, latest.applied_at || null); } catch (_) {} }
     await deps.sbUpdateWhere("program_history", `?id=eq.${latest.id}`, { program_text: t });
     return;
   }
 
   if (latest && !latest.completed_at) await closeBlock(athleteId, latest, deps);
+
+  // applied_at doubles as the block's START (programPosition.js reads it as the
+  // preferred week-1 anchor), so a Builder timeline start lands here. ends_at is
+  // the PLANNED end — the date the whole boundary system keys off. Resolved and
+  // handed to onBlockStart BEFORE the summary/insert below — those are still
+  // real network+AI latency that a fast-following chat turn must never wait on.
+  const appliedAt = startsAt || new Date().toISOString();
+  if (onBlockStart) { try { onBlockStart(t, appliedAt); } catch (_) {} }
 
   // Haiku one-liner BEFORE the insert so the row lands complete in one write
   // (the gateway's insert doesn't return the new id). Best-effort: a summary
@@ -299,9 +332,6 @@ export async function snapshotProgramHistory({ athleteId, text, source, forceNew
     summary = (line || "").trim().split("\n")[0].slice(0, 120) || null;
   } catch (_) {}
 
-  // applied_at doubles as the block's START (programPosition.js reads it as the
-  // preferred week-1 anchor), so a Builder timeline start lands here. ends_at is
-  // the PLANNED end — the date the whole boundary system keys off.
   const row = {
     athlete_id: athleteId,
     program_text: t,
@@ -309,7 +339,7 @@ export async function snapshotProgramHistory({ athleteId, text, source, forceNew
     block_summary: summary,
     // Explicit rather than relying on the DB default: the demo's mock store has
     // no column defaults, and ordering/date-ranges key off this everywhere.
-    applied_at: startsAt || new Date().toISOString(),
+    applied_at: appliedAt,
   };
   if (endsAt) row.ends_at = endsAt;
   // Phase name: caller-provided ("what are we calling it"), else a contract
@@ -332,7 +362,7 @@ export async function snapshotProgramHistory({ athleteId, text, source, forceNew
 //   boundary signal there is (a shifted goal means a shifted chapter), and it
 //   costs the user nothing: no one has to know what a "block" is.
 export async function startNextBlock({ athleteId, programText, source = "next_block" }, deps) {
-  const { sbRead, sbInsert } = deps;
+  const { sbRead, sbInsert, onBlockStart } = deps;
   const rows = await sbRead(
     "program_history",
     `?athlete_id=eq.${athleteId}&order=applied_at.desc&limit=1&select=id,program_text,block_summary,completed_at,applied_at`
@@ -340,12 +370,15 @@ export async function startNextBlock({ athleteId, programText, source = "next_bl
   const latest = (Array.isArray(rows) && rows[0]) || null;
   if (!latest || latest.completed_at) return false;
   await closeBlock(athleteId, latest, deps);
+  const appliedAt = new Date().toISOString();
+  const nextText = (programText || latest.program_text || "").trim() || latest.program_text;
+  if (onBlockStart) { try { onBlockStart(nextText, appliedAt); } catch (_) {} }
   await sbInsert("program_history", {
     athlete_id: athleteId,
-    program_text: (programText || latest.program_text || "").trim() || latest.program_text,
+    program_text: nextText,
     source,
     block_summary: latest.block_summary || null,
-    applied_at: new Date().toISOString(),
+    applied_at: appliedAt,
   });
   return true;
 }
@@ -403,4 +436,133 @@ export function blockPromptState({ endsAt, now = null, soonDays = 7 } = {}) {
   if (t >= end) return "ended";
   if (end - t <= soonDays * 86400000) return "ending";
   return null;
+}
+
+// ─── BLOCK DATES BELONG TO THE BLOCK (T64 Fix 1) ─────────────────────────────
+// athletes.program_block_span used to hold the athlete's stated end date with no
+// tie to any particular block, so an answer given for block A silently leaked
+// into block B, C, D... forever (Will's real "wraps up Sep 7" answer, given
+// 08-24 about a block that closed 09-04, is still sitting on his athlete row
+// today). The fix is not a new table — it's scoping the SAME jsonb answer to the
+// block it was given for, and never trusting it for a different one.
+
+// The athlete's answer, tagged with the block it was given for. blockId is
+// program_history.id — the one durable handle a block has. Everything else
+// mirrors the message parser's own program_block_span shape.
+export function buildBlockSpanAnswer({ blockId, weeks = null, endsAt = null, repeating = false }) {
+  return {
+    blockId: blockId || null,
+    weeks: Number.isFinite(Number(weeks)) && Number(weeks) >= 1 ? Number(weeks) : null,
+    endsAt: endsAt || null,
+    repeating: !!repeating,
+    answeredAt: new Date().toISOString(),
+  };
+}
+
+// An answer only counts for a block when it says so explicitly — an answer
+// recorded before this fix shipped (no blockId at all) is nobody's answer now,
+// not a free pass for whichever block happens to be open when it's read.
+const answerForBlock = (spanAnswer, blockId) =>
+  (spanAnswer && blockId && spanAnswer.blockId === blockId) ? spanAnswer : null;
+
+// Does a freshly stated span (the athlete's own words, just now) CONTRADICT what
+// the block's own program text already declares? Only a genuine disagreement is
+// a conflict — restating what the text already says, or answering when the text
+// says nothing at all, is not. This is the exact gap in Will's 08-24 incident:
+// Joe's own reply named the program's real end (Sep 5) in the same breath as
+// accepting Will's "Sep 7," and nothing reconciled the two. `stated` is the
+// parser's raw program_block_span shape: {weeks, end_date, repeating}. `appliedAt`
+// (the open block's own applied_at) is optional but load-bearing for the common
+// real-world shape: most programs are numbered weeks with NO printed end date at
+// all (Will's real block included — parseBlockSpan reads it as weeks:3, not an
+// explicit date), so a same-type-only comparison (weeks-vs-weeks, date-vs-date)
+// would miss the exact case this fix exists for. With appliedAt, a weeks-only
+// text side and a date-only stated side (or vice versa) are both anchored to the
+// block's own start and compared as dates.
+export function blockSpanConflict({ programText, stated, appliedAt = null } = {}) {
+  if (!stated) return null;
+  const fromText = parseBlockSpan(programText);
+  if (!fromText.known) return null; // the text doesn't answer this itself — nothing to contradict
+  if (fromText.repeating) {
+    // Text says it repeats; the athlete just gave it a hard end / length.
+    if (stated.repeating) return null;
+    if (stated.end_date || stated.weeks) return { textSide: fromText, statedSide: stated };
+    return null;
+  }
+  if (stated.repeating) return { textSide: fromText, statedSide: stated }; // text is finite, athlete says it repeats
+  if (stated.end_date && fromText.endDate && stated.end_date !== fromText.endDate) {
+    return { textSide: fromText, statedSide: stated };
+  }
+  if (stated.weeks && fromText.weeks && stated.weeks !== fromText.weeks) {
+    return { textSide: fromText, statedSide: stated };
+  }
+  // Cross-type comparison, anchored to the block's own start. A few days of slop
+  // is normal week-boundary rounding (which weekday a "3-week block" technically
+  // lands on), not a real disagreement — only a gap wider than that counts.
+  const applied = appliedAt ? new Date(appliedAt) : null;
+  if (applied && !Number.isNaN(applied.getTime())) {
+    const impliedEnd = (weeks) => { const d = new Date(applied); d.setUTCDate(d.getUTCDate() + weeks * 7); return d; };
+    if (stated.end_date && !fromText.endDate && fromText.weeks) {
+      const diffDays = Math.abs((new Date(`${stated.end_date}T12:00:00Z`) - impliedEnd(fromText.weeks)) / 86400000);
+      if (diffDays > 2) return { textSide: fromText, statedSide: stated };
+    }
+    if (stated.weeks && !stated.end_date && fromText.endDate) {
+      const diffDays = Math.abs((new Date(`${fromText.endDate}T12:00:00Z`) - impliedEnd(stated.weeks)) / 86400000);
+      if (diffDays > 2) return { textSide: fromText, statedSide: stated };
+    }
+  }
+  return null;
+}
+
+// Should the "does this end?" question be asked for the CURRENTLY OPEN block?
+// Never twice for the same block: any answer recorded against it — including an
+// explicit "no end date" (repeating:true) — ends the asking for good. A
+// different block (a new one, or a program whose text changed since the answer
+// was given) always re-asks; that is the whole point of scoping it.
+export function blockSpanNeedsAsk({ openBlock, programText, spanAnswer } = {}) {
+  if (!openBlock || openBlock.completed_at) return false;
+  if (openBlock.ends_at) return false; // already resolved (Builder timeline, self-heal, a prior answer)
+  const currentText = String(programText ?? openBlock.program_text ?? "").trim();
+  const blockText = String(openBlock.program_text || "").trim();
+  if (currentText && blockText && programTextIdentity(currentText) !== programTextIdentity(blockText)) return false;
+  if (parseBlockSpan(blockText).known) return false; // the text answers it itself
+  if (answerForBlock(spanAnswer, openBlock.id)) return false;
+  return true;
+}
+
+// Full eligibility for the wrap-up/heads-up card (Will's screenshot 1: "your
+// program wraps up Sep 7"). `openBlock` is the newest program_history row
+// (whatever the caller's own query considers "latest" — this module trusts the
+// caller already scoped that query to ONE athlete's most recent row, so "open
+// and present" already implies "newest"). `programText` is the athlete's
+// CURRENT program_text, checked against the block's own saved text: a program
+// that has since been replaced, with program_history's snapshot lagging behind
+// (the fire-and-forget write hasn't landed yet), must show nothing rather than a
+// date that belonged to different text. `spanAnswer` is the raw
+// athletes.program_block_span value. Returns {show, kind, endsAt, reason};
+// kind is 'ending'|'ended' only when show is true.
+export function wrapCardEligible({ openBlock, programText, spanAnswer, now = null } = {}) {
+  const no = (reason) => ({ show: false, kind: null, endsAt: null, reason });
+  if (!openBlock || openBlock.completed_at) return no("no_open_block");
+  const currentText = String(programText ?? "").trim();
+  const blockText = String(openBlock.program_text || "").trim();
+  if (currentText && blockText && programTextIdentity(currentText) !== programTextIdentity(blockText)) {
+    return no("program_text_changed");
+  }
+  const fromText = parseBlockSpan(blockText);
+  const answer = answerForBlock(spanAnswer, openBlock.id);
+  if (fromText.repeating || (answer && answer.repeating)) return no("repeating");
+
+  let endsAt = openBlock.ends_at || null;
+  if (!endsAt && answer?.endsAt) endsAt = answer.endsAt;
+  if (!endsAt && answer?.weeks && openBlock.applied_at) {
+    const end = new Date(openBlock.applied_at);
+    end.setDate(end.getDate() + answer.weeks * 7);
+    endsAt = end.toISOString();
+  }
+  if (!endsAt) return no("no_end_known");
+
+  const kind = blockPromptState({ endsAt, now });
+  if (!kind) return { show: false, kind: null, endsAt, reason: "not_near_end" };
+  return { show: true, kind, endsAt, reason: "ok" };
 }

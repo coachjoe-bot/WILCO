@@ -1,0 +1,13 @@
+{
+  "description": "Will's real 09-02 incident (T64 diagnosis A, BUG 4). He explicitly scoped the change to 'today's workout' (no weightlifting shoes, subbing behind-the-neck push press). Joe's own reply correctly judged 'One session without the gear isn't worth rewriting anything, but if it keeps being a problem I'll draft a program fix' and offered to lock in today's sheet swap — then the code's is_temp_program_update branch fired anyway underneath that correct reply and posted the hardcoded '✈️ Got it, I've set a temporary program for while you're away' bubble, contradicting what Joe himself just said. program_modifications logged a field_mode row for a single missing item.",
+  "athleteMessage": {
+    "text": "I don't have my weightlifting shoes with me so I can't really do snatch balance. I am thinking of doing behind the neck push press at a snatch grip and push press and then some other shoulder work in place of today's workout.",
+    "at": "2026-09-02T20:32:20.000Z"
+  },
+  "joeReply": "Fair trade for one day. Behind-the-neck push press at a snatch grip plus push press covers the overhead pattern fine. One session without the gear isn't worth rewriting anything, but if it keeps being a problem I'll draft a program fix. Want me to lock this in as today's swap so it's on your sheet?",
+  "expect": {
+    "days": 1,
+    "confidence": "high",
+    "tempProgramWriteShouldFire": false
+  }
+}

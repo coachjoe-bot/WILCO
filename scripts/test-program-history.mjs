@@ -3,7 +3,7 @@
 // deps. Deterministic, no network. Part of the Program Builder Phase B ship gate
 // (docs/program-builder-build-handoff.md).
 
-import { snapshotProgramHistory, startNextBlock, closeCurrentBlock, setBlockEnd, blockPromptState, parseTimeline, dateToIso, digestWorkouts, changedRatio, NEW_BLOCK_RATIO, deriveBlockName, refreshOpenBlockRecap, recapShortFallback } from "../src/programHistory.js";
+import { snapshotProgramHistory, startNextBlock, closeCurrentBlock, setBlockEnd, blockPromptState, parseTimeline, dateToIso, digestWorkouts, changedRatio, NEW_BLOCK_RATIO, deriveBlockName, refreshOpenBlockRecap, recapShortFallback, buildBlockSpanAnswer, blockSpanConflict, blockSpanNeedsAsk, wrapCardEligible } from "../src/programHistory.js";
 
 let fail = 0;
 const bad = (msg) => { fail++; console.error("  ✗ " + msg); };
@@ -54,6 +54,12 @@ const openBlock = (text) => ({ id: "blk-1", program_text: text, completed_at: nu
 const closes = (calls) => calls.updates.filter((u) => u.data && u.data.completed_at);
 const recaps = (calls) => calls.updates.filter((u) => u.data && u.data.block_recap);
 const shortRecaps = (calls) => calls.updates.filter((u) => u.data && u.data.block_recap_short);
+// T64 Fix 7a: closeBlock no longer AWAITS the recap (a chat turn racing the close
+// must never wait on a Sonnet call) — it fires generateBlockRecap in the
+// background instead. A caller that has already awaited closeBlock/startNextBlock/
+// closeCurrentBlock must flush the microtask queue before asserting on the recap
+// write landing; the completed_at stamp is on the critical path and needs no flush.
+const flush = () => new Promise((r) => setTimeout(r, 10));
 
 // ── changedRatio sanity ──────────────────────────────────────────────────────
 console.log("changedRatio:");
@@ -118,8 +124,9 @@ console.log("rewrite:");
   const { calls, deps } = harness(openBlock(PROGRAM));
   await snapshotProgramHistory({ athleteId: "a1", text: REWRITE, source: "coach_save" }, deps);
   ok(closes(calls).length === 1, "previous block closed");
-  ok(recaps(calls).length === 1, "closed block got its recap");
   ok(calls.inserts.length === 1 && calls.inserts[0].data.program_text === REWRITE.trim(), "new block inserted");
+  await flush();
+  ok(recaps(calls).length === 1, "closed block got its recap (backgrounded, awaited via flush)");
 }
 
 // ── T64 Fix 3b: the short athlete-facing recap rides alongside the full one ──
@@ -238,7 +245,8 @@ console.log("startNextBlock:");
   const did = await startNextBlock({ athleteId: "a1", programText: PROGRAM }, deps);
   ok(did === true, "transition happens on an open block");
   ok(closes(calls).length === 1, "old block closed");
-  ok(recaps(calls).length === 1, "old block recapped from the logs");
+  await flush();
+  ok(recaps(calls).length === 1, "old block recapped from the logs (backgrounded, awaited via flush)");
   ok(calls.inserts.length === 1 && calls.inserts[0].data.source === "next_block", "new row opens with source next_block");
   ok(calls.inserts[0].data.program_text === PROGRAM.trim() || calls.inserts[0].data.program_text === PROGRAM, "same program text carries over");
 }
@@ -287,7 +295,9 @@ console.log("block dates:");
 {
   const { calls, deps } = harness(openBlock(PROGRAM));
   const did = await closeCurrentBlock({ athleteId: "a1" }, deps);
-  ok(did === true && closes(calls).length === 1 && recaps(calls).length === 1, "closeCurrentBlock closes + recaps");
+  ok(did === true && closes(calls).length === 1, "closeCurrentBlock closes");
+  await flush();
+  ok(recaps(calls).length === 1, "…and recaps (backgrounded, awaited via flush)");
   ok(calls.inserts.length === 0, "…and opens NOTHING (next save starts the next chapter)");
 }
 {
@@ -295,6 +305,211 @@ console.log("block dates:");
   ok(blockPromptState({ endsAt: "2026-08-24T12:00:00Z", now: "2026-08-01T12:00:00Z" }) === null, "far out → quiet");
   ok(blockPromptState({ endsAt: "2026-08-24T12:00:00Z", now: "2026-08-20T12:00:00Z" }) === "ending", "inside 7 days → ending");
   ok(blockPromptState({ endsAt: "2026-08-24T12:00:00Z", now: "2026-08-25T12:00:00Z" }) === "ended", "past → ended");
+}
+
+// ── T64 Fix 7a: the recap is decoupled from the block boundary itself ────────
+// The close's completed_at stamp (and the new block's row) are what the very
+// next chat turn's position read depends on — the recap is not. Before this fix
+// closeBlock AWAITED the whole recap (a Sonnet call plus two reads) before the
+// caller's promise resolved, which is exactly the window a fast-following chat
+// message could race.
+console.log("Fix 7a — recap decoupled from the close:");
+{
+  let recapSettled = false;
+  const { calls, deps } = harness(openBlock(PROGRAM));
+  const realAsk = deps.askClaude;
+  deps.askClaude = async (sys, user, maxTokens) => {
+    if (maxTokens === 600) {
+      // The recap call specifically — artificially slow, to prove the close
+      // doesn't wait on it.
+      await new Promise((r) => setTimeout(r, 30));
+      recapSettled = true;
+      return "Block recap text.";
+    }
+    return realAsk(sys, user, maxTokens);
+  };
+  const start = Date.now();
+  await snapshotProgramHistory({ athleteId: "a1", text: REWRITE, source: "coach_save" }, deps);
+  const elapsed = Date.now() - start;
+  ok(closes(calls).length === 1, "old block closed without waiting for the recap");
+  ok(!recapSettled, "the artificially slow recap has NOT resolved yet");
+  ok(recaps(calls).length === 0, "…so no recap write has landed yet either");
+  ok(elapsed < 25, `snapshot returned well before the 30ms recap delay (took ${elapsed}ms)`);
+  await new Promise((r) => setTimeout(r, 40));
+  ok(recapSettled && recaps(calls).length === 1, "recap lands afterward, in the background");
+}
+
+// ── T64 Fix 7a: onBlockStart primes the caller's cache before slow AI calls ──
+console.log("Fix 7a — onBlockStart:");
+{
+  const primed = [];
+  const { calls, deps } = harness(openBlock(PROGRAM));
+  deps.onBlockStart = (text, startedOn) => primed.push({ text, startedOn });
+  await snapshotProgramHistory({ athleteId: "a1", text: REWRITE, source: "coach_save", startsAt: "2026-08-01T00:00:00Z" }, deps);
+  ok(primed.length === 1 && primed[0].text === REWRITE.trim() && primed[0].startedOn === "2026-08-01T00:00:00Z",
+    "new block primes with ITS OWN start, not the old block's");
+}
+{
+  // Same-block evolution: the start hasn't moved, but the caller still gets a
+  // prime under the new text's identity so a racing chat turn never falls
+  // through to a cache miss mid-write.
+  const primed = [];
+  const { calls, deps } = harness(openBlock(PROGRAM));
+  deps.onBlockStart = (text, startedOn) => primed.push({ text, startedOn });
+  const tweaked = PROGRAM.replace("@225", "@235");
+  await snapshotProgramHistory({ athleteId: "a1", text: tweaked, source: "pr_propagation" }, deps);
+  ok(primed.length === 1 && primed[0].text === tweaked && primed[0].startedOn === "2026-07-01T00:00:00Z",
+    "evolve-in-place primes with the block's UNCHANGED start");
+}
+{
+  const primed = [];
+  const { calls, deps } = harness(openBlock(PROGRAM));
+  deps.onBlockStart = (text, startedOn) => primed.push({ text, startedOn });
+  await startNextBlock({ athleteId: "a1", programText: PROGRAM }, deps);
+  ok(primed.length === 1 && primed[0].text === PROGRAM, "startNextBlock primes too");
+}
+{
+  // A no-op save (identical text on an open block) makes no history write at
+  // all — nothing to prime either, since nothing about the block changed.
+  const primed = [];
+  const { calls, deps } = harness(openBlock(PROGRAM));
+  deps.onBlockStart = (text, startedOn) => primed.push({ text, startedOn });
+  await snapshotProgramHistory({ athleteId: "a1", text: PROGRAM, source: "manual_edit" }, deps);
+  ok(primed.length === 0, "no-op save primes nothing");
+}
+
+// ── T64 Fix 1: block dates belong to the block ────────────────────────────────
+// Will's real 08-24 incident: he typed "wraps up sept 7th" against a block whose
+// own text said Sep 5; the app stored his number on the ATHLETE row with no tie
+// to that block, so it silently outlived it. These are the module's own tests;
+// tests/replay/wraps-up-sept7-0824.json + scripts/test-replay-s1.mjs replay the
+// literal incident end to end.
+console.log("Fix 1 — block span answers are scoped to the block:");
+
+const DURATION_TEXT = "BLOCK 1 — ROAD TO 315\nDuration: 3 Weeks (Aug 17 to Sep 5)\n\nDay 1 - Squat\nBack Squat 5x5 @225";
+const UNKNOWN_SPAN_TEXT = PROGRAM; // no Duration/Runs/repeating language at all
+const blockA = { id: "blk-A", program_text: DURATION_TEXT, applied_at: "2026-08-16T22:54:04.413Z", ends_at: null, completed_at: null };
+
+{
+  const a = buildBlockSpanAnswer({ blockId: "blk-A", weeks: 6, repeating: false });
+  ok(a.blockId === "blk-A" && a.weeks === 6 && a.repeating === false && !!a.answeredAt, "buildBlockSpanAnswer shapes the record");
+  ok(buildBlockSpanAnswer({ blockId: "blk-A", weeks: "not a number" }).weeks === null, "garbage weeks becomes null, not NaN");
+}
+
+console.log("Fix 1 — blockSpanConflict:");
+{
+  const c = blockSpanConflict({ programText: DURATION_TEXT, stated: { weeks: 5, end_date: null, repeating: false } });
+  ok(c && c.textSide.weeks === 3, "athlete's stated length disagrees with the text's own 3-week duration → conflict");
+}
+ok(blockSpanConflict({ programText: DURATION_TEXT, stated: { weeks: 3, end_date: null, repeating: false } }) === null,
+  "restating the SAME length as the text is not a conflict");
+ok(blockSpanConflict({ programText: UNKNOWN_SPAN_TEXT, stated: { weeks: 6, end_date: null, repeating: false } }) === null,
+  "text doesn't declare a span at all → nothing to contradict, no conflict");
+ok(blockSpanConflict({ programText: DURATION_TEXT, stated: { weeks: null, end_date: null, repeating: true } })?.textSide.weeks === 3,
+  "text says a fixed length, athlete says it repeats → conflict");
+{
+  const REPEAT_TEXT = "Push/Pull/Legs, repeats every week, no end date.\nDay 1 - Push\nBench 3x5 @185\nDay 2 - Pull\nRow 3x8\nDay 3 - Legs\nSquat 3x5";
+  ok(blockSpanConflict({ programText: REPEAT_TEXT, stated: { weeks: 4, end_date: null, repeating: false } }) !== null,
+    "text says it repeats, athlete gives it a hard length → conflict");
+  ok(blockSpanConflict({ programText: REPEAT_TEXT, stated: { weeks: null, end_date: null, repeating: true } }) === null,
+    "text and athlete both say repeating → agreement, no conflict");
+}
+
+console.log("Fix 1 — blockSpanNeedsAsk:");
+ok(blockSpanNeedsAsk({ openBlock: blockA, programText: DURATION_TEXT, spanAnswer: null }) === false,
+  "the text already answers it (3-week duration) → never ask");
+ok(blockSpanNeedsAsk({ openBlock: { ...blockA, program_text: UNKNOWN_SPAN_TEXT }, programText: UNKNOWN_SPAN_TEXT, spanAnswer: null }) === true,
+  "no ends_at, text silent, no answer → ask");
+ok(blockSpanNeedsAsk({ openBlock: { ...blockA, program_text: UNKNOWN_SPAN_TEXT, ends_at: "2026-09-05T12:00:00Z" }, programText: UNKNOWN_SPAN_TEXT, spanAnswer: null }) === false,
+  "already resolved (ends_at set) → never ask");
+ok(blockSpanNeedsAsk({ openBlock: { ...blockA, program_text: UNKNOWN_SPAN_TEXT }, programText: UNKNOWN_SPAN_TEXT, spanAnswer: buildBlockSpanAnswer({ blockId: "blk-A", repeating: true }) }) === false,
+  '"no end date" recorded for THIS block → never asks again for it');
+ok(blockSpanNeedsAsk({ openBlock: { ...blockA, id: "blk-B", program_text: UNKNOWN_SPAN_TEXT }, programText: UNKNOWN_SPAN_TEXT, spanAnswer: buildBlockSpanAnswer({ blockId: "blk-A", repeating: true }) }) === true,
+  "GAP HUNTER: a NEW block (different id) must still be asked — an old block's answer never carries over");
+ok(blockSpanNeedsAsk({ openBlock: { ...blockA, program_text: UNKNOWN_SPAN_TEXT }, programText: "a completely different program now, mid-replace", spanAnswer: null }) === false,
+  "program text changed since this row was snapshotted (a save mid-flight) → don't ask about stale text");
+
+console.log("Fix 1 — wrapCardEligible:");
+{
+  const nearEnd = { ...blockA, program_text: UNKNOWN_SPAN_TEXT, ends_at: "2026-09-05T12:00:00Z" };
+  const r = wrapCardEligible({ openBlock: nearEnd, programText: UNKNOWN_SPAN_TEXT, spanAnswer: null, now: "2026-09-01T09:00:00Z" });
+  ok(r.show === true && r.kind === "ending" && r.endsAt === "2026-09-05T12:00:00Z", "common path: block has an end date, card shows 'ending'");
+}
+{
+  // Will's real incident, reconstructed: block A's own answer must never leak
+  // into block B, even though block B is now the open/current one.
+  const answerFromBlockA = buildBlockSpanAnswer({ blockId: "blk-A", endsAt: "2026-09-07T12:00:00Z" });
+  const blockB = { id: "blk-B", program_text: "WEEK 1\nDay 1 - Push\nBench 3x5 @185", applied_at: "2026-09-09T21:12:54.705Z", ends_at: null, completed_at: null };
+  const r = wrapCardEligible({ openBlock: blockB, programText: blockB.program_text, spanAnswer: answerFromBlockA, now: "2026-09-10T09:00:00Z" });
+  ok(r.show === false && r.reason === "no_end_known", "GAP HUNTER: new block inherits nothing from block A's answer");
+}
+{
+  // "No end date" — recorded once, never re-derived from anything else on the block.
+  const openNoEnd = { ...blockA, program_text: UNKNOWN_SPAN_TEXT };
+  const noEndAnswer = buildBlockSpanAnswer({ blockId: "blk-A", repeating: true });
+  const r = wrapCardEligible({ openBlock: openNoEnd, programText: UNKNOWN_SPAN_TEXT, spanAnswer: noEndAnswer, now: "2027-01-01T09:00:00Z" });
+  ok(r.show === false && r.reason === "repeating", '"no end date" holds forever, even a year later — never shows the card');
+}
+{
+  // Program replaced while the card would have been on screen: current text no
+  // longer matches the block's own saved text (a fire-and-forget snapshot that
+  // hasn't caught up, or a genuinely different program now live).
+  const stale = { ...blockA, ends_at: "2026-09-05T12:00:00Z" };
+  const r = wrapCardEligible({ openBlock: stale, programText: "A totally different program now on the athlete row", spanAnswer: null, now: "2026-09-01T09:00:00Z" });
+  ok(r.show === false && r.reason === "program_text_changed", "program replaced mid-flight → shows nothing, never a stale date");
+}
+{
+  // Block closed manually the same day the card would have fired.
+  const closedToday = { ...blockA, program_text: UNKNOWN_SPAN_TEXT, ends_at: "2026-09-01T12:00:00Z", completed_at: "2026-09-01T08:00:00Z" };
+  const r = wrapCardEligible({ openBlock: closedToday, programText: UNKNOWN_SPAN_TEXT, spanAnswer: null, now: "2026-09-01T09:00:00Z" });
+  ok(r.show === false && r.reason === "no_open_block", "manually closed block never shows the card, however close its end date was");
+}
+{
+  // Zero history: brand new block, nothing known yet.
+  const fresh = { id: "blk-new", program_text: UNKNOWN_SPAN_TEXT, applied_at: "2026-09-28T09:00:00Z", ends_at: null, completed_at: null };
+  const r = wrapCardEligible({ openBlock: fresh, programText: UNKNOWN_SPAN_TEXT, spanAnswer: null, now: "2026-09-28T09:05:00Z" });
+  ok(r.show === false && r.reason === "no_end_known", "brand new block with zero history → nothing to show, not a guess");
+}
+{
+  // A weeks-only answer (no explicit end date) still resolves against the
+  // BLOCK's own applied_at, not "now" or any other anchor.
+  const openWeeks = { ...blockA, program_text: UNKNOWN_SPAN_TEXT, applied_at: "2026-08-01T00:00:00Z" };
+  const weeksAnswer = buildBlockSpanAnswer({ blockId: "blk-A", weeks: 5 });
+  const r = wrapCardEligible({ openBlock: openWeeks, programText: UNKNOWN_SPAN_TEXT, spanAnswer: weeksAnswer, now: "2026-09-03T09:00:00Z" });
+  ok(r.show === true, "resolves a date from the weeks-only answer");
+  ok(new Date(r.endsAt).toISOString().slice(0, 10) === "2026-09-05", "5 weeks from the block's OWN applied_at (Aug 1), not from now");
+}
+{
+  // GAP HUNTER: athlete with zero history rows — no program_history row at all
+  // for this athlete (a brand-new account, or one that predates the table).
+  // Both eligibility functions must degrade to "nothing to show/ask", never throw.
+  ok(wrapCardEligible({ openBlock: null, programText: PROGRAM, spanAnswer: null }).show === false,
+    "no program_history row at all → card never shows");
+  ok(wrapCardEligible({ openBlock: null, programText: PROGRAM, spanAnswer: null }).reason === "no_open_block",
+    "reason is explicit, not a silent false");
+  ok(blockSpanNeedsAsk({ openBlock: null, programText: PROGRAM, spanAnswer: null }) === false,
+    "no open block → never asks (nothing to pin the answer to)");
+}
+
+console.log("Fix 1 — blockSpanConflict cross-type (text states WEEKS, athlete states a DATE, or vice versa):");
+{
+  // This is the shape of Will's REAL program (a numbered-week block with no
+  // printed end date — parseBlockSpan reads "Duration: 3 Weeks" as weeks:3, never
+  // an endDate) crossed with his real answer shape (a calendar date, "sept 7th").
+  // The same-type-only checks above (weeks-vs-weeks, date-vs-date) never compare
+  // these two — this is the exact gap that let his real Sep 7 answer through.
+  const appliedAt = "2026-08-17T00:00:00Z"; // block's own start
+  ok(blockSpanConflict({ programText: DURATION_TEXT, stated: { weeks: null, end_date: "2026-10-01", repeating: false }, appliedAt })?.textSide.weeks === 3,
+    "text says 3 weeks (~Sep 7), athlete's stated date is weeks later → conflict, cross-type");
+  ok(blockSpanConflict({ programText: DURATION_TEXT, stated: { weeks: null, end_date: "2026-09-07", repeating: false }, appliedAt }) === null,
+    "text's 3-week estimate lands within 2 days of the stated date → normal week-boundary slop, not a conflict");
+  ok(blockSpanConflict({ programText: DURATION_TEXT, stated: { weeks: null, end_date: "2026-09-07", repeating: false } }) === null,
+    "no appliedAt supplied → cross-type check is skipped entirely (never a false positive from a missing anchor)");
+  // Reverse direction: text states an explicit date (RUNS_RE contract style),
+  // athlete states a week count that disagrees once anchored to the block start.
+  const RUNS_TEXT = "Runs: 2026-08-17 to 2026-09-05\nDay 1 - Squat\nBack Squat 5x5 @225";
+  const conflict = blockSpanConflict({ programText: RUNS_TEXT, stated: { weeks: 6, end_date: null, repeating: false }, appliedAt });
+  ok(conflict && conflict.textSide.endDate === "2026-09-05", "text's explicit end date vs a disagreeing stated week count → conflict, cross-type reverse");
 }
 
 // ── phase names + retire's completedAt override ──────────────────────────────
