@@ -81,6 +81,8 @@ import { performedBlock } from "./turnFacts.js";
 import { ledgerTurn, ledgerBlock, normArea, painFollowUpPlan, applyStamps, recStagedLine, withMark, normalizeMarks, flagClearedFor, keepPainRec } from "./painLedger.js";
 import { programPurpose, purposeLine } from "./programPurpose.js";
 import { classifyFollowUp, arbitrateFollowUp } from "./replyGuards.js";
+import { replyGate, gateText, renderGate, gateFields } from "./replyGate.js";
+import { JOE_IDENTITY, JOE_VOICE, VOICE_ATHLETE, VOICE_LAW } from "./ai/voice.js";
 
 // T58 rollout gates, resolved once per load. ?mastermind=1 / ?chatfirst=1 stay
 // as preview overrides for whenever a flag is off; the real switches live in
@@ -115,7 +117,7 @@ const ProgramEditPane = lazy(() => import("./builder.jsx").then(m => ({ default:
 import {
   needsAdvancedParser, looksLikeLifting, parseGotNothing, asksToRemember,
   looksLikeWorkoutLog, hasExplicitWorkingBasis, propagate1RM, isFullProgramEcho,
-  stripFailedAttempts, asksProgramEdit, stripToolNameNoise,
+  stripFailedAttempts, asksProgramEdit,
 } from "./chatRouting.js";
 export { isFullProgramEcho };
 // Boot layer: is this build still the deployed one, the warm-reopen snapshot, and
@@ -2236,7 +2238,7 @@ export const propagateForPRs = async (programText, prs) => {
   // the token limit) or garbled — NEVER let that overwrite the athlete's program.
   // Bail to null so the caller falls back and leaves program_text untouched.
   if(prog.length < programText.length * 0.9) return null;
-  return {text:prog, summary:m[2].trim(), changed:/yes/i.test(m[1])};
+  return {text:prog, summary:gateText("program_summary", m[2].trim()), changed:/yes/i.test(m[1])};
 };
 
 // Shared truncation guard for every "echo the FULL program back" call. The rule
@@ -3687,7 +3689,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
           280,[],"claude-sonnet-5","joebot_chat"
         );
         setLoading(false);
-        if(reply&&reply.trim()) setMessages(prev=>[...prev,{role:"assistant",content:reply.trim()}]);
+        if(reply&&reply.trim()) setMessages(prev=>[...prev,{role:"assistant",content:gateText("checkin", reply.trim())}]);
         setMessages(prev=>[...prev,{role:"assistant",content:q.text}]); // re-ask the same question
       }catch(_){
         setLoading(false);
@@ -3724,7 +3726,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
           // question, which at 170 got cut off mid-word ("running on f[umes]").
           320,[],"claude-sonnet-5","joebot_chat"
         );
-        return (r&&r.trim())?r.trim():"";
+        return (r&&r.trim())?gateText("checkin", r.trim()):"";
       }catch(_){ return ""; }
     };
 
@@ -4053,7 +4055,7 @@ Rules: facts are about the ATHLETE (schedule, availability, equipment, preferenc
         {messages.slice(1).map((m,i)=>(
           <div key={i} className="proof-drop" style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
             <div style={{maxWidth:"86%",background:m.role==="user"?CA_BUBBLE:CA.navy2,color:m.role==="user"?"#fff":CA.text,borderRadius:14,padding:"11px 14px",fontSize:14,lineHeight:1.6,whiteSpace:"pre-wrap",border:m.role==="user"?"none":`1px solid ${CA.border}`,borderBottomLeftRadius:m.role==="user"?14:4,borderBottomRightRadius:m.role==="user"?4:14}}>
-              {m.content}
+              {m.role==="user" ? m.content : renderGate(m.content)}
             </div>
           </div>
         ))}
@@ -7266,7 +7268,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       const revised = await askClaude(QL_EDIT_SYS,
         `Today is ${qlTodayStr()}.${unitLine}\n\n${qlCtxBlock(ctx)}\n\nCURRENT FOCUS NOTE:\n${sheetState.notes||"(none)"}\n\nCURRENT DRAFT:\n${sheetState.draft.trim()||"(empty)"}\n\nATHLETE'S INSTRUCTION:\n${ins}`,
         800, [], "claude-sonnet-5", "quick_log_edit");
-      const { notes:newNotes, log } = splitQuickLogReply(revised);
+      const { notes:rawNotes, log } = splitQuickLogReply(revised);
+      const newNotes = rawNotes===null ? null : gateText("ql_note", rawNotes);   // T64 S4 gate
       const t = log ? draftInUnit(log, athlete.weight_unit) : log;
       if(t){
         const nextNotes = newNotes===null ? sheetState.notes : newNotes;
@@ -9236,7 +9239,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // T62: model-narrated tool identifiers never reach the transcript or the
       // persisted bot_reply — the renderer strips them too (already-polluted
       // history), but the settle is where NEW pollution is stopped at the source.
-      reply = stripToolNameNoise(reply);
+      // T64 S4: the one output gate (tool names, banned words, dashes). The
+      // claim guard runs below, once the turn's final tool calls are known.
+      reply = gateText("chat", reply);
       if(reply && reply.trim()){
         // Settle on the stream's full text — guarantees the tail chunk that was
         // still buffered when the stream closed is never dropped.
@@ -9245,13 +9250,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // A28: the stream died but a substantial partial is already on screen.
         // Keep it — regenerating replaced visibly-rendered text with differently-
         // worded copy and billed the tokens twice. Only regenerate empty bubbles.
-        reply = stripToolNameNoise(streamedText);
+        reply = gateText("chat", streamedText);
         setMessages(prev=>{ const u=[...prev]; const last=u[u.length-1]; if(last && last.role==="assistant") u[u.length-1]={role:"assistant",content:reply}; return u; });
       } else {
         // One-shot fallback: mastermind persona/memory ride along, tools don't
         // (the JSON path returns text only) — a dropped stream costs the turn's
         // actions, never the reply.
-        reply = stripToolNameNoise(await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext,null,MASTERMIND_ON?{mastermind:true, memoryRows, pureLog:fromQuickLog, parsedLog:parsedForReply}:{parsedLog:parsedForReply}));
+        reply = gateText("chat", await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext,null,MASTERMIND_ON?{mastermind:true, memoryRows, pureLog:fromQuickLog, parsedLog:parsedForReply}:{parsedLog:parsedForReply}));
         setMessages(prev=>{ const u=[...prev]; const last=u[u.length-1]; if(last && last.role==="assistant") u[u.length-1]={role:"assistant",content:reply}; return u; });
       }
       // A held reply keeps the typing dot up until releaseReply shows the bubble
@@ -9321,6 +9326,26 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         if(rest.length) executeMasterTools(rest, updatedAthlete, newMsgs);
       }
 
+      // ── T64 S4: claim guard (AI contract rule 6), the gate's second half ─────
+      // Runs once the turn's FINAL tool calls are known (after the pain-rec
+      // backstop above) and what the app itself will write: a parser program
+      // flag, or a serious pain report the app stages a rec for. A reply that
+      // says the program changed with neither is corrected in the bubble and in
+      // the stored bot_reply. (The stream shows text as it types; the settle is
+      // where a false claim is replaced.)
+      try{
+        const painRec = (()=>{ try{
+          const t = (parsed.pain_flags?.length && !(painTurn && painTurn.turn.exact)) ? painTurnFor({athlete:updatedAthlete, workoutHistory, message:msg, parsed}).turn : painTurn?.turn;
+          return !!(t && painFollowUpPlan(t).draftRec);
+        }catch(_){ return false; } })();
+        const programWrite = !!(parsed.is_program_update || parsed.program_append || parsed.is_temp_program_update || parsed.program_create_request);
+        const cg = replyGate("chat", reply, {toolCalls: MASTERMIND_ON ? masterToolCalls : [], appWrites:{program: programWrite, rec: painRec}});
+        if(cg.text !== reply){
+          const was = reply;
+          reply = cg.text;
+          setMessages(prev=>{ const u=[...prev]; for(let i=u.length-1;i>=0;i--){ if(u[i].role==="assistant" && u[i].content===was){ u[i]={...u[i],content:reply}; break; } } return u; });
+        }
+      }catch(_){ /* the gate never blocks the turn */ }
       // Notes that used to be appended to the reply text before showing it now post
       // as their own follow-up bubbles (the reply is already on screen). finalReply
       // still accumulates them so the persisted bot_reply keeps the full record.
@@ -10231,6 +10256,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
         setVideoLoading(true);
         analysis = await askClaude(sys, userMsg, 500, frames, "claude-sonnet-5", "video_form_review");
       }
+      analysis = gateText("video_review", analysis);   // T64 S4: one output gate
       updateMsg(analysis);
       await sbInsert("workouts",{
         athlete_id:athlete.id,
@@ -10494,7 +10520,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
                   {/* stripToolNameNoise: the display-side half of the T62 leakage
                       fix — cleans mid-stream deltas AND history rows persisted
                       before the settle-side strip existed. */}
-                  {m.role==="assistant"?(!m.content&&loading&&i===messages.length-1?<div className="ld-dots"><i/><i/><i/></div>:<StreamText text={stripToolNameNoise(m.content)}/>):m.content}
+                  {m.role==="assistant"?(!m.content&&loading&&i===messages.length-1?<div className="ld-dots"><i/><i/><i/></div>:<StreamText text={renderGate(m.content)}/>):m.content}
                   {/* Opener answer — IN the bubble, big and bold (Will 08-29: the
                       floating chips above the composer got ignored; these can't be).
                       Same answerOpenerChoice handlers; retired by a tap or by typing
@@ -11848,7 +11874,9 @@ async function draftRecJSON({programText, context, instruction, origin}) {
   if(!js){ try{ reportError("ai", new Error("rec draft unparseable"), { component:"program_rec_draft", meta:{ origin } }); }catch(_){} return null; }
   const v = validateRecPayload({...js, origin});
   if(!v.ok){ try{ reportError("ai", new Error(`rec draft invalid: ${v.reason}`), { component:"program_rec_draft", meta:{ origin } }); }catch(_){} return null; }
-  return v.rec;
+  // T64 S4: the athlete reads title + summary on the card; why is Joe's own
+  // note. All three pass the one output gate (swaps are program text, untouched).
+  return gateFields("rec", v.rec, ["title","summary","why"]);
 }
 
 const QL_EDIT_SYS = `You revise a prefilled workout-log draft per an athlete's instruction. You get their program, recent sessions, 1RMs, coaching context (goals/context/injury/form reviews), Joe's focus note (reference only), the CURRENT draft, and the instruction.
@@ -11985,7 +12013,8 @@ async function generateQuickLogDraft({athlete, workoutHistory, messages, goals, 
         // A rest day answers with the bare token REST_DAY — don't flash that into
         // the focus-note box on the way to the rest-day screen.
         if(acc.trim().startsWith("REST_DAY")) return;
-        onProgress(streamQuickLogReply(acc));
+        const sp = streamQuickLogReply(acc);
+        onProgress(sp && sp.notes ? {...sp, notes: renderGate(sp.notes)} : sp);   // T64 S4 gate, mid-stream
       } : undefined,
     });
   }catch(_streamErr){
@@ -11996,7 +12025,7 @@ async function generateQuickLogDraft({athlete, workoutHistory, messages, goals, 
   const t = (text||"").trim();
   if(!t || t==="REST_DAY") return { ctx, rest:true, notes:"", draft:"" };
   const { notes, log } = splitQuickLogReply(t);
-  return { ctx, rest:false, notes: notes===null ? "" : notes, draft: log };
+  return { ctx, rest:false, notes: notes===null ? "" : gateText("ql_note", notes), draft: log };
 }
 
 function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals, contextNotes, onClose, onAddProgram, onSend, demo}) {
@@ -12186,7 +12215,8 @@ function QuickLogSheet({athlete, workoutHistory, historyLoaded, messages, goals,
       // A two-section reply means the day changed and the worksheet was rebuilt
       // to match; a plain reply is a log-only tweak (worksheet stays put) — which
       // is exactly why splitQuickLogReply returns null, not "", for "no section".
-      const { notes:newNotes, log:t } = splitQuickLogReply(revised);
+      const { notes:rawNotes, log:t } = splitQuickLogReply(revised);
+      const newNotes = rawNotes===null ? null : gateText("ql_note", rawNotes);   // T64 S4 gate
       if(t && (t!==draft.trim() || (newNotes!==null && newNotes!==notes))){
         setUndoStack(prev=>[...prev,{draft,notes}]);
         setDraft(t);
@@ -12641,7 +12671,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
                   const feelVal = sessionFeel?(typeof sessionFeel.parsed_data==="string"?JSON.parse(sessionFeel.parsed_data):sessionFeel.parsed_data)?.session_feel:null;
                   // stripToolNameNoise: rows persisted before the T62 leakage fix
                   // can carry model-narrated tool names — never shown.
-                  const lastReply = stripToolNameNoise([...session.entries].reverse().find(e=>e.bot_reply)?.bot_reply || "");
+                  const lastReply = renderGate([...session.entries].reverse().find(e=>e.bot_reply)?.bot_reply || "");
                   const sessionDate = effectiveDate(session.entries[0]);
 
                   // Check if this is a run session
@@ -14352,10 +14382,10 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, legacyC
       const raw = await askClaude(MEMORY_EDIT_SYS, user, 700, [], "claude-sonnet-5", "memory_edit");
       const plan = planMemoryOps(raw, rows, new Date(), {targetId: target?.id ?? null});
       if(plan.decision==="deny"){
-        setDenied(plan.reply);
+        setDenied(gateText("memory", plan.reply));   // T64 S4: one output gate
       } else {
         setRows(await applyMemoryActions(athlete.id, plan.actions, rows));
-        setJoeReply(plan.reply);
+        setJoeReply(gateText("memory", plan.reply));
         setAsk("");
         setTarget(null);
       }

@@ -12,6 +12,7 @@
 // per-digest cost flat and bounded as the roster grows.
 
 import crypto from "node:crypto";
+import { gateText } from "./_voice.js";
 import {
   getPD, isRealSession, groupIntoSessions, epley1RM, buildLiftHistory,
   detectPlateaus, aggregateInjuries, computeRankMovement, compareProgramVsActual,
@@ -239,9 +240,11 @@ const parseJsonLoose = (raw) => {
 };
 
 // Turn a keyed model object into the ordered sections[] the client renders.
+// T64 S4: every section body passes the one output gate before it is stored.
 const sectionsFrom = (obj, specs) =>
   specs.filter((s) => obj && obj[s.key] && String(obj[s.key]).trim())
-    .map((s) => ({ label: s.label, body: String(obj[s.key]).trim(), flag: s.flag || null }));
+    .map((s) => ({ label: s.label, body: gateText("proof_letter", String(obj[s.key]).trim()), flag: s.flag || null }))
+    .filter((s) => s.body);
 
 // WEEKLY (§8). Returns { label, contentJson, has_plateau, has_pain, has_missed }.
 export async function generateWeekly(athlete, brief, deps) {
@@ -336,7 +339,7 @@ Adapt to WHATEVER program the athlete runs, do not assume a long, multi-week per
 
   // Drive the injury questions from the SAME area + change the prose addresses.
   const activeInjury = obj.injury_focus || (brief.injuries.active || [])[0] || null;
-  const injuryChange = obj.injury_change || null;
+  const injuryChange = obj.injury_change ? gateText("proof_letter", String(obj.injury_change)) : null;
 
   return {
     label: `WEEKLY DIGEST: ${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}`,

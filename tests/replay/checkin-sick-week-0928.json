@@ -1,0 +1,28 @@
+{
+  "bug": "T64 screenshot 8: the weekly check-in cursed ('Damn, sorry you got hit with that'), parroted 'knee's clear and goal's locked in' back at him twice, and ended on the hard-coded 'go deeper' line",
+  "source": "Will Higgins, weekly check-in, 2026-09-28 (screenshot prompts/T64-screenshots/8.webp). Athlete text verbatim.",
+  "agenda": [
+    {"id": "volume", "kind": "context", "text": "Those light set counts: intentional recovery, or short on time/gas?"},
+    {"id": "goal", "kind": "goal", "meta": {"goal": "heal the left pec, build clean and jerk, posterior chain and front squat"}, "text": "Still chasing \"heal the left pec, build clean and jerk, posterior chain and front squat\", or has the target shifted?"},
+    {"id": "recovery", "kind": "context", "text": "Recovery this week: dialed, flat, or running on fumes?"},
+    {"id": "niggles", "kind": "context", "deeper": true, "text": "Low back, knees, anything nagging: managing it, or is it behind you?"},
+    {"id": "delivery", "kind": "context", "deeper": true, "text": "Anything about how I deliver these: more detail, less, different focus?"}
+  ],
+  "turns": [
+    {"athlete": "Short on timee", "answers": ["volume"],
+     "old_reply": "Got it, time crunch not fatigue - good to know it wasn't your body backing off. Let's make sure we're still pointed the right direction: still chasing healing that left pec, building up your clean and jerk, posterior chain and front squat, or has the target shifted?"},
+    {"athlete": "Goal is the same", "answers": ["goal"],
+     "old_reply": "Good, keeping that focus locked in since the knee's clear and pec's on the mend. Let's talk recovery this week: dialed, flat, or running on fumes?"},
+    {"athlete": "I was sick all week", "answers": ["recovery"],
+     "old_reply": "Damn, sorry you got hit with that. Good news is the knee's clear and goal's locked in, so let's just get you healthy and back to full gas next week before we worry about pushing anything.",
+     "old_app_line": "That's the short version. Want to go deeper, or wrap it here?"}
+  ],
+  "invariants": [
+    "no banned word in any reply (the gate removes 'Damn' even if the model says it)",
+    "no 'go deeper' text anywhere",
+    "no agenda item asked after it is covered",
+    "the sick-week reply does not repeat 'knee's clear' / 'goal's locked in'",
+    "the check-in ends only when every agenda item is covered or the athlete ends it",
+    "gate('Damn, sorry you got hit with that.') == 'Sorry you got hit with that.'"
+  ]
+}

@@ -26,6 +26,7 @@
 //   structured (lift/current/suggested_change/why), never raw chat text.
 
 import { findPlacement } from "./programDiff.js";
+import { gateText } from "./replyGate.js";
 
 export const CR_SOURCES = ["pain","plateau","pr","feedback"];
 
@@ -47,14 +48,17 @@ suggested_change: ONE concrete, actionable sentence in a coach's voice — what 
     draft = JSON.parse(String(dj).replace(/```json|```/g,"").trim());
   }catch(_){ draft = null; } // AI unavailable / bad JSON — full fallback below
 
-  const suggestion = String(draft?.suggested_change||"").trim() || message.slice(0,140);
+  // T64 S4: model text passes the one output gate; the fallback is the
+  // athlete's own words and is never gated.
+  const drafted = String(draft?.suggested_change||"").trim();
+  const suggestion = (drafted && gateText("change_request", drafted)) || message.slice(0,140);
   const lift = draft?.lift || null;
   // "Current" is a FACT — compute it from the full program text, never trust the
   // model's copy (T57: the drafter only sees the first 1200 chars, so it quoted
   // "4x6 @ RPE 7-8" for a lift actually programmed 5x5 @ RPE 8 further down).
   const placed = lift ? findPlacement(programText||"", lift) : null;
   const current = placed?.currentLine || null;
-  const why = draft?.why || null;
+  const why = draft?.why ? gateText("change_request", String(draft.why)) : null;
   const source = CR_SOURCES.includes(sourceHint) ? sourceHint
     : (CR_SOURCES.includes(draft?.source) ? draft.source : "feedback");
   return {suggestion, lift, current, why, source};

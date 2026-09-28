@@ -1,5 +1,6 @@
 import { campaignLine, parseBlockInfo } from "./programContract.js";
 import { PREF_FIELDS } from "./trainingPrefs.js";
+import { gateText } from "./replyGate.js";
 // ─── PROGRAM BUILDER ENGINE (Phase C) ────────────────────────────────────────
 // Pure logic for the interview-driven Program Builder: blueprint cell
 // definitions, pre-charge from known data, scope rules, the one-topic doctrine
@@ -216,7 +217,9 @@ export function parseInterviewerReply(raw) {
   const text = String(raw || "").trim();
   const m = text.match(/^CHIPS:\s*(.+)$/m);
   const chips = m ? m[1].split("|").map(s => s.trim()).filter(Boolean).slice(0, 4) : [];
-  return { text: text.replace(/^CHIPS:.*$/m, "").trim(), chips };
+  // T64 S4: the interviewer's prose passes the one output gate (chips are
+  // tap targets the athlete sends back as their own words; gated too).
+  return { text: gateText("builder", text.replace(/^CHIPS:.*$/m, "").trim()), chips: chips.map((c) => gateText("builder", c)).filter(Boolean) };
 }
 
 // ── Drafter (Sonnet, doctrine-cached) ────────────────────────────────────────

@@ -27,6 +27,7 @@
 import { lineDiff } from "./programDiff.js";
 import { currentPosition, parseBlockSpan, programTextIdentity } from "./programPosition.js";
 import { parseBlockInfo, stripBlockInfo } from "./programContract.js";
+import { gateText } from "./replyGate.js";
 
 // Fraction of the COMBINED line count that changed between two program texts.
 // 0 = identical, 1 = nothing in common. Exported for the test suite.
@@ -163,7 +164,7 @@ async function generateBlockRecap(athleteId, row, completedAt, deps) {
       `GOAL ATTACHED TO THIS BLOCK: ${goal || "(none on file)"}\n\n` +
       `TRAINING LOGGED DURING THE BLOCK:\n${digest || "(no logged sessions)"}`;
     const recap = await askClaude(RECAP_SYS, user, 600, [], "claude-sonnet-5", "program_summary");
-    const text = (recap || "").trim();
+    const text = gateText("recap", (recap || "").trim());   // T64 S4: one output gate
     if (text) {
       await sbUpdateWhere("program_history", `?id=eq.${row.id}`, { block_recap: text.slice(0, 1500) });
       // T64 Fix 3b: the short athlete-facing line is its OWN best-effort write,
@@ -174,7 +175,7 @@ async function generateBlockRecap(athleteId, row, completedAt, deps) {
       // ever costing the real recap write. The render falls back to the first
       // two sentences of the full recap until this lands (recapShortFallback).
       try {
-        const short = capWords40(((await askClaude(RECAP_SHORT_SYS, text, 120, [], "claude-haiku-4-5", "program_summary")) || "").trim());
+        const short = capWords40(gateText("recap", ((await askClaude(RECAP_SHORT_SYS, text, 120, [], "claude-haiku-4-5", "program_summary")) || "").trim()));
         if (short) await sbUpdateWhere("program_history", `?id=eq.${row.id}`, { block_recap_short: short });
       } catch (_) {}
     }
@@ -258,7 +259,7 @@ export async function refreshOpenBlockRecap({ athleteId }, deps) {
     `PROGRAM THE BLOCK IS RUNNING:\n${String(row.program_text || "").slice(0, 2500)}\n\n` +
     `GOAL ATTACHED TO THIS BLOCK: ${goal || "(none on file)"}\n\n` +
     `TRAINING LOGGED SO FAR:\n${digest}`;
-  const recap = ((await askClaude(ONGOING_RECAP_SYS, user, 400, [], "claude-sonnet-5", "program_summary")) || "").trim().slice(0, 1500);
+  const recap = gateText("recap", ((await askClaude(ONGOING_RECAP_SYS, user, 400, [], "claude-sonnet-5", "program_summary")) || "").trim()).slice(0, 1500);
   if (!recap) return null;
   await sbUpdateWhere("program_history", `?id=eq.${row.id}`, { block_recap: recap });
   return recap;
@@ -329,7 +330,7 @@ export async function snapshotProgramHistory({ athleteId, text, source, forceNew
   let summary = null;
   try {
     const line = await askClaude(SUMMARY_SYS, t.slice(0, 4000), 80, [], "claude-haiku-4-5", "program_summary");
-    summary = (line || "").trim().split("\n")[0].slice(0, 120) || null;
+    summary = gateText("recap", (line || "").trim().split("\n")[0]).slice(0, 120) || null;
   } catch (_) {}
 
   const row = {
