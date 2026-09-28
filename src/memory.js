@@ -87,7 +87,17 @@ export function extractJson(text) {
   try { return JSON.parse(s.slice(a, b + 1)); } catch (_) { return null; }
 }
 
-export function planMemoryOps(raw, rows, now = new Date()) {
+// opts.targetId (T62, Will's 09-01 "highlight as targeted" ruling): the athlete
+// selected ONE fact in the Memory tab, so this turn's edit/delete ops may touch
+// only that row — the model's match strings are re-pointed at it, and any
+// edit/delete that would land elsewhere is dropped, never guessed at. Adds keep
+// the normal rules. This is the whole point of (c2): the selection narrows the
+// blast radius while every write still passes Joe's judgment and validateFact.
+export function planMemoryOps(raw, rows, now = new Date(), opts = {}) {
+  const targetId = opts.targetId ?? null;
+  const targetRow = targetId != null
+    ? activeFacts(rows, now).find((x) => String(x.id) === String(targetId)) || null
+    : null;
   const r = (raw && typeof raw === "object") ? raw : extractJson(raw);
   if (!r || (r.decision !== "apply" && r.decision !== "deny")) {
     return { ok: false, decision: "deny", reply: "Couldn't read that one. Give it to me once more, plain." };
@@ -117,9 +127,16 @@ export function planMemoryOps(raw, rows, now = new Date()) {
       actions.push({ type: "insert", data: { content: v.content, kind, expires_at: op.expires_at || null, source: "athlete_said" } });
       activeCount++;
     } else if (op.op === "edit") {
-      const m = matchFacts(rows, op.match, now);
-      if (!m.ok || m.rows.length !== 1 || claimed.has(m.rows[0].id)) continue;
-      const row = m.rows[0];
+      let row;
+      if (targetRow) {
+        // Targeted turn: the selection IS the match. One edit max.
+        if (claimed.has(targetRow.id)) continue;
+        row = targetRow;
+      } else {
+        const m = matchFacts(rows, op.match, now);
+        if (!m.ok || m.rows.length !== 1 || claimed.has(m.rows[0].id)) continue;
+        row = m.rows[0];
+      }
       const kind = ["pinned", "contextual", "situational"].includes(op.kind) ? op.kind : row.kind;
       const v = validateFact({ content: op.content, kind, expires_at: op.expires_at !== undefined ? op.expires_at : row.expires_at });
       if (!v.ok) continue;
@@ -129,6 +146,14 @@ export function planMemoryOps(raw, rows, now = new Date()) {
       if (kind === "pinned") data.expires_at = null; // pinned never silently expires
       actions.push({ type: "update", id: row.id, data });
     } else if (op.op === "delete") {
+      if (targetRow) {
+        // Targeted turn: only the selected fact may die.
+        if (claimed.has(targetRow.id)) continue;
+        claimed.add(targetRow.id);
+        actions.push({ type: "update", id: targetRow.id, data: { status: "deleted" } });
+        activeCount--;
+        continue;
+      }
       const m = matchFacts(rows, op.match, now);
       if (!m.ok) continue;
       for (const row of m.rows) {

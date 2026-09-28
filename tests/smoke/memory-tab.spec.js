@@ -112,3 +112,34 @@ test("athlete context: an out-of-scope ask is flagged red and writes nothing", a
   await box.fill("ok fair");
   await expect(page.getByText("Flagged — out of scope")).toHaveCount(0);
 });
+
+test("athlete context: tapping a fact scopes the ask to that one note (T62 targeted edit)", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const { calls } = await mockApi(page, { athlete, dataReads: { athlete_memory: MEMORY_ROWS(athlete.id) } });
+  // The model's match string points at the WRONG fact on purpose — the planner
+  // must land the edit on the SELECTED row anyway (the whole point of c2).
+  await mockMemoryEdit(page, { decision: "apply", reply: "Updated that note.",
+    ops: [{ op: "edit", match: "Watching: knee squats", content: "Prefers lbs on the barbell lifts now" }] });
+  await loginAsAthlete(page, athlete);
+  await openMemory(page);
+  await page.getByRole("button", { name: "Athlete Context", exact: true }).click();
+
+  // Select the pinned kg fact; the composer flips into targeted mode.
+  await page.getByText("Prefers kg on the barbell lifts", { exact: false }).click();
+  await expect(page.getByText("EDITING:")).toBeVisible();
+  const box = page.getByPlaceholder("What should change about that note?");
+  await box.fill("actually I switched to pounds");
+  await page.getByRole("button", { name: "Send context request" }).click();
+
+  await expect(page.getByText("Updated that note.", { exact: false })).toBeVisible({ timeout: 15000 });
+  // The write landed on the SELECTED row (m1), not the model's stray match (m2).
+  const write = calls.find((c) => c.body?.op === "update" && c.body?.table === "athlete_memory");
+  expect(write).toBeTruthy();
+  expect(String(write.body.id || "")).toBe("m1");
+  // Selection clears after a successful apply, and the ✕ path works too.
+  await expect(page.getByText("EDITING:")).toHaveCount(0);
+  await page.getByText("Watching: knee squats", { exact: false }).click();
+  await expect(page.getByText("EDITING:")).toBeVisible();
+  await page.getByRole("button", { name: "Clear selected fact" }).click();
+  await expect(page.getByText("EDITING:")).toHaveCount(0);
+});

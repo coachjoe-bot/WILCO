@@ -75,6 +75,7 @@ import { CREW_ENABLED, MASTERMIND_ENABLED, CHAT_FIRST_ENABLED } from "./flags.js
 import { buildMastermindStatic } from "./ai/card.js";
 import { blueprintPct } from "./programBuilder.js";
 import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps } from "./memory.js";
+import { activeGoals, goalsToSupersede, sameGoalText } from "./goals.js";
 import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
 
 // T58 rollout gates, resolved once per load. ?mastermind=1 / ?chatfirst=1 stay
@@ -559,6 +560,41 @@ export const parseAndStampGoal = (row) => {
     if (first && first.target_date) patch.target_date = first.target_date;
     sbUpdate("athlete_goals", row.id, patch).catch(() => {});
   }).catch(() => {});
+};
+
+// T62 memory engine: writing a NEW goal supersedes the prior active rows —
+// stamped, never deleted, so history stays for Past Blocks and the coach brain.
+// Reads fresh rather than trusting caller state (parallel surfaces write goals),
+// stamps each survivor by id through the gateway, and returns the stamp so the
+// caller can patch local state. Best-effort like every goal write: a failure
+// here never costs the insert that triggered it.
+export const supersedePriorGoals = async (athleteId, keepId) => {
+  const stamp = new Date().toISOString();
+  try {
+    const rows = await sbRead("athlete_goals", `?athlete_id=eq.${athleteId}&superseded_at=is.null&order=created_at.desc&limit=12`);
+    for (const g of goalsToSupersede(Array.isArray(rows) ? rows : [], keepId)) {
+      await sbUpdate("athlete_goals", g.id, { superseded_at: stamp });
+    }
+  } catch (_) {}
+  return stamp;
+};
+
+// Insert-a-goal, the ONE path (flush rule): insert → supersede priors → parse
+// stamp. Returns the inserted row (or null). Skips the whole write when the
+// text just restates the current active goal — a Builder re-apply of the same
+// block must not churn the goal history.
+export const writeAthleteGoal = async (athleteId, goalText, currentGoals = [], extra = {}) => {
+  const text = String(goalText || "").trim();
+  if (text.length < 4) return null;
+  const live = activeGoals(currentGoals || []);
+  if (live.some((g) => sameGoalText(g.goal_text, text))) return null;
+  const inserted = await sbInsert("athlete_goals", { athlete_id: athleteId, goal_text: text, ...extra });
+  const row = Array.isArray(inserted) ? inserted[0] : inserted;
+  if (row && row.id) {
+    await supersedePriorGoals(athleteId, row.id);
+    parseAndStampGoal(row); // fire-and-forget — never blocks the save path
+  }
+  return row || null;
 };
 
 // Write this turn's detected crew moments — best-effort, fire-and-forget, gated
@@ -2042,8 +2078,13 @@ ACCOUNT FACTS: coach linked: ${athlete.coach_id?"yes":"no"} · program locked: $
 ${athlete.weight_unit==="kg"?"This athlete works in KG. State every weight you say in kg (logged data below may carry lbs labels — convert exactly, 1 kg = 2.20462 lbs, and round working weights to 2.5 kg).":"This athlete works in LBS. If logged data below carries a kg label, that lift was performed in kg — convert to lbs when you talk about it (1 kg = 2.20462 lbs)."}${prefs&&prefsPromptLines(prefs)?"\n"+prefsPromptLines(prefs):""}${pastContext}${lastDoneContext}${maxContext}${prCheckContext}${programContext}${positionContext}`;
 
   let goalsContext = "";
-  if(athleteGoals?.length>0){
-    const goalLines = athleteGoals.map(g=>g.goal_text||"").filter(Boolean).slice(0,3).join(" | ");
+  // T62: only ACTIVE goals reach the prompt (superseded rows and goals >14 days
+  // past their target_date are out). Before this filter every historical goal row
+  // rode in as an equal — Will's May "bench 315 by mid-August" was still steering
+  // Joe in September, right next to the goal that replaced it.
+  const liveGoals = activeGoals(athleteGoals||[]);
+  if(liveGoals.length>0){
+    const goalLines = liveGoals.map(g=>g.goal_text||"").filter(Boolean).slice(0,3).join(" | ");
     goalsContext = `\n\nATHLETE GOALS: ${goalLines}\nKeep these goals in view when giving advice and programming.`;
   }
   // Injury context from profile
@@ -3476,7 +3517,7 @@ function reportsActivePain(text){
   return PAIN_WORDS.test(t) && BODY_AREAS.test(t);
 }
 
-function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead, workoutHistory}) {
+function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead, workoutHistory, kbInset=0}) {
   const alreadyDone = !!(digest?.content_json?.checkin_done);
   const [phase, setPhase] = useState(alreadyDone ? "done" : "report"); // report | dialogue | coach-offer | acting | done
   const [messages, setMessages] = useState([]);
@@ -3715,14 +3756,39 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
     setPhase("acting");
     setLoading(true);
     const qaText = finalAnswers.map(a=>`[${a.kind}] Q: ${a.q}\nA: ${a.a}`).join("\n\n");
+    // T62 memory engine (Will 09-01): the check-in is the PRIMARY way athlete
+    // context grows — its answers write straight into the coach's saved notes.
+    // The extractor sees the current facts and returns memory ops in the same
+    // shape the ask-Joe box uses; planMemoryOps + validateFact then gate every
+    // one of them, so this path can never write what the Memory tab couldn't.
+    let memRows = [];
+    try{
+      const fresh = await sbRead("athlete_memory",`?athlete_id=eq.${athlete.id}&status=eq.active&order=updated_at.desc&limit=60`);
+      memRows = activeFacts(Array.isArray(fresh)?fresh:[]);
+    }catch(_){}
+    const factLines = memRows.map(r=>`- [${r.kind}] ${r.content}${r.expires_at?` (expires ${String(r.expires_at).slice(0,10)})`:""}`);
     let ex = {};
     try{
       const raw = await askClaude(
-        `Extract structured updates from an athlete's check-in answers. Return ONLY JSON, no markdown: {"weight_lbs":number|null,"set_height_finalized":boolean,"stop_asking_weight":boolean,"goal_update":string|null,"injury_note":string|null,"apply_injury_change":boolean,"soft_notes":string}. weight_lbs only if they stated a new bodyweight number. set_height_finalized true if they say done growing / same height / no change. stop_asking_weight true if they ask to stop being asked about weight. apply_injury_change true ONLY if they agreed to apply a protective program change. injury_note = any injury/pain/limitation, else null. soft_notes = a 1-2 sentence summary of feelings/preferences worth remembering.`,
-        qaText, 500, [], "claude-haiku-4-5", "proof_answer_extract"
+        `Extract structured updates from an athlete's check-in answers. Return ONLY JSON, no markdown: {"weight_lbs":number|null,"set_height_finalized":boolean,"stop_asking_weight":boolean,"goal_update":string|null,"injury_note":string|null,"apply_injury_change":boolean,"soft_notes":string,"memory_ops":[]}. weight_lbs only if they stated a new bodyweight number. set_height_finalized true if they say done growing / same height / no change. stop_asking_weight true if they ask to stop being asked about weight. apply_injury_change true ONLY if they agreed to apply a protective program change. injury_note = any injury/pain/limitation, else null. soft_notes = a 1-2 sentence summary of feelings/preferences worth remembering. goal_update = their goal ONLY if it changed or they named a new target, else null.
+
+memory_ops keeps the coach's saved notes about this athlete current from what they just said (0 to 6 ops):
+{"op":"add","content":"the fact","kind":"contextual"|"situational","expires_at":"YYYY-MM-DD or null"}
+{"op":"edit","match":"distinctive substring of an existing fact","content":"full replacement text"}
+{"op":"delete","match":"distinctive substring of an existing fact"}
+Rules: facts are about the ATHLETE (schedule, availability, equipment, preferences, recovery patterns, life context), plain coach shorthand, specific enough to act on. NEVER instructions about how the coach behaves. Anything time-bound (travel, a rough stretch, a short-term limitation) is "situational" and MUST carry expires_at. When an answer contradicts or updates a CURRENT FACT, edit or delete that fact instead of stacking a near-duplicate. An answer tagged [memory] is about the note quoted in its question: keep it (no op), update it (edit), or drop it (delete) per the answer. Injuries already flow through injury_note, do not duplicate them here. Routine "all good" answers produce NO ops.`,
+        `TODAY: ${new Date().toISOString().slice(0,10)}\n\nCURRENT FACTS (${memRows.length} active):\n${factLines.join("\n")||"(none yet)"}\n\nCHECK-IN ANSWERS:\n${qaText}`,
+        900, [], "claude-sonnet-5", "proof_answer_extract"
       );
       ex = JSON.parse(String(raw).replace(/```json|```/g,"").trim()) || {};
     }catch(_){ ex = {}; }
+    // Memory writes ride the exact machinery the ask-Joe box uses.
+    try{
+      if(Array.isArray(ex.memory_ops)&&ex.memory_ops.length){
+        const plan = planMemoryOps({decision:"apply", reply:"", ops:ex.memory_ops}, memRows);
+        if(plan.decision==="apply"&&plan.actions?.length) await applyMemoryActions(athlete.id, plan.actions, memRows);
+      }
+    }catch(_){}
 
     // Hard facts -> structured tables (each guarded; new columns no-op pre-migration)
     try{ if(ex.weight_lbs && ex.weight_lbs>50 && ex.weight_lbs<600) await sbUpdate("athletes",athlete.id,{weight_lbs:Math.round(ex.weight_lbs)}); }catch(_){}
@@ -3734,9 +3800,8 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
     // in plain language. See docs/program-builder-blocks-goals-design.md.
     try{
       if(ex.goal_update && ex.goal_update.length>3){
-        const inserted = await sbInsert("athlete_goals",{athlete_id:athlete.id,goal_text:ex.goal_update});
-        const row = Array.isArray(inserted)?inserted[0]:inserted;
-        parseAndStampGoal(row); // fire-and-forget — never blocks the check-in
+        // T62: one door for goal writes — insert + supersede priors + parse stamp.
+        await writeAthleteGoal(athlete.id, ex.goal_update);
       }
     }catch(_){}
 
@@ -3869,7 +3934,7 @@ function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead,
   };
 
   return (
-    <div style={{position:"fixed",inset:0,zIndex:500,background:CA.navy,display:"flex",flexDirection:"column",maxWidth:600,margin:"0 auto"}}>
+    <div style={{position:"fixed",inset:0,zIndex:500,background:CA.navy,display:"flex",flexDirection:"column",maxWidth:600,margin:"0 auto",paddingBottom:kbInset}}>
       <style>{GS}</style>
       <div style={{background:CA.navy2,borderBottom:`1px solid ${CA.border}`,paddingTop:"calc(12px + env(safe-area-inset-top, 0px))",paddingBottom:"12px",paddingLeft:"16px",paddingRight:"16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
         <div style={{...kick(NEWS.ink3),fontSize:10}}>{isMonthly?"Monthly":"Weekly"} Edition · {athlete.name}</div>
@@ -6158,9 +6223,19 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     setBlockPromptBusy(false);
   };
 
-  const applyBuilderText = async (text, tl) => {
+  const applyBuilderText = async (text, tl, goalText=null) => {
     const t=(text||"").trim();
     await sbUpdate("athletes",athlete.id,{program_text:t||null});
+    // T62 (Will 09-01): a program built around a NEW goal updates the goal on
+    // file — the blueprint's stated goal supersedes the prior active rows via
+    // the one goal door (no-op when it restates the current goal). Best-effort:
+    // a goal-write failure never costs the program save.
+    if(t && goalText){
+      try{
+        const row = await writeAthleteGoal(athlete.id, goalText, athleteGoals);
+        if(row) setAthleteGoals(prev=>[row, ...(prev||[]).map(g=>({...g, superseded_at: g.superseded_at||new Date().toISOString()}))]);
+      }catch(_){}
+    }
     // tl = the blueprint's timeline: start stamps the block's applied_at (the
     // week-1 anchor programPosition reads), end stamps ends_at (what the
     // end-of-program prompt keys off).
@@ -7293,7 +7368,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // loaded on demand so doctrine never rides the boot.
   const [builderChat,setBuilderChat] = useState(null);           // {st, chips, busy}
   const [builderOfferPending,setBuilderOfferPending] = useState(false);
-  const [dockProgram,setDockProgram] = useState(null);           // {title, text, draftId, tl}
+  const [dockProgram,setDockProgram] = useState(null);           // {title, text, draftId, tl, goal}
   const [pgOpen,setPgOpen] = useState(false);
   const [pgBusy,setPgBusy] = useState(false);
   const builderEngRef = useRef(null);
@@ -7310,7 +7385,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // A finished draft tapped from Past Blocks skips the interview entirely —
       // it reopens on the program sheet, exactly where it left off.
       if(restoreRow && restoreRow.status==="draft" && restoreRow.draft_text){
-        setDockProgram({title:(restoreRow.title||"Program draft").slice(0,40), text:restoreRow.draft_text, draftId:restoreRow.id||null, tl:restoreRow.blueprint?.timeline?.value||null});
+        setDockProgram({title:(restoreRow.title||"Program draft").slice(0,40), text:restoreRow.draft_text, draftId:restoreRow.id||null, tl:restoreRow.blueprint?.timeline?.value||null, goal:restoreRow.provisional_goal||restoreRow.blueprint?.goal?.value||null});
         setSheetOpen(false); setPgOpen(true);
         return;
       }
@@ -7359,7 +7434,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       bc.st.transcript = [...bc.st.transcript,{role:"assistant",content:"Draft's below. Look it over and change anything, then Save to Drafts or Apply."}];
       await eng.park(bc.st,"draft",text);
       joeBubble("Done. It's below, look it over and change anything, then Save to Drafts or Apply.");
-      setDockProgram({title, text, draftId:bc.st.draftId||null, tl:bc.st.blueprint?.timeline?.value||null});
+      setDockProgram({title, text, draftId:bc.st.draftId||null, tl:bc.st.blueprint?.timeline?.value||null, goal:bc.st.blueprint?.goal?.value||null});
       setSheetOpen(false); setPgOpen(true);
       setBuilderChat(null); // the interview is over; the sheet owns it from here
     }catch(_){
@@ -7442,7 +7517,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     const p = dockProgram; if(!p) return;
     try{
       let tl=null; try{ tl = p.tl ? parseTimeline(p.tl) : null; }catch(_){}
-      await applyBuilderText(p.text, tl);
+      await applyBuilderText(p.text, tl, p.goal||null);
       if(p.draftId) sbUpdateWhere("program_drafts",`?id=eq.${p.draftId}`,{status:"applied",updated_at:new Date().toISOString()}).catch(()=>{});
       setPgOpen(false); setDockProgram(null);
       joeBubble("It's on your Program tab and live from today. Ask for your workout whenever you're ready.");
@@ -8835,18 +8910,14 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         );
         try {
           const parsed = JSON.parse(goalJson.replace(/```json|```/g,"").trim());
-          const inserted = await sbInsert("athlete_goals",{
-            athlete_id:athlete.id,
-            goal_text:msg,
+          // T62: one door for goal writes — insert + supersede priors (a first
+          // goal has none, harmless) + the crew-glance parse stamp inside.
+          await writeAthleteGoal(athlete.id, msg, [], {
             goal_type:parsed.goal_type||"general",
             target_metric:parsed.target_metric||null,
             target_value:parsed.target_value||null,
             target_date:parsed.target_date||null
           });
-          // Crew goal-at-a-glance needs parsed_lift/target_lbs specifically (a
-          // different, numeric-lift-only shape from this legacy goal_type/
-          // target_metric parse above) — fire-and-forget, never blocks onboarding.
-          parseAndStampGoal(Array.isArray(inserted)?inserted[0]:inserted);
           setAthleteGoals([{goal_text:msg,goal_type:parsed.goal_type||"general",created_at:new Date().toISOString()}]);
         } catch(e){}
         // Mark first_chat_complete
@@ -11241,6 +11312,7 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
           PAST edition open here (A5 archive) without clobbering the app-level latest. */}
       {showProofChat&&(chatDigest||proofDigest)&&(
         <ProofChatModal
+          kbInset={kbInset}
           athlete={athlete}
           digest={chatDigest||proofDigest}
           workoutHistory={workoutHistory}
@@ -12762,7 +12834,7 @@ export function ProgramDraftsPane({athlete, viewer="athlete", onSaveToProgram, o
     if(!confirming||busy) return;
     setBusy(true); setErr("");
     try {
-      await onSaveToProgram(confirming.draft.draft_text, parseTimeline(confirming.draft.blueprint?.timeline?.value));
+      await onSaveToProgram(confirming.draft.draft_text, parseTimeline(confirming.draft.blueprint?.timeline?.value), confirming.draft.provisional_goal||confirming.draft.blueprint?.goal?.value||null);
       await sbUpdateWhere("program_drafts",`?id=eq.${confirming.draft.id}`,{status:"applied",updated_at:new Date().toISOString()});
       setConfirming(null);
       load();
@@ -13885,20 +13957,49 @@ ops only when decision is "apply", up to 8, each one of:
 {"op":"edit","match":"distinctive substring of the existing fact","content":"full replacement text"}
 {"op":"delete","match":"distinctive substring of the existing fact"}
 kind: pinned = always matters to coaching them, contextual = useful background (the default), situational = temporary.
-deny = out of scope or inappropriate: reply says why in one plain line, ops empty. A reasonable request that needs no change (already covered, nothing to do) is "apply" with no ops, never a deny.`;
+deny = out of scope or inappropriate: reply says why in one plain line, ops empty. A reasonable request that needs no change (already covered, nothing to do) is "apply" with no ops, never a deny.
+TARGETED REQUESTS: when the message carries a SELECTED FACT block, the athlete highlighted that one fact and is talking about IT. Edit or delete THAT fact (your match refers to it), add a replacement or follow-up only if they asked for one, and leave every other fact alone. The same judgment rules apply: a selected fact does not make an inappropriate change acceptable.`;
+
+// Executes a planMemoryOps action list against the gateway and returns the
+// updated rows array. Shared by the ask-Joe box and the proof-feed check-in
+// (T62): every surface that writes memory runs the SAME validated actions the
+// planner shaped — there is no second, looser write path.
+export async function applyMemoryActions(athleteId, actions, rows){
+  const stamp = new Date().toISOString();
+  let next = [...(rows||[])];
+  for(const a of actions||[]){
+    if(a.type==="insert"){
+      const ins = await sbInsert("athlete_memory",{athlete_id:athleteId,...a.data});
+      const row = Array.isArray(ins)?ins[0]:ins;
+      if(row&&row.id) next = [row,...next];
+    } else {
+      await sbUpdate("athlete_memory",a.id,{...a.data,updated_at:stamp});
+      next = a.data.status==="deleted" ? next.filter(r=>r.id!==a.id)
+        : next.map(r=>r.id===a.id?{...r,...a.data,updated_at:stamp}:r);
+    }
+  }
+  return next;
+}
 
 export function AthleteContextPane({athlete, goals=[], rows=[], setRows, legacyContext=""}){
   const [ask,setAsk] = useState("");
   const [busy,setBusy] = useState(false);
   const [denied,setDenied] = useState(null);   // flag toast text (also reddens the box)
   const [joeReply,setJoeReply] = useState(null);
+  // T62 targeted edit (Will's "highlight as targeted" ruling): tapping a fact
+  // selects it, and the next ask is scoped to THAT fact — the request still
+  // runs the full memory_edit → planMemoryOps path, the selection only narrows
+  // what the returned ops may touch. Tapping again (or ✕) deselects.
+  const [target,setTarget] = useState(null);   // the selected athlete_memory row
 
   const act = activeFacts(rows);
   const pinned = act.filter(r=>r.kind==="pinned");
   const rest = act.filter(r=>r.kind!=="pinned")
     .sort((a,b)=>Date.parse(b.updated_at||b.created_at||0)-Date.parse(a.updated_at||a.created_at||0));
   const legacyLines = String(legacyContext||"").split("\n").map(l=>l.trim()).filter(Boolean);
-  const goalLines = (goals||[]).map(g=>g&&g.goal_text).filter(Boolean).slice(0,3);
+  // Only ACTIVE goals render as "Goal" — superseded / stale-by-date rows belong
+  // to history, not to what Joe is currently coaching toward (T62).
+  const goalLines = activeGoals(goals||[]).map(g=>g&&g.goal_text).filter(Boolean).slice(0,3);
   const h = athlete.height_inches;
   const profileBits = [
     [athlete.age?`${athlete.age}`:null, athlete.gender||null, h?`${Math.floor(h/12)}'${h%12}"`:null, athlete.weight_lbs?`${athlete.weight_lbs} lbs`:null].filter(Boolean).join(" · "),
@@ -13915,28 +14016,17 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, legacyC
         const exp = r.expires_at?` (expires ${String(r.expires_at).slice(0,10)})`:"";
         return `- [${r.kind}] ${r.content}${exp}`;
       });
-      const user = `TODAY: ${new Date().toISOString().slice(0,10)}\n\nCURRENT FACTS (${act.length} active):\n${factLines.join("\n")||"(none yet)"}\n\nOLDER NOTES (read-only history, for context):\n${legacyLines.join("\n")||"(none)"}\n\nATHLETE REQUEST:\n${req}`;
+      const selectedBlock = target ? `\n\nSELECTED FACT (the athlete highlighted this one, the request is about it):\n- [${target.kind}] ${target.content}` : "";
+      const user = `TODAY: ${new Date().toISOString().slice(0,10)}\n\nCURRENT FACTS (${act.length} active):\n${factLines.join("\n")||"(none yet)"}\n\nOLDER NOTES (read-only history, for context):\n${legacyLines.join("\n")||"(none)"}${selectedBlock}\n\nATHLETE REQUEST:\n${req}`;
       const raw = await askClaude(MEMORY_EDIT_SYS, user, 700, [], "claude-sonnet-5", "memory_edit");
-      const plan = planMemoryOps(raw, rows);
+      const plan = planMemoryOps(raw, rows, new Date(), {targetId: target?.id ?? null});
       if(plan.decision==="deny"){
         setDenied(plan.reply);
       } else {
-        const stamp = new Date().toISOString();
-        let next = [...rows];
-        for(const a of plan.actions||[]){
-          if(a.type==="insert"){
-            const ins = await sbInsert("athlete_memory",{athlete_id:athlete.id,...a.data});
-            const row = Array.isArray(ins)?ins[0]:ins;
-            if(row&&row.id) next = [row,...next];
-          } else {
-            await sbUpdate("athlete_memory",a.id,{...a.data,updated_at:stamp});
-            next = a.data.status==="deleted" ? next.filter(r=>r.id!==a.id)
-              : next.map(r=>r.id===a.id?{...r,...a.data,updated_at:stamp}:r);
-          }
-        }
-        setRows(next);
+        setRows(await applyMemoryActions(athlete.id, plan.actions, rows));
         setJoeReply(plan.reply);
         setAsk("");
+        setTarget(null);
       }
     }catch(_){ setDenied("Couldn't reach Joe just now. Try again in a second."); }
     setBusy(false);
@@ -13963,13 +14053,20 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, legacyC
           </>)}
           <div style={secttl}>What Joe's keeping in mind</div>
           {act.length===0&&<div style={{...mono,color:CA.muted}}>Nothing saved yet. Ask below, or just talk to Joe — he keeps notes as you go.</div>}
-          {[...pinned,...rest].map(r=>(
-            <div key={r.id} style={{...mono,color:isWatchNote(r.content)?CA.amber:mono.color}}>
+          {[...pinned,...rest].map(r=>{
+            const sel = target&&target.id===r.id;
+            return (
+            <div key={r.id} role="button" tabIndex={0} aria-pressed={sel}
+              onClick={()=>{setTarget(sel?null:r); if(denied) setDenied(null);}}
+              style={{...mono,color:isWatchNote(r.content)?CA.amber:mono.color,cursor:"pointer",
+                borderLeft:sel?`3px solid ${CA.accent}`:"3px solid transparent",
+                background:sel?`${CA.accent}14`:"transparent",
+                borderRadius:sel?6:0,padding:"1px 6px 1px 7px",margin:"0 -6px 0 -10px"}}>
               {"•"} {r.content}
               {r.kind==="pinned"&&<span style={{color:CA.muted}}> [pinned]</span>}
               {r.expires_at&&<span style={{color:CA.muted}}> (until {String(r.expires_at).slice(0,10)})</span>}
             </div>
-          ))}
+          );})}
           {legacyLines.length>0&&(<>
             <div style={secttl}>Older notes</div>
             <div style={{...mono,color:CA.muted,fontSize:11}}>{legacyLines.join("\n")}</div>
@@ -13989,12 +14086,21 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, legacyC
         </div>
       )}
       <div style={{borderTop:`1px solid ${CA.border}`,background:CA.navy2,padding:"9px 12px 12px",flexShrink:0}}>
-        <div style={{fontSize:9.5,color:CA.muted,margin:"0 2px 6px",letterSpacing:0.3}}>Joe applies changes here — he can add, edit, or clear anything above.</div>
+        {target?(
+          <div style={{display:"flex",alignItems:"center",gap:6,margin:"0 2px 6px"}}>
+            <span style={{fontSize:10,fontWeight:700,color:CA.accent,letterSpacing:0.4,flexShrink:0}}>EDITING:</span>
+            <span style={{fontSize:10.5,color:CA.muted2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:0}}>{target.content}</span>
+            <button onClick={()=>setTarget(null)} aria-label="Clear selected fact"
+              style={{background:"none",border:"none",color:CA.muted,cursor:"pointer",fontSize:12,lineHeight:1,padding:"0 2px",flexShrink:0}}>✕</button>
+          </div>
+        ):(
+          <div style={{fontSize:9.5,color:CA.muted,margin:"0 2px 6px",letterSpacing:0.3}}>Joe applies changes here — tap a note above to edit just that one.</div>
+        )}
         <div style={{display:"flex",gap:7,alignItems:"center"}}>
           <input value={ask} aria-label="Ask Joe to change your context"
             onChange={e=>{setAsk(e.target.value); if(denied) setDenied(null);}}
             onKeyDown={e=>{ if(e.key==="Enter") send(); }}
-            placeholder="Ask Joe to remember or change something..."
+            placeholder={target?"What should change about that note?":"Ask Joe to remember or change something..."}
             style={{flex:1,background:denied?"#FCEAE8":CA.navy3,border:`1.5px solid ${denied?"#C0261B":CA.border}`,color:denied?"#C0261B":CA.text,borderRadius:11,padding:"10px 12px",fontSize:13,fontFamily:"'Inter'",outline:"none"}}/>
           <button onClick={send} disabled={busy} aria-label="Send context request"
             style={{width:40,height:40,borderRadius:10,background:denied?"#C0261B":CA.accent,color:CA.onAccent,border:"none",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,cursor:busy?"wait":"pointer",fontSize:15}}>
