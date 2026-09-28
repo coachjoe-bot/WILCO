@@ -126,8 +126,9 @@ export function performedBlock(exercises, opts = {}) {
 //   c. pain verdict acknowledge_once / offer_change_once for this message
 //   d. a main lift up on the last time it was done (load or reps, both numbers),
 //      else a main lift's first time on file (their new baseline, top set)
-//   e. a main planned lift missing from the log: sets alsoAsk (ONE question);
-//      the headline only when nothing above applied
+//   e. a main planned lift missing from a session-shaped log (two or more of
+//      the day's lifts logged; several missing = a large departure, still ONE
+//      question): sets alsoAsk; the headline only when nothing above applied
 //   f. nothing notable
 // Accessories never headline while a main lift has something; an accessory's
 // estimated max never headlines at all (screenshot 5's lateral raises). An
@@ -210,7 +211,7 @@ export function planDayFor({ programText, loggedNames = [], resolverLabel = null
     if (!r) return null;
     best = [r];
   }
-  return { label: best[0].label, planned: best[0].planned };
+  return { label: best[0].label, planned: best[0].planned, matched: bestN };
 }
 
 const topSet = (ex) => {
@@ -270,7 +271,9 @@ export function logHeadline({ exercises = [], prLines = [], lastDone = null, pai
   // e: main planned lifts missing (a lift already logged earlier this session counts as done)
   let alsoAsk = null;
   let gapLine = null;
-  if (planDay && Array.isArray(planDay.planned)) {
+  // Only a session-shaped log (two or more lifts on the matched day) is checked
+  // for gaps: "hit a 102 snatch today" is a highlight, not the whole session.
+  if (planDay && Array.isArray(planDay.planned) && planDay.matched >= 2) {
     const missing = planDay.planned.filter((p) => p.main
       && !exs.some((e) => sameLift(e.name, p.name))
       && !sameSession(getLast(p.name)));

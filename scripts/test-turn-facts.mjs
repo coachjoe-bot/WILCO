@@ -137,19 +137,21 @@ eq(head({ exercises: [kg("Back Squat", 3, 2, 155)], rows: HIST }).kind, "none", 
 }
 // e. missing main lift: with a headline above it, and without
 {
-  const withPr = head({ exercises: [kg("Snatch", 3, 1, 105)], rows: HIST, plan: PLAN });
+  const withPr = head({ exercises: [kg("Snatch", 3, 1, 105), kg("Back Extensions", 3, 10, 20)], rows: HIST, plan: PLAN });
   eq(withPr.kind, "pr", "missing C&J does not displace the PR");
   ok(/Clean & Jerk/.test(withPr.alsoAsk || "") && !/Back Extensions/.test(withPr.alsoAsk || ""), `alsoAsk names the missing main lift (got ${withPr.alsoAsk})`);
-  const flat = head({ exercises: [kg("Snatch", 6, 1, 90)], rows: HIST, plan: PLAN });
+  const PLAN3 = PLAN.replace("Clean & Jerk 5x1 @ 80%", "Clean & Jerk 5x1 @ 80%\nFront Squat 3x2");
+  eq(head({ exercises: [kg("Snatch", 6, 1, 90)], rows: HIST, plan: PLAN }).alsoAsk, null, "a one-lift highlight is not checked for gaps");
+  const flat = head({ exercises: [kg("Snatch", 6, 1, 90), kg("Front Squat", 3, 2, 110)], rows: HIST, plan: PLAN3 });
   eq(flat.kind, "plan_gap", "nothing above: the gap is the headline"); ok(/Clean & Jerk/.test(flat.line) && flat.alsoAsk, "plan_gap carries the question");
   // accessory missing from the plan is never asked about
   const noAcc = head({ exercises: [kg("Back Squat", 5, 3, 150), kg("Front Squat", 4, 3, 110)], rows: HIST, plan: PLAN });
   eq(noAcc.kind, "none", "plan matched except an accessory: nothing notable"); eq(noAcc.alsoAsk, null, "a skipped accessory earns no question");
   // a planned lift logged earlier this session is not missing
   const split = [...HIST, row(new Date(NOW.getTime() - 40 * 60000).toISOString(), [kg("Clean & Jerk", 5, 1, 110)])];
-  eq(head({ exercises: [kg("Snatch", 6, 1, 90)], rows: split, plan: PLAN }).alsoAsk, null, "C&J logged 40 minutes ago counts as done");
+  eq(head({ exercises: [kg("Snatch", 6, 1, 90), kg("Front Squat", 3, 2, 110)], rows: split, plan: PLAN3 }).alsoAsk, null, "C&J logged 40 minutes ago counts as done");
   // pain turns never ask about a skipped lift
-  eq(head({ exercises: [kg("Snatch", 6, 1, 90)], rows: HIST, plan: PLAN, painTurn: { areas: ["knee"], serious: false, verdicts: { knee: "acknowledge_once" } } }).alsoAsk, null, "pain headline: no skipped-lift question");
+  eq(head({ exercises: [kg("Snatch", 6, 1, 90), kg("Front Squat", 3, 2, 110)], rows: HIST, plan: PLAN3, painTurn: { areas: ["knee"], serious: false, verdicts: { knee: "acknowledge_once" } } }).alsoAsk, null, "pain headline: no skipped-lift question");
 }
 // f. matches the plan exactly, no progress: nothing notable
 {
