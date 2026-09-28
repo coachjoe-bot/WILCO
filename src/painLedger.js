@@ -634,7 +634,10 @@ export function ledgerTurn({ rows = [], marks = {}, legacyResolved = [], protect
       if (r) verdicts[e.area] = r.speak;
       if (e.severity >= SEV_SERIOUS) serious = true;
     }
-    records = withTurn;
+    // the block's per-area lines describe history BEFORE this message (the
+    // turn line carries this message's verdict); post-parse readers that need
+    // the updated picture (the rec drafter) use recordsWithTurn
+    return { records: base, recordsWithTurn: withTurn, turn: finishTurn(verdicts, serious, true) };
   } else {
     for (const a of pre.areas) {
       const r = base.find((x) => x.area === a);
@@ -642,9 +645,12 @@ export function ledgerTurn({ rows = [], marks = {}, legacyResolved = [], protect
       verdicts[a] = pre.serious ? "address_now" : nm.same;
     }
   }
+  return { records, recordsWithTurn: records, turn: finishTurn(verdicts, serious, false) };
+}
+function finishTurn(verdicts, serious, exact) {
   if (serious) for (const a of Object.keys(verdicts)) verdicts[a] = "address_now";
   const areas = Object.keys(verdicts);
-  return { records, turn: { areas, serious: !!serious && areas.length > 0, verdicts, exact: !!parsed } };
+  return { areas, serious: !!serious && areas.length > 0, verdicts, exact };
 }
 
 // The line naming THIS message's verdicts, for the block.

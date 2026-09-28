@@ -88,7 +88,8 @@ const rp = JSON.parse(fs.readFileSync(join(here, "../tests/replay/bug2-pain-voic
   // the founder's Sep 1 verdict: already offered Aug 25, worsening -> none (quiet 14 days)
   const lt = ledgerTurn({ rows: before, marks, now: new Date("2026-09-01T12:40:00Z"), tz: fx.tz, message: rp.cases[0].input_message, parsed: { pain_flags: rp.cases[0].parsed_pain_flags } });
   eq(lt.turn.verdicts.knee, "none", "founder Sep 1: no second offer within 14 days");
-  const rec = lt.records.find((r) => r.area === "knee");
+  eq(lt.records.find((r) => r.area === "knee").mentions, 4, "founder Sep 1: the block's history line counts the 4 mentions BEFORE this message");
+  const rec = lt.recordsWithTurn.find((r) => r.area === "knee");
   ok(rec.summary.includes("5 mentions"), `founder Sep 1: the ledger counts 5 real mentions, not Joe's 3 (${rec.summary})`);
   // serious report: a rec is drafted, the app confirms once after staging
   const ser = ledgerTurn({ rows: [], now: new Date("2026-09-01T16:00:00Z"), message: "felt a pop in my knee and it gave out", parsed: { pain_flags: [{ area: "knee", description: "felt a pop, knee gave out" }] } });

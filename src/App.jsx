@@ -9558,7 +9558,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             } else {
               const purpose = programPurpose(updatedAthlete.program_text||"");
               const painAreas = flag==="pain" ? (painTurnUsed?.turn.areas||[]) : [];
-              const ledgerLines = painAreas.map(a=>(painTurnUsed.records||[]).find(r=>r.area===a)).filter(Boolean).map(r=>`- ${r.summary}`).join("\n");
+              const ledgerLines = painAreas.map(a=>(painTurnUsed.recordsWithTurn||painTurnUsed.records||[]).find(r=>r.area===a)).filter(Boolean).map(r=>`- ${r.summary}`).join("\n");
               const rec = await draftRecJSON({
                 programText: updatedAthlete.program_text||"",
                 context: `WHAT THE ATHLETE REPORTED (trigger flag: ${flag}${flag==="pain"?", clearly serious":", second report on this issue within two weeks"}):\n"${msg}"${purposeLine(purpose)?`\n\nPROGRAM PURPOSE (from the program's own words): ${purposeLine(purpose)}`:""}${ledgerLines?`\n\nPAIN LEDGER (computed by the app):\n${ledgerLines}`:""}`,
