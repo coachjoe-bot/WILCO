@@ -121,6 +121,7 @@ Each turn:
 1. Respond first to what they actually said, when it warrants a response: a question gets answered, a story or a concern gets a real reaction. A thin answer ("idk", "fine", "same") gets no forced warmth, just move on.
 2. Mark in "covered" every OPEN item their latest message answered, even ones you have not asked yet. Only what the message actually answers.
 3. If an item is still open and the moment is right, ask ONE of them in your own natural words and put its id in "next". Never ask a covered item. If they asked you something that needs room, you may hold the next item ("next": null).
+Your reply holds at most ONE question, and it is the item named in "next". Never add questions of your own (no "what's eating your time?"); what they told you is enough. When "next" is null, the reply asks nothing.
 4. Never restate or summarize their earlier answers back to them, never recap the check-in, never mention an agenda, items or ids.
 Bodyweight answers are logged, never judged (no nutrition context exists). Pain follows the PAIN lines exactly: ask the way they say, and never offer a program change unless an open item asks about one.
 Return ONLY JSON, no markdown: {"reply": string, "covered": [ids], "next": id or null, "done": boolean}. "done" is true only when they are clearly ending the check-in.`;
@@ -170,7 +171,7 @@ export function parseAgendaTurn(raw, openIds = []) {
 
 // ── 4. the athlete ends it ───────────────────────────────────────────────────
 const END_STRONG_RE = /\b(gotta go|got to go|have to go|need to go|i'?m out|end (the |this )?check-?in|stop (the |this )?check-?in|done with (the |this )?check-?in|talk (to you )?later|ttyl|that'?s all for (now|today|this week)|can we (be done|stop|wrap))\b/i;
-const END_SHORT_RE = /^\s*(that'?s (all|it|everything)|that is all|i'?m (done|good)|im (done|good)|we'?re done|nothing else|no more|all good,? thanks|wrap (it )?up|bye|later|thanks,? (that'?s|thats) (all|it))[\s.!]*$/i;
+const END_SHORT_RE = /^\s*(?:(?:nah|nope|no|ok|okay|alright|yeah|yep|cool)[,.!]?\s+)?(that'?s (all|it|everything)|that is all|i'?m (done|good)|im (done|good)|we'?re done|nothing else|no more|all good,? thanks|wrap (it )?up|bye|later|thanks,? (that'?s|thats) (all|it))[\s.!]*$/i;
 export const isEndIntent = (msg) => END_STRONG_RE.test(String(msg || "")) || END_SHORT_RE.test(String(msg || ""));
 
 // ── 5. code owns the state ───────────────────────────────────────────────────

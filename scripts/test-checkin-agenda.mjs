@@ -148,7 +148,7 @@ const A = buildAgenda(BANK.slice(0, 4), { painRecords: [KNEE_EASING] }); // weig
   const r = advanceAgenda(A, st, { message: "dunno", parsed: { reply: "All good. How's the knee?", covered: [], next: "injury", done: false, malformed: false } });
   ok(r.state.covered.includes("weight"), "after the cap, the reply counts as its answer: no third ask");
 }
-for (const [m, want] of [["gotta go", true], ["that's all", true], ["I'm done", true], ["bye", true], ["end the check-in", true], ["I did squats and that's all I did today", false], ["I'm done with the squat block, what's next?", false], ["goal is the same", false]])
+for (const [m, want] of [["gotta go", true], ["that's all", true], ["I'm done", true], ["bye", true], ["end the check-in", true], ["I did squats and that's all I did today", false], ["I'm done with the squat block, what's next?", false], ["goal is the same", false], ["nah that's it", true], ["no, that's all", true], ["no", false], ["nope, all good", false]])
   ok(isEndIntent(m) === want, `end intent: "${m}" -> ${want}`);
 
 console.log("pain outcomes -> marks:");

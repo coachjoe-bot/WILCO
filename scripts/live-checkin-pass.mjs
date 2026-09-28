@@ -91,7 +91,8 @@ async function settle(maxMs = 60000) {
   while (Date.now() - t0 < maxMs) {
     await page.waitForTimeout(1200);
     const now = await page.evaluate(() => document.body.innerText);
-    if (now !== last) { last = now; since = Date.now(); }
+    const busy = await page.evaluate(() => !!document.querySelector('[style*="pulse 1.2s"]') || !!document.querySelector(".ld-dots"));
+    if (now !== last || busy) { last = now; since = Date.now(); }
     if (Date.now() - since > 5000 && Date.now() - t0 > 4000) break;
   }
 }
