@@ -187,6 +187,21 @@ const ATHLETE_OWN_COL = {
 // allowlisted or the write is rejected: a hard server-side boundary independent of
 // what the client (or an AI extractor parsing free-text chat) sends. Columns NOT
 // listed are denied; tables not in this map keep plain row-only scoping.
+// T64 S2: athletes.pain_marks shape guard. Plain object of area keys, each an
+// object of known stamp fields (ISO strings or null) and a small decline count.
+const PAIN_MARK_FIELDS = new Set(["cleared_at", "dismissed_at", "offered_at", "asked_at", "noted_at", "declined_change_count", "legacy"]);
+export const validPainMarks = (v) => {
+  if (v === null) return true;
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  const keys = Object.keys(v);
+  if (keys.length > 40 || JSON.stringify(v).length > 8000) return false;
+  return keys.every((k) => typeof k === "string" && k.length > 0 && k.length <= 40 && v[k] && typeof v[k] === "object" && !Array.isArray(v[k])
+    && Object.entries(v[k]).every(([f, x]) => PAIN_MARK_FIELDS.has(f) && (
+      f === "declined_change_count" ? Number.isInteger(x) && x >= 0 && x <= 99
+      : f === "legacy" ? typeof x === "boolean"
+      : x === null || (typeof x === "string" && x.length <= 40 && Number.isFinite(Date.parse(x))))));
+};
+
 const ATHLETE_COL_ALLOW = {
   // T58 mastermind memory: the model writes these through tool handlers, so pin
   // the vocabulary server-side — content bounded, kind/status enums, expires_at
@@ -231,12 +246,16 @@ const ATHLETE_COL_ALLOW = {
       // T57-B: recovery email, self-serve add/fix — 29 of 53 athletes signed up
       // name-only and could never PIN-recover. Format-guarded in `values`.
       "email",
+      // T64 S2: the pain ledger's marks ({areaKey: {cleared_at, dismissed_at,
+      // offered_at, asked_at, noted_at, declined_change_count}}). Value-guarded.
+      "pain_marks",
     ]),
     // Value guards: an athlete may only ever DOWNGRADE their own tier to "free"
     // (paid tiers are granted server-side by Stripe), never self-grant pro/elite.
     values: {
       tier: (v) => v === "free",
       email: (v) => typeof v === "string" && /^\S+@\S+\.\S+$/.test(v.trim()) && v.trim().length <= 200,
+      pain_marks: (v) => validPainMarks(v),
     },
   },
   // A filed request is AI-extracted from free-text chat — pin down what the athlete
@@ -255,6 +274,11 @@ const ATHLETE_COL_ALLOW = {
     cols: new Set([
       "owner_type", "title", "status", "blueprint", "transcript",
       "draft_text", "provisional_goal", "scope", "updated_at",
+      // T64 Fix 3: non-destructive card hide. dismissed_at is a stamp, never a
+      // status — the row, its blueprint.rec.swaps, and any auto-revert clock
+      // stay exactly as they were. Additive column (20260928_program_drafts_
+      // dismissed_at.sql), applied to prod 2026-09-28.
+      "dismissed_at",
     ]),
     values: {
       owner_type: (v) => v === "athlete",
@@ -267,6 +291,9 @@ const ATHLETE_COL_ALLOW = {
       // gates — BOTH must know every status the app writes.
       status: (v) => ["interview", "draft", "applied", "rec", "rec_applied"].includes(v),
       scope: (v) => ["full", "short", "quick"].includes(v),
+      // T64 Fix 3: null clears a dismiss (not currently used by the client, but
+      // keeps the validator symmetric with every other timestamp column here).
+      dismissed_at: (v) => v === null || (typeof v === "string" && !Number.isNaN(Date.parse(v))),
     },
   },
   // T53: typed training preferences. The payload originates from an AI extraction
@@ -295,7 +322,13 @@ const ATHLETE_COL_ALLOW = {
     // applied_at was missing from this set at launch, which 403'd EVERY
     // athlete-side snapshot insert (snapshotProgramHistory sends it explicitly)
     // and left program_history empty on prod. Guard the value, allow the column.
-    cols: new Set(["program_text", "source", "block_summary", "block_recap", "block_name", "completed_at", "applied_at", "ends_at"]),
+    cols: new Set([
+      "program_text", "source", "block_summary", "block_recap", "block_name", "completed_at", "applied_at", "ends_at",
+      // T64 Fix 3b: short athlete-facing recap alongside the full AI-context
+      // one. Additive column (20260928_program_history_block_recap_short.sql),
+      // applied to prod 2026-09-28.
+      "block_recap_short",
+    ]),
     values: {
       source: (v) => [
         "manual_edit", "chat_save", "chat_replace", "chat_append", "chat_create",
@@ -304,6 +337,7 @@ const ATHLETE_COL_ALLOW = {
       ].includes(v),
       applied_at: (v) => typeof v === "string" && !Number.isNaN(Date.parse(v)),
       ends_at: (v) => typeof v === "string" && !Number.isNaN(Date.parse(v)),
+      block_recap_short: (v) => v === null || (typeof v === "string" && v.length <= 400),
       block_name: (v) => v === null || (typeof v === "string" && v.length <= 80),
     },
   },

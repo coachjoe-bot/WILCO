@@ -91,6 +91,9 @@ export const TOOLSETS = {
         type: "object",
         properties: {
           title: { type: "string", maxLength: 40 },
+          // T64 Fix 3b (shipped ahead of the client): OPTIONAL, so the deployed
+          // client, which has never heard of this field, keeps working unchanged.
+          summary: { type: "string", maxLength: 110, description: "One short, factual line stating WHAT changed, 12 words or fewer. No reasoning, no naming the athlete, just the change, e.g. 'Swapped Monday's front squat and pulls with Tuesday's bench and dips.'" },
           why: { type: "string", maxLength: 500, description: "1-3 plain sentences tying the change to what they said or logged" },
           duration: { type: "string", enum: ["1w", "2w", "3w", "block"], description: "temporary changes take 1w/2w/3w and auto-revert; 'block' rides out the block" },
           swaps: {
