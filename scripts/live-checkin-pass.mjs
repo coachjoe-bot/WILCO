@@ -81,7 +81,7 @@ async function login() {
   await page.getByPlaceholder(/name/i).first().fill(NAME);
   await page.locator('input[type="password"], input[inputmode="numeric"]').first().fill(PIN);
   await page.getByRole("button", { name: /Let's Get to Work/i }).click();
-  await page.getByText("WILCO", { exact: true }).first().waitFor({ timeout: 45000 });
+  await page.getByRole("button", { name: "MY LOG" }).waitFor({ timeout: 45000 }).catch(async (e) => { await page.screenshot({ path: "/tmp/s4-login-fail.png" }); throw e; });
 }
 async function dismiss() { for (const label of [/Not now/i, /No thanks/i, /^Later$/i, /Keep going/i]) { const b = page.getByRole("button", { name: label }).first(); if (await b.isVisible().catch(() => false)) await b.click().catch(() => {}); } }
 const bubbles = () => page.evaluate(() => [...document.querySelectorAll(".proof-drop > div")].map((d) => ({ user: d.style.color === "rgb(255, 255, 255)" || d.style.color === "#fff", text: d.innerText })));
@@ -133,6 +133,8 @@ for (const name of order) {
       await page.getByRole("button", { name: "MY LOG" }).click();
       await page.getByRole("button", { name: /^proof$/i }).click();
       await page.getByText(/OPEN THIS WEEK'S EDITION/).click();
+      await page.getByText(/START CHECK-IN/).waitFor({ timeout: 20000 });
+      if (SHOTS && run === 1) { await page.getByText(/START CHECK-IN/).scrollIntoViewIfNeeded(); await page.screenshot({ path: `${SHOTS}/checkin-start-card-${name}-${THEME}.png` }); }
       await page.getByText(/START CHECK-IN/).click({ timeout: 20000 });
       await page.waitForTimeout(800);
       for (const msg of sc.say) {
@@ -144,7 +146,8 @@ for (const name of order) {
         rec.said.push(msg);
         await settle(60000);
       }
-      rec.ended = rec.ended || await page.getByText(/Check-in complete for this report/).isVisible().catch(() => false);
+      // the close runs the answer extraction first; give it time before judging
+      rec.ended = rec.ended || await page.getByText(/Check-in complete for this report/).waitFor({ timeout: 45000 }).then(() => true).catch(() => false);
       rec.shown = (await bubbles()).map((b) => `${b.user ? "ATHLETE" : "JOE"}: ${b.text}`);
       if (SHOTS && run === 1) await page.screenshot({ path: `${SHOTS}/realai-checkin-${name}-${THEME}.png`, fullPage: false });
       await page.getByRole("button", { name: /Close/ }).first().click().catch(() => {});
