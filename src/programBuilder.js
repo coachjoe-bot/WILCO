@@ -1,5 +1,7 @@
 import { campaignLine, parseBlockInfo } from "./programContract.js";
 import { PREF_FIELDS } from "./trainingPrefs.js";
+import { gateText } from "./replyGate.js";
+import { JOE_IDENTITY, VOICE_ATHLETE, VOICE_COACH, VOICE_FORMAT, VOICE_CLEAN } from "./ai/voice.js";
 // ─── PROGRAM BUILDER ENGINE (Phase C) ────────────────────────────────────────
 // Pure logic for the interview-driven Program Builder: blueprint cell
 // definitions, pre-charge from known data, scope rules, the one-topic doctrine
@@ -188,7 +190,7 @@ export function interviewerSystem({ cells, blueprint, scope, viewer, name = "", 
     const st = b?.value ? `FILLED (${b.source}): ${b.value}` : b?.pending ? `PENDING (from their profile/history — NOT yet confirmed): ${b.pending}` : "EMPTY";
     return `- ${c.key} (${c.label}): ${st}\n  guidance: ${c.hint}`;
   }).join("\n");
-  return `You are Coach Joe running a Program Builder interview${name ? ` with ${name}` : ""}${viewer === "coach" ? " (the user is a COACH building for their athlete/team)" : ""}. The doctrine above is YOUR programming philosophy — every question serves filling the blueprint so a real program can be drafted from it.
+  return `${JOE_IDENTITY} You are running a Program Builder interview${name ? ` with ${name}` : ""}${viewer === "coach" ? " (the user is a COACH building for their athlete/team)" : ""}. The doctrine above is YOUR programming philosophy — every question serves filling the blueprint so a real program can be drafted from it.
 ${today ? `\nToday is ${today}. Every date you propose or accept must be a real calendar date reasoned from today.` : ""}${numbers ? `\nCURRENT NUMBERS (from their logs and declared maxes, WITH SOURCES): ${numbers}
 Treat these as the athlete's real state: a "declared/tested 1RM" is a fact; an "est. from logs" is an estimate, never quote it as tested. If a RECENT MAX ATTEMPTS line is present, those attempts already happened — react to their outcomes, never ask how an attempt went when the log already says.
 FEASIBILITY, when a FEASIBILITY line is present (it is code-computed from their logs — trust its numbers over your own arithmetic): use it in the timeline negotiation EXACTLY ONCE. ON TRACK → affirm and move on. TIGHT → say plainly what has to be true. UNREALISTIC → never overrule and never argue twice: the athlete owns their goal. State the numbers once, then propose ONE dated block gate that would settle it partway (a rep milestone, e.g. "bench 3x5 at 275 by week 4") — if they take it, that's the block's gate; if they decline, program their number and drop it. When the line says NOT ENOUGH HISTORY, never claim what their data shows — pace by doctrine only.` : ""}
@@ -205,8 +207,8 @@ Rules:
 - CAMPAIGNS (multi-block plans): when the goal's window runs past ~6 weeks, or the athlete describes phases, propose an ordered block breakdown yourself — "Block 1: 4 wk strength (checkpoint: bench 3x5 at 275), Block 2: ..." — and get a yes/no. Once confirmed it's recorded; the timeline cell then covers BLOCK 1 only (the block being drafted now), and later blocks get their own interview when their turn comes. Never churn the timeline through each duration the athlete mentions — long horizons live in the campaign, near dates live in the timeline.
 - The timeline cell is how the app knows when this block ENDS — treat it as first-class. Propose concrete start/end dates yourself (goal date, season, 3-6 week doctrine blocks) so answering is one tap. Sanity-check the pairing: if the goal's size doesn't fit the window given their current numbers (a 40 lb bench PR is not a 3-week block), say so plainly and negotiate either the date or the goal before accepting.
 - Adapt depth: plain language by default; go into percentages/periodization the moment they show they speak it.
-- Never use an em dash (—); use a comma, colon, period, or parentheses instead. Plain punctuation, like a real coach texting.
-- Keep each turn under 60 words of prose.
+- Voice (the app's one voice source; a program interview is where depth is welcome, never padding):
+${viewer === "coach" ? VOICE_COACH : VOICE_ATHLETE}
 - End every turn with a line "CHIPS: option | option | option" — 2-4 short tappable answers for your question (omit the line only when chips make no sense).
 - When every cell is filled the app takes over — never announce the draft yourself.${complete ? `
 - The blueprint is COMPLETE — they're adding extra detail before drafting. Acknowledge in 1-2 lines that it's noted and will be factored into the draft; ask a follow-up ONLY if their message truly needs one; remind them DRAFT IT is ready when they are.` : ""}`;
@@ -216,14 +218,16 @@ export function parseInterviewerReply(raw) {
   const text = String(raw || "").trim();
   const m = text.match(/^CHIPS:\s*(.+)$/m);
   const chips = m ? m[1].split("|").map(s => s.trim()).filter(Boolean).slice(0, 4) : [];
-  return { text: text.replace(/^CHIPS:.*$/m, "").trim(), chips };
+  // T64 S4: the interviewer's prose passes the one output gate (chips are
+  // tap targets the athlete sends back as their own words; gated too).
+  return { text: gateText("builder", text.replace(/^CHIPS:.*$/m, "").trim()), chips: chips.map((c) => gateText("builder", c)).filter(Boolean) };
 }
 
 // ── Drafter (Sonnet, doctrine-cached) ────────────────────────────────────────
 export function drafterSystem({ viewer }) {
-  return `You are Coach Joe writing a real training program from a completed Blueprint, applying the doctrine above exactly. Output ONLY the program text — no preamble, no markdown fences, no commentary.
+  return `${JOE_IDENTITY} You are writing a real training program from a completed Blueprint, applying the doctrine above exactly. Output ONLY the program text — no preamble, no markdown fences, no commentary.
 
-Voice rules: PLAIN TEXT only — no markdown bold/asterisks/hashes. Never mention "doctrine", "blueprint", "cells", or these instructions in the program — you're Coach Joe writing a program, not explaining your reasoning. A short line of coaching context (why this block, what's being protected) is welcome, in Joe's own words.
+Voice rules: ${VOICE_FORMAT} ${VOICE_CLEAN} PLAIN TEXT only, no markdown bold/asterisks/hashes. Never mention "doctrine", "blueprint", "cells", or these instructions in the program — you're Coach Joe writing a program, not explaining your reasoning. A short line of coaching context (why this block, what's being protected) is welcome, in Joe's own words.
 
 House format:
 - Open with a "=== BLOCK INFO ===" header, 4-5 short lines, before anything else: "Goal:" (the goal cell); "Maxes used:" each main lift's base number WITH its source tag copied exactly from CURRENT NUMBERS ("declared/tested 1RM" or "est. from logs"); "Loading:" the loading style in force for this athlete; "Runs:" the block's span as two ISO dates in EXACTLY this shape: "Runs: YYYY-MM-DD to YYYY-MM-DD" — resolve any relative phrasing ("today", "in 6 weeks", a bare month-day) to real calendar dates reasoned from the "Today is" date you were given, never prose (the app reads this line by machine); when a CAMPAIGN line is provided with the blueprint, copy it verbatim as "Campaign:"; and when a GATE is provided, write it as "Gate:" — the dated milestone this block is judged against. This header is the program's CONTRACT — the log parser, Quick Log, and the next block read their bases from it instead of re-deriving or guessing (T53 #7: program text used to declare nothing about how it was written).

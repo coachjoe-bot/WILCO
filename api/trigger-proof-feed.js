@@ -63,6 +63,7 @@ import { mapPooled } from "./_pool.js";
 import { buildCrewBlip } from "./_crew.js";
 import { CREW_ENABLED } from "./_flags.js";
 import { emailFooter, unsubHeaders, isUnsubscribed } from "./_email.js";
+import { painStatus, programPurpose } from "./_painLedger.js";
 
 const RESEND_KEY = process.env.RESEND_API_KEY;
 const FROM_EMAIL = process.env.FROM_EMAIL || "WILCO <noreply@trainwilco.com>";
@@ -269,13 +270,16 @@ const briefFor = (athlete, batch, windowType, fullWorkouts, fullManual, previous
   const monthSessions = groupIntoSessions(windowType === "monthly" ? w28 : w28.filter((w) => w.created_at >= monthCut));
 
   const oneRMs = buildOneRMs(prs, manual);
+  // T64 (S2 ledger semantics, wired by S4): dated clears from pain_marks, legacy
+  // resolved_pain strings as cleared-before-today, so a flare after a clear shows.
+  const resolvedArg = { marks: athlete.pain_marks || {}, legacyResolved: athlete.resolved_pain || [] };
   const injuries = aggregateInjuries(
     windowType === "monthly" ? monthSessions : [...lastWeekSessions, ...thisWeekSessions],
-    athlete.resolved_pain || []
+    resolvedArg
   );
   // Pain trend needs a real this-week-vs-last-week comparison regardless of window
   // type (the monthly digest still rides the weekly generator's injury section).
-  const painTrendData = painTrend(thisWeekSessions, lastWeekSessions, athlete.resolved_pain || []);
+  const painTrendData = painTrend(thisWeekSessions, lastWeekSessions, resolvedArg);
 
   // Grit rank movement: current snapshot vs the athlete's own last feed entry.
   // Skipped (rank stays null) when there's no bodyweight on file — the whole ladder
@@ -289,6 +293,23 @@ const briefFor = (athlete, batch, windowType, fullWorkouts, fullManual, previous
   }
 
   const brief = buildBrief({ athlete, thisWeekSessions, lastWeekSessions, monthSessions, prs, goals, memory, adherence: null, injuries, windowType, rank, painTrendData });
+
+  // T64 S4: the pain ledger is the one home for pain state. The letter's injury
+  // plan and the check-in's pain questions both read it (buildQuestionBank,
+  // generateWeekly). Rows: the unwindowed history (episodes span weeks), else the
+  // batch window. A ledger failure leaves brief.pain unset = the old behavior.
+  try {
+    const protects = [...new Set([...programPurpose(athlete.program_text || "").protects, ...programPurpose(athlete.temp_program_text || "").protects])];
+    const recs = painStatus({
+      rows: (fullWorkouts && fullWorkouts.length) ? fullWorkouts : w28,
+      marks: athlete.pain_marks || {}, legacyResolved: athlete.resolved_pain || [],
+      protects, now: new Date(), tz: athlete.proof_timezone || undefined,
+    });
+    brief.pain = recs.map((r) => ({
+      area: r.area, label: r.label, state: r.state, trend: r.trend, summary: r.summary,
+      addressedByProgram: !!r.addressedByProgram, dismissed: !!r.dismissed, checkIn: r.checkIn,
+    }));
+  } catch (e) { console.error("[proof-feed] pain ledger failed:", e.message); }
 
   // Month-vs-month facts, computed in CODE from the unwindowed history (monthly
   // digests only). The month layer used to be PROMPTED for "this month vs last
@@ -350,7 +371,7 @@ async function runAthlete(athlete, batch, { dryRun = false } = {}) {
   // null), one fewer serial DB round trip per digest child.
   const [[fullWorkouts, fullManual], previousEntryAt, openBlock] = await Promise.all([
     Promise.all([
-      sbSelect("workouts", `?athlete_id=eq.${enc(athlete.id)}&select=created_at,parsed_data&order=created_at.desc&limit=300`),
+      sbSelect("workouts", `?athlete_id=eq.${enc(athlete.id)}&select=id,created_at,parsed_data,raw_message&order=created_at.desc&limit=300`),
       sbSelect("manual_one_rms", `?athlete_id=eq.${enc(athlete.id)}&select=exercise,normalized_exercise,weight,unit`),
     ]).catch((e) => { console.error("[proof-feed] full-history fetch failed:", e.message); return [[], []]; }),
     // Find this athlete's most recent PRIOR entry (before today) to diff rank against.

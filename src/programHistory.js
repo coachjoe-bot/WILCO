@@ -27,6 +27,8 @@
 import { lineDiff } from "./programDiff.js";
 import { currentPosition, parseBlockSpan, programTextIdentity } from "./programPosition.js";
 import { parseBlockInfo, stripBlockInfo } from "./programContract.js";
+import { gateText } from "./replyGate.js";
+import { JOE_IDENTITY, VOICE_ATHLETE } from "./ai/voice.js";
 
 // Fraction of the COMBINED line count that changed between two program texts.
 // 0 = identical, 1 = nothing in common. Exported for the test suite.
@@ -56,23 +58,24 @@ export function deriveBlockName(text, blockName = null) {
 
 const SUMMARY_SYS =
   "You summarize a strength training program in ONE line (max 90 characters) for a history list: " +
-  "the main focus and split, e.g. \"4-day upper/lower — squat & bench strength, 5s progression\". " +
-  "Plain text, no quotes, no preamble, no second line.";
+  "the main focus and split, e.g. \"4-day upper/lower, squat & bench strength, 5s progression\". " +
+  "Plain text, no quotes, no preamble, no second line, no em dashes, no profanity.";
 
 const RECAP_SYS =
-  "You are Coach Joe writing the closing recap of a COMPLETED training block for an athlete's " +
+  `${JOE_IDENTITY} ` +
+  "You are writing the closing recap of a COMPLETED training block for an athlete's " +
   "block history. You get the program that was planned, the training actually logged during the " +
   "block, the goal that was attached to it, and a BLOCK FACTS line computed by the app. Write ONE " +
-  "tight plain-text paragraph — 3 to 6 sentences, hard limit, and always FINISH your final " +
-  "sentence: what the block focused on, what actually got trained (be honest about adherence — " +
+  "tight plain-text paragraph, 3 to 6 sentences, hard limit, and always FINISH your final " +
+  "sentence: what the block focused on, what actually got trained (be honest about adherence: " +
   "logged sessions vs the plan), what visibly moved (weights, reps, PRs), and where the goal " +
-  "stands — HIT, CLOSE, or STILL CHASING — so the next block can pick it up or retire it. " +
-  "NUMBERS: the BLOCK FACTS line is computed by the app and is always right — use its dates, " +
+  "stands (HIT, CLOSE, or STILL CHASING) so the next block can pick it up or retire it. " +
+  "NUMBERS: the BLOCK FACTS line is computed by the app and is always right: use its dates, " +
   "session count, and block length over anything you'd derive yourself. Every logged load carries " +
-  "its unit (kg or lbs) — keep each number in the unit it carries and NEVER quote a load without " +
+  "its unit (kg or lbs): keep each number in the unit it carries and NEVER quote a load without " +
   "its unit; the program text may mix units, so restate any number you take from it with the unit " +
-  "written there. Joe's voice: direct, warm, no hype, no markdown, no headers. If there are no " +
-  "logs, say the block has no logged training and leave it at that — never invent results.";
+  "written there. No headers. If there are no logs, say the block has no logged training and " +
+  "leave it at that, never invent results.\nVOICE (the app's one voice source):\n" + VOICE_ATHLETE;
 
 // T64 Fix 3b (Will 09-28): the full recap above is written for the AI (the
 // Builder's block-handoff context) and Will found it too long to read on the
@@ -83,8 +86,8 @@ const RECAP_SYS =
 const RECAP_SHORT_SYS =
   "Condense this closing training-block recap into ONE short line for the athlete reading their own " +
   "history, 40 words or fewer, hard limit. Second person (\"you\"), plain facts and numbers only: what " +
-  "was trained, what moved, where the goal stands. No coach-voice flourishes, no filler, no headers, " +
-  "no quotes around the output. Every load keeps its unit (kg or lbs) exactly as written in the recap.";
+  "was trained, what moved, where the goal stands. No headers, no quotes around the output. Every " +
+  "load keeps its unit (kg or lbs) exactly as written in the recap.\nVOICE (the app's one voice source):\n" + VOICE_ATHLETE;
 
 const capWords40 = (s) => {
   const words = String(s || "").trim().replace(/\s+/g, " ").split(" ").filter(Boolean);
@@ -155,7 +158,7 @@ async function generateBlockRecap(athleteId, row, completedAt, deps) {
       row.applied_at ? `ran ${String(row.applied_at).slice(0, 10)} → ${completedAt.slice(0, 10)}${ranDays ? ` (${ranDays} days)` : ""}` : null,
       `${(Array.isArray(logs) ? logs.length : 0)} workout rows logged in the block`,
       declaredWeeks ? `the program itself is a ${declaredWeeks}-week block` : null,
-      gate ? `the block's agreed GATE was: ${gate} — judge it plainly in the recap (hit or missed, from the logs)` : null,
+      gate ? `the block's agreed GATE was: ${gate}; judge it plainly in the recap (hit or missed, from the logs)` : null,
     ].filter(Boolean).join(" · ");
     const user =
       `BLOCK FACTS (computed by the app — authoritative): ${factBits}\n\n` +
@@ -163,7 +166,7 @@ async function generateBlockRecap(athleteId, row, completedAt, deps) {
       `GOAL ATTACHED TO THIS BLOCK: ${goal || "(none on file)"}\n\n` +
       `TRAINING LOGGED DURING THE BLOCK:\n${digest || "(no logged sessions)"}`;
     const recap = await askClaude(RECAP_SYS, user, 600, [], "claude-sonnet-5", "program_summary");
-    const text = (recap || "").trim();
+    const text = gateText("recap", (recap || "").trim());   // T64 S4: one output gate
     if (text) {
       await sbUpdateWhere("program_history", `?id=eq.${row.id}`, { block_recap: text.slice(0, 1500) });
       // T64 Fix 3b: the short athlete-facing line is its OWN best-effort write,
@@ -174,7 +177,7 @@ async function generateBlockRecap(athleteId, row, completedAt, deps) {
       // ever costing the real recap write. The render falls back to the first
       // two sentences of the full recap until this lands (recapShortFallback).
       try {
-        const short = capWords40(((await askClaude(RECAP_SHORT_SYS, text, 120, [], "claude-haiku-4-5", "program_summary")) || "").trim());
+        const short = capWords40(gateText("recap", ((await askClaude(RECAP_SHORT_SYS, text, 120, [], "claude-haiku-4-5", "program_summary")) || "").trim()));
         if (short) await sbUpdateWhere("program_history", `?id=eq.${row.id}`, { block_recap_short: short });
       } catch (_) {}
     }
@@ -209,17 +212,18 @@ async function closeBlock(athleteId, row, deps, completedAtOverride = null) {
 // Written into the same block_recap column; closeBlock overwrites it with the
 // final past-tense recap when the block actually ends.
 const ONGOING_RECAP_SYS =
-  "You are Coach Joe writing the LIVE status paragraph for a training block that is STILL RUNNING, " +
+  `${JOE_IDENTITY} ` +
+  "You are writing the LIVE status paragraph for a training block that is STILL RUNNING, " +
   "shown on the athlete's current-phase card. You get the program, the training logged so far, the " +
   "goal, and a BLOCK FACTS line computed by the app. Write ONE tight plain-text paragraph, 2 to 4 " +
   "sentences, hard limit, and always FINISH your final sentence: what the block is focused on, what " +
   "has actually been trained so far, and what is moving. Present tense, ongoing voice ('so far', " +
   "'is building'): the block is NOT over, so never sum it up like a finished chapter, never judge " +
   "the goal as hit or missed, never speak of what the block 'was'. NUMBERS: the BLOCK FACTS line is " +
-  "computed by the app and is always right — use its dates and session count over anything you'd " +
-  "derive yourself. Every logged load carries its unit (kg or lbs) — keep each number in the unit " +
-  "it carries and NEVER quote a load without its unit. Joe's voice: direct, warm, no hype, no " +
-  "markdown, no headers. Only a session or two logged means one or two sentences, never padding.";
+  "computed by the app and is always right: use its dates and session count over anything you'd " +
+  "derive yourself. Every logged load carries its unit (kg or lbs): keep each number in the unit " +
+  "it carries and NEVER quote a load without its unit. No headers. Only a session or two logged " +
+  "means one or two sentences, never padding.\nVOICE (the app's one voice source):\n" + VOICE_ATHLETE;
 
 // Refresh the open block's live recap from the logs inside its window. Returns
 // the new recap text, or null when there is nothing to write (no open block, or
@@ -258,7 +262,7 @@ export async function refreshOpenBlockRecap({ athleteId }, deps) {
     `PROGRAM THE BLOCK IS RUNNING:\n${String(row.program_text || "").slice(0, 2500)}\n\n` +
     `GOAL ATTACHED TO THIS BLOCK: ${goal || "(none on file)"}\n\n` +
     `TRAINING LOGGED SO FAR:\n${digest}`;
-  const recap = ((await askClaude(ONGOING_RECAP_SYS, user, 400, [], "claude-sonnet-5", "program_summary")) || "").trim().slice(0, 1500);
+  const recap = gateText("recap", ((await askClaude(ONGOING_RECAP_SYS, user, 400, [], "claude-sonnet-5", "program_summary")) || "").trim()).slice(0, 1500);
   if (!recap) return null;
   await sbUpdateWhere("program_history", `?id=eq.${row.id}`, { block_recap: recap });
   return recap;
@@ -329,7 +333,7 @@ export async function snapshotProgramHistory({ athleteId, text, source, forceNew
   let summary = null;
   try {
     const line = await askClaude(SUMMARY_SYS, t.slice(0, 4000), 80, [], "claude-haiku-4-5", "program_summary");
-    summary = (line || "").trim().split("\n")[0].slice(0, 120) || null;
+    summary = gateText("recap", (line || "").trim().split("\n")[0]).slice(0, 120) || null;
   } catch (_) {}
 
   const row = {

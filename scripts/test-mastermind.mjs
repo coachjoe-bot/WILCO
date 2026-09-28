@@ -56,6 +56,33 @@ ok(coachAll.includes("Within 5 lbs is THE SAME WEIGHT"), "coach slice shares the
 ok(!/—/.test(coachAll), "coach slice: no em dashes");
 ok(buildCoachStatic() === buildCoachStatic(), "coach static block is byte-stable");
 
+// ── the voice source (T64 S4) ────────────────────────────────────────────────
+// TIER1 is BUILT from src/ai/voice.js; the voice is a manner, never a number.
+console.log("voice:");
+{
+  const V = await import("../src/ai/voice.js");
+  ok(TIER1_JOE.startsWith(V.JOE_IDENTITY), "TIER1 opens with the shared identity line");
+  ok(TIER1_JOE.includes(V.VOICE_LAW), "TIER1 carries the shared voice law verbatim");
+  ok(buildCoachStatic().includes(V.VOICE_COACH), "coach slice carries the shared coach voice");
+  ok(buildCoachStatic().startsWith(V.WILCO_COACH_IDENTITY), "coach slice opens with the shared coach identity");
+  ok(!/two short paragraphs/i.test(cardAll), "the length cap is gone (Will 09-28: manner, not caps)");
+  for (const frag of ["answer or react first", "No preamble", "never summarize your own message", "go as deep as they asked", "brief celebration", "Never curse", "not even mild ones", "never about them"])
+    ok(cardAll.includes(frag), `voice law carries the manner: "${frag}"`);
+  // No numeric length rule anywhere in the voice source (no word, sentence or paragraph counts).
+  const allVoice = [V.VOICE_LAW, V.VOICE_ATHLETE, V.VOICE_COACH, V.JOE_VOICE].join("\n");
+  ok(!/\b\d+\s*(?:-\s*\d+\s*)?(?:words?|sentences?|paragraphs?)\b/i.test(allVoice), "voice source states no word/sentence/paragraph counts");
+  ok(!/\b(?:one|two|three|four|five)\s+(?:short\s+)?(?:sentences?|paragraphs?)\b/i.test(allVoice), "voice source states no spelled-out length counts");
+  ok(!/—/.test(allVoice), "voice source has no em dashes");
+  // Laws that are not about length survive the rewrite.
+  for (const frag of ["Max one exclamation point", "Reserved lines stay reserved", "Most replies have NO question", "Scope of practice", "never address the athlete as Joe", "is data about them"])
+    ok(V.VOICE_LAW.includes(frag), `voice law keeps: "${frag}"`);
+  ok(V.VOICE_ATHLETE.includes(V.VOICE_MANNER) && V.VOICE_ATHLETE.includes(V.VOICE_CLEAN), "athlete voice = manner + clean");
+  ok(V.JOE_VOICE.startsWith(V.JOE_IDENTITY), "JOE_VOICE opens with the identity");
+  ok(!buildCoachStatic().includes("1-3 sentences"), "coach slice lost its sentence cap");
+  ok(cardAll.includes("Check-ins are a short conversation"), "PROOF AND MOTIVATION describes the agenda check-in");
+  ok(!/go deeper/i.test(cardAll), "card never mentions go deeper");
+}
+
 // ── the tool registry ────────────────────────────────────────────────────────
 console.log("tools:");
 ok(toolsetFor("mastermind_athlete") === TOOLSETS.mastermind_athlete, "toolsetFor resolves known set");

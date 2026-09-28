@@ -26,6 +26,8 @@
 //   structured (lift/current/suggested_change/why), never raw chat text.
 
 import { findPlacement } from "./programDiff.js";
+import { gateText } from "./replyGate.js";
+import { VOICE_COACH } from "./ai/voice.js";
 
 export const CR_SOURCES = ["pain","plateau","pr","feedback"];
 
@@ -39,7 +41,9 @@ export const flagToSource = (flag) => flag==="pain" ? "pain" : flag==="plateau" 
 export async function draftChangeRequest({athlete, message, reaction=null, programText="", sourceHint=null, askClaude}){
   const sys = `An athlete asked (or agreed) to send their human coach a program change request. Author the request the coach will read. Return ONLY valid JSON, no markdown:
 {"suggested_change":string,"lift":string|null,"current":string|null,"why":string|null,"source":"pain"|"plateau"|"pr"|"feedback"}
-suggested_change: ONE concrete, actionable sentence in a coach's voice — what to change and until/unless what — max 140 chars, no preamble. lift: the main exercise involved, or null. current: what the program currently prescribes for that lift, copied from the program text (e.g. "Back Squat 4x5 @ RPE 8"), or null if not found. why: one short plain clause tying the change to what the athlete reported, max 100 chars. source: "pain" if discomfort/injury drove this, "plateau" if a stall did, "pr" if a new max should update loading, else "feedback".`;
+suggested_change: ONE concrete, actionable sentence in a coach's voice (what to change and until/unless what), max 140 chars, no preamble. lift: the main exercise involved, or null. current: what the program currently prescribes for that lift, copied from the program text (e.g. "Back Squat 4x5 @ RPE 8"), or null if not found. why: one short plain clause tying the change to what the athlete reported, max 100 chars. source: "pain" if discomfort/injury drove this, "plateau" if a stall did, "pr" if a new max should update loading, else "feedback".
+Voice for suggested_change and why (a human coach reads them; the app's one voice source):
+${VOICE_COACH}`;
   const user = `Athlete: ${athlete?.name||""}\nTheir message/answer: "${message}"\n${reaction?`Coach Joe's reaction: "${reaction}"\n`:""}Current program (first 1200 chars):\n${(programText||"").slice(0,1200)}`;
   let draft = null;
   try{
@@ -47,14 +51,17 @@ suggested_change: ONE concrete, actionable sentence in a coach's voice — what 
     draft = JSON.parse(String(dj).replace(/```json|```/g,"").trim());
   }catch(_){ draft = null; } // AI unavailable / bad JSON — full fallback below
 
-  const suggestion = String(draft?.suggested_change||"").trim() || message.slice(0,140);
+  // T64 S4: model text passes the one output gate; the fallback is the
+  // athlete's own words and is never gated.
+  const drafted = String(draft?.suggested_change||"").trim();
+  const suggestion = (drafted && gateText("change_request", drafted)) || message.slice(0,140);
   const lift = draft?.lift || null;
   // "Current" is a FACT — compute it from the full program text, never trust the
   // model's copy (T57: the drafter only sees the first 1200 chars, so it quoted
   // "4x6 @ RPE 7-8" for a lift actually programmed 5x5 @ RPE 8 further down).
   const placed = lift ? findPlacement(programText||"", lift) : null;
   const current = placed?.currentLine || null;
-  const why = draft?.why || null;
+  const why = draft?.why ? gateText("change_request", String(draft.why)) : null;
   const source = CR_SOURCES.includes(sourceHint) ? sourceHint
     : (CR_SOURCES.includes(draft?.source) ? draft.source : "feedback");
   return {suggestion, lift, current, why, source};
