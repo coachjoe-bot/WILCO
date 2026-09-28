@@ -216,12 +216,13 @@ export function displayWeights(text, unit = "lbs") {
   const kg = unit === "kg";
   const cv = (w) => (kg ? String(Math.round((Number(w) / LBS_PER_KG) / 2.5) * 2.5) : String(w));
   const u = kg ? "kg" : "lbs";
-  return rewriteLoads(text, u, cv, ({ converted, perSide, source }) => {
-    if (source === undefined) return `@ ${converted} ${u}${perSide}`;
+  return rewriteLoads(text, u, cv, ({ converted, perSide, source, bw, sign }) => {
+    const bwPrefix = bw ? `${bw.toUpperCase()}${sign}` : "";
+    if (source === undefined) return `@ ${bwPrefix}${converted} ${u}${perSide}`;
     // "@ N (source)": a %/RPE source leads; anything else (last time) trails.
     const s = source.trim();
     const lead = /%/.test(s) || /^(rpe|rir)\b/i.test(s);
-    return lead ? `@ ${s} (${converted} ${u}${perSide})` : `@ ${converted} ${u}${perSide} (${s})`;
+    return lead ? `@ ${s} (${bwPrefix}${converted} ${u}${perSide})` : `@ ${bwPrefix}${converted} ${u}${perSide} (${s})`;
   });
 }
 
@@ -243,9 +244,12 @@ export function draftInUnit(text, unit = "lbs") {
   // (Will's contract: it's the editable, loggable draft) whether or not it
   // carries a "(source)".
   const cv = (w) => String(Math.round((Number(w) / LBS_PER_KG) / 2.5) * 2.5);
-  return rewriteLoads(text, "kg", cv, ({ converted, perSide, source }) =>
-    source === undefined ? `@ ${converted} kg${perSide}` : `@ ${converted} kg${perSide} (${source.trim()})`
-  );
+  return rewriteLoads(text, "kg", cv, ({ converted, perSide, source, bw, sign }) => {
+    const bwPrefix = bw ? `${bw.toUpperCase()}${sign}` : "";
+    return source === undefined
+      ? `@ ${bwPrefix}${converted} kg${perSide}`
+      : `@ ${bwPrefix}${converted} kg${perSide} (${source.trim()})`;
+  });
 }
 
 // Frame the resolved draft as a session to RUN, not a log to type. The draft's

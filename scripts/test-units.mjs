@@ -76,7 +76,11 @@ eq(displayWeights("Incline DB Bench 3x8 @ 45 pounds", "kg"), "Incline DB Bench 3
 eq(displayWeights("@ 100/110/120lb", "kg"), "@ 45/50/55 kg", "T64/BUG6 multi-value slash chain, one unit at the end");
 eq(displayWeights("@ 40-45lb", "kg"), "@ 17.5-20 kg", "T64/BUG6 dash-range chain");
 eq(displayWeights("Squat 5x3 @ 60/80/90/100/100kg", "kg"), "Squat 5x3 @ 60/80/90/100/100kg", "T64/BUG6 already-kg multi-value chain passes through untouched");
-eq(displayWeights("@ BW+25lb", "kg"), "@ BW+25lb", "T64/BUG6 bodyweight-plus never matches the @N pattern");
+// T64/BUG6b (S3b): "@ BW+25lb" WAS wrongly left unchanged (the "@N" pattern
+// didn't allow a "BW+" prefix before the number) — that's the "Dips 3x8 @
+// BW+25lb -> unchanged" bug from the S3b fix-wave prompt. Now converts; see
+// section 4d below for the full BW+/BW- suite.
+eq(displayWeights("@ BW+25lb", "kg"), "@ BW+12.5 kg", "T64/BUG6b bodyweight-plus converts the number, keeps the BW+ prefix");
 eq(displayWeights("135 x 5", "kg"), "135 x 5", "T64/BUG6 sets x reps with no @ is never touched");
 eq(displayWeights("@ 20kg", "lbs"), "@ 20kg", "T64/BUG6 an explicit-kg load for an lbs athlete stays kg (no reverse conversion)");
 eq(displayWeights("Bench 3x8 @ 70%", "kg"), "Bench 3x8 @ 70%", "T64/BUG6 a bare percentage is never a load");
@@ -85,6 +89,101 @@ eq(displayWeights("@ 20 kglbs", "kg"), "@ 20 kg", "T64/BUG6 heals the pluralized
 eq(draftInUnit(draftInUnit("Incline DB Bench 3x8 @ 45lb", "kg"), "kg"), "Incline DB Bench 3x8 @ 20 kg", "T64/BUG6 double application of the live-repro line is a no-op, never a compounding re-convert");
 eq(draftInUnit("@ 20 kglb", "kg"), "@ 20 kg", "T64/BUG6 draftInUnit heals the corrupted artifact the same way");
 eq(draftInUnit(draftInUnit("@ 20 kglb", "kg"), "kg"), "@ 20 kg", "T64/BUG6 double-heal is stable");
+
+// 4d ── T64 Fix 6b: non-weight numbers after "@" are never loads; explicitly
+// lbs-tagged numbers convert anywhere (@ or not); BW+/BW- keeps its prefix.
+// `ld(lb)` mirrors the app's own working-load rounding (2.5 kg steps) exactly
+// so expected numbers are computed, never hand-rounded.
+const ld = (lb) => Math.round((lb / LBS_PER_KG) / 2.5) * 2.5;
+
+// -- a clock time / pace after "@" is never a load (both athlete units) --
+eq(draftInUnit("Run 400m x 6 @ 1:30", "kg"), "Run 400m x 6 @ 1:30", "T64/BUG6b clock time untouched (kg athlete)");
+eq(draftInUnit(draftInUnit("Run 400m x 6 @ 1:30", "kg"), "kg"), "Run 400m x 6 @ 1:30", "T64/BUG6b clock time idempotent");
+eq(displayWeights("Run 400m x 6 @ 1:30", "lbs"), "Run 400m x 6 @ 1:30", "T64/BUG6b clock time untouched (lbs athlete) — the live repro");
+eq(displayWeights(displayWeights("Run 400m x 6 @ 1:30", "lbs"), "lbs"), "Run 400m x 6 @ 1:30", "T64/BUG6b clock time idempotent (lbs athlete)");
+eq(draftInUnit("Run 3 mi @ 8:30 pace", "kg"), "Run 3 mi @ 8:30 pace", "T64/BUG6b pace untouched");
+eq(draftInUnit(draftInUnit("Run 3 mi @ 8:30 pace", "kg"), "kg"), "Run 3 mi @ 8:30 pace", "T64/BUG6b pace idempotent");
+
+// -- a duration/count/distance word glued to the number is never a load --
+eq(draftInUnit("Plank 3x @ 60s", "kg"), "Plank 3x @ 60s", "T64/BUG6b seconds untouched, not '60 kgs'");
+eq(draftInUnit(draftInUnit("Plank 3x @ 60s", "kg"), "kg"), "Plank 3x @ 60s", "T64/BUG6b seconds idempotent");
+eq(draftInUnit("Rest 90 sec between sets", "kg"), "Rest 90 sec between sets", "T64/BUG6b 'sec' (no @) untouched");
+eq(draftInUnit("Plank 3x @ 45 seconds", "kg"), "Plank 3x @ 45 seconds", "T64/BUG6b spelled-out seconds untouched");
+eq(draftInUnit("Row 3x @ 2 min", "kg"), "Row 3x @ 2 min", "T64/BUG6b minutes untouched");
+eq(draftInUnit("Box jump 3x5 @ 24in", "kg"), "Box jump 3x5 @ 24in", "T64/BUG6b inches untouched, not '10 kgin'");
+eq(draftInUnit(draftInUnit("Box jump 3x5 @ 24in", "kg"), "kg"), "Box jump 3x5 @ 24in", "T64/BUG6b inches idempotent (not '5 kg kgin')");
+eq(draftInUnit("Sled push @ 20 yds", "kg"), "Sled push @ 20 yds", "T64/BUG6b yards untouched");
+eq(draftInUnit("Row @ 500m", "kg"), "Row @ 500m", "T64/BUG6b meters untouched");
+eq(draftInUnit("Bike @ 12mph", "kg"), "Bike @ 12mph", "T64/BUG6b mph untouched");
+eq(draftInUnit("Finisher @ 20 cal", "kg"), "Finisher @ 20 cal", "T64/BUG6b calories untouched");
+eq(draftInUnit("Assault bike @ 15 rounds", "kg"), "Assault bike @ 15 rounds", "T64/BUG6b rounds untouched");
+eq(draftInUnit("Sprint @ 10 reps", "kg"), "Sprint @ 10 reps", "T64/BUG6b reps untouched");
+
+// -- BW+/BW- prefix: the number converts, the prefix survives, one unit tag --
+eq(draftInUnit("Dips 3x8 @ BW+25lb", "kg"), `Dips 3x8 @ BW+${ld(25)} kg`, "T64/BUG6b BW+lb converts the number, keeps BW+");
+eq(draftInUnit(draftInUnit("Dips 3x8 @ BW+25lb", "kg"), "kg"), `Dips 3x8 @ BW+${ld(25)} kg`, "T64/BUG6b BW+ idempotent");
+eq(draftInUnit("Dips 3x8 @ BW + 25 lb", "kg"), `Dips 3x8 @ BW+${ld(25)} kg`, "T64/BUG6b spaced 'BW + 25 lb' normalizes the same way");
+eq(draftInUnit("Pull-ups 3x8 @ BW-10lb", "kg"), `Pull-ups 3x8 @ BW-${ld(10)} kg`, "T64/BUG6b BW-lb keeps the minus sign");
+eq(displayWeights("Dips 3x8 @ BW+25lb", "lbs"), "Dips 3x8 @ BW+25lb", "T64/BUG6b BW+lb untouched for an lbs athlete (already the right unit)");
+
+// -- explicitly lbs-tagged numbers convert wherever they sit, "@" or not --
+eq(draftInUnit("DB curls 2x10 at 40lb", "kg"), `DB curls 2x10 at ${ld(40)} kg`, "T64/BUG6b 'at 40lb' (no @) converts");
+eq(draftInUnit(draftInUnit("DB curls 2x10 at 40lb", "kg"), "kg"), `DB curls 2x10 at ${ld(40)} kg`, "T64/BUG6b 'at 40lb' idempotent");
+eq(draftInUnit("Carry 2x45lb", "kg"), `Carry 2x${ld(45)} kg`, "T64/BUG6b '2x45lb' converts only the 45, never the set count");
+eq(draftInUnit(draftInUnit("Carry 2x45lb", "kg"), "kg"), `Carry 2x${ld(45)} kg`, "T64/BUG6b '2x45lb' idempotent");
+eq(draftInUnit("Farmer carry 40lb DBs", "kg"), `Farmer carry ${ld(40)} kg DBs`, "T64/BUG6b bare tag + trailing free text (no @)");
+eq(displayWeights("DB curls 2x10 at 40lb", "kg"), `DB curls 2x10 at ${ld(40)} kg`, "T64/BUG6b same bare-tag pass runs under displayWeights too");
+eq(displayWeights("DB curls 2x10 at 40lb", "lbs"), "DB curls 2x10 at 40lb", "T64/BUG6b lbs athlete: bare tag untouched (already the athlete's unit)");
+
+// -- must-not-change controls (T64-S3b) --
+eq(draftInUnit("3x8 @ 70%", "kg"), "3x8 @ 70%", "T64/BUG6b control: bare percentage");
+eq(draftInUnit("5x5 @ RPE 8", "kg"), "5x5 @ RPE 8", "T64/BUG6b control: RPE with no number before it");
+eq(draftInUnit("4x3 @ 97.5kg (75%)", "kg"), "4x3 @ 97.5kg (75%)", "T64/BUG6b control: already-kg with a %-source trailer");
+eq(draftInUnit("Pull-ups 3x8", "kg"), "Pull-ups 3x8", "T64/BUG6b control: rep-only, no @");
+eq(draftInUnit("Week 3 Day 2", "kg"), "Week 3 Day 2", "T64/BUG6b control: week/day numbers");
+eq(draftInUnit("Sep 9, 2026", "kg"), "Sep 9, 2026", "T64/BUG6b control: a date");
+eq(draftInUnit("Tempo 3-1-1 @ 95lb", "kg"), `Tempo 3-1-1 @ ${ld(95)} kg`, "T64/BUG6b control: tempo prefix untouched, the real @-load after it converts");
+eq(draftInUnit("5x3 @ 60/80/90/100/100kg", "kg"), "5x3 @ 60/80/90/100/100kg", "T64/BUG6b control: already-kg multi-value chain");
+eq(draftInUnit("@ 20 kglb", "kg"), "@ 20 kg", "T64/BUG6b control: heals the corrupted artifact (regression guard)");
+eq(draftInUnit("@ 20 kglb (75%)", "kg"), "@ 20 kg (75%)", "T64/BUG6b control: heals the corrupted artifact with a %-source trailer");
+
+// -- property test: 300 lines built from random combinations of the fragments
+// above must always be idempotent, and never contain a two-unit collision or
+// a unit word glued directly to trailing letters.
+const FRAGMENTS = [
+  "Run 400m x 6 @ 1:30", "Run 3 mi @ 8:30 pace", "Plank 3x @ 60s", "Rest 90 sec between sets",
+  "Row 3x @ 2 min", "Box jump 3x5 @ 24in", "Sled push @ 20 yds", "Row @ 500m", "Bike @ 12mph",
+  "Finisher @ 20 cal", "Assault bike @ 15 rounds", "Sprint @ 10 reps", "Dips 3x8 @ BW+25lb",
+  "Pull-ups 3x8 @ BW-10lb", "DB curls 2x10 at 40lb", "Carry 2x45lb", "Farmer carry 40lb DBs",
+  "3x8 @ 70%", "5x5 @ RPE 8", "4x3 @ 97.5kg (75%)", "Pull-ups 3x8", "Week 3 Day 2", "Sep 9, 2026",
+  "Tempo 3-1-1 @ 95lb", "5x3 @ 60/80/90/100/100kg", "@ 20 kglb", "Incline DB Bench 3x8 @ 45lb",
+  "Bench 3x5 @ 185 (75%)", "Squat 5x3 @ 100kg", "Front Squat 3x5 @ 225",
+];
+// Deterministic PRNG (mulberry32) — reproducible across runs, no dependency.
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rand = mulberry32(6402026);
+let propFail = 0;
+const BAD_COLLISION = /kg\s*(lb|kg|s\b|in\b|:)/i;
+const BAD_GLUE = /\d\s*kg[a-z]/i;
+for (let i = 0; i < 300; i++) {
+  const n = 1 + Math.floor(rand() * 3);
+  const lines = [];
+  for (let j = 0; j < n; j++) lines.push(FRAGMENTS[Math.floor(rand() * FRAGMENTS.length)]);
+  const line = lines.join("\n");
+  const once = draftInUnit(line, "kg");
+  const twice = draftInUnit(once, "kg");
+  if (once !== twice) { propFail++; console.error(`✗ property: not idempotent\n  in:    ${JSON.stringify(line)}\n  once:  ${JSON.stringify(once)}\n  twice: ${JSON.stringify(twice)}`); continue; }
+  if (BAD_COLLISION.test(once)) { propFail++; console.error(`✗ property: two-unit collision in ${JSON.stringify(once)}`); continue; }
+  if (BAD_GLUE.test(once)) { propFail++; console.error(`✗ property: unit glued to trailing letters in ${JSON.stringify(once)}`); continue; }
+}
+ok(propFail === 0, `property test: 300 generated lines, idempotent + no unit collisions (${propFail} failed)`);
 
 // 4b ── draftInUnit: the SHEET/CARD converter — number-FIRST shape preserved
 // (the text stays the editable, loggable draft), explicit kg suffix, idempotent.
