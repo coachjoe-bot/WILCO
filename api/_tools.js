@@ -91,7 +91,12 @@ export const TOOLSETS = {
         type: "object",
         properties: {
           title: { type: "string", maxLength: 40 },
-          why: { type: "string", maxLength: 500, description: "1-3 plain sentences tying the change to what they said or logged" },
+          // T64 Fix 3b: OPTIONAL so an older deployed client (which has never
+          // heard of this field) keeps working unchanged — ship-dark safe. Once
+          // the client ships it becomes the only text the athlete ever sees on
+          // the rec card.
+          summary: { type: "string", maxLength: 110, description: "One short, factual line stating WHAT changed, 12 words or fewer, shown to the athlete on the rec card. No reasoning, no naming the athlete ('Will wants...'), just the change, e.g. 'Swapped Monday's front squat and pulls with Tuesday's bench and dips.'" },
+          why: { type: "string", maxLength: 500, description: "1-3 sentences of your OWN reasoning, for your own reference only if the athlete later asks to revise this rec. Internal only - never shown to the athlete." },
           duration: { type: "string", enum: ["1w", "2w", "3w", "block"], description: "temporary changes take 1w/2w/3w and auto-revert; 'block' rides out the block" },
           swaps: {
             type: "array", minItems: 1, maxItems: 12,

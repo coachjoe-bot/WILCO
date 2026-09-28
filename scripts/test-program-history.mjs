@@ -3,7 +3,7 @@
 // deps. Deterministic, no network. Part of the Program Builder Phase B ship gate
 // (docs/program-builder-build-handoff.md).
 
-import { snapshotProgramHistory, startNextBlock, closeCurrentBlock, setBlockEnd, blockPromptState, parseTimeline, dateToIso, digestWorkouts, changedRatio, NEW_BLOCK_RATIO, deriveBlockName, refreshOpenBlockRecap } from "../src/programHistory.js";
+import { snapshotProgramHistory, startNextBlock, closeCurrentBlock, setBlockEnd, blockPromptState, parseTimeline, dateToIso, digestWorkouts, changedRatio, NEW_BLOCK_RATIO, deriveBlockName, refreshOpenBlockRecap, recapShortFallback } from "../src/programHistory.js";
 
 let fail = 0;
 const bad = (msg) => { fail++; console.error("  ✗ " + msg); };
@@ -53,6 +53,7 @@ const openBlock = (text) => ({ id: "blk-1", program_text: text, completed_at: nu
 // second update — assertions pick the writes apart instead of counting them.
 const closes = (calls) => calls.updates.filter((u) => u.data && u.data.completed_at);
 const recaps = (calls) => calls.updates.filter((u) => u.data && u.data.block_recap);
+const shortRecaps = (calls) => calls.updates.filter((u) => u.data && u.data.block_recap_short);
 
 // ── changedRatio sanity ──────────────────────────────────────────────────────
 console.log("changedRatio:");
@@ -119,6 +120,44 @@ console.log("rewrite:");
   ok(closes(calls).length === 1, "previous block closed");
   ok(recaps(calls).length === 1, "closed block got its recap");
   ok(calls.inserts.length === 1 && calls.inserts[0].data.program_text === REWRITE.trim(), "new block inserted");
+}
+
+// ── T64 Fix 3b: the short athlete-facing recap rides alongside the full one ──
+console.log("short recap (T64 Fix 3b):");
+{
+  const { calls, deps } = harness(openBlock(PROGRAM));
+  await snapshotProgramHistory({ athleteId: "a1", text: REWRITE, source: "coach_save" }, deps);
+  ok(shortRecaps(calls).length === 1, "closing a block also writes a short recap, in its OWN update call");
+  ok(!("block_recap" in shortRecaps(calls)[0].data) && !("block_recap_short" in recaps(calls)[0].data), "the two writes carry distinct fields — never bundled into one payload (so a missing column on one can never fail the other)");
+  ok(calls.asked === 3, "recap + short-recap condense + the new block's own summary line — never re-derived from raw logs");
+}
+{
+  // The short-recap call is its OWN best-effort try/catch (see closeBlock):
+  // it must never be able to cost the full recap or the completed_at stamp,
+  // which is exactly what "additive column not yet applied to prod" needs —
+  // an "unknown column" failure here degrades silently to the render fallback.
+  const { calls, deps } = harness(openBlock(PROGRAM));
+  const originalAsk = deps.askClaude;
+  let n = 0;
+  deps.askClaude = async (...args) => { n++; if (n === 2) throw new Error("unknown column block_recap_short"); return originalAsk(...args); };
+  await snapshotProgramHistory({ athleteId: "a1", text: REWRITE, source: "coach_save" }, deps);
+  ok(recaps(calls).length === 1, "the full recap still lands even when the short-recap step throws");
+  ok(closes(calls).length === 1, "and the block still closes");
+  ok(shortRecaps(calls).length === 0, "no short-recap write when its own call fails");
+}
+
+// recapShortFallback: the render's own funnel — stored short, else first two
+// sentences of the full recap (every real row on prod today has no short
+// version yet), else nothing. Never throws on a bare/partial row.
+console.log("recapShortFallback:");
+{
+  ok(recapShortFallback({ block_recap_short: "You squatted twice, bench once. On track for the goal.", block_recap: "A much longer paragraph that should never be shown when a short version exists." })
+    === "You squatted twice, bench once. On track for the goal.", "a stored short recap wins outright");
+  ok(recapShortFallback({ block_recap: "First sentence here. Second sentence here. Third sentence that should be cut." })
+    === "First sentence here. Second sentence here.", "no short version: falls back to the first two sentences of the full recap");
+  ok(recapShortFallback({ block_recap: "Only one sentence here." }) === "Only one sentence here.", "a one-sentence recap isn't truncated further");
+  ok(recapShortFallback({}) === "", "no recap at all → empty, never throws");
+  ok(recapShortFallback(null) === "", "null block → empty, never throws");
 }
 
 // ── closed latest never evolves in place ─────────────────────────────────────

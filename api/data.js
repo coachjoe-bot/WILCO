@@ -255,6 +255,11 @@ const ATHLETE_COL_ALLOW = {
     cols: new Set([
       "owner_type", "title", "status", "blueprint", "transcript",
       "draft_text", "provisional_goal", "scope", "updated_at",
+      // T64 Fix 3: non-destructive card hide. dismissed_at is a stamp, never a
+      // status — the row, its blueprint.rec.swaps, and any auto-revert clock
+      // stay exactly as they were. Additive column (20260928_program_drafts_
+      // dismissed_at.sql), applied to prod 2026-09-28.
+      "dismissed_at",
     ]),
     values: {
       owner_type: (v) => v === "athlete",
@@ -267,6 +272,9 @@ const ATHLETE_COL_ALLOW = {
       // gates — BOTH must know every status the app writes.
       status: (v) => ["interview", "draft", "applied", "rec", "rec_applied"].includes(v),
       scope: (v) => ["full", "short", "quick"].includes(v),
+      // T64 Fix 3: null clears a dismiss (not currently used by the client, but
+      // keeps the validator symmetric with every other timestamp column here).
+      dismissed_at: (v) => v === null || (typeof v === "string" && !Number.isNaN(Date.parse(v))),
     },
   },
   // T53: typed training preferences. The payload originates from an AI extraction
@@ -295,7 +303,17 @@ const ATHLETE_COL_ALLOW = {
     // applied_at was missing from this set at launch, which 403'd EVERY
     // athlete-side snapshot insert (snapshotProgramHistory sends it explicitly)
     // and left program_history empty on prod. Guard the value, allow the column.
-    cols: new Set(["program_text", "source", "block_summary", "block_recap", "block_name", "completed_at", "applied_at", "ends_at"]),
+    cols: new Set([
+      "program_text", "source", "block_summary", "block_recap", "block_name", "completed_at", "applied_at", "ends_at",
+      // T64 Fix 3b: short athlete-facing recap alongside the full AI-context
+      // one. Additive column (20260928_program_history_block_recap_short.sql),
+      // NOT yet applied to prod — this entry is listed here (ship-dark safe:
+      // an unapplied column is simply an unused allowlist entry) so the write
+      // works the instant the integrator applies the migration, with no second
+      // deploy needed. Until then, closeBlock's own try/catch absorbs the
+      // "unknown column" failure.
+      "block_recap_short",
+    ]),
     values: {
       source: (v) => [
         "manual_edit", "chat_save", "chat_replace", "chat_append", "chat_create",
@@ -304,6 +322,7 @@ const ATHLETE_COL_ALLOW = {
       ].includes(v),
       applied_at: (v) => typeof v === "string" && !Number.isNaN(Date.parse(v)),
       ends_at: (v) => typeof v === "string" && !Number.isNaN(Date.parse(v)),
+      block_recap_short: (v) => v === null || (typeof v === "string" && v.length <= 400),
       block_name: (v) => v === null || (typeof v === "string" && v.length <= 80),
     },
   },

@@ -1,8 +1,9 @@
-// ─── PROGRAM RECS (Will's 08-28 design) ──────────────────────────────────────
+// ─── PROGRAM RECS (Will's 08-28 design; T64 Fix 3/3b dismiss + summary) ──────
 // Staged program changes under chat-first: the pattern gate (first mention =
 // watched note, repeat/severity = rec), the rec bar + sheet (week-tagged swaps,
-// collapsible WHY, hard durations), deterministic apply with instant local
-// sync, and boot restore of an un-parked rec.
+// the athlete-facing "What changed" summary strip, hard durations),
+// deterministic apply with instant local sync, boot restore of an un-parked
+// rec, and the Drafts-pane ✕ that hides a card without touching the program.
 import { test, expect } from "@playwright/test";
 import { mockApi, makeAthlete, loginAsAthlete, emptyParse } from "./mocks.js";
 
@@ -38,10 +39,15 @@ test("rec: boot restores the bar, the sheet shows the tagged swap, Apply lands b
   const bar = page.getByText("PROGRAM REC — Pec swap").first();
   await expect(bar).toBeVisible({ timeout: 15000 });
 
-  // Open the sheet: WHY strip, the struck original with its day tag, the
-  // editable replacement, hard duration chips (no Permanent anywhere).
+  // Open the sheet: the athlete-facing summary strip (T64 Fix 3b: `why` is
+  // internal-only now, never rendered — this row has no `summary` yet, so it
+  // falls back to a line built from the swap's own exercise name), the struck
+  // original with its day tag, the editable replacement, hard duration chips
+  // (no Permanent anywhere).
   await bar.click();
-  await expect(page.getByText("Pec pain two weeks running", { exact: false })).toBeVisible();
+  await expect(page.getByText("What changed")).toBeVisible();
+  await expect(page.getByText("Changed Bench Press.")).toBeVisible();
+  await expect(page.getByText("Pec pain two weeks running", { exact: false })).toHaveCount(0);
   await expect(page.getByText("Day 1 - Push — replacing")).toBeVisible();
   await expect(page.getByText("Bench Press 3x5 @ 185").first()).toBeVisible();
   const repl = page.getByRole("textbox", { name: "Replacement 1" });
@@ -62,6 +68,66 @@ test("rec: boot restores the bar, the sheet shows the tagged swap, Apply lands b
   expect(write.body.data.program_text).toContain("Floor Press 4x5 @ 160");
   expect(write.body.data.program_text).not.toContain("Bench Press 3x5 @ 185");
   expect(write.body.data.program_text).toContain("Overhead Press 3x8 @ 95"); // everything else untouched
+});
+
+test("rec sheet (T64 Fix 3b): a row WITH a summary shows it verbatim, never falls back", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const rowWithSummary = REC_ROW(athlete.id);
+  rowWithSummary.blueprint.rec.summary = "Swapped Monday's bench for a floor press.";
+  await mockApi(page, {
+    athlete, chatReply: DRAFT_REPLY,
+    dataReads: { program_drafts: (body) => String(body.params || "").includes('status=in.("rec"') ? [rowWithSummary] : [] },
+  });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  const bar = page.getByText("PROGRAM REC — Pec swap").first();
+  await expect(bar).toBeVisible({ timeout: 15000 });
+  await bar.click();
+  await expect(page.getByText("Swapped Monday's bench for a floor press.")).toBeVisible();
+  await expect(page.getByText("Changed Bench Press.")).toHaveCount(0);
+});
+
+// T64 Fix 3: a non-destructive way off the Drafts-pane list — Will's original
+// complaint was specifically an APPLIED, block-duration rec (only "Revert
+// now" existed, destructive to the live program). The card's own top-left ✕
+// stamps dismissed_at and drops it from the list; the row, its swaps, and any
+// auto-revert clock stay exactly as they were.
+test("Drafts pane (T64 Fix 3): ✕ dismisses an applied rec card without touching the program", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const appliedRow = REC_ROW(athlete.id);
+  appliedRow.id = "rec-row-applied";
+  appliedRow.status = "rec_applied";
+  appliedRow.blueprint.rec.appliedAt = new Date().toISOString();
+  appliedRow.blueprint.rec.expiresAt = null; // block-duration: never auto-reverts
+  const { calls } = await mockApi(page, {
+    athlete, chatReply: DRAFT_REPLY,
+    dataReads: { program_drafts: (body) => {
+      const params = String(body.params || "");
+      // The boot bar-restore scan (no dismissed_at filter) must see NOTHING
+      // here so the bar doesn't pop up and cover the Drafts tab; only the
+      // ProgramDraftsPane's own load (which DOES filter dismissed_at) gets it.
+      if (!params.includes("dismissed_at")) return [];
+      return [appliedRow];
+    } },
+  });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  await page.getByRole("button", { name: "Program", exact: true }).click();
+  await page.getByRole("button", { name: "MEMORY" }).click();
+  await page.getByRole("button", { name: "Drafts", exact: true }).click();
+  await expect(page.getByText("Pec swap").first()).toBeVisible({ timeout: 15000 });
+  await expect(page.getByText("Applied")).toBeVisible();
+
+  await page.getByRole("button", { name: "Dismiss this card" }).first().click();
+  await expect(page.getByText("Pec swap")).toHaveCount(0);
+
+  const dismiss = calls.find((c) => c.body?.op === "update" && c.body?.table === "program_drafts"
+    && String(c.body?.params || "").includes("rec-row-applied") && c.body?.data?.dismissed_at);
+  expect(dismiss).toBeTruthy();
+  // Nothing else about the row was touched — no delete, no program write, no
+  // change to the row's own status or swaps.
+  expect(dismiss.body.data).not.toHaveProperty("status");
+  expect(dismiss.body.data).not.toHaveProperty("blueprint");
+  expect(calls.find((c) => c.body?.op === "delete" && c.body?.table === "program_drafts")).toBeFalsy();
+  expect(calls.find((c) => c.body?.op === "update" && c.body?.table === "athletes")).toBeFalsy();
 });
 
 test("rec DISMISS (T62): the pair renders (struck old + incoming line), Dismiss DELETES the row", async ({ page }) => {
