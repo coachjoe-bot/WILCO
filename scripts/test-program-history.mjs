@@ -3,7 +3,7 @@
 // deps. Deterministic, no network. Part of the Program Builder Phase B ship gate
 // (docs/program-builder-build-handoff.md).
 
-import { snapshotProgramHistory, startNextBlock, closeCurrentBlock, setBlockEnd, blockPromptState, parseTimeline, dateToIso, digestWorkouts, changedRatio, NEW_BLOCK_RATIO, deriveBlockName, refreshOpenBlockRecap } from "../src/programHistory.js";
+import { snapshotProgramHistory, startNextBlock, closeCurrentBlock, setBlockEnd, blockPromptState, parseTimeline, dateToIso, digestWorkouts, changedRatio, NEW_BLOCK_RATIO, deriveBlockName, refreshOpenBlockRecap, buildBlockSpanAnswer, blockSpanConflict, blockSpanNeedsAsk, wrapCardEligible } from "../src/programHistory.js";
 
 let fail = 0;
 const bad = (msg) => { fail++; console.error("  ✗ " + msg); };
@@ -337,6 +337,108 @@ console.log("Fix 7a — onBlockStart:");
   deps.onBlockStart = (text, startedOn) => primed.push({ text, startedOn });
   await snapshotProgramHistory({ athleteId: "a1", text: PROGRAM, source: "manual_edit" }, deps);
   ok(primed.length === 0, "no-op save primes nothing");
+}
+
+// ── T64 Fix 1: block dates belong to the block ────────────────────────────────
+// Will's real 08-24 incident: he typed "wraps up sept 7th" against a block whose
+// own text said Sep 5; the app stored his number on the ATHLETE row with no tie
+// to that block, so it silently outlived it. These are the module's own tests;
+// tests/replay/wraps-up-sept7-0824.json + scripts/test-replay-s1.mjs replay the
+// literal incident end to end.
+console.log("Fix 1 — block span answers are scoped to the block:");
+
+const DURATION_TEXT = "BLOCK 1 — ROAD TO 315\nDuration: 3 Weeks (Aug 17 to Sep 5)\n\nDay 1 - Squat\nBack Squat 5x5 @225";
+const UNKNOWN_SPAN_TEXT = PROGRAM; // no Duration/Runs/repeating language at all
+const blockA = { id: "blk-A", program_text: DURATION_TEXT, applied_at: "2026-08-16T22:54:04.413Z", ends_at: null, completed_at: null };
+
+{
+  const a = buildBlockSpanAnswer({ blockId: "blk-A", weeks: 6, repeating: false });
+  ok(a.blockId === "blk-A" && a.weeks === 6 && a.repeating === false && !!a.answeredAt, "buildBlockSpanAnswer shapes the record");
+  ok(buildBlockSpanAnswer({ blockId: "blk-A", weeks: "not a number" }).weeks === null, "garbage weeks becomes null, not NaN");
+}
+
+console.log("Fix 1 — blockSpanConflict:");
+{
+  const c = blockSpanConflict({ programText: DURATION_TEXT, stated: { weeks: 5, end_date: null, repeating: false } });
+  ok(c && c.textSide.weeks === 3, "athlete's stated length disagrees with the text's own 3-week duration → conflict");
+}
+ok(blockSpanConflict({ programText: DURATION_TEXT, stated: { weeks: 3, end_date: null, repeating: false } }) === null,
+  "restating the SAME length as the text is not a conflict");
+ok(blockSpanConflict({ programText: UNKNOWN_SPAN_TEXT, stated: { weeks: 6, end_date: null, repeating: false } }) === null,
+  "text doesn't declare a span at all → nothing to contradict, no conflict");
+ok(blockSpanConflict({ programText: DURATION_TEXT, stated: { weeks: null, end_date: null, repeating: true } })?.textSide.weeks === 3,
+  "text says a fixed length, athlete says it repeats → conflict");
+{
+  const REPEAT_TEXT = "Push/Pull/Legs, repeats every week, no end date.\nDay 1 - Push\nBench 3x5 @185\nDay 2 - Pull\nRow 3x8\nDay 3 - Legs\nSquat 3x5";
+  ok(blockSpanConflict({ programText: REPEAT_TEXT, stated: { weeks: 4, end_date: null, repeating: false } }) !== null,
+    "text says it repeats, athlete gives it a hard length → conflict");
+  ok(blockSpanConflict({ programText: REPEAT_TEXT, stated: { weeks: null, end_date: null, repeating: true } }) === null,
+    "text and athlete both say repeating → agreement, no conflict");
+}
+
+console.log("Fix 1 — blockSpanNeedsAsk:");
+ok(blockSpanNeedsAsk({ openBlock: blockA, programText: DURATION_TEXT, spanAnswer: null }) === false,
+  "the text already answers it (3-week duration) → never ask");
+ok(blockSpanNeedsAsk({ openBlock: { ...blockA, program_text: UNKNOWN_SPAN_TEXT }, programText: UNKNOWN_SPAN_TEXT, spanAnswer: null }) === true,
+  "no ends_at, text silent, no answer → ask");
+ok(blockSpanNeedsAsk({ openBlock: { ...blockA, program_text: UNKNOWN_SPAN_TEXT, ends_at: "2026-09-05T12:00:00Z" }, programText: UNKNOWN_SPAN_TEXT, spanAnswer: null }) === false,
+  "already resolved (ends_at set) → never ask");
+ok(blockSpanNeedsAsk({ openBlock: { ...blockA, program_text: UNKNOWN_SPAN_TEXT }, programText: UNKNOWN_SPAN_TEXT, spanAnswer: buildBlockSpanAnswer({ blockId: "blk-A", repeating: true }) }) === false,
+  '"no end date" recorded for THIS block → never asks again for it');
+ok(blockSpanNeedsAsk({ openBlock: { ...blockA, id: "blk-B", program_text: UNKNOWN_SPAN_TEXT }, programText: UNKNOWN_SPAN_TEXT, spanAnswer: buildBlockSpanAnswer({ blockId: "blk-A", repeating: true }) }) === true,
+  "GAP HUNTER: a NEW block (different id) must still be asked — an old block's answer never carries over");
+ok(blockSpanNeedsAsk({ openBlock: { ...blockA, program_text: UNKNOWN_SPAN_TEXT }, programText: "a completely different program now, mid-replace", spanAnswer: null }) === false,
+  "program text changed since this row was snapshotted (a save mid-flight) → don't ask about stale text");
+
+console.log("Fix 1 — wrapCardEligible:");
+{
+  const nearEnd = { ...blockA, program_text: UNKNOWN_SPAN_TEXT, ends_at: "2026-09-05T12:00:00Z" };
+  const r = wrapCardEligible({ openBlock: nearEnd, programText: UNKNOWN_SPAN_TEXT, spanAnswer: null, now: "2026-09-01T09:00:00Z" });
+  ok(r.show === true && r.kind === "ending" && r.endsAt === "2026-09-05T12:00:00Z", "common path: block has an end date, card shows 'ending'");
+}
+{
+  // Will's real incident, reconstructed: block A's own answer must never leak
+  // into block B, even though block B is now the open/current one.
+  const answerFromBlockA = buildBlockSpanAnswer({ blockId: "blk-A", endsAt: "2026-09-07T12:00:00Z" });
+  const blockB = { id: "blk-B", program_text: "WEEK 1\nDay 1 - Push\nBench 3x5 @185", applied_at: "2026-09-09T21:12:54.705Z", ends_at: null, completed_at: null };
+  const r = wrapCardEligible({ openBlock: blockB, programText: blockB.program_text, spanAnswer: answerFromBlockA, now: "2026-09-10T09:00:00Z" });
+  ok(r.show === false && r.reason === "no_end_known", "GAP HUNTER: new block inherits nothing from block A's answer");
+}
+{
+  // "No end date" — recorded once, never re-derived from anything else on the block.
+  const openNoEnd = { ...blockA, program_text: UNKNOWN_SPAN_TEXT };
+  const noEndAnswer = buildBlockSpanAnswer({ blockId: "blk-A", repeating: true });
+  const r = wrapCardEligible({ openBlock: openNoEnd, programText: UNKNOWN_SPAN_TEXT, spanAnswer: noEndAnswer, now: "2027-01-01T09:00:00Z" });
+  ok(r.show === false && r.reason === "repeating", '"no end date" holds forever, even a year later — never shows the card');
+}
+{
+  // Program replaced while the card would have been on screen: current text no
+  // longer matches the block's own saved text (a fire-and-forget snapshot that
+  // hasn't caught up, or a genuinely different program now live).
+  const stale = { ...blockA, ends_at: "2026-09-05T12:00:00Z" };
+  const r = wrapCardEligible({ openBlock: stale, programText: "A totally different program now on the athlete row", spanAnswer: null, now: "2026-09-01T09:00:00Z" });
+  ok(r.show === false && r.reason === "program_text_changed", "program replaced mid-flight → shows nothing, never a stale date");
+}
+{
+  // Block closed manually the same day the card would have fired.
+  const closedToday = { ...blockA, program_text: UNKNOWN_SPAN_TEXT, ends_at: "2026-09-01T12:00:00Z", completed_at: "2026-09-01T08:00:00Z" };
+  const r = wrapCardEligible({ openBlock: closedToday, programText: UNKNOWN_SPAN_TEXT, spanAnswer: null, now: "2026-09-01T09:00:00Z" });
+  ok(r.show === false && r.reason === "no_open_block", "manually closed block never shows the card, however close its end date was");
+}
+{
+  // Zero history: brand new block, nothing known yet.
+  const fresh = { id: "blk-new", program_text: UNKNOWN_SPAN_TEXT, applied_at: "2026-09-28T09:00:00Z", ends_at: null, completed_at: null };
+  const r = wrapCardEligible({ openBlock: fresh, programText: UNKNOWN_SPAN_TEXT, spanAnswer: null, now: "2026-09-28T09:05:00Z" });
+  ok(r.show === false && r.reason === "no_end_known", "brand new block with zero history → nothing to show, not a guess");
+}
+{
+  // A weeks-only answer (no explicit end date) still resolves against the
+  // BLOCK's own applied_at, not "now" or any other anchor.
+  const openWeeks = { ...blockA, program_text: UNKNOWN_SPAN_TEXT, applied_at: "2026-08-01T00:00:00Z" };
+  const weeksAnswer = buildBlockSpanAnswer({ blockId: "blk-A", weeks: 5 });
+  const r = wrapCardEligible({ openBlock: openWeeks, programText: UNKNOWN_SPAN_TEXT, spanAnswer: weeksAnswer, now: "2026-09-03T09:00:00Z" });
+  ok(r.show === true, "resolves a date from the weeks-only answer");
+  ok(new Date(r.endsAt).toISOString().slice(0, 10) === "2026-09-05", "5 weeks from the block's OWN applied_at (Aug 1), not from now");
 }
 
 // ── phase names + retire's completedAt override ──────────────────────────────

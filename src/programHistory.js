@@ -25,7 +25,7 @@
 // import back would be a cycle). React-free; block-decision logic unit tested by
 // scripts/test-program-history.mjs.
 import { lineDiff } from "./programDiff.js";
-import { currentPosition } from "./programPosition.js";
+import { currentPosition, parseBlockSpan, programTextIdentity } from "./programPosition.js";
 import { parseBlockInfo, stripBlockInfo } from "./programContract.js";
 
 // Fraction of the COMBINED line count that changed between two program texts.
@@ -392,4 +392,111 @@ export function blockPromptState({ endsAt, now = null, soonDays = 7 } = {}) {
   if (t >= end) return "ended";
   if (end - t <= soonDays * 86400000) return "ending";
   return null;
+}
+
+// ─── BLOCK DATES BELONG TO THE BLOCK (T64 Fix 1) ─────────────────────────────
+// athletes.program_block_span used to hold the athlete's stated end date with no
+// tie to any particular block, so an answer given for block A silently leaked
+// into block B, C, D... forever (Will's real "wraps up Sep 7" answer, given
+// 08-24 about a block that closed 09-04, is still sitting on his athlete row
+// today). The fix is not a new table — it's scoping the SAME jsonb answer to the
+// block it was given for, and never trusting it for a different one.
+
+// The athlete's answer, tagged with the block it was given for. blockId is
+// program_history.id — the one durable handle a block has. Everything else
+// mirrors the message parser's own program_block_span shape.
+export function buildBlockSpanAnswer({ blockId, weeks = null, endsAt = null, repeating = false }) {
+  return {
+    blockId: blockId || null,
+    weeks: Number.isFinite(Number(weeks)) && Number(weeks) >= 1 ? Number(weeks) : null,
+    endsAt: endsAt || null,
+    repeating: !!repeating,
+    answeredAt: new Date().toISOString(),
+  };
+}
+
+// An answer only counts for a block when it says so explicitly — an answer
+// recorded before this fix shipped (no blockId at all) is nobody's answer now,
+// not a free pass for whichever block happens to be open when it's read.
+const answerForBlock = (spanAnswer, blockId) =>
+  (spanAnswer && blockId && spanAnswer.blockId === blockId) ? spanAnswer : null;
+
+// Does a freshly stated span (the athlete's own words, just now) CONTRADICT what
+// the block's own program text already declares? Only a genuine disagreement is
+// a conflict — restating what the text already says, or answering when the text
+// says nothing at all, is not. This is the exact gap in Will's 08-24 incident:
+// Joe's own reply named the program's real end (Sep 5) in the same breath as
+// accepting Will's "Sep 7," and nothing reconciled the two. `stated` is the
+// parser's raw program_block_span shape: {weeks, end_date, repeating}.
+export function blockSpanConflict({ programText, stated } = {}) {
+  if (!stated) return null;
+  const fromText = parseBlockSpan(programText);
+  if (!fromText.known) return null; // the text doesn't answer this itself — nothing to contradict
+  if (fromText.repeating) {
+    // Text says it repeats; the athlete just gave it a hard end / length.
+    if (stated.repeating) return null;
+    if (stated.end_date || stated.weeks) return { textSide: fromText, statedSide: stated };
+    return null;
+  }
+  if (stated.repeating) return { textSide: fromText, statedSide: stated }; // text is finite, athlete says it repeats
+  if (stated.end_date && fromText.endDate && stated.end_date !== fromText.endDate) {
+    return { textSide: fromText, statedSide: stated };
+  }
+  if (stated.weeks && fromText.weeks && stated.weeks !== fromText.weeks) {
+    return { textSide: fromText, statedSide: stated };
+  }
+  return null;
+}
+
+// Should the "does this end?" question be asked for the CURRENTLY OPEN block?
+// Never twice for the same block: any answer recorded against it — including an
+// explicit "no end date" (repeating:true) — ends the asking for good. A
+// different block (a new one, or a program whose text changed since the answer
+// was given) always re-asks; that is the whole point of scoping it.
+export function blockSpanNeedsAsk({ openBlock, programText, spanAnswer } = {}) {
+  if (!openBlock || openBlock.completed_at) return false;
+  if (openBlock.ends_at) return false; // already resolved (Builder timeline, self-heal, a prior answer)
+  const currentText = String(programText ?? openBlock.program_text ?? "").trim();
+  const blockText = String(openBlock.program_text || "").trim();
+  if (currentText && blockText && programTextIdentity(currentText) !== programTextIdentity(blockText)) return false;
+  if (parseBlockSpan(blockText).known) return false; // the text answers it itself
+  if (answerForBlock(spanAnswer, openBlock.id)) return false;
+  return true;
+}
+
+// Full eligibility for the wrap-up/heads-up card (Will's screenshot 1: "your
+// program wraps up Sep 7"). `openBlock` is the newest program_history row
+// (whatever the caller's own query considers "latest" — this module trusts the
+// caller already scoped that query to ONE athlete's most recent row, so "open
+// and present" already implies "newest"). `programText` is the athlete's
+// CURRENT program_text, checked against the block's own saved text: a program
+// that has since been replaced, with program_history's snapshot lagging behind
+// (the fire-and-forget write hasn't landed yet), must show nothing rather than a
+// date that belonged to different text. `spanAnswer` is the raw
+// athletes.program_block_span value. Returns {show, kind, endsAt, reason};
+// kind is 'ending'|'ended' only when show is true.
+export function wrapCardEligible({ openBlock, programText, spanAnswer, now = null } = {}) {
+  const no = (reason) => ({ show: false, kind: null, endsAt: null, reason });
+  if (!openBlock || openBlock.completed_at) return no("no_open_block");
+  const currentText = String(programText ?? "").trim();
+  const blockText = String(openBlock.program_text || "").trim();
+  if (currentText && blockText && programTextIdentity(currentText) !== programTextIdentity(blockText)) {
+    return no("program_text_changed");
+  }
+  const fromText = parseBlockSpan(blockText);
+  const answer = answerForBlock(spanAnswer, openBlock.id);
+  if (fromText.repeating || (answer && answer.repeating)) return no("repeating");
+
+  let endsAt = openBlock.ends_at || null;
+  if (!endsAt && answer?.endsAt) endsAt = answer.endsAt;
+  if (!endsAt && answer?.weeks && openBlock.applied_at) {
+    const end = new Date(openBlock.applied_at);
+    end.setDate(end.getDate() + answer.weeks * 7);
+    endsAt = end.toISOString();
+  }
+  if (!endsAt) return no("no_end_known");
+
+  const kind = blockPromptState({ endsAt, now });
+  if (!kind) return { show: false, kind: null, endsAt, reason: "not_near_end" };
+  return { show: true, kind, endsAt, reason: "ok" };
 }

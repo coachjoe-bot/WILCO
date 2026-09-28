@@ -91,7 +91,7 @@ export const CHAT_FIRST_ON = CHAT_FIRST_ENABLED || urlFlag("chatfirst");
 import { validatePref, normalizePrefs, describePref, prefsPromptLines, nextSignalState, clearedSignal } from "./trainingPrefs.js";
 import { parseBlockInfo, stripBlockInfo } from "./programContract.js";
 import { lineDiff, findPlacement, mergeGuard, mergeSystemPrompt } from "./programDiff.js";
-import { snapshotProgramHistory, startNextBlock, closeCurrentBlock, setBlockEnd, blockPromptState, parseTimeline, dateToIso, refreshOpenBlockRecap } from "./programHistory.js";
+import { snapshotProgramHistory, startNextBlock, closeCurrentBlock, setBlockEnd, blockPromptState, parseTimeline, dateToIso, refreshOpenBlockRecap, buildBlockSpanAnswer, blockSpanConflict, blockSpanNeedsAsk, wrapCardEligible } from "./programHistory.js";
 // First-run app tour (spotlight coach-marks + scripted Quick Log demo). Pure
 // display: fixtures never touch real data — see tour.jsx header.
 import { TourOffer, TourSpotlight, athleteTourSteps, tourWelcome, tourInteractiveAt, TOUR_QL_FIXTURE, TOUR_SCRIPT } from "./tour.jsx";
@@ -5976,6 +5976,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [blockPromptBusy,setBlockPromptBusy] = useState(false);
   const [blockDateInput,setBlockDateInput] = useState("");
   const [blockDateErr,setBlockDateErr] = useState("");
+  // T64 Fix 1: the athlete's stated block span disagreed with the program's own
+  // text — {blockId, program:{endDate,weeks,repeating}, stated:{...}}. Nothing
+  // was written; this chip is the one deterministic two-tap confirm.
+  const [blockSpanConflictPending,setBlockSpanConflictPending] = useState(null);
   // Deep-link: chat's "Swap in my draft" lands on the Drafts tab with the diff
   // review already open for this draft id.
   const [draftsAutoConfirm,setDraftsAutoConfirm] = useState(null);
@@ -6071,7 +6075,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         const today=new Date().toISOString().slice(0,10);
         const stamp=(k)=>{ try{ localStorage.setItem(stampKey,`${k}:${today}`); }catch(_){} };
         const [rows,dRows]=await Promise.all([
-          sbRead("program_history",`?athlete_id=eq.${athlete.id}&order=applied_at.desc&limit=1&select=id,ends_at,applied_at,completed_at`).catch(()=>[]),
+          sbRead("program_history",`?athlete_id=eq.${athlete.id}&order=applied_at.desc&limit=1&select=id,ends_at,applied_at,completed_at,program_text`).catch(()=>[]),
           sbRead("program_drafts",`?athlete_id=eq.${athlete.id}&owner_type=eq.athlete&status=eq.draft&order=updated_at.desc&limit=1&select=id,title,draft_text,blueprint`).catch(()=>[]),
         ]);
         if(!on) return;
@@ -6079,36 +6083,41 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         const dRow=(Array.isArray(dRows)&&dRows[0]&&(dRows[0].draft_text||"").trim())?dRows[0]:null;
         const draft=dRow?{id:dRow.id,title:dRow.title}:null;
         const schedStart=dRow?parseTimeline(dRow.blueprint?.timeline?.value).start:null;
+        // T64 Fix 1: ONE pure eligibility check decides the wrap-up/heads-up card
+        // — block open, its OWN text unchanged since it was snapshotted (a stale
+        // or mid-replace read shows nothing rather than a date that belonged to
+        // different text), and the end date actually recorded AGAINST THIS BLOCK
+        // (its own ends_at, or an athlete answer tagged with its id — never a
+        // different block's answer, however recent). See src/programHistory.js
+        // wrapCardEligible; Will's real 08-24 incident is replayed end to end in
+        // tests/replay/wraps-up-sept7-0824.json.
+        const eligible = open
+          ? wrapCardEligible({openBlock:open, programText:athlete.program_text, spanAnswer:athlete.program_block_span, now:new Date()})
+          : {show:false, reason:"no_open_block"};
         // Priority: the phase hitting its planned end (its card already offers the
         // draft swap) > a scheduled program whose start date arrived (fires even
         // with NO live program — e.g. right after a retire) > the typed backfill.
-        if(open&&open.ends_at){
-          const state=blockPromptState({endsAt:open.ends_at});
-          if(state){
-            if(last===`${state}:${today}`) return;
-            stamp(state);
-            setBlockPrompt({kind:state,endsAt:open.ends_at,draft,extendOpen:false});
-            return;
-          }
-          // Open block with a known, still-distant end: nothing to raise about
-          // the END — but a scheduled draft whose start date has arrived still
-          // gets its offer below (T57: the Builder promises "when the date
-          // comes, Joe offers to swap it in"; an early return here silently
-          // broke that promise whenever the outgoing block's end was far off).
+        if(eligible.show){
+          if(last!==`${eligible.kind}:${today}`){ stamp(eligible.kind); setBlockPrompt({kind:eligible.kind,endsAt:eligible.endsAt,draft,extendOpen:false}); }
+          return;
         }
+        // Not shown — could be a known-but-distant end (nothing to raise), a
+        // program-text mismatch, or genuinely nothing known yet. A scheduled
+        // draft whose start date has arrived still gets its offer either way
+        // (T57: the Builder promises "when the date comes, Joe offers to swap it
+        // in"; that promise must not depend on the outgoing block's own state).
         if(dRow&&schedStart&&schedStart<=today){
           if(last===`scheduled:${today}`) return;
           stamp("scheduled");
           setBlockPrompt({kind:"scheduled",draft,start:schedStart});
-        } else if(open&&!open.ends_at){
+        } else if(open&&eligible.reason==="no_end_known"){
           // Self-heal before ever asking (T57): the program's own contract
-          // (BLOCK INFO "Runs:") or the athlete's recorded program_block_span
-          // already answer this — write ends_at silently instead of prompting.
-          const fromText=parseBlockSpan(athlete.program_text);
-          const sp=athlete.program_block_span;
-          const spWeeks=Number(sp?.weeks);
-          const spEndRaw=sp?.endsAt||sp?.end_date||null;
-          const healEnd=dateToIso(fromText.endDate)||(spEndRaw?(dateToIso(spEndRaw)||spEndRaw):null);
+          // (BLOCK INFO "Runs:") already answers this — write ends_at silently
+          // instead of prompting. Scoped to THIS block's own saved text;
+          // wrapCardEligible already confirmed it matches the live program (a
+          // "program_text_changed" reason would have skipped this branch).
+          const fromText=parseBlockSpan(open.program_text||athlete.program_text);
+          const healEnd=dateToIso(fromText.endDate);
           if(healEnd){
             const ok=await setBlockEnd({athleteId:athlete.id,endsAt:healEnd},{sbRead,sbInsert,sbUpdateWhere,askClaude}).catch(()=>false);
             if(!on) return;
@@ -6118,9 +6127,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
               return;
             }
           }
-          // Repeating (from the text) or an answered span (repeating/weeks) —
-          // the question is answered; asking again is friction, not diligence.
-          if(fromText.repeating||(sp&&(sp.repeating===true||(Number.isFinite(spWeeks)&&spWeeks>=1)))) return;
+          // blockSpanNeedsAsk covers: the text already answers it (checked again
+          // here for safety), an answer already recorded AGAINST THIS BLOCK
+          // (including an explicit "no end date" — repeating:true, which holds
+          // forever and is never re-asked), or the program text having changed.
+          // A DIFFERENT block's answer never counts, however recent — that is
+          // the exact bug this fix closes.
+          if(!blockSpanNeedsAsk({openBlock:open, programText:athlete.program_text, spanAnswer:athlete.program_block_span})) return;
           if(last.startsWith("backfill:")&&(Date.parse(today)-Date.parse(last.slice(9)))<3*86400000) return;
           let est=null;
           try{
@@ -6184,6 +6197,50 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       }
     }catch(_){ setBlockDateErr("Couldn't reach Joe, try again in a sec."); }
     setBlockPromptBusy(false);
+  };
+  // "No end date" — a real answer, not a dodge (T64 Fix 1). Recorded against
+  // THIS block's id via program_block_span so it holds only for it; a new block
+  // always re-asks. There's no date to set here, only an answer to remember, so
+  // this writes program_block_span directly rather than going through
+  // setBlockEnd (which is for an actual planned date).
+  const blockDateNoEnd=async()=>{
+    if(blockPromptBusy||!blockPrompt?.blockId) return;
+    setBlockPromptBusy(true); setBlockDateErr("");
+    try{
+      const span=buildBlockSpanAnswer({blockId:blockPrompt.blockId, repeating:true});
+      await sbUpdate("athletes",athlete.id,{program_block_span:span});
+      setAthlete(prev=>({...prev, program_block_span: span}));
+      blockPromptAck("Got it, no end date on this one. I won't ask again for it.");
+      setBlockPrompt(null); setBlockDateInput("");
+    }catch(_){ setBlockDateErr("Couldn't save that, try again in a sec."); }
+    setBlockPromptBusy(false);
+  };
+  // Human phrasing for one side of a block-span conflict — shared by the
+  // deterministic confirm message and its two button labels, so the words the
+  // athlete reads in the message match the words on the buttons exactly.
+  const spanSideLabel = (side, len="short") => {
+    if(!side) return "";
+    if(side.repeating) return len==="long" ? "it just repeats, no end date" : "No end date";
+    if(side.endDate){
+      const d = new Date(`${side.endDate}T12:00:00Z`).toLocaleDateString("en-US",{month:"short",day:"numeric"});
+      return len==="long" ? `it ends ${d}` : d;
+    }
+    if(side.weeks) return len==="long" ? `it's a ${side.weeks}-week block` : `${side.weeks} weeks`;
+    return "";
+  };
+  // Two taps, no model call: the athlete's own words vs the program's own text.
+  // Whichever wins gets written scoped to THIS block, same as any other answer.
+  const confirmBlockSpanConflict = async (useStated) => {
+    const pending = blockSpanConflictPending;
+    setBlockSpanConflictPending(null);
+    if(!pending) return;
+    const side = useStated ? pending.stated : pending.program;
+    try{
+      const span = buildBlockSpanAnswer({blockId: pending.blockId, weeks: side.weeks||null, endsAt: side.endDate||null, repeating: !!side.repeating});
+      await sbUpdate("athletes",athlete.id,{program_block_span:span});
+      setAthlete(prev=>({...prev, program_block_span: span}));
+      setMessages(prev=>[...prev,{role:"assistant",content:`Locked in: ${spanSideLabel(side,"long")}.`}]);
+    }catch(_){ setMessages(prev=>[...prev,{role:"assistant",content:"Couldn't save that, try again in a sec."}]); }
   };
 
   const applyBuilderText = async (text, tl) => {
@@ -9277,23 +9334,42 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // Gates the Proof Feed's week-ahead section. Until this is known that section is
       // withheld entirely rather than guessed, because an athlete on a simple
       // repeatable week would otherwise be told their block had finished every single
-      // week (Will, 2026-07-27). Pinned to the block it describes via appliedAt, so
-      // starting a new block re-asks — the next block's length is its own question.
+      // week (Will, 2026-07-27).
+      //
+      // T64 Fix 1: pinned to the block it describes via the block's OWN id (not
+      // athletes.program_started_on, which is never written — see
+      // src/programHistory.js wrapCardEligible), so starting a new block
+      // genuinely re-asks instead of the answer outliving the block it was given
+      // for. And when the athlete's stated span disagrees with what the block's
+      // own program text already declares (Will's real 08-24 incident: he said
+      // "Sep 7", the block's own text said Sep 5, and the app silently kept his
+      // number), nothing is stored silently — one deterministic two-tap confirm
+      // instead, no model call deciding which number wins.
       try {
         const s = parsed.program_block_span;
         const wks = Number(s?.weeks);
         const validWeeks = Number.isFinite(wks) && wks>=1 && wks<=52 ? wks : null;
         if(s && (s.repeating===true || validWeeks || s.end_date)){
-          const span = {
-            appliedAt: updatedAthlete.program_started_on || null,
-            repeating: s.repeating===true,
-            weeks: validWeeks,
-            endsAt: s.end_date || null,
-            answeredAt: new Date().toISOString(),
-          };
-          await sbUpdate("athletes",athlete.id,{program_block_span:span}).catch(e=>{ reportError("data", e, { component:"block_span_write" }); throw e; });
-          updatedAthlete.program_block_span = span;
-          setAthlete(prev=>({...prev, program_block_span: span}));
+          const openRows = await sbRead("program_history",`?athlete_id=eq.${athlete.id}&order=applied_at.desc&limit=1&select=id,applied_at,completed_at,program_text`).catch(()=>[]);
+          const openBlk = (Array.isArray(openRows)&&openRows[0]&&!openRows[0].completed_at) ? openRows[0] : null;
+          if(openBlk){
+            const conflict = blockSpanConflict({programText: openBlk.program_text || updatedAthlete.program_text || "", stated: s});
+            if(conflict){
+              const programSide = {endDate: conflict.textSide.endDate||null, weeks: conflict.textSide.repeating?null:(conflict.textSide.weeks||null), repeating: conflict.textSide.repeating};
+              const statedSide = {endDate: s.end_date||null, weeks: validWeeks, repeating: s.repeating===true};
+              setBlockSpanConflictPending({blockId: openBlk.id, program: programSide, stated: statedSide});
+              chipSetThisSend = true;
+              followUp(`Your program says ${spanSideLabel(programSide,"long")}. You said ${spanSideLabel(statedSide,"long")}.`);
+            } else {
+              const span = buildBlockSpanAnswer({blockId: openBlk.id, weeks: validWeeks, endsAt: s.end_date||null, repeating: s.repeating===true});
+              await sbUpdate("athletes",athlete.id,{program_block_span:span}).catch(e=>{ reportError("data", e, { component:"block_span_write" }); throw e; });
+              updatedAthlete.program_block_span = span;
+              setAthlete(prev=>({...prev, program_block_span: span}));
+            }
+          }
+          // No open block at all (mid-save race, or no program yet) — nothing to
+          // scope the answer to. Silently skipped rather than guessed at; the
+          // Proof Feed's own weekly ask will catch it once a block exists.
         }
       } catch(_){}
 
@@ -10312,6 +10388,12 @@ Keep it under 200 words. No fluff. If the frames are unclear, use the clearest o
                 <button onClick={blockDateSubmit} disabled={blockPromptBusy||!blockDateInput.trim()}
                   style={{background:blockDateInput.trim()?`${CA.accent}20`:"transparent",border:`1px solid ${blockDateInput.trim()?CA.accent:CA.border}`,color:blockDateInput.trim()?CA.accent:CA.muted,borderRadius:9,padding:"8px 14px",cursor:"pointer",fontSize:12.5,fontWeight:600}}>{blockPromptBusy?"…":"Set it"}</button>
                 <button onClick={()=>setBlockPrompt(null)} style={{background:"none",border:`1px solid ${CA.border}`,color:CA.muted,borderRadius:9,padding:"8px 10px",cursor:"pointer",fontSize:12}}>Later</button>
+              </div>
+              <div style={{marginTop:6}}>
+                <button onClick={blockDateNoEnd} disabled={blockPromptBusy}
+                  style={{background:"none",border:"none",color:CA.muted,cursor:"pointer",fontSize:11.5,padding:0,textDecoration:"underline"}}>
+                  It doesn't end, same thing every week
+                </button>
               </div>
               {blockDateErr&&<div style={{color:CA.red,fontSize:11.5,marginTop:6}}>{blockDateErr}</div>}
             </>
