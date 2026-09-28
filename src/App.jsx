@@ -76,6 +76,7 @@ import { buildMastermindStatic } from "./ai/card.js";
 import { blueprintPct } from "./programBuilder.js";
 import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps } from "./memory.js";
 import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
+import { performedBlock } from "./turnFacts.js";
 
 // T58 rollout gates, resolved once per load. ?mastermind=1 / ?chatfirst=1 stay
 // as preview overrides for whenever a flag is off; the real switches live in
@@ -1993,6 +1994,12 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
       const lines = prCheckLines(pl.exercises, byEx, athlete.weight_unit);
       if(lines.length) prCheckContext = `\n\nPR CHECK — THIS MESSAGE'S LOG (computed by the app from their records; these verdicts are FINAL — never re-derive, re-convert, or re-compare the numbers yourself):\n${lines.map(l=>`- ${l}`).join("\n")}\nA line marked NEW PR is confirmed above their previous best: open the reply with genuine, specific celebration scaled to how central that lift is to their sport (a weightlifter's snatch or clean and jerk PR is a headline day, not a footnote), then coach. Never describe a NEW PR weight as under, below, or "right under" anything.`;
     }catch(_){ /* verdicts are additive — a failure just means no block */ }
+    // T64 S2 (bug 5): what was PERFORMED, from set_details. Joe called a logged
+    // 5x3 "a clean double" because only the plan's 5x2 was in front of him.
+    try{
+      const perf = performedBlock(pl.exercises, {displayUnit: athlete.weight_unit, planText: athlete.temp_program_text || athlete.program_text || ""});
+      if(perf) prCheckContext += `\n\n${perf}`;
+    }catch(_){ /* additive */ }
   }
 
   // Resolved program position — the SAME resolver Quick Log trusts (src/

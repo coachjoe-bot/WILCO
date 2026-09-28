@@ -1,0 +1,20 @@
+{
+  "bug": "T64 bug 5 (screenshot 5): Joe called a logged 5x3 top set 'a clean double' because the temp program prescribed 5x2",
+  "source": "workouts row 0b810591 (founder, 2026-09-02 21:24 UTC), temp program Day 3 swap",
+  "input_message": "Day 3 – Snatch Balance/Split Jerk (Temp Swap: Overhead Stability)\n\nBehind the Neck Snatch Grip Push Press 5x3 @ 60/80/90/100/100kg\nPush Press 5x3 @ 60/70/80/90/90kg\nDB Lateral Raise 3x8 @ 40lbs",
+  "starting_state": {
+    "display_unit": "kg",
+    "plan_text": "Day 3 – Snatch Balance/Split Jerk (Temp Swap: Overhead Stability)\n* Behind the Neck Snatch Grip Push Press 5x2 @ 60 kg (60kg)\n* Push Press 5x2 @ 70 kg\n* DB Lateral Raise 3x8 @ 20 lb"
+  },
+  "parsed_exercises": [
+    {"name":"Behind the Neck Snatch Grip Push Press","reps":3,"sets":5,"unit":"kg","weight":100,"set_details":[{"reps":3,"weight":60},{"reps":3,"weight":80},{"reps":3,"weight":90},{"reps":3,"weight":100},{"reps":3,"weight":100}]},
+    {"name":"Push Press","reps":3,"sets":5,"unit":"kg","weight":90,"set_details":[{"reps":3,"weight":60},{"reps":3,"weight":70},{"reps":3,"weight":80},{"reps":3,"weight":90},{"reps":3,"weight":90}]},
+    {"name":"DB Lateral Raise","reps":8,"sets":3,"unit":"lbs","weight":40}
+  ],
+  "invariants": [
+    "the injected PERFORMED line for the push press says 5 sets of 3 and top set 100 kg x 3",
+    "the line names the plan's 5x2 as the plan, never as what was done",
+    "Joe's reply never says 'double' or 'doubles' about these lifts"
+  ],
+  "bad_reply_words": ["double", "doubles"]
+}
