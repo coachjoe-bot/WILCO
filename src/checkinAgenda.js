@@ -120,11 +120,11 @@ export const CHECKIN_INSTRUCTION = `This is the athlete's check-in: a short, nor
 Each turn:
 1. Respond first to what they actually said, when it warrants a response: a question gets answered, a story or a concern gets a real reaction. A thin answer ("idk", "fine", "same") gets no forced warmth, just move on.
 2. Mark in "covered" every OPEN item their latest message answered, even ones you have not asked yet. Only what the message actually answers.
-3. If an item is still open and the moment is right, ask ONE of them in your own natural words and put its id in "next". Never ask a covered item. If they asked you something that needs room, you may hold the next item ("next": null).
-Your reply holds at most ONE question, and it is the item named in "next". Never add questions of your own (no "what's eating your time?"); what they told you is enough. When "next" is null, the reply asks nothing.
+3. If an item is still open and the moment is right, put ONE of them in "ask", in your own natural words, and its id in "next". Never ask a covered item. If they asked you something that needs room, you may hold it ("ask": null, "next": null).
+"reply" is only your response to what they said: it never contains a question. The one question of the turn is "ask". Never ask questions of your own beyond the agenda (no "what's eating your time?"); what they told you is enough.
 4. Never restate or summarize their earlier answers back to them, never recap the check-in, never mention an agenda, items or ids.
 Bodyweight answers are logged, never judged (no nutrition context exists). Pain follows the PAIN lines exactly: ask the way they say, and never offer a program change unless an open item asks about one.
-Return ONLY JSON, no markdown: {"reply": string, "covered": [ids], "next": id or null, "done": boolean}. "done" is true only when they are clearly ending the check-in.`;
+Return ONLY JSON, no markdown: {"reply": string (may be empty), "ask": string or null, "covered": [ids], "next": id or null, "done": boolean}. "done" is true only when they are clearly ending the check-in.`;
 
 export function agendaTurnPrompt({ agenda = [], covered = [], answers = [], transcript = [], message = "", isMonthly = false, digestNote = "", holdNext = false } = {}) {
   const cov = new Set(covered);
@@ -166,7 +166,8 @@ export function parseAgendaTurn(raw, openIds = []) {
   const covered = [...new Set((Array.isArray(js.covered) ? js.covered : []).map(String))].filter((id) => open.has(id));
   const coveredSet = new Set(covered);
   const next = js.next != null && open.has(String(js.next)) && !coveredSet.has(String(js.next)) ? String(js.next) : null;
-  return { reply: String(js.reply).trim(), covered, next, done: js.done === true, malformed: false };
+  const ask = next && typeof js.ask === "string" && js.ask.trim() ? js.ask.trim() : null;
+  return { reply: String(js.reply).trim(), ask, covered, next, done: js.done === true, malformed: false };
 }
 
 // ── 4. the athlete ends it ───────────────────────────────────────────────────
@@ -199,13 +200,15 @@ export function advanceAgenda(agenda, state, { message, parsed, endIntent = fals
   // bounded: the pending item has been asked MAX times and this reply still
   // did not cover it: the reply is its answer, move on
   if (state.pending && !covered.has(state.pending) && (asked[state.pending] || 0) >= MAX_ASKS_PER_ITEM) cover(state.pending);
+  // "nah, that's it" right after a question is also its answer
+  if (endIntent && state.pending && /^\s*(nah|nope|no)\b/i.test(String(message || ""))) cover(state.pending);
   const openItems = agenda.filter((i) => !covered.has(i.id));
   if (endIntent || !openItems.length) {
-    return { state: { covered: [...covered], asked, pending: null, answers }, reply: p.reply, ask: null, finished: true, reason: endIntent ? "athlete_ended" : "covered" };
+    return { state: { covered: [...covered], asked, pending: null, answers }, reply: composeReply(p, null), ask: null, finished: true, reason: openItems.length ? "athlete_ended" : "covered" };
   }
   if (p.malformed) {
     // agenda unchanged; the plain reply shows, the pending ask stands
-    return { state: { covered: [...covered], asked, pending: state.pending, answers }, reply: p.reply, ask: null, finished: false, reason: "malformed" };
+    return { state: { covered: [...covered], asked, pending: state.pending, answers }, reply: composeReply(p, null), ask: null, finished: false, reason: "malformed" };
   }
   let pending = p.next && !covered.has(p.next) ? p.next : null;
   let ask = null;
@@ -214,10 +217,29 @@ export function advanceAgenda(agenda, state, { message, parsed, endIntent = fals
     // question in it) and the athlete did not just ask something, code asks the
     // first open item so the check-in never stalls.
     const athleteAsked = /\?\s*$/.test(String(message || "").trim());
-    if (!/\?/.test(p.reply) && !athleteAsked) { ask = openItems[0]; pending = ask.id; }
+    if (!athleteAsked) { ask = openItems[0]; pending = ask.id; }
   }
   if (pending) asked[pending] = (asked[pending] || 0) + 1;
-  return { state: { covered: [...covered], asked, pending, answers }, reply: p.reply, ask, finished: false, reason: "continue" };
+  // A held turn (no next) keeps the reply's own question only when the athlete
+  // just asked something back (a clarifying question is fair there).
+  const keepQ = !pending && /\?\s*$/.test(String(message || "").trim());
+  return { state: { covered: [...covered], asked, pending, answers }, reply: keepQ ? p.reply : composeReply(p, pending && !ask ? byId.get(pending) : null), ask, finished: false, reason: "continue" };
+}
+
+// The turn's text: the reaction (question sentences dropped: the one question
+// of a turn is the agenda item) + the model's natural "ask" for the next item.
+// Old-shape replies (question inside "reply", no "ask") keep their last question
+// when it is the only one, so a model that ignores the split still reads right.
+export function composeReply(p, nextItem) {
+  const reply = String(p.reply || "").trim();
+  const sents = reply.split(/(?<=[.!?])\s+/).filter(Boolean);
+  const qs = sents.filter((x) => /\?\s*$/.test(x));
+  let reaction = sents.filter((x) => !/\?\s*$/.test(x)).join(" ");
+  let ask = p.ask || null;
+  if (!ask && p.next && qs.length) ask = qs[qs.length - 1];     // old shape: question lives in reply
+  if (!ask && nextItem) ask = nextItem.text;                     // model named next but wrote no question
+  if (p.malformed) return reply;                                 // never rewrite a plain fallback
+  return [reaction, ask].filter(Boolean).join(" ").trim();
 }
 
 // ── 6. pain outcomes -> ledger mark stamps ───────────────────────────────────

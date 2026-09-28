@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   buildAgenda, agendaTurnPrompt, parseAgendaTurn, advanceAgenda, initialAgendaState, isEndIntent,
-  painStampsFrom, painOutcome, closingLine, painQuestionText, LEGACY_DEFAULT_QUESTIONS, GENERIC_PAIN_TEXT, MAX_ASKS_PER_ITEM,
+  painStampsFrom, painOutcome, closingLine, composeReply, painQuestionText, LEGACY_DEFAULT_QUESTIONS, GENERIC_PAIN_TEXT, MAX_ASKS_PER_ITEM,
 } from "../src/checkinAgenda.js";
 import { buildQuestionBank, planEligible } from "../api/_proof.js";
 import { replyGate, hasBannedWord } from "../src/replyGate.js";
@@ -150,6 +150,23 @@ const A = buildAgenda(BANK.slice(0, 4), { painRecords: [KNEE_EASING] }); // weig
 }
 for (const [m, want] of [["gotta go", true], ["that's all", true], ["I'm done", true], ["bye", true], ["end the check-in", true], ["I did squats and that's all I did today", false], ["I'm done with the squat block, what's next?", false], ["goal is the same", false], ["nah that's it", true], ["no, that's all", true], ["no", false], ["nope, all good", false]])
   ok(isEndIntent(m) === want, `end intent: "${m}" -> ${want}`);
+
+console.log("one question per turn (live finding 09-28):");
+{
+  const st = initialAgendaState(A);
+  const r = advanceAgenda(A, st, { message: "short on time", parsed: parseAgendaTurn(J({ reply: "Two days won't move the squat. What's eating the time, work or life?", ask: "Anything banged up I should know about?", covered: ["weight"], next: "injury" }), A.map((i) => i.id)) });
+  ok(r.reply === "Two days won't move the squat. Anything banged up I should know about?", `the model's own extra question is dropped, the agenda ask stays (${r.reply})`);
+  ok((r.reply.match(/\?/g) || []).length === 1, "exactly one question in the turn");
+  const old = advanceAgenda(A, st, { message: "185", parsed: parseAgendaTurn(J({ reply: "Logged. How's the knee?", covered: ["weight"], next: "injury" }), A.map((i) => i.id)) });
+  ok(old.reply === "Logged. How's the knee?", "old shape (question inside reply, no ask) still reads right");
+  const bare = advanceAgenda(A, st, { message: "185", parsed: parseAgendaTurn(J({ reply: "Logged.", covered: ["weight"], next: "injury" }), A.map((i) => i.id)) });
+  ok(bare.reply === `Logged. ${A.find((i) => i.id === "injury").text}`, "next named but no question written: the item's own text is asked");
+  const tangent = advanceAgenda(A, st, { message: "why do my knees click?", parsed: parseAgendaTurn(J({ reply: "Clicking without pain is usually gas in the joint. Does it hurt when it clicks?", covered: [], next: null }), A.map((i) => i.id)) });
+  ok(/Does it hurt/.test(tangent.reply), "athlete asked something: Joe's clarifying question may stay on a held turn");
+  ok(composeReply({ reply: "Plain fallback? yes.", malformed: true }, null) === "Plain fallback? yes.", "malformed fallback text is never rewritten");
+  const endAns = advanceAgenda(A, { ...st, pending: "injury" }, { message: "nah that's it", parsed: null, endIntent: true });
+  ok(endAns.state.covered.includes("injury") && endAns.finished, "'nah that's it' answers the pending item and ends");
+}
 
 console.log("pain outcomes -> marks:");
 {
