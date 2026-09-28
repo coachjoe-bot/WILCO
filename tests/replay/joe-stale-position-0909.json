@@ -1,0 +1,23 @@
+{
+  "bug": "T64 Fix 7 — chat read the OLD block's start seconds after a new program was saved, then narrated the wrong day",
+  "source": "outputs/T64-diagnosis-A-program-lifecycle.md, BUG 7 — real workouts rows, athlete 0704b840-45db-4bff-81eb-064154092e7f, 2026-09-09 21:12-21:16 UTC",
+  "note": "programText below is RECONSTRUCTED from the diagnosis report's verbatim quotes of Week 1/2/4 (the report did not capture the full raw program_text). Week 3 content is a plausible filler for weekCount purposes only, not quoted from prod. Every quoted line (Week 1 Tuesday, Week 2 Tuesday, Week 4 Monday) is copied character-for-character from the diagnosis's evidence section.",
+  "athleteMessage": "Just added a new program, check it out.",
+  "athleteMessageAt": "2026-09-09T21:13:03Z",
+  "oldBlockAppliedAt": "2026-08-16T22:54:04.413Z",
+  "newBlockAppliedAt": "2026-09-09T21:12:54.705Z",
+  "programText": "WEEK 1\nMONDAY — off\nTUESDAY — Upper, light\nPull-ups 3x8\nIncline DB Bench 3x8 @ 45lb\nChest-Supported Row 3x12\nBand Pull-Aparts 3x15\nFace Pulls 3x15\nWEDNESDAY — Front Squat/Clean Pull, light\nFront Squat 4x3 @ 85kg\nClean Pull 4x3 @ 107kg\n\nWEEK 2\nMONDAY — off\nTUESDAY — Front Squat/Clean Pull\nFront Squat 4x3 @ 97.5kg\nClean Pull 4x3 @ 123kg\nWEDNESDAY — Upper\nIncline DB Bench 4x8 @ 65lb\n\nWEEK 3\nMONDAY — off\nTUESDAY — Front Squat/Clean Pull, heavier\nFront Squat 4x2 @ 102.5kg\nWEDNESDAY — Upper\nIncline DB Bench 4x6 @ 67.5lb\n\nWEEK 4\nMONDAY — Upper\nIncline DB Bench 4x8 @ 70lb\nHorizontal Cable Row 3x10 @ 160lb\nArnold Press 3x8 @ 50lb\nDB Curls 2x10 @ 40lb\nToes-to-Bar 3x8\nTUESDAY — off\nWEDNESDAY — off",
+  "athleteOverride": { "week": 1, "day": 2, "at": "2026-09-09T21:13:03Z" },
+  "expect": {
+    "withOldBlockStart": { "week": 4, "label_contains": "MONDAY" },
+    "withNewBlockStart": { "week": 1, "label_contains": "MONDAY" },
+    "withOverride": {
+      "week": 1,
+      "day": 2,
+      "label_contains": "TUESDAY",
+      "isRestDay": false,
+      "sessionText_contains": ["Pull-ups 3x8", "Incline DB Bench 3x8 @ 45lb"],
+      "sessionText_excludes": ["off"]
+    }
+  }
+}

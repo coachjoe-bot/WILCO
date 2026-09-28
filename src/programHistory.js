@@ -95,17 +95,12 @@ export function digestWorkouts(rows) {
   return s.length <= 3200 ? s : `${s.slice(0, 1600)}\n…\n${s.slice(-1600)}`;
 }
 
-// Close an open block row: stamp completed_at, then best-effort generate the
-// recap from the logs that fell inside the block. The stamp must land even when
-// the recap fails (recap is AI + extra reads; the close is the source of truth).
-// completedAtOverride: "retire" ends a phase at the LAST WORKOUT logged under
-// it, not at the moment the button was tapped.
-async function closeBlock(athleteId, row, deps, completedAtOverride = null) {
+// The recap itself: a Sonnet call plus two reads, a second or several. Split out
+// of closeBlock (T64 Fix 7a) so the close's ROW WRITES — which is what the next
+// chat turn's position read actually depends on — never wait on it. Fire-and-
+// forget from closeBlock; never awaited on any save's critical path.
+async function generateBlockRecap(athleteId, row, completedAt, deps) {
   const { sbRead, sbUpdateWhere, askClaude } = deps;
-  const completedAt = (completedAtOverride && !Number.isNaN(Date.parse(completedAtOverride)))
-    ? new Date(completedAtOverride).toISOString()
-    : new Date().toISOString();
-  await sbUpdateWhere("program_history", `?id=eq.${row.id}`, { completed_at: completedAt });
   try {
     const from = row.applied_at ? `&created_at=gte.${encodeURIComponent(row.applied_at)}` : "";
     const [logs, goals] = await Promise.all([
@@ -140,6 +135,28 @@ async function closeBlock(athleteId, row, deps, completedAtOverride = null) {
     const text = (recap || "").trim();
     if (text) await sbUpdateWhere("program_history", `?id=eq.${row.id}`, { block_recap: text.slice(0, 1500) });
   } catch (e) { console.error("[history] block recap failed:", e?.message || e); }
+}
+
+// Close an open block row: stamp completed_at (the ONLY part anything downstream
+// waits on), then kick off the recap in the background. completedAtOverride:
+// "retire" ends a phase at the LAST WORKOUT logged under it, not at the moment
+// the button was tapped.
+//
+// T64 Fix 7a: this used to AWAIT the whole recap (a Sonnet call plus two reads)
+// before returning, which meant a chat message sent seconds after a program save
+// could race a still-in-flight close — the very next block's row wasn't inserted
+// yet, so "what's today" read the OLD block's start date. The recap is real work
+// but nothing except the athlete's Past Blocks tab needs it fast; the position
+// system only needs the completed_at stamp and the new row's applied_at, both of
+// which are now on the critical path and nothing else is.
+async function closeBlock(athleteId, row, deps, completedAtOverride = null) {
+  const { sbUpdateWhere } = deps;
+  const completedAt = (completedAtOverride && !Number.isNaN(Date.parse(completedAtOverride)))
+    ? new Date(completedAtOverride).toISOString()
+    : new Date().toISOString();
+  await sbUpdateWhere("program_history", `?id=eq.${row.id}`, { completed_at: completedAt });
+  generateBlockRecap(athleteId, row, completedAt, deps).catch((e) => console.error("[history] block recap failed:", e?.message || e));
+  return completedAt;
 }
 
 // Live status paragraph for the OPEN block — the current-phase card's answer to
@@ -205,9 +222,13 @@ export async function refreshOpenBlockRecap({ athleteId }, deps) {
 
 // Fire-and-forget from every program_text save path (never await it on the save's
 // critical path, never let it throw into the caller). deps = {sbRead, sbInsert,
-// sbUpdateWhere, askClaude} from App.jsx.
+// sbUpdateWhere, askClaude, onBlockStart} from App.jsx. onBlockStart(text,
+// startedOn), when given, fires the MOMENT this function knows the current
+// block's start — before the Haiku summary call or the row insert — so the
+// caller can prime its own chat-context cache synchronously instead of racing a
+// DB read against this still-in-flight write (T64 Fix 7a).
 export async function snapshotProgramHistory({ athleteId, text, source, forceNewBlock = false, startsAt = null, endsAt = null, blockName = null }, deps) {
-  const { sbRead, sbInsert, askClaude } = deps;
+  const { sbRead, sbInsert, askClaude, onBlockStart } = deps;
   const t = (text || "").trim();
   const rows = await sbRead(
     "program_history",
@@ -240,11 +261,23 @@ export async function snapshotProgramHistory({ athleteId, text, source, forceNew
   if (!isNewBlock) {
     // Same block, evolved text. applied_at and source stay those of the block's
     // first save; per-tweak provenance already lives in program_modifications.
+    // The start hasn't moved, but prime anyway — a chat turn racing THIS save
+    // must see the (unchanged) start under the NEW text's identity, not fall
+    // through to a cache miss that re-reads a row this same write is touching.
+    if (onBlockStart) { try { onBlockStart(t, latest.applied_at || null); } catch (_) {} }
     await deps.sbUpdateWhere("program_history", `?id=eq.${latest.id}`, { program_text: t });
     return;
   }
 
   if (latest && !latest.completed_at) await closeBlock(athleteId, latest, deps);
+
+  // applied_at doubles as the block's START (programPosition.js reads it as the
+  // preferred week-1 anchor), so a Builder timeline start lands here. ends_at is
+  // the PLANNED end — the date the whole boundary system keys off. Resolved and
+  // handed to onBlockStart BEFORE the summary/insert below — those are still
+  // real network+AI latency that a fast-following chat turn must never wait on.
+  const appliedAt = startsAt || new Date().toISOString();
+  if (onBlockStart) { try { onBlockStart(t, appliedAt); } catch (_) {} }
 
   // Haiku one-liner BEFORE the insert so the row lands complete in one write
   // (the gateway's insert doesn't return the new id). Best-effort: a summary
@@ -255,9 +288,6 @@ export async function snapshotProgramHistory({ athleteId, text, source, forceNew
     summary = (line || "").trim().split("\n")[0].slice(0, 120) || null;
   } catch (_) {}
 
-  // applied_at doubles as the block's START (programPosition.js reads it as the
-  // preferred week-1 anchor), so a Builder timeline start lands here. ends_at is
-  // the PLANNED end — the date the whole boundary system keys off.
   const row = {
     athlete_id: athleteId,
     program_text: t,
@@ -265,7 +295,7 @@ export async function snapshotProgramHistory({ athleteId, text, source, forceNew
     block_summary: summary,
     // Explicit rather than relying on the DB default: the demo's mock store has
     // no column defaults, and ordering/date-ranges key off this everywhere.
-    applied_at: startsAt || new Date().toISOString(),
+    applied_at: appliedAt,
   };
   if (endsAt) row.ends_at = endsAt;
   // Phase name: caller-provided ("what are we calling it"), else a contract
@@ -288,7 +318,7 @@ export async function snapshotProgramHistory({ athleteId, text, source, forceNew
 //   boundary signal there is (a shifted goal means a shifted chapter), and it
 //   costs the user nothing: no one has to know what a "block" is.
 export async function startNextBlock({ athleteId, programText, source = "next_block" }, deps) {
-  const { sbRead, sbInsert } = deps;
+  const { sbRead, sbInsert, onBlockStart } = deps;
   const rows = await sbRead(
     "program_history",
     `?athlete_id=eq.${athleteId}&order=applied_at.desc&limit=1&select=id,program_text,block_summary,completed_at,applied_at`
@@ -296,12 +326,15 @@ export async function startNextBlock({ athleteId, programText, source = "next_bl
   const latest = (Array.isArray(rows) && rows[0]) || null;
   if (!latest || latest.completed_at) return false;
   await closeBlock(athleteId, latest, deps);
+  const appliedAt = new Date().toISOString();
+  const nextText = (programText || latest.program_text || "").trim() || latest.program_text;
+  if (onBlockStart) { try { onBlockStart(nextText, appliedAt); } catch (_) {} }
   await sbInsert("program_history", {
     athlete_id: athleteId,
-    program_text: (programText || latest.program_text || "").trim() || latest.program_text,
+    program_text: nextText,
     source,
     block_summary: latest.block_summary || null,
-    applied_at: new Date().toISOString(),
+    applied_at: appliedAt,
   });
   return true;
 }

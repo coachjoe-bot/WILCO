@@ -254,12 +254,22 @@ export const currentPosition = ({ programText, startedOn, override, sessions, no
   const loggedLastWeek = times.filter((n) => n >= prevStart.getTime() && n < weekStart.getTime()).length;
   const missedLastWeek = dayCount > 0 ? Math.max(0, dayCount - loggedLastWeek) : 0;
 
+  const label = dayCount > 0 ? (shape.dayTemplate[day - 1] || "") : "";
+  // Only sliced when the week isn't in question — with weekKnown false there is
+  // no way to tell WHICH week's occurrence of this day label to grab in a
+  // week-sectioned program, and a wrong guess there is worse than no hint at all.
+  const sessionText = label && (!shape.hasWeeks || weekKnown)
+    ? extractDaySessionText(programText, { week: shape.hasWeeks ? week : null, dayLabel: label })
+    : null;
+
   return {
     week,
     weekRaw,
     weekKnown,
     day,
-    label: dayCount > 0 ? (shape.dayTemplate[day - 1] || "") : "",
+    label,
+    sessionText,
+    isRestDay: label ? isRestDayLabel(label) : false,
     dayTemplate: shape.dayTemplate,
     hasWeeks: shape.hasWeeks,
     weekCount: shape.weekCount,
@@ -347,6 +357,84 @@ export const resolveBlockSpan = ({ programText, endsAt, answer } = {}) => {
   return { ...parsed, endsAt: parsed.endDate ? new Date(`${parsed.endDate}T12:00:00Z`) : null };
 };
 
+// ─── TODAY'S SESSION TEXT, VERBATIM ──────────────────────────────────────────
+// T64 Fix 7b: once the week/day is resolved correctly, chat still had to pick the
+// right day's LINES out of the whole program text itself, turn by turn — and that
+// second lookup is where "Tuesday's a rest day" (actually Monday's line) came
+// from. This slices the day's own text straight out of the program instead, the
+// same way the header-detection above already knows where one day ends and the
+// next begins. Deliberately conservative: any ambiguity returns null rather than
+// a confidently wrong slice — callers already have the full program text as a
+// fallback, so a null here costs nothing but the extra hint.
+const isWeekSectionHeader = (t) => {
+  if (!WEEK_HEADER_RE.test(t) || WEEK_OF_RE.test(t)) return false;
+  const mentions = (t.match(/\b(?:wk|week)\s*#?\s*\d{1,2}\b/gi) || []).length;
+  return mentions === 1;
+};
+
+export function extractDaySessionText(programText, { week = null, dayLabel = null } = {}) {
+  const text = String(programText || "");
+  if (!text.trim() || !dayLabel) return null;
+  const lines = text.split("\n");
+  const strongAnywhere = lines.some((l) => {
+    const t = l.trim();
+    return t && !SETS_REPS_RE.test(t) && STRONG_DAY_RE.test(t);
+  });
+  const isDayHeaderLine = (t) => {
+    if (SETS_REPS_RE.test(t)) return false;
+    return strongAnywhere ? STRONG_DAY_RE.test(t) : WEAK_DAY_RE.test(t);
+  };
+  const target = cleanLabel(dayLabel).toLowerCase();
+
+  let curWeek = null;
+  let matchStart = -1;
+  let matchEnd = lines.length;
+  let matched = false;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (!t) continue;
+    if (isWeekSectionHeader(t)) {
+      if (matched) { matchEnd = i; break; }
+      const m = t.match(WEEK_HEADER_RE);
+      curWeek = m ? parseInt(m[1], 10) : curWeek;
+      continue;
+    }
+    if (isDayHeaderLine(t)) {
+      if (matched) { matchEnd = i; break; }
+      const inRightWeek = week == null || curWeek == null || curWeek === week;
+      if (inRightWeek && cleanLabel(t).toLowerCase() === target) {
+        matchStart = i;
+        matched = true;
+      }
+      continue;
+    }
+  }
+  if (!matched || matchStart < 0) return null;
+  const body = lines.slice(matchStart, matchEnd).join("\n").trim();
+  return body || null;
+}
+
+// A day's own text reads as a rest day when its header line SAYS so ("MON —
+// off", "Rest day") — never inferred from the absence of set×rep numbers, which
+// a mobility/recovery session could also lack while still being real work.
+const REST_LABEL_RE = /\b(rest|off)\b/i;
+export function isRestDayLabel(label) {
+  return REST_LABEL_RE.test(String(label || ""));
+}
+
+// ─── PROGRAM IDENTITY ────────────────────────────────────────────────────────
+// A cheap, deterministic fingerprint of a program's CURRENT text — good enough to
+// tell "this is a different program than a moment ago" without pulling in a real
+// hash library. Used to key the chat context cache to the program itself rather
+// than to a time-to-live, so a brand new program can never have a stale start
+// date served from a cache that hasn't noticed anything changed (T64 Fix 7a).
+export function programTextIdentity(text) {
+  const s = String(text || "");
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return `${s.length}:${h}`;
+}
+
 // ─── THE WEEK AHEAD ──────────────────────────────────────────────────────────
 // What the Proof Feed and the Coach's Edition look forward to. Two outcomes, and the
 // difference matters more than the contents of either:
@@ -429,5 +517,17 @@ export const positionBlock = (pos) => {
   if (pos.hasWeeks && !pos.weekKnown) lines.push(`- WHICH WEEK of the program they're on is NOT known — nothing on record establishes it. Do NOT assume Week 1 and do NOT state a week as if it were fact. Use the loads you can justify from their recent logged sessions, and ask them once, plainly, which week they're on ("Which week of the block are you on?") so it can be recorded.`);
   if (pos.missedLastWeek > 0) lines.push(`- They missed ${pos.missedLastWeek} programmed session${pos.missedLastWeek === 1 ? "" : "s"} last week. The program has MOVED ON — do not try to make them up, and do not mention it unless they raise it.`);
   if (pos.blockComplete) lines.push(`- They have reached the END of this program's ${pos.weekCount} weeks and are holding on the final week. Worth telling them the block is done when it fits naturally.`);
+  // T64 Fix 7b: hand over the day's OWN lines verbatim so the model reads them
+  // instead of re-locating "today" inside the full program text itself — that
+  // second, unresolved lookup is what let a reply about Tuesday quote Monday's
+  // "off" line. When the slice couldn't be found confidently, say so plainly
+  // rather than let silence read as permission to go hunt through the program.
+  if (pos.isRestDay) {
+    lines.push(`- TODAY IS A REST DAY per the program's own label ("${pos.label}"). Nothing is programmed. Do not invent a session for it.`);
+  } else if (pos.sessionText) {
+    lines.push(`- TODAY'S SESSION, EXACT TEXT FROM THE PROGRAM (this and only this — do not quote a different day's lines, even one mentioned earlier in this conversation):\n${pos.sessionText}`);
+  } else {
+    lines.push(`- Today's exact lines could not be sliced out of the program automatically — read them yourself from the day labeled "${pos.label}" in the ATHLETE'S CURRENT PROGRAM below, and only that day.`);
+  }
   return lines.join("\n");
 };

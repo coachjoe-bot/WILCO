@@ -53,6 +53,12 @@ const openBlock = (text) => ({ id: "blk-1", program_text: text, completed_at: nu
 // second update — assertions pick the writes apart instead of counting them.
 const closes = (calls) => calls.updates.filter((u) => u.data && u.data.completed_at);
 const recaps = (calls) => calls.updates.filter((u) => u.data && u.data.block_recap);
+// T64 Fix 7a: closeBlock no longer AWAITS the recap (a chat turn racing the close
+// must never wait on a Sonnet call) — it fires generateBlockRecap in the
+// background instead. A caller that has already awaited closeBlock/startNextBlock/
+// closeCurrentBlock must flush the microtask queue before asserting on the recap
+// write landing; the completed_at stamp is on the critical path and needs no flush.
+const flush = () => new Promise((r) => setTimeout(r, 10));
 
 // ── changedRatio sanity ──────────────────────────────────────────────────────
 console.log("changedRatio:");
@@ -117,8 +123,9 @@ console.log("rewrite:");
   const { calls, deps } = harness(openBlock(PROGRAM));
   await snapshotProgramHistory({ athleteId: "a1", text: REWRITE, source: "coach_save" }, deps);
   ok(closes(calls).length === 1, "previous block closed");
-  ok(recaps(calls).length === 1, "closed block got its recap");
   ok(calls.inserts.length === 1 && calls.inserts[0].data.program_text === REWRITE.trim(), "new block inserted");
+  await flush();
+  ok(recaps(calls).length === 1, "closed block got its recap (backgrounded, awaited via flush)");
 }
 
 // ── closed latest never evolves in place ─────────────────────────────────────
@@ -199,7 +206,8 @@ console.log("startNextBlock:");
   const did = await startNextBlock({ athleteId: "a1", programText: PROGRAM }, deps);
   ok(did === true, "transition happens on an open block");
   ok(closes(calls).length === 1, "old block closed");
-  ok(recaps(calls).length === 1, "old block recapped from the logs");
+  await flush();
+  ok(recaps(calls).length === 1, "old block recapped from the logs (backgrounded, awaited via flush)");
   ok(calls.inserts.length === 1 && calls.inserts[0].data.source === "next_block", "new row opens with source next_block");
   ok(calls.inserts[0].data.program_text === PROGRAM.trim() || calls.inserts[0].data.program_text === PROGRAM, "same program text carries over");
 }
@@ -248,7 +256,9 @@ console.log("block dates:");
 {
   const { calls, deps } = harness(openBlock(PROGRAM));
   const did = await closeCurrentBlock({ athleteId: "a1" }, deps);
-  ok(did === true && closes(calls).length === 1 && recaps(calls).length === 1, "closeCurrentBlock closes + recaps");
+  ok(did === true && closes(calls).length === 1, "closeCurrentBlock closes");
+  await flush();
+  ok(recaps(calls).length === 1, "…and recaps (backgrounded, awaited via flush)");
   ok(calls.inserts.length === 0, "…and opens NOTHING (next save starts the next chapter)");
 }
 {
@@ -256,6 +266,77 @@ console.log("block dates:");
   ok(blockPromptState({ endsAt: "2026-08-24T12:00:00Z", now: "2026-08-01T12:00:00Z" }) === null, "far out → quiet");
   ok(blockPromptState({ endsAt: "2026-08-24T12:00:00Z", now: "2026-08-20T12:00:00Z" }) === "ending", "inside 7 days → ending");
   ok(blockPromptState({ endsAt: "2026-08-24T12:00:00Z", now: "2026-08-25T12:00:00Z" }) === "ended", "past → ended");
+}
+
+// ── T64 Fix 7a: the recap is decoupled from the block boundary itself ────────
+// The close's completed_at stamp (and the new block's row) are what the very
+// next chat turn's position read depends on — the recap is not. Before this fix
+// closeBlock AWAITED the whole recap (a Sonnet call plus two reads) before the
+// caller's promise resolved, which is exactly the window a fast-following chat
+// message could race.
+console.log("Fix 7a — recap decoupled from the close:");
+{
+  let recapSettled = false;
+  const { calls, deps } = harness(openBlock(PROGRAM));
+  const realAsk = deps.askClaude;
+  deps.askClaude = async (sys, user, maxTokens) => {
+    if (maxTokens === 600) {
+      // The recap call specifically — artificially slow, to prove the close
+      // doesn't wait on it.
+      await new Promise((r) => setTimeout(r, 30));
+      recapSettled = true;
+      return "Block recap text.";
+    }
+    return realAsk(sys, user, maxTokens);
+  };
+  const start = Date.now();
+  await snapshotProgramHistory({ athleteId: "a1", text: REWRITE, source: "coach_save" }, deps);
+  const elapsed = Date.now() - start;
+  ok(closes(calls).length === 1, "old block closed without waiting for the recap");
+  ok(!recapSettled, "the artificially slow recap has NOT resolved yet");
+  ok(recaps(calls).length === 0, "…so no recap write has landed yet either");
+  ok(elapsed < 25, `snapshot returned well before the 30ms recap delay (took ${elapsed}ms)`);
+  await new Promise((r) => setTimeout(r, 40));
+  ok(recapSettled && recaps(calls).length === 1, "recap lands afterward, in the background");
+}
+
+// ── T64 Fix 7a: onBlockStart primes the caller's cache before slow AI calls ──
+console.log("Fix 7a — onBlockStart:");
+{
+  const primed = [];
+  const { calls, deps } = harness(openBlock(PROGRAM));
+  deps.onBlockStart = (text, startedOn) => primed.push({ text, startedOn });
+  await snapshotProgramHistory({ athleteId: "a1", text: REWRITE, source: "coach_save", startsAt: "2026-08-01T00:00:00Z" }, deps);
+  ok(primed.length === 1 && primed[0].text === REWRITE.trim() && primed[0].startedOn === "2026-08-01T00:00:00Z",
+    "new block primes with ITS OWN start, not the old block's");
+}
+{
+  // Same-block evolution: the start hasn't moved, but the caller still gets a
+  // prime under the new text's identity so a racing chat turn never falls
+  // through to a cache miss mid-write.
+  const primed = [];
+  const { calls, deps } = harness(openBlock(PROGRAM));
+  deps.onBlockStart = (text, startedOn) => primed.push({ text, startedOn });
+  const tweaked = PROGRAM.replace("@225", "@235");
+  await snapshotProgramHistory({ athleteId: "a1", text: tweaked, source: "pr_propagation" }, deps);
+  ok(primed.length === 1 && primed[0].text === tweaked && primed[0].startedOn === "2026-07-01T00:00:00Z",
+    "evolve-in-place primes with the block's UNCHANGED start");
+}
+{
+  const primed = [];
+  const { calls, deps } = harness(openBlock(PROGRAM));
+  deps.onBlockStart = (text, startedOn) => primed.push({ text, startedOn });
+  await startNextBlock({ athleteId: "a1", programText: PROGRAM }, deps);
+  ok(primed.length === 1 && primed[0].text === PROGRAM, "startNextBlock primes too");
+}
+{
+  // A no-op save (identical text on an open block) makes no history write at
+  // all — nothing to prime either, since nothing about the block changed.
+  const primed = [];
+  const { calls, deps } = harness(openBlock(PROGRAM));
+  deps.onBlockStart = (text, startedOn) => primed.push({ text, startedOn });
+  await snapshotProgramHistory({ athleteId: "a1", text: PROGRAM, source: "manual_edit" }, deps);
+  ok(primed.length === 0, "no-op save primes nothing");
 }
 
 // ── phase names + retire's completedAt override ──────────────────────────────

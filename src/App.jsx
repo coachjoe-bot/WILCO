@@ -64,7 +64,7 @@ import {
 } from "./deepLink.js";
 // Where the athlete is in their program — week turns Sunday, day advances per logged
 // session, athlete's word wins. Replaces the calendar heuristic that kept drifting.
-import { currentPosition, positionBlock, parseBlockSpan } from "./programPosition.js";
+import { currentPosition, positionBlock, parseBlockSpan, programTextIdentity } from "./programPosition.js";
 // Coach change-request drafting/filing — single source of truth for the rule set
 // governing when Joe offers to loop the human coach in (see file header).
 import { draftChangeRequest, fileChangeRequest, flagToSource } from "./changeRequest.js";
@@ -399,10 +399,31 @@ const dataApi = async (op,table,{data,id,params,conflict}={}) => {
 // resolved position Quick Log uses instead of re-deriving the day itself.
 // Cached per athlete; busted at the sb* write choke point below so a max
 // declared mid-chat is visible to the very next message.
-let joeCtxCache = { athleteId:null, manualRMs:[], programStartedOn:null, prefs:null, prefsRow:null, at:0 };
+// T64 Fix 7a: programStartedOn used to be keyed ONLY on a 5-minute TTL, busted by
+// a write-side hook that raced the fire-and-forget program_history snapshot — a
+// chat message sent seconds after a program save could read the OLD block's
+// start because the new block's row hadn't landed (or its cache-busting insert
+// hadn't fired) yet. Now the cache is keyed on the CURRENT program's own
+// identity (programText param below): a different program can never read a
+// stale start, because "stale" would mean a different identity, which is always
+// a forced cache miss regardless of the TTL.
+let joeCtxCache = { athleteId:null, manualRMs:[], programStartedOn:null, programIdentity:null, prefs:null, prefsRow:null, at:0 };
 const bustJoeCtxCache = (table) => { if(table==="manual_one_rms"||table==="program_history"||table==="athlete_training_prefs") joeCtxCache.at = 0; };
-const getJoeCtx = async (athleteId) => {
-  if(joeCtxCache.athleteId===athleteId && Date.now()-joeCtxCache.at < 5*60*1000) return joeCtxCache;
+// A save's own program_history snapshot (src/programHistory.js) knows the
+// current block's start the moment it resolves new-vs-evolve — well before its
+// Haiku summary call or its row insert. It reports that here, synchronously,
+// so the very next chat turn (which can fire within milliseconds of a save) sees
+// the right start without a DB round trip that could race its own still-in-
+// flight write. Keyed on program-text identity, same as the cache above.
+let pendingBlockStart = null; // { identity, startedOn }
+export const primeProgramStart = (programText, startedOn) => {
+  pendingBlockStart = { identity: programTextIdentity(programText), startedOn: startedOn || null };
+};
+const getJoeCtx = async (athleteId, programText) => {
+  const identity = programText!=null ? programTextIdentity(programText) : null;
+  const fresh = joeCtxCache.athleteId===athleteId && Date.now()-joeCtxCache.at < 5*60*1000
+    && (identity===null || joeCtxCache.programIdentity===identity);
+  if(fresh) return joeCtxCache;
   let manualRMs = [], programStartedOn = null, prefs = null, prefsRow = null;
   try {
     const [rms, hist, pf] = await Promise.all([
@@ -411,11 +432,15 @@ const getJoeCtx = async (athleteId) => {
       sbRead("athlete_training_prefs",`?athlete_id=eq.${athleteId}&limit=1`).catch(()=>[]),
     ]);
     manualRMs = Array.isArray(rms)?rms:[];
-    programStartedOn = (Array.isArray(hist)&&hist[0]?.applied_at)||null;
+    // A pending, client-known start for THIS exact program identity always wins
+    // over the DB read — it can't race a write the way the read can.
+    programStartedOn = (identity!=null && pendingBlockStart?.identity===identity)
+      ? pendingBlockStart.startedOn
+      : ((Array.isArray(hist)&&hist[0]?.applied_at)||null);
     prefs = (Array.isArray(pf)&&pf[0]) ? normalizePrefs(pf[0]) : null;
     prefsRow = (Array.isArray(pf)&&pf[0]) || null;
   } catch(_){ /* chat degrades to history-only, same as before this cache existed */ }
-  joeCtxCache = { athleteId, manualRMs, programStartedOn, prefs, prefsRow, at:Date.now() };
+  joeCtxCache = { athleteId, manualRMs, programStartedOn, programIdentity: identity, prefs, prefsRow, at:Date.now() };
   return joeCtxCache;
 };
 export const sbInsert = async (table,data) => {
@@ -584,7 +609,7 @@ const crewWriteMoments = async (athlete, moments) => {
 // propagation rewrites, and coach.jsx's onProgramSave all route here (flush rule:
 // every sibling call site). Never awaited on a save's critical path, never throws.
 export const snapshotProgram = (athleteId, text, source, opts = {}) => {
-  snapshotProgramHistory({ athleteId, text, source, ...opts }, { sbRead, sbInsert, sbUpdateWhere, askClaude })
+  snapshotProgramHistory({ athleteId, text, source, ...opts }, { sbRead, sbInsert, sbUpdateWhere, askClaude, onBlockStart: primeProgramStart })
     .catch((e) => console.error("[program-history] snapshot failed:", e?.message || e));
   // RECENT CHANGES audit trail (Will, 08-10): every user-visible program save also
   // drops a one-line program_modifications row, so the Program tab's strip shows
@@ -1957,7 +1982,10 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
   // estimate), and it's what keeps one contaminated e1RM from outranking a real
   // declared max. History-only was how 70% snatch resolved off ~200 with an actual
   // 250 on file: chat simply never saw the 250.
-  const { manualRMs, programStartedOn, prefs } = await getJoeCtx(athlete.id);
+  // Passing the athlete's CURRENT program text keys the cached programStartedOn
+  // to this exact program's identity (T64 Fix 7a) — a program that changed since
+  // the cache was filled is a guaranteed cache miss, never a stale 5-minute hold.
+  const { manualRMs, programStartedOn, prefs } = await getJoeCtx(athlete.id, athlete.temp_program_text || athlete.program_text || "");
   let maxContext = "";
   const byEx = {}; // hoisted: the PR CHECK block below reuses the same bests map
   {
@@ -12970,7 +12998,7 @@ export function ProgramBlocksPane({athlete, viewer="athlete"}){
     backfilledRef.current=true;
     (async()=>{
       try {
-        await snapshotProgramHistory({athleteId:athlete.id,text:t,source:"backfill"},{sbRead,sbInsert,sbUpdateWhere,askClaude});
+        await snapshotProgramHistory({athleteId:athlete.id,text:t,source:"backfill"},{sbRead,sbInsert,sbUpdateWhere,askClaude,onBlockStart:primeProgramStart});
         load();
       } catch(e){ console.error("[blocks] backfill failed:",e?.message||e); }
     })();
@@ -13079,7 +13107,7 @@ export function ProgramBlocksPane({athlete, viewer="athlete"}){
       // Closes the current phase (Joe writes the recap from the logs) and opens
       // the next one on the same program text — the explicit "phase 1 is done,
       // phase 2 starts now" for programs with internal phases.
-      const did = await startNextBlock({athleteId:athlete.id,programText:athlete.program_text||""},{sbRead,sbInsert,sbUpdateWhere,askClaude});
+      const did = await startNextBlock({athleteId:athlete.id,programText:athlete.program_text||""},{sbRead,sbInsert,sbUpdateWhere,askClaude,onBlockStart:primeProgramStart});
       if(did) load();
     } catch(e){ setErr("Couldn't close the phase, try again in a sec."); }
     setBusy(false);
