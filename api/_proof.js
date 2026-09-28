@@ -86,10 +86,14 @@ Rules: sets/reps are the prescribed working sets per session. pct_by_week is %1R
 // Built in CODE (deterministic, never open-ended, hard stop). Ranked; `deeper:true`
 // items are hidden behind "Go deeper". `kind` tells the client how to persist the
 // answer. meta carries the values the answer may update.
-// opts: { activeInjury, injuryChange } — the SAME injury area + concrete change the
-// digest's injury_plan addresses, so the question never mismatches the prose.
+// opts: { activeInjury, injuryChange, now } — the SAME injury area + concrete change
+// the digest's injury_plan addresses, so the question never mismatches the prose.
+// `now` (ms epoch) defaults to the real clock; pass it in tests so date-relative
+// questions (goal target date, memory expiry) stay deterministic instead of
+// drifting as real time passes (bit W0 during the T64 base-branch build).
 export function buildQuestionBank(brief, athlete, opts = {}) {
   const q = [];
+  const now = opts.now ?? Date.now();
   const inj = brief.injuries || { active: [], recurring: [] };
   const activeInjury = opts.activeInjury || inj.active[0] || null;
   const injuryChange = opts.injuryChange || null;
@@ -156,8 +160,39 @@ export function buildQuestionBank(brief, athlete, opts = {}) {
   }
   // 5. goal check — ALWAYS a top (non-deeper) question so it's never buried behind
   // "Go deeper" where athletes skip it. The goal is the spine of the check-in.
-  const goal = brief.goals[0]?.goal;
-  q.push({ id: "goal", kind: "goal", deeper: false, meta: { goal: goal || null }, text: goal ? `Still chasing "${goal}", or has the target shifted?` : `What's the main thing you're chasing right now?` });
+  // T62: when the goal carries a target date that's near (or past), the question
+  // names it — the answer is what supersedes a lapsed goal instead of letting it
+  // linger to the 14-day read-side cutoff. This check-in loop is the PRIMARY way
+  // athlete context stays current (Will, 09-01).
+  const g0 = brief.goals[0] || null;
+  const goal = g0?.goal;
+  const gDate = g0?.target_date ? Date.parse(g0.target_date) : NaN;
+  const daysToTarget = Number.isFinite(gDate) ? Math.round((gDate - now) / 864e5) : null;
+  if (goal && daysToTarget != null && daysToTarget <= 21) {
+    // A bare YYYY-MM-DD parses as UTC midnight; format in UTC too or the shown
+    // date lands a day early in every US timezone.
+    const when = new Date(gDate).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+    q.push({
+      id: "goal", kind: "goal", deeper: false, meta: { goal, target_date: g0.target_date },
+      text: daysToTarget < 0
+        ? `"${goal}" was dated ${when}. Did you get it, is the date moving, or is there a new target?`
+        : `"${goal}" is dated ${when}, ${daysToTarget <= 1 ? "right on top of us" : `${daysToTarget} days out`}. On track, moving the date, or changing the target?`,
+    });
+  } else {
+    q.push({ id: "goal", kind: "goal", deeper: false, meta: { goal: goal || null }, text: goal ? `Still chasing "${goal}", or has the target shifted?` : `What's the main thing you're chasing right now?` });
+  }
+  // 5b. memory refresh (T62) — ONE note nearing its expiry gets a direct check,
+  // so time-sensitive context gets refreshed by the athlete instead of silently
+  // dropping off. Watching notes are excluded: the rec pattern gate owns those.
+  const expiring = (brief.memory || [])
+    .filter((m) => m.kind === "situational" && m.expires_at && !/^Watching:/.test(m.fact))
+    .map((m) => ({ ...m, days: Math.round((Date.parse(m.expires_at) - now) / 864e5) }))
+    .filter((m) => Number.isFinite(m.days) && m.days <= 10)
+    .sort((a, b) => a.days - b.days)[0];
+  if (expiring) {
+    const short = expiring.fact.length > 90 ? `${expiring.fact.slice(0, 87)}...` : expiring.fact;
+    q.push({ id: "memory", kind: "memory", deeper: false, meta: { fact: expiring.fact }, text: `Quick check on a note I'm holding: "${short}". Still true, or should I update it?` });
+  }
   // 6. recovery
   q.push({ id: "recovery", kind: "context", deeper: false, text: `Recovery this week: dialed, flat, or running on fumes?` });
 
@@ -177,6 +212,16 @@ export function monthlyExtraQuestions(brief) {
   const q = [{ id: "month_review", kind: "context", deeper: true, text: `Looking at the whole month: what genuinely worked, and what didn't?` }];
   if (volGap) q.push({ id: "month_volume", kind: "context", deeper: true, meta: { gapPct: volGap.rolledGapPct }, text: `The volume gap is the headline this month: what's the real cause? I want the next block built honestly.` });
   q.push({ id: "month_avail", kind: "context", deeper: true, text: `Any bodyweight or training-availability change heading into the next block?` });
+  // T62: long-lived context gets re-confirmed monthly — the oldest note past 60
+  // days. Same [memory] channel as the weekly expiry check; the extractor keeps,
+  // edits, or drops the note off the answer.
+  const stale = (brief.memory || [])
+    .filter((m) => m.kind !== "situational" && m.ageDays >= 60 && !/^Watching:/.test(m.fact))
+    .sort((a, b) => b.ageDays - a.ageDays)[0];
+  if (stale) {
+    const short = stale.fact.length > 90 ? `${stale.fact.slice(0, 87)}...` : stale.fact;
+    q.push({ id: "memory_stale", kind: "memory", deeper: true, meta: { fact: stale.fact }, text: `From a while back I still have: "${short}". Still right, or has it changed?` });
+  }
   return q;
 }
 

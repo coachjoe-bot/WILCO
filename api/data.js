@@ -934,8 +934,10 @@ async function handleCrew(body, caller, res) {
     // Current block's goal only, same rule as loadOwnGoals - a revised goal writes a
     // new row, so keeping every row made one lift show up once per revision. goalsRows
     // is ordered created_at.desc, so the first hit per athlete is their current one.
+    // T62: same active filter as loadOwnGoals — superseded/stale rows are history.
+    const { activeGoals: activePeerGoals } = await import("../src/goals.js");
     const goalsByAthlete = {};
-    for (const g of goalsRows) if (!goalsByAthlete[g.athlete_id]) goalsByAthlete[g.athlete_id] = [g];
+    for (const g of activePeerGoals(goalsRows)) if (!goalsByAthlete[g.athlete_id]) goalsByAthlete[g.athlete_id] = [g];
     const lastWorkoutAt = {};
     for (const w of recentWorkoutRows) if (!lastWorkoutAt[w.athlete_id]) lastWorkoutAt[w.athlete_id] = w.created_at; // query is DESC — first hit per id is the latest
 
@@ -1210,7 +1212,9 @@ async function loadOwnGoals(athleteId) {
   // so "bench 315 by end of summer" and "bench 315 pushed back past mid-August" both
   // showed, and Bench Press appeared twice with two different targets. Newest row
   // wins; the history stays in the table for the coach brain.
-  const rows = all.slice(0, 1);
+  // T62: newest ACTIVE row — a superseded or stale-by-date goal is history here too.
+  const { activeGoals } = await import("../src/goals.js");
+  const rows = activeGoals(all).slice(0, 1);
   if (!rows.length) return [];
   const { resolveLift, bestE1RMForExercise, toLbs, epley1RM } = await import("./_grit.js");
   const currentByLift = {};

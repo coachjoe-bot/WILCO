@@ -56,6 +56,8 @@ import {
   buildLiftHistory, totalSetVolume,
 } from "./_proof.js";
 import { computeGritSnapshot } from "./_grit.js";
+import { activeGoals } from "../src/goals.js";
+import { activeFacts } from "../src/memory.js";
 import { sendToAthlete, pushPayload, ensureVapid, sendTo } from "./_push.js";
 import { mapPooled } from "./_pool.js";
 import { buildCrewBlip } from "./_crew.js";
@@ -250,7 +252,11 @@ async function sendFeedPush(athlete, digest, windowType) {
 // set at any point, not just this month.
 const briefFor = (athlete, batch, windowType, fullWorkouts, fullManual, previousEntryAt) => {
   const w28 = (batch.workouts || []).filter((w) => w.athlete_id === athlete.id);
-  const goals = (batch.goals || []).filter((g) => g.athlete_id === athlete.id);
+  // T62: only ACTIVE goals reach the digest and its questions — superseded and
+  // stale-by-date rows are history, and a check-in probing a dead goal is
+  // exactly the contradiction loop this wave removes.
+  const goals = activeGoals((batch.goals || []).filter((g) => g.athlete_id === athlete.id));
+  const memory = activeFacts((batch.memory || []).filter((m) => m.athlete_id === athlete.id));
   const prs = (batch.prs || []).filter((p) => p.athlete_id === athlete.id);
   const manual = (batch.manual || []).filter((m) => m.athlete_id === athlete.id);
 
@@ -282,7 +288,7 @@ const briefFor = (athlete, batch, windowType, fullWorkouts, fullManual, previous
     catch (e) { console.error("[proof-feed] rank movement failed:", e.message); }
   }
 
-  const brief = buildBrief({ athlete, thisWeekSessions, lastWeekSessions, monthSessions, prs, goals, adherence: null, injuries, windowType, rank, painTrendData });
+  const brief = buildBrief({ athlete, thisWeekSessions, lastWeekSessions, monthSessions, prs, goals, memory, adherence: null, injuries, windowType, rank, painTrendData });
 
   // Month-vs-month facts, computed in CODE from the unwindowed history (monthly
   // digests only). The month layer used to be PROMPTED for "this month vs last
@@ -536,10 +542,10 @@ async function runCoachReports(allAthletes, batch, coaches, opts = {}) {
 
 // ── Batch-fetch everything the briefs need for a set of athlete ids ───────────
 async function fetchBatch(ids) {
-  if (!ids.length) return { workouts: [], goals: [], prs: [], manual: [], prescriptions: [] };
+  if (!ids.length) return { workouts: [], goals: [], prs: [], manual: [], prescriptions: [], memory: [] };
   const idList = ids.map((id) => `"${id}"`).join(",");
   const since = new Date(Date.now() - 28 * 864e5).toISOString();
-  const [workouts, goals, prs, manual, prescriptions] = await Promise.all([
+  const [workouts, goals, prs, manual, prescriptions, memory] = await Promise.all([
     sbSelect("workouts", `?athlete_id=in.(${idList})&created_at=gte.${since}&select=*&order=created_at.asc`),
     sbSelect("athlete_goals", `?athlete_id=in.(${idList})&select=*&order=created_at.desc`),
     sbSelect("prs", `?athlete_id=in.(${idList})&select=*`),
@@ -547,8 +553,11 @@ async function fetchBatch(ids) {
     // program_prescriptions only exists after the Phase 1 migration — tolerate its
     // absence so deploying code before the migration can't hard-fail the run.
     sbSelect("program_prescriptions", `?athlete_id=in.(${idList})&select=*`).catch(() => []),
+    // T62 memory engine: the brief carries the coach's saved notes so the
+    // question bank can probe what's expiring or stale (tolerant like above).
+    sbSelect("athlete_memory", `?athlete_id=in.(${idList})&status=eq.active&select=athlete_id,content,kind,expires_at,updated_at,created_at&order=updated_at.desc`).catch(() => []),
   ]);
-  return { workouts, goals, prs, manual, prescriptions };
+  return { workouts, goals, prs, manual, prescriptions, memory };
 }
 
 // ── MAIN HANDLER ─────────────────────────────────────────────────────────────

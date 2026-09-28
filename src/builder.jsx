@@ -615,8 +615,9 @@ Anything wrong is a one-word fix now and a wasted week later. Good to build?`;
     setBusy(true); setErr("");
     try {
       // The blueprint's timeline rides along so the save can stamp the new
-      // block's start (applied_at) and planned end (ends_at).
-      await onSaveToProgram(draftText, parseTimeline(blueprint?.timeline?.value));
+      // block's start (applied_at) and planned end (ends_at); the blueprint's
+      // goal rides too so the apply supersedes the athlete's goal on file (T62).
+      await onSaveToProgram(draftText, parseTimeline(blueprint?.timeline?.value), blueprint?.goal?.value||null);
       if (draftIdRef.current) await sbUpdateWhere("program_drafts", `?id=eq.${draftIdRef.current}`, { status: "applied", updated_at: nowIso() }).catch(() => {});
       track("builder_draft_applied", "ai");
       setConfirmSave(null);

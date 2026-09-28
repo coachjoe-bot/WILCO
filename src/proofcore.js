@@ -355,7 +355,7 @@ export function painTrend(thisWeekSessions, lastWeekSessions, resolved = []) {
 // ─── THE BRIEF (§5) ───────────────────────────────────────────────────────────
 // Pure-code summary handed to Sonnet (server) or rendered on the coach dashboard
 // (client). Compact (a few KB), no raw workout JSON.
-export function buildBrief({ athlete, thisWeekSessions, lastWeekSessions, monthSessions, prs, goals, adherence, injuries, windowType, rank, painTrendData }) {
+export function buildBrief({ athlete, thisWeekSessions, lastWeekSessions, monthSessions, prs, goals, memory, adherence, injuries, windowType, rank, painTrendData }) {
   const thisWeekLifts = buildLiftHistory(thisWeekSessions);
   const lastWeekLifts = buildLiftHistory(lastWeekSessions);
 
@@ -379,6 +379,16 @@ export function buildBrief({ athlete, thisWeekSessions, lastWeekSessions, monthS
 
   const goalLines = (goals || []).slice(0, 4).map((g) => ({
     goal: g.goal_text, target_metric: g.target_metric, target_value: g.target_value, target_date: g.target_date,
+  }));
+
+  // T62 memory engine: the coach's saved notes ride the brief in compact form so
+  // the question bank can probe what's expiring or going stale. Caller passes
+  // ACTIVE rows only; this just trims for prompt size.
+  const memoryLines = (memory || []).slice(0, 20).map((m) => ({
+    fact: String(m.content || "").slice(0, 140),
+    kind: m.kind,
+    expires_at: m.expires_at || null,
+    ageDays: Math.floor((Date.now() - (Date.parse(m.updated_at || m.created_at || "") || Date.now())) / 864e5),
   }));
 
   const thisWeekVolume = totalSetVolume(thisWeekSessions);
@@ -418,6 +428,7 @@ export function buildBrief({ athlete, thisWeekSessions, lastWeekSessions, monthS
     plateaus,
     prs: recentPRs,
     goals: goalLines,
+    memory: memoryLines,
     injuries,
     painTrend: painTrendData || null,   // null when there's no window to compare (e.g. never logged pain)
     rank: rank || null,                 // Grit rank movement (null if not computed — e.g. no bodyweight on file)
