@@ -134,6 +134,7 @@ console.log("short recap (T64 Fix 3b):");
 {
   const { calls, deps } = harness(openBlock(PROGRAM));
   await snapshotProgramHistory({ athleteId: "a1", text: REWRITE, source: "coach_save" }, deps);
+  await flush(); // recap runs in the background since Fix 7a (S1); the short recap rides the same task (S3)
   ok(shortRecaps(calls).length === 1, "closing a block also writes a short recap, in its OWN update call");
   ok(!("block_recap" in shortRecaps(calls)[0].data) && !("block_recap_short" in recaps(calls)[0].data), "the two writes carry distinct fields — never bundled into one payload (so a missing column on one can never fail the other)");
   ok(calls.asked === 3, "recap + short-recap condense + the new block's own summary line — never re-derived from raw logs");
@@ -148,6 +149,7 @@ console.log("short recap (T64 Fix 3b):");
   let n = 0;
   deps.askClaude = async (...args) => { n++; if (n === 2) throw new Error("unknown column block_recap_short"); return originalAsk(...args); };
   await snapshotProgramHistory({ athleteId: "a1", text: REWRITE, source: "coach_save" }, deps);
+  await flush(); // recap runs in the background since Fix 7a (S1); the short recap rides the same task (S3)
   ok(recaps(calls).length === 1, "the full recap still lands even when the short-recap step throws");
   ok(closes(calls).length === 1, "and the block still closes");
   ok(shortRecaps(calls).length === 0, "no short-recap write when its own call fails");
