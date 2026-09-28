@@ -127,14 +127,16 @@ const at = (d) => {
   const a25 = at("2026-08-25");
   eq([a25.knee.state, a25.knee.trend], ["active", "worsening"], "Aug 25 knee: active, worsening");
   eq(said("2026-08-25", "knee").speak, "offer_change_once", "Aug 25 knee: worsening pattern earns ONE offer");
-  has(a25.knee.summary, "3 mentions in this stretch, 3 in the last 14 days", "Aug 25 knee summary counts");
+  has(a25.knee.summary, "it keeps coming up in the last two weeks", "Aug 25 knee summary reads frequency in words");
+  eq([a25.knee.mentions, a25.knee.mentions14d], [3, 3], "Aug 25 knee: counts stay on the record");
   eq([a25.pec.state, a25.pec.trend], ["easing", "improving"], "Aug 25 pec: easing, improving (a clean incline session)");
   ok(a25.marks.knee && a25.marks.knee.offered_at, "Aug 25 offer stamped");
 
   const s01 = at("2026-09-01");
   eq([s01.knee.state, s01.knee.trend], ["active", "worsening"], "Sep 1 knee: active, worsening");
   eq(said("2026-09-01", "knee").speak, "none", "Sep 1 knee: already offered Aug 25, stays quiet (14-day cooldown)");
-  has(s01.knee.summary, "5 mentions in this stretch, 4 in the last 14 days", "Sep 1 knee: 5 real mentions, not the 3 Joe claimed");
+  eq([s01.knee.mentions, s01.knee.mentions14d], [5, 4], "Sep 1 knee: 5 real mentions (4 in 14 days), not the 3 Joe claimed");
+  ok(!/\d+ mentions|twice|three times/.test(s01.knee.summary), "Sep 1 knee: Joe's line carries no count");
   eq([s01.pec.state, s01.pec.trend], ["easing", "improving"], "Sep 1 pec: easing");
 
   const s04 = at("2026-09-04");

@@ -109,5 +109,5 @@ export function performedLines(exercises, opts = {}) {
 export function performedBlock(exercises, opts = {}) {
   const lines = performedLines(exercises, opts);
   if (!lines.length) return "";
-  return `PERFORMED — THIS MESSAGE'S LOG (computed by the app from the saved log; FINAL. Sets, reps and loads here are what they did. Never describe a set with a rep word or number that is not in these lines, and never swap in the program's prescription):\n${lines.map((l) => `- ${l}`).join("\n")}`;
+  return `PERFORMED — THIS MESSAGE'S LOG (computed by the app from the saved log; FINAL. Sets, reps and loads here are what they did. Say reps as the numbers here (5 sets of 3), never as words like single, double or triple, not even for the plan; never swap in the program's prescription):\n${lines.map((l) => `- ${l}`).join("\n")}`;
 }

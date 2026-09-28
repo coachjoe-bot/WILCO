@@ -104,9 +104,9 @@ const rp = JSON.parse(fs.readFileSync(join(here, "../tests/replay/bug2-pain-voic
   eq(lt.turn.verdicts.knee, "none", "founder Sep 1: no second offer within 14 days");
   eq(lt.records.find((r) => r.area === "knee").mentions, 4, "founder Sep 1: the block's history line counts the 4 mentions BEFORE this message");
   const rec = lt.recordsWithTurn.find((r) => r.area === "knee");
-  ok(rec.summary.includes("5 mentions"), `founder Sep 1: the ledger counts 5 real mentions, not Joe's 3 (${rec.summary})`);
+  eq(rec.mentions, 5, "founder Sep 1: the ledger counts 5 real mentions, not Joe's 3");
   const blk = ledgerBlock(lt.records, { turn: lt.turn });
-  ok(blk.includes("5 mentions in this stretch") && blk.includes("(This message included.) Verdict for this message: none"), "block: this message's area shows counts including it, with its verdict");
+  ok(blk.includes("(This message included.) Verdict for this message: none") && !/\d+ mentions/.test(blk), "block: this message's area shows the picture including it, with its verdict, no counts");
   ok(blk.includes("A program change was already offered Aug 25"), "block: the prior offer is named so 'none' reads as a decision");
   ok(blk.includes("Never say first, second or third time"), "block forbids ordinal counting");
   // serious report: a rec is drafted, the app confirms once after staging

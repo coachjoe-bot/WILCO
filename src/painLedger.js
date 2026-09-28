@@ -485,7 +485,9 @@ export function summarize(r) {
   else if (r.gapBefore != null && r.gapBefore >= EPISODE_GAP_DAYS) bits.push(`back ${fmtDay(r.firstAt)} after ${Math.round(r.gapBefore / 7)} weeks quiet`);
   else if (r.mentions === 1) bits.push(`first mentioned ${fmtDay(r.firstAt)}`);
   else bits.push(`came on ${fmtDay(r.firstAt)}`);
-  if (r.mentions > 1) bits.push(`${r.mentions} mentions in this stretch, ${r.mentions14d} in the last 14 days`);
+  // No counts in Joe's line (real-AI pass 09-28: he turned counts into "twice",
+  // "second time"). Frequency reads as words; the numbers stay on the record.
+  if (r.mentions > 1) bits.push(r.mentions14d >= 3 ? "it keeps coming up in the last two weeks" : r.mentions14d === 2 ? "it came up again in the last two weeks" : "on and off since");
   const latestWord = SEVERITY_WORDS[r.lastSeverity] || "noted";
   bits.push(r.mentions > 1 ? `latest ${fmtDay(r.lastAt)} was ${latestWord}` : `${latestWord}`);
   if (r.daysSince > 0) {
