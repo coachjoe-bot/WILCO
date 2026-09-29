@@ -59,6 +59,14 @@ const SCENARIOS = [
     want: "all-weighted-kg", wrong: [] },
   { id: "lbs-plain", name: "lbs athlete, plain typed log (nothing changes)", unit: "lbs", msg: "bench 3x5 at 185, rows 3x8 at 135",
     want: [{ lift: /bench/i, weight: 185, unit: "lbs", source: ["history", "display"] }, { lift: /row/i, weight: 135, unit: "lbs", source: ["history", "display"] }], wrong: [/185\s?kg/i, /135\s?kg/i] },
+  // v3 (orchestrator 09-29): recency ranking, one voice, nothing derived until answered.
+  { id: "lbs-frontsquat-answer", name: "lbs athlete, front squat history kg, 'front squat 3x3 at 225' -> one ask, answer lbs", unit: "lbs", msg: "front squat 3x3 at 225",
+    want: [{ lift: /front squat/i, weight: 225, unit: "kg", source: ["history"], suspect: true }], wrong: [], answer: "lbs" },
+  { id: "kg-snatch-recency", name: "kg athlete, snatch history kg, kg, lbs (none written): 'snatch singles 70/80/90/100'", unit: "kg", msg: "snatch singles 70/80/90/100",
+    want: [{ lift: /snatch/i, weight: 100, unit: "kg", source: ["history"] }], wrong: [/100\s?lbs?\b/i] },
+  { id: "kg-cj-switchover", name: "kg athlete, first C&J after switching (C&J history all lbs) -> asks, answer kg, next C&J kg with no ask", unit: "kg",
+    msg: "clean and jerk 3x1 @ 110,120,125", want: [{ lift: /clean/i, weight: 125, unit: "lbs", source: ["history"], suspect: true }], wrong: [], answer: "kg",
+    followUp: { msg: "clean and jerk singles 115, 120", want: { lift: /clean/i, weight: 120, unit: "kg" } } },
 ].filter((s) => !ONLY || ONLY.has(s.id));
 
 // Per-lift history in mixed units, backdated so each scenario's cleanup (rows
@@ -74,6 +82,14 @@ async function seedHistory() {
     hist(12, "Front Squat 3x3 @ 97.5kg", [{ name: "Front Squat", sets: 3, reps: 3, weight: 97.5, unit: "kg" }]),
     hist(7, "Clean 3x2 @ 95kg", [{ name: "Clean", sets: 3, reps: 2, weight: 95, unit: "kg" }]),
     hist(8, "DB curls 3x10 @ 35lbs", [{ name: "Dumbbell Curl", sets: 3, reps: 10, weight: 35, unit: "lbs" }]),
+    // v3: snatch = the founder's 09-04 C&J shape (recent kg, older lbs, none written)
+    hist(3, "snatch singles 60/70/80/90", [{ name: "Snatch", sets: 4, reps: 1, weight: 90, unit: "kg", set_details: [60, 70, 80, 90].map((w) => ({ weight: w, reps: 1 })) }]),
+    hist(9, "snatch singles 60/70/85", [{ name: "Snatch", sets: 3, reps: 1, weight: 85, unit: "kg", set_details: [60, 70, 85].map((w) => ({ weight: w, reps: 1 })) }]),
+    hist(16, "snatch singles 135/185/205", [{ name: "Snatch", sets: 3, reps: 1, weight: 205, unit: "lbs", set_details: [135, 185, 205].map((w) => ({ weight: w, reps: 1 })) }]),
+    // v3: C&J all lbs (the founder before his first kg C&J on 08-22)
+    hist(7, "clean and jerk singles at 135/225/290", [{ name: "Clean & Jerk", sets: 3, reps: 1, weight: 290, unit: "lbs", set_details: [135, 225, 290].map((w) => ({ weight: w, reps: 1 })) }]),
+    hist(14, "clean and jerk 2x1 @ 225/275", [{ name: "Clean & Jerk", sets: 2, reps: 1, weight: 275, unit: "lbs", set_details: [225, 275].map((w) => ({ weight: w, reps: 1 })) }]),
+    hist(21, "clean and jerk 3x1 @ 225/245/285", [{ name: "Clean & Jerk", sets: 3, reps: 1, weight: 285, unit: "lbs", set_details: [225, 245, 285].map((w) => ({ weight: w, reps: 1 })) }]),
   ]) });
 }
 // Stay under the claude proxy limiter (100 calls / 15 min per athlete): wait
@@ -197,7 +213,8 @@ try {
         inv[`set:${w.weight}${w.unit}`] = !!e && Number(e.weight) === w.weight && e.unit === w.unit;
         const p = prs.find((x) => w.lift.test(x.exercise || ""));
         // Estimated max agrees with the stored pair (Epley on the lbs value).
-        inv[`est:${w.weight}${w.unit}`] = !!p && p.unit === w.unit && Math.abs(Number(p.estimated_1rm) - epley1RM(toLbs(Number(p.weight), p.unit), p.reps || 1)) <= 2;
+        if (w.suspect) inv[`nothingDerived:${w.weight}`] = !p && (await rest(`manual_one_rms?athlete_id=eq.${QA}&created_at=gte.${since}&select=exercise`)).filter((m) => w.lift.test(m.exercise || "")).length === 0;
+        else inv[`est:${w.weight}${w.unit}`] = !!p && p.unit === w.unit && Math.abs(Number(p.estimated_1rm) - epley1RM(toLbs(Number(p.weight), p.unit), p.reps || 1)) <= 2;
         if (w.source) inv[`source:${w.weight}`] = !!e && w.source.includes(e.unit_source);
         inv[`suspect:${w.weight}`] = !!e && !!e.unit_suspect === !!w.suspect;
       }
@@ -212,13 +229,45 @@ try {
     inv.replyAndScreenAgree = sc.wrong.every((re) => !statements(replyText).some((x) => re.test(x)) && !statements(screen).some((x) => re.test(x)));
     const slips = mislabelRes(exs).filter((re) => statements(replyText).some((x) => re.test(x)) || statements(screen).some((x) => re.test(x))).map(String);
     inv.noUnitMislabel = slips.length === 0;
+    // One voice: after the athlete's message, exactly one line asks about the unit
+    // (the app's ask, or Joe's own question when he asked and the app stayed quiet).
+    const tail = screenRaw.slice(screenRaw.lastIndexOf(msg) + msg.length);
+    const flaggedNums = (sc.want === "all-weighted-kg" ? [] : sc.want.filter((w) => w.suspect).map((w) => w.weight));
+    const unitQuestions = tail.split(/(?<=[.!?])\s+|\n+/).filter((x) => /\?\s*$/.test(x.trim()) && (/\b(kgs?|kilos?|lbs?|pounds?|units?)\b/i.test(x) || flaggedNums.some((n) => new RegExp(`(?<![\\d.])${n}(?!\\d)`).test(x))));
+    if (Array.isArray(sc.want)) inv.unitQuestions = unitQuestions.length === (sc.want.some((w) => w.suspect) ? 1 : 0);
+    let answer = null, follow = null;
+    if (sc.answer && inv.rowSaved) {
+      await page.getByRole("button", { name: `It was ${sc.answer}` }).click({ timeout: 20000 }).catch(() => {});
+      await settle();
+      const r2 = (await rest(`workouts?athlete_id=eq.${QA}&created_at=gte.${since}&raw_message=eq.${encodeURIComponent(msg)}&select=parsed_data`))[0];
+      const w = sc.want.find((x) => x.suspect);
+      const e2 = (r2?.parsed_data?.exercises || []).find((x) => w.lift.test(x.name || ""));
+      const prs2 = (await rest(`prs?athlete_id=eq.${QA}&created_at=gte.${since}&select=exercise,weight,unit,reps,estimated_1rm`)).filter((x) => w.lift.test(x.exercise || ""));
+      answer = { saved: e2 && { unit: e2.unit, unit_source: e2.unit_source, unit_suspect: !!e2.unit_suspect }, prs: prs2 };
+      inv.answerWritten = !!e2 && e2.unit === sc.answer && e2.unit_source === "athlete_confirmed" && !e2.unit_suspect;
+      inv.bankedOnce = prs2.length === 1 && prs2[0].unit === sc.answer;
+      inv.noSecondRow = (await rest(`workouts?athlete_id=eq.${QA}&created_at=gte.${since}&raw_message=eq.${encodeURIComponent(msg)}&select=id`)).length === 1;
+      if (sc.followUp) {
+        await paceForLimiter();
+        const composer = page.getByPlaceholder(/Tell Coach Joe about your workout/);
+        await composer.fill(sc.followUp.msg);
+        await page.getByRole("button", { name: "→", exact: true }).click();
+        await settle();
+        const r3 = (await rest(`workouts?athlete_id=eq.${QA}&created_at=gte.${since}&raw_message=eq.${encodeURIComponent(sc.followUp.msg)}&select=parsed_data,bot_reply`))[0];
+        const e3 = (r3?.parsed_data?.exercises || []).find((x) => sc.followUp.want.lift.test(x.name || ""));
+        const s3 = await page.evaluate(() => document.body.innerText);
+        follow = { saved: e3 && { unit: e3.unit, unit_source: e3.unit_source, unit_suspect: !!e3.unit_suspect }, reply: r3?.bot_reply };
+        inv.followUpKg = !!e3 && Number(e3.weight) === sc.followUp.want.weight && e3.unit === sc.followUp.want.unit && !e3.unit_suspect;
+        inv.followUpNoAsk = !/Quick check before I bank/.test(s3.slice(s3.lastIndexOf(sc.followUp.msg)));
+      }
+    }
     const okAll = Object.values(inv).every(Boolean);
     if (!okAll) failed++;
     if (!inv.rowSaved) {
       await page.screenshot({ path: `${OUT.replace(/\.json$/, "")}-${sc.id}-run${run}.png`, fullPage: true }).catch(() => {});
       fs.writeFileSync(`${OUT.replace(/\.json$/, "")}-${sc.id}-run${run}.txt`, screenRaw);
     }
-    results.push({ run, id: sc.id, name: sc.name, displayUnit: sc.unit, msg, parserEx, slips, saved: exs.map((e) => ({ name: e.name, weight: e.weight, unit: e.unit, unit_source: e.unit_source, unit_suspect: !!e.unit_suspect })), prs, reply: replyText, inv });
+    results.push({ run, id: sc.id, name: sc.name, displayUnit: sc.unit, msg, parserEx, slips, saved: exs.map((e) => ({ name: e.name, weight: e.weight, unit: e.unit, unit_source: e.unit_source, unit_suspect: !!e.unit_suspect })), unitQuestions, answer, follow, prs, reply: replyText, inv });
     fs.writeFileSync(OUT, JSON.stringify(results, null, 2));
     console.log(`${okAll ? "✓" : "✗"} run ${run} ${sc.name}\n    sent:   ${JSON.stringify(msg.slice(0, 200))}\n    parser: ${JSON.stringify(parserEx)}\n    saved:  ${JSON.stringify(exs.map((e) => `${e.name} ${e.weight} ${e.unit} (${e.unit_source}${e.unit_suspect ? ", suspect" : ""})`))}\n    prs:    ${JSON.stringify(prs.map((p) => `${p.exercise} ${p.weight}${p.unit} x${p.reps} e1rm ${p.estimated_1rm}`))}\n    inv:    ${JSON.stringify(inv)}${slips.length ? `\n    SLIPS:  ${JSON.stringify(slips)}` : ""}\n    reply:  ${JSON.stringify(replyText.slice(0, 260))}`);
     await page.waitForTimeout(5000); // slow pace: the gateway rate-limits bursts
