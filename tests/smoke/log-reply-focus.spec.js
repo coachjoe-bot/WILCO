@@ -64,3 +64,24 @@ test("T67 partial log: a sentence about the planned lifts left out never settles
   await expect.poll(() => calls.filter((c) => c.body?.table === "workouts" && /insert|update/.test(c.body?.op || "") && /whenever you get to them/.test(JSON.stringify(c.body))).length).toBe(0);
   expect(calls.some((c) => c.body?.table === "workouts" && /275 for 3x5, clean work\./.test(JSON.stringify(c.body)))).toBe(true);
 });
+
+// T68 (prod pass 09-29): a kg athlete logs a lift they keep in lbs. Joe is
+// handed that lift's facts in lbs AND the LOG UNITS line. The line was being
+// overwritten by the PR CHECK block's assignment on the deployed app.
+test("T68 mixed units: the LOG UNITS fact and lbs facts reach Joe for a kg athlete's lbs lift", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM, weight_unit: "kg" });
+  const benchRow = { id: "h-b", athlete_id: "x", created_at: new Date(Date.now() - 4 * 86400000).toISOString(), raw_message: "Bench 4x5 @ 190lbs",
+    parsed_data: { exercises: [{ name: "Bench Press", sets: 4, reps: 5, weight: 190, unit: "lbs", unit_source: "written" }], pain_flags: [] } };
+  const { calls } = await mockApi(page, { athlete, chatReply: "195 for 4x5, solid work.",
+    parseResult: { ...emptyParse, exercises: [{ name: "Bench Press", sets: 4, reps: 5, weight: 195, unit: null, set_details: null }] },
+    dataReads: { workouts: [benchRow] } });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  await page.getByPlaceholder(/Tell Coach Joe about your workout/).fill("Bench press 4x5 @ 195");
+  await page.getByRole("button", { name: "→" }).click();
+  await expect(page.getByText("195 for 4x5, solid work.", { exact: true })).toBeVisible({ timeout: 15000 });
+  const sys = sysOf(chatBodies(calls).at(-1));
+  expect(sys).toContain("PR CHECK");
+  expect(sys).toContain("LOG UNITS (app fact, this log): Bench Press was logged in lbs.");
+  expect(sys).toMatch(/Bench Press: 4 sets of 5 at 195 lbs/);
+  expect(sys).not.toMatch(/Bench Press: [^\n]*88\.5 kg/);
+});
