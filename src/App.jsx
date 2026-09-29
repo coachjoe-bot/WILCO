@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, Component, lazy, Suspense } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, Component, lazy, Suspense } from "react";
 // Coach dashboard lives in its own lazily-loaded chunk (src/coach.jsx) so the
 // athlete-facing bundle — what 95% of users download — stays smaller.
 const CoachDashboard = lazy(()=>import("./coach.jsx"));
@@ -7368,6 +7368,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // status "rec"/"rec_applied", payload in blueprint.rec). Native-gated.
   const [recPending,setRecPending] = useState(null);   // {draftId, rec} — the bar's rec
   const [recOpen,setRecOpen] = useState(false);
+  // T68: the boot restore below is async, and its bar mounts in the flow above the
+  // composer. The opener's Start Workout buttons used to render first, then the
+  // bar pushed them (a tap aimed at Start landed elsewhere, 2 of 6 on prod). The
+  // buttons now wait for the restore to settle, and the bar mounts in the same
+  // batch as they appear, with the list re-pinned to the bottom (see the layout
+  // effect after the restore).
+  const [recRestored,setRecRestored] = useState(!CHAT_FIRST_ON);
   const [recBusy,setRecBusy] = useState(false);
   // The bar's ✕ never acts silently (Will 09-01): it asks Save to Drafts or
   // Delete. Backdrop tap cancels and the rec stays live.
@@ -7558,8 +7565,12 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           if(live) setRecPending({draftId:live.id, rec:live.blueprint.rec});
         }
       }catch(_){}
+      setRecRestored(true);   // batched with setRecPending above: one render
     })();
   },[historyLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
+  // A bar mounting shrinks the chat list; keep a reader who was at the bottom
+  // at the bottom, before paint, so nothing they can see slides.
+  useLayoutEffect(()=>{ if(chatPinnedRef.current) scrollChatBottom(); },[recPending?.draftId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── T58/3b: BUILDER MODE IN CHAT + the program sheet ────────────────────────
   // The Builder tab dissolves into the thread: opt-in interview (blueprint strip
@@ -10766,7 +10777,7 @@ ${VOICE_ATHLETE}`;
                       Same answerOpenerChoice handlers; retired by a tap or by typing
                       (send() clears openerChoicePending). CA.accent/onAccent keep
                       both themes in their own colors. */}
-                  {m.role==="assistant"&&openerChoicePending&&!dockWorkout&&i===messages.length-1&&(
+                  {m.role==="assistant"&&openerChoicePending&&recRestored&&!dockWorkout&&i===messages.length-1&&(
                     <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:14,userSelect:"none",WebkitUserSelect:"none"}}>
                       <button onClick={()=>answerOpenerChoice("yes")}
                         style={{background:CA.accent,border:"none",color:CA.onAccent,borderRadius:10,padding:"13px 16px",cursor:"pointer",fontSize:15,fontWeight:800,letterSpacing:.3,width:"100%",fontFamily:"'Inter'"}}>
