@@ -125,3 +125,31 @@ test("BUG-3: coach-locked athlete gets the temp program, the coach wording and t
   expect(calls.find((c) => c.body?.op === "insert" && c.body?.table === "program_modifications")).toBeTruthy();
 });
 
+// ─── BUG-1 ────────────────────────────────────────────────────────────────────
+const now = Date.now();
+const iso = (days) => new Date(now + days * 86400000).toISOString().slice(0, 10);
+const TEXT_END = iso(20);
+const BLOCK_PROGRAM = `BLOCK 1 — QA\nRuns: ${iso(-20)} to ${TEXT_END}\n\nDay 1 - Push\nBench Press 4x5 @ 185`;
+const openBlock = { id: "smoke-open-block-s6", applied_at: new Date(now - 20 * 86400000).toISOString(), completed_at: null, ends_at: null, program_text: BLOCK_PROGRAM };
+const monthDay = (isoDate) => new Date(`${isoDate}T12:00:00Z`).toLocaleDateString("en-US", { month: "long", day: "numeric", timeZone: "UTC" });
+
+for (const [label, text, parse] of [
+  ["just so you know … wraps up <date>", `hey just so you know this program actually wraps up ${monthDay(iso(30))}, not sooner`,
+    { ...emptyParse, context_request: { is_explicit: true, note: "Current program block ends later than planned.", is_injury: false, weight_lbs: null } }],
+  ["it wraps up <date>", `it wraps up ${monthDay(iso(33))}`, emptyParse],
+]) {
+  test(`BUG-1: "${label}" with the parser silent raises the two-tap confirm and never writes athlete_context`, async ({ page }) => {
+    const athlete = makeAthlete({ program_text: BLOCK_PROGRAM });
+    const { calls } = await mockApi(page, { athlete, parseResult: parse, chatReply: "Noted.", dataReads: { program_history: () => [openBlock] } });
+    await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+
+    await say(page, text);
+    await expect(page.getByText(/Your program says/)).toBeVisible({ timeout: 15000 });
+    await expect(page.getByRole("button", { name: /^Use / })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Keep / })).toBeVisible();
+    await expect(page.getByText(/I'll remember that/)).toHaveCount(0);
+    expect(calls.find((c) => (c.body?.op === "upsert" || c.body?.op === "insert" || c.body?.op === "update") && c.body?.table === "athlete_context")).toBeFalsy();
+    // Nothing stored until a tap picks a side.
+    expect(calls.find((c) => c.body?.op === "update" && c.body?.table === "athletes" && c.body?.data?.program_block_span)).toBeFalsy();
+  });
+}

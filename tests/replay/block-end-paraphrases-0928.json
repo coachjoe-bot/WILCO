@@ -1,0 +1,11 @@
+{
+  "description": "T64 final verification BUG-1 (09-28, QA athlete, real model). The QA program's own text declared 'Runs: 2026-08-17 to 2026-09-13'. The exact replay phrasing ('No my program wraps up sept 20th') got the two-tap confirm; these two ordinary paraphrases did not: the parser left program_block_span null, Joe answered conversationally, and the 'just so you know' one was written to athlete_context as 'Sep 28: Current program block ends September 15, 2026.' with a '✓ Got it, I'll remember that.' bubble.",
+  "today": "2026-09-28T16:00:00Z",
+  "programText": "BLOCK 1 — QA\nRuns: 2026-08-17 to 2026-09-13\n\nDay 1 - Push\nBench Press 4x5 @ 185",
+  "appliedAt": "2026-08-17T12:00:00Z",
+  "cases": [
+    { "text": "hey just so you know this program actually wraps up Sept 15th, not sooner", "parserSpan": null, "contextRequestObserved": { "is_explicit": true, "note": "Current program block ends September 15, 2026." }, "expectEndDate": "2026-09-15" },
+    { "text": "it wraps up October 1st", "parserSpan": null, "contextRequestObserved": null, "expectEndDate": "2026-10-01" }
+  ],
+  "expect": { "conflictForEvery": true, "textSideEndDate": "2026-09-13", "contextNoteSaved": false }
+}

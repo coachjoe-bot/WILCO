@@ -99,7 +99,7 @@ export const CHAT_FIRST_ON = CHAT_FIRST_ENABLED || urlFlag("chatfirst");
 import { validatePref, normalizePrefs, describePref, prefsPromptLines, nextSignalState, clearedSignal } from "./trainingPrefs.js";
 import { parseBlockInfo, stripBlockInfo } from "./programContract.js";
 import { lineDiff, findPlacement, mergeGuard, mergeSystemPrompt } from "./programDiff.js";
-import { snapshotProgramHistory, startNextBlock, closeCurrentBlock, setBlockEnd, blockPromptState, parseTimeline, dateToIso, refreshOpenBlockRecap, recapShortFallback, buildBlockSpanAnswer, blockSpanConflict, blockSpanNeedsAsk, wrapCardEligible } from "./programHistory.js";
+import { snapshotProgramHistory, startNextBlock, closeCurrentBlock, setBlockEnd, blockPromptState, parseTimeline, dateToIso, refreshOpenBlockRecap, recapShortFallback, buildBlockSpanAnswer, blockSpanConflict, blockSpanNeedsAsk, wrapCardEligible, statesBlockEnd, resolveStatedSpan } from "./programHistory.js";
 import { decideTempWrite, tempTurnBefore, tempProgramFact, tempConfirmLine, planSlice, countPlanDays } from "./changeScope.js";
 // First-run app tour (spotlight coach-marks + scripted Quick Log demo). Pure
 // display: fixtures never touch real data — see tour.jsx header.
@@ -9529,8 +9529,21 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // "Sep 7", the block's own text said Sep 5, and the app silently kept his
       // number), nothing is stored silently — one deterministic two-tap confirm
       // instead, no model call deciding which number wins.
+      // T64 S6 (verifier BUG-1): a deterministic pre-gate, same precedent as
+      // asksProgramEdit. "it wraps up October 1st" and "just so you know this
+      // program actually wraps up Sept 15th" left the parser's span null, so the
+      // date skipped this branch (no conflict check, no confirm) and landed in
+      // athlete_context as free text instead. statesBlockEnd reads the
+      // statement in code; when it fires it fills (or, on a disagreement,
+      // overrides and logs) the parser's span, and blockEndStated keeps the
+      // remember-this channel below from saving the same fact a second time.
+      let blockEndStated = false;
       try {
-        const s = parsed.program_block_span;
+        const detSpan = fromQuickLog ? null : statesBlockEnd(msg, new Date());
+        const stated = resolveStatedSpan({parserSpan: parsed.program_block_span, detected: detSpan});
+        if(stated.disagree) reportError("ai", new Error("program_block_span: parser disagreed with statesBlockEnd"), {severity:"info", error_type:"block_span_disagree", component:"statesBlockEnd", meta:{parser:parsed.program_block_span, detector:detSpan}});
+        blockEndStated = stated.blockEndStated;
+        const s = stated.span;
         const wks = Number(s?.weeks);
         const validWeeks = Number.isFinite(wks) && wks>=1 && wks<=52 ? wks : null;
         if(s && (s.repeating===true || validWeeks || s.end_date)){
@@ -9543,12 +9556,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
               const statedSide = {endDate: s.end_date||null, weeks: validWeeks, repeating: s.repeating===true};
               setBlockSpanConflictPending({blockId: openBlk.id, program: programSide, stated: statedSide});
               chipSetThisSend = true;
-              followUp(`Your program says ${spanSideLabel(programSide,"long")}. You said ${spanSideLabel(statedSide,"long")}.`);
+              followUp(`Your program says ${spanSideLabel(programSide,"long")}. You said ${spanSideLabel(statedSide,"long")}.`, "choice");
             } else {
               const span = buildBlockSpanAnswer({blockId: openBlk.id, weeks: validWeeks, endsAt: s.end_date||null, repeating: s.repeating===true});
               await sbUpdate("athletes",athlete.id,{program_block_span:span}).catch(e=>{ reportError("data", e, { component:"block_span_write" }); throw e; });
               updatedAthlete.program_block_span = span;
               setAthlete(prev=>({...prev, program_block_span: span}));
+              followUp(`Locked in: ${spanSideLabel({endDate: s.end_date||null, weeks: validWeeks, repeating: s.repeating===true},"long")}.`, "action_done");
             }
           }
           // No open block at all (mid-save race, or no program yet) — nothing to
@@ -9965,7 +9979,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             saved.push("weight");
           }catch(_){}
         }
-        if(cr.note && cr.note.trim().length>2){
+        // T64 S6: a block-end statement already has its one home (the block,
+        // above); it is never also saved here as an unscoped free-text note.
+        if(cr.note && cr.note.trim().length>2 && !blockEndStated){
           const dateTag = new Date().toLocaleDateString("en-US",{month:"short",day:"numeric"});
           const updated = await appendAthleteContext(athlete.id,`${dateTag}: ${cr.note.trim()}`,{longTerm:!!cr.is_injury});
           if(updated!==null){ setAthleteContext(updated); saved.push("note"); }
