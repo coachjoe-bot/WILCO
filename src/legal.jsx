@@ -3,7 +3,7 @@
 // full-screen consent flow shown at athlete signup. The text below is the
 // verbatim version of the documents hosted at trainwilco.com/terms and
 // trainwilco.com/privacy (Terms last updated June 1, 2026; Privacy last
-// updated July 29, 2026; they update independently, hence separate version
+// updated September 29, 2026; they update independently, hence separate version
 // constants below).
 //
 // KEEP IN SYNC: when a hosted document changes, update its text constant below
@@ -25,12 +25,12 @@ const DISP = LEGAL_DARK
 // document (terms, privacy, AND parental_consent) with ONE version string,
 // which falsely recorded athletes as having accepted a version of the Terms
 // that never existed (Terms' own "Last Updated" is June 1; Privacy is updated
-// again today, 07-29, for the push-notification + Meta Pixel disclosures added
-// in this same change). Each constant must match its document's own
+// again 09-29 for the AI and Your Data section; 07-29 added the push-notification
+// + Meta Pixel disclosures). Each constant must match its document's own
 // "Last Updated" line below. parental_consent covers the Terms' liability
 // waiver (§10.5), so it rides on TERMS_VERSION.
 export const TERMS_VERSION = "2026-06-01";
-export const PRIVACY_VERSION = "2026-07-29";
+export const PRIVACY_VERSION = "2026-09-29";
 // App Store guideline 5.1.2(i): before any personal data goes to a third-party
 // AI, the app must clearly disclose it, name the provider, and get explicit
 // permission — a line inside Terms/Privacy doesn't count on its own. This is
@@ -38,6 +38,15 @@ export const PRIVACY_VERSION = "2026-07-29";
 // (both the signup stage and the existing-account login gate key off it) any
 // time what WILCO sends to Anthropic, or why, materially changes.
 export const AI_CONSENT_VERSION = "2026-09-29";
+
+// The whole AI notice, in the fewest words that still name the provider, the
+// purpose and the data (App Store 5.1.2(i)). ONE source: the first section of
+// PRIVACY_TEXT below, the one-time card for existing accounts and the Settings
+// reopen all read it from here. Will, 09-29: as brief as possible, and part of
+// the Privacy Policy itself rather than a boxed block of its own.
+export const AI_NOTICE_TITLE = "AI and Your Data";
+export const AI_NOTICE_ATHLETE = "Your coach runs on Claude, an AI model made by Anthropic. To write your replies, programs and log entries, WILCO sends Anthropic your messages, workout logs, program, goals, injury notes and form-check video frames.";
+export const AI_NOTICE_COACH = "WILCO runs on Claude, an AI model made by Anthropic. To write replies, programs and reports, WILCO sends Anthropic your athletes' messages, workout logs, programs, goals, injury notes and form-check video frames.";
 
 export const TERMS_TEXT = `WILCO TRAINING LLC
 Terms of Service and Liability Waiver
@@ -170,9 +179,11 @@ Wilco Training LLC  |  TrainWilco.com  |  support@trainwilco.com801 Internationa
 
 export const PRIVACY_TEXT = `WILCO TRAINING LLC
 Privacy Policy
-Effective Date: May 22, 2026  |  Last Updated: July 29, 2026
+Effective Date: May 22, 2026  |  Last Updated: September 29, 2026
 Wilco Training LLC (“Wilco,” “we,” “us,” or “our”) is committed to protecting the privacy of all users of the Wilco Training platform (“Platform”), including athletes, coaches, and organization administrators. This Privacy Policy explains what information we collect, how we use it, how we protect it, and what choices you have. By using the Platform, you agree to the practices described in this Privacy Policy.
 This Privacy Policy applies to the Platform operated at TrainWilco.com and all associated web and mobile applications.
+${AI_NOTICE_TITLE}
+${AI_NOTICE_ATHLETE}
 1. Information We Collect
 1.1 Information You Provide Directly
 When you create an account and use the Platform, we collect information you provide, including:
@@ -309,37 +320,13 @@ The Platform is operated from the United States and is subject to U.S. export co
 
 Wilco Training LLC  |  TrainWilco.com  |  support@trainwilco.com801 International Pkwy, Suite #5034, Lake Mary, Florida 32746`;
 
-// Short explanatory body for the AI-processing consent gate (no document text —
-// same treatment as ParentalBody above). Read for the exact "what/who/why" the
-// disclosure covers before changing this copy; guideline 5.1.2(i) needs all of it.
-// `role` swaps the athlete-worded body for a coach-worded one (the coach-side
-// gate in App.jsx's AiConsentGate) — same four categories, described as the
-// athletes' data a coach's own AI calls (program parse, check-in, briefs) send.
-// `signup` is the copy shown above the Privacy Policy at signup: same provider, data
-// and purpose, minus the "we can't create an account without this" sentence, which
-// reads oddly sitting on top of a policy the person is about to agree to anyway.
-function AiConsentBody({ C, role = "athlete", signup = false }) {
-  const coach = role === "coach";
+// Body of the one-time AI card for existing accounts and of Settings' read-only
+// reopen: only the notice, nothing else. `role` swaps in the coach wording.
+function AiConsentBody({ C, role = "athlete" }) {
   return (
-    <div style={{ color: C.muted2, fontSize: 14, lineHeight: 1.7 }}>
-      <p style={{ marginBottom: 12 }}>
-        WILCO's coaching runs on AI. To write {coach ? "your athletes'" : "your"}{" "}
-        coaching replies, programs, and log entries, we send data to Anthropic,
-        the company that makes the Claude AI model:
-      </p>
-      <ul style={{ margin: "0 0 12px", paddingLeft: 20 }}>
-        <li style={{ marginBottom: 6 }}>{coach ? "Athlete messages to the coach" : "Your messages to the coach"}</li>
-        <li style={{ marginBottom: 6 }}>{coach ? "Athlete workout logs and programs" : "Your workout logs and program"}</li>
-        <li style={{ marginBottom: 6 }}>{coach ? "Athlete goals" : "Your goals"}</li>
-        <li style={{ marginBottom: 6 }}>{coach ? "Athlete injury and pain notes" : "Your injury and pain notes"}</li>
-        <li>{coach ? "Video frames from any form check an athlete submits" : "Video frames from any form check you submit"}</li>
-      </ul>
-      <p style={{ marginBottom: 12 }}>
-        {signup
-          ? "You can delete your account and your data at any time in Settings."
-          : `AI coaching is the core of WILCO, so ${coach ? "a coach account" : "the app"} can't run without this. You can delete your account and your data at any time in Settings.`}
-      </p>
-    </div>
+    <p style={{ color: C.muted2, fontSize: 14, lineHeight: 1.7, marginBottom: 12 }}>
+      {role === "coach" ? AI_NOTICE_COACH : AI_NOTICE_ATHLETE}
+    </p>
   );
 }
 
@@ -376,7 +363,7 @@ function LegalDocBody({ C, text }) {
         if (!t) return <div key={i} style={{ height: 8 }} />;
         const isTitle = /^(WILCO TRAINING LLC|Terms of Service and Liability Waiver|Privacy Policy)$/.test(t);
         const isEffective = /^Effective Date:/.test(t);
-        const isSection = /^\d+(\.\d+)*\.?\s+\S/.test(t);
+        const isSection = /^\d+(\.\d+)*\.?\s+\S/.test(t) || t === AI_NOTICE_TITLE; // the AI notice is the one un-numbered section
         if (isTitle) return <div key={i} style={{ color: C.gold, ...DISP, fontSize: 20, letterSpacing: 1, marginTop: i ? 16 : 0, marginBottom: 4 }}>{t}</div>;
         if (isEffective) return <div key={i} style={{ color: C.muted2, fontSize: 12, marginBottom: 10 }}>{t}</div>;
         if (isSection) return <div key={i} style={{ color: C.text, fontWeight: 700, fontSize: 14, marginTop: 14, marginBottom: 4 }}>{t}</div>;
@@ -410,12 +397,12 @@ function ParentalBody({ C }) {
 // drops the checkbox/gate entirely and shows a single "Close" button — used to
 // REOPEN a disclosure someone already accepted (Settings' "AI and your data" row,
 // the login-time AI gate's "read it again" path), never for the original ask.
-// `leadBlock` puts the AI disclosure (AiConsentBody) in a boxed block ABOVE the
-// document text, inside the same scroll area, so the Privacy step at signup carries
-// it without a page of its own. `noCheckbox` is the login-time card for existing
+// The Privacy step at signup carries the AI notice as the first section of the
+// policy text itself (PRIVACY_TEXT), so it needs no page or block of its own.
+// `noCheckbox` is the login-time card for existing
 // accounts: no checkbox, no scroll gate, the primary button works at once and the
 // quiet decline link stays (label via `declineLabel`).
-export function LegalModal({ C, kicker, title, text, parental, aiConsent, aiRole, leadBlock, noCheckbox, checkboxLabel, primaryLabel, declineLabel = "Decline & Go Back", onAccept, onDecline, busy, readOnly }) {
+export function LegalModal({ C, kicker, title, text, parental, aiConsent, aiRole, noCheckbox, checkboxLabel, primaryLabel, declineLabel = "Decline & Go Back", onAccept, onDecline, busy, readOnly }) {
   const [checked, setChecked] = useState(false);
   // You cannot agree to something you have not been shown. The box stays disabled
   // until the document has actually been scrolled to the bottom (Will, 08-12).
@@ -436,19 +423,10 @@ export function LegalModal({ C, kicker, title, text, parental, aiConsent, aiRole
     let raf2 = 0;
     const raf1 = requestAnimationFrame(() => { raf2 = requestAnimationFrame(() => noteScroll(scrollRef.current)); });
     return () => { cancelAnimationFrame(raf1); cancelAnimationFrame(raf2); };
-  }, [text, parental, aiConsent, leadBlock, readOnly, noCheckbox]);
+  }, [text, parental, aiConsent, readOnly, noCheckbox]);
   // Unchecking after reading must not re-arm the gate — you have still read it.
   const canContinue = readOnly ? true : noCheckbox ? !busy : (checked && readToEnd && !busy);
   const docBody = parental ? <ParentalBody C={C} /> : aiConsent ? <AiConsentBody C={C} role={aiRole||"athlete"} /> : <LegalDocBody C={C} text={text} />;
-  const body = leadBlock ? (
-    <>
-      <div style={{ background: C.navy2, border: `1px solid ${C.border}`, borderRadius: 12, padding: "14px 16px", marginBottom: 20 }}>
-        <div style={{ color: C.gold, ...DISP, fontSize: 15, letterSpacing: 1.5, marginBottom: 8 }}>AI and your data</div>
-        <AiConsentBody C={C} role={aiRole||"athlete"} signup />
-      </div>
-      {docBody}
-    </>
-  ) : docBody;
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: C.navy, display: "flex", flexDirection: "column", maxWidth: 600, margin: "0 auto", fontFamily: "'Inter',system-ui,-apple-system,sans-serif" }}>
       <div style={{ padding: "calc(16px + env(safe-area-inset-top,0px)) 20px 12px", borderBottom: `1px solid ${C.border}` }}>
@@ -458,7 +436,7 @@ export function LegalModal({ C, kicker, title, text, parental, aiConsent, aiRole
       <div ref={scrollRef} onScroll={e => noteScroll(e.currentTarget)}
         style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", padding: "16px 20px" }}>
         <div style={{ maxWidth: 720, margin: "0 auto" }}>
-          {body}
+          {docBody}
         </div>
       </div>
       <div style={{ borderTop: `1px solid ${C.border}`, padding: "14px 20px calc(14px + env(safe-area-inset-bottom,0px))", background: C.navy2 }}>
@@ -487,8 +465,8 @@ export function LegalModal({ C, kicker, title, text, parental, aiConsent, aiRole
 }
 
 // Orchestrates the consent sequence: parental gate (only for 13–17) → Terms →
-// Privacy. The Privacy step carries the AI processing disclosure (5.1.2(i)) as a
-// block above the policy, and its one checkbox grants both. onComplete({ isMinor }) fires
+// Privacy. The Privacy step carries the AI notice (5.1.2(i)) as the first section
+// of the policy text, and its one checkbox grants both. onComplete({ isMinor }) fires
 // when every required box is checked and the final "Create Account" is tapped.
 // onDecline fires from any step. `busy` freezes the final step while the
 // account is being created.
@@ -521,7 +499,7 @@ export function ConsentFlow({ C, birthday, busy, onComplete, onDecline }) {
     );
   }
   return (
-    <LegalModal key="privacy" C={C} text={PRIVACY_TEXT} busy={busy} leadBlock
+    <LegalModal key="privacy" C={C} text={PRIVACY_TEXT} busy={busy}
       kicker="STEP 2 OF 2"
       title="Privacy Policy"
       checkboxLabel="I agree to the Privacy Policy and allow WILCO to send my training data to Anthropic to power my coaching."

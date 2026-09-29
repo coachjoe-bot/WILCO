@@ -20,20 +20,37 @@ const identity = readFileSync(new URL("../api/identity.js", import.meta.url), "u
 
 console.log("legal.jsx — the disclosure itself:");
 ok(legal.includes('export const AI_CONSENT_VERSION = "2026-09-29"'), "AI_CONSENT_VERSION is exported with today's date");
+ok(legal.includes('export const PRIVACY_VERSION = "2026-09-29"'), "PRIVACY_VERSION moved to 2026-09-29 with the new section");
+ok(legal.includes("Effective Date: May 22, 2026  |  Last Updated: September 29, 2026"), "the policy's Last Updated line says September 29, 2026");
+const ATHLETE = "Your coach runs on Claude, an AI model made by Anthropic. To write your replies, programs and log entries, WILCO sends Anthropic your messages, workout logs, program, goals, injury notes and form-check video frames.";
+const COACH = "WILCO runs on Claude, an AI model made by Anthropic. To write replies, programs and reports, WILCO sends Anthropic your athletes' messages, workout logs, programs, goals, injury notes and form-check video frames.";
+ok(legal.includes(`export const AI_NOTICE_ATHLETE = "${ATHLETE}"`), "the athlete notice is exactly the two approved sentences");
+ok(legal.includes(`export const AI_NOTICE_COACH = "${COACH}"`), "the coach notice is exactly the two approved sentences");
+ok(legal.includes('export const AI_NOTICE_TITLE = "AI and Your Data"'), 'the policy heading is "AI and Your Data"');
 ok(/function AiConsentBody/.test(legal), "a dedicated AI-consent body component exists (not folded into the Terms/Privacy renderer)");
+{
+  const body = legal.slice(legal.indexOf("function AiConsentBody"), legal.indexOf("// Whole years between"));
+  ok(/AI_NOTICE_COACH : AI_NOTICE_ATHLETE/.test(body) && !/<ul|<li/.test(body), "the card body is only the notice (no bullet list, no extra sentences)");
+}
+ok(!/leadBlock/.test(legal) && !/leadBlock/.test(app), "leadBlock (the boxed block) is gone");
+ok(!/[\u2014]/.test(legal.slice(legal.indexOf("export const AI_NOTICE_TITLE"), legal.indexOf("export const TERMS_TEXT"))), "no em-dashes in the notice copy");
+{
+  // The notice is the FIRST section of the policy text: after the two intro lines,
+  // before "1. Information We Collect", and the renderer treats the title as a heading.
+  const pol = legal.slice(legal.indexOf("export const PRIVACY_TEXT"), legal.indexOf("1. Information We Collect\n1.1"));
+  const iTitle = pol.indexOf("${AI_NOTICE_TITLE}"), iBody = pol.indexOf("${AI_NOTICE_ATHLETE}");
+  ok(iTitle > pol.indexOf("This Privacy Policy applies to the Platform") && iBody === iTitle + "${AI_NOTICE_TITLE}\n".length,
+    "PRIVACY_TEXT carries the heading then the notice, after the intro lines and before section 1");
+  ok(/t === AI_NOTICE_TITLE/.test(legal.slice(legal.indexOf("function LegalDocBody"))), "LegalDocBody renders the un-numbered AI title as a section heading");
+  ok(legal.includes("\n1. Information We Collect\n1.1 Information You Provide Directly"), "existing sections were not renumbered");
+}
 ok(legal.includes("Anthropic"), "the provider is named: Anthropic");
-ok(legal.includes("Claude AI model"), "the model is named: Claude");
-ok(/what is shared|messages to the coach/i.test(legal) && legal.includes("workout logs") && legal.includes("injury and pain notes") && legal.includes("form check"),
-  "the disclosure lists what is shared: chat messages, workout logs/program, goals, injury/pain notes, form-check video frames");
-ok(legal.includes("You can delete your account and your data at any time in Settings"),
-  "the disclosure states account/data deletion is available any time in Settings");
-// Task spec: only claim Anthropic doesn't train on WILCO's data if that sentence
-// ALREADY exists in the Privacy text — it doesn't (checked 2026-09-29), so the
-// AI consent body must not invent the claim.
+// Only claim Anthropic doesn't train on WILCO's data if that sentence ALREADY
+// exists in the Privacy text; it doesn't (checked 2026-09-29), so it is not invented.
 ok(!/Anthropic does not use (it|your data|this data) to train/i.test(legal),
   "does NOT claim Anthropic excludes WILCO data from model training (not in PRIVACY_TEXT, so not invented here)");
 
-console.log("\nConsentFlow — two steps, the AI block rides on the Privacy step:");
+console.log("\nConsentFlow — two steps, the AI notice is part of the Privacy step's policy text:");
 {
   const cf = legal.slice(legal.indexOf("export function ConsentFlow"));
   const iParental = cf.indexOf('stage === "parental"');
@@ -45,13 +62,11 @@ console.log("\nConsentFlow — two steps, the AI block rides on the Privacy step
   ok(/kicker="STEP 1 OF 2"/.test(termsBlock) && /kicker="STEP 2 OF 2"/.test(termsBlock), "kickers read STEP 1 OF 2 and STEP 2 OF 2");
   ok(/onAccept=\{\(\) => setStage\("privacy"\)\}/.test(termsBlock), "accepting Terms advances straight to privacy");
   const priv = cf.slice(cf.indexOf('<LegalModal key="privacy"'));
-  ok(/<LegalModal key="privacy"[^>]*\bleadBlock\b/.test(priv), "the privacy stage renders LegalModal with leadBlock (the AI block above the policy)");
+  ok(/<LegalModal key="privacy"[^>]*text=\{PRIVACY_TEXT\}/.test(priv), "the privacy stage renders the policy text itself (which now opens with the AI notice)");
   ok(priv.includes('checkboxLabel="I agree to the Privacy Policy and allow WILCO to send my training data to Anthropic to power my coaching."'),
     "the one privacy checkbox label names the policy, Anthropic and the purpose, exactly");
   ok((cf.match(/checkboxLabel=/g) || []).length === 3, "signup has exactly three checkboxes at most (parental, terms, privacy), none added");
   const modal = legal.slice(legal.indexOf("export function LegalModal"), legal.indexOf("export function ConsentFlow"));
-  ok(/<AiConsentBody C=\{C\} role=\{aiRole\|\|"athlete"\} signup \/>/.test(modal) && modal.includes("AI and your data"),
-    "leadBlock renders AiConsentBody with a small 'AI and your data' heading inside the scroll body");
   ok(/scrollRef\} onScroll/.test(modal) && /noteScroll\(scrollRef\.current\)/.test(modal) && /checked && readToEnd && !busy/.test(modal),
     "the read-to-end scroll gate is still wired to the same scroll area and the checkbox");
   ok(/noCheckbox \? !busy/.test(modal) && /!readOnly && !noCheckbox && \(\s*<label/.test(modal),
@@ -84,6 +99,7 @@ ok(/function resetAiConsentGate\(\)/.test(app) && (app.match(/resetAiConsentGate
   const gate = app.slice(app.indexOf("function AiConsentGate("), app.indexOf("function WilcoRoot"));
   const card = gate.slice(gate.indexOf("<LegalModal"));
   ok(/<LegalModal[^>]*\bnoCheckbox\b/.test(card) && !/checkboxLabel/.test(card), "the login gate card has no checkbox");
+  ok(card.includes('kicker="ONE MORE THING"') && card.includes(`"AI and your athletes' data" : "AI and your data"`), "the card kicker and titles are as approved");
   ok(card.includes('primaryLabel="Allow and continue"'), 'the gate primary button reads "Allow and continue"');
   ok(card.includes('declineLabel="Not now"') && /onDecline=\{onDecline\}/.test(card), 'the quiet decline link reads "Not now" and still signs out');
 }
