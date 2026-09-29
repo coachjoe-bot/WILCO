@@ -15,6 +15,7 @@ import {
   REF_BW, bwLoadLabel, computeGritSnapshot, resolveLift,
   sessionTonnage, sessionTopSet,
   implausibleJump, prCheckLines, knownMaxLines,
+  LBS_PER_KG,
 } from "../src/grit.js";
 
 let fail = 0, pass = 0;
@@ -72,6 +73,11 @@ approx(bestE1RMForExercise({ name: "bench press", weight: 100, reps: 1, sets: 1,
 // bodyweight + added (pull-up/dip)
 eq(bestE1RMForExercise({ name: "Pull-Ups", unit: "bodyweight", added_weight: 45, reps: 5, sets: 1 }, 180), 263, "pull-up: (180bw + 45 added) x5 → epley(225,5)=263");
 eq(bestE1RMForExercise({ name: "Dips", unit: "bodyweight", reps: 1, sets: 1, assist_weight: 50 }, 180), 130, "dip with 50 assist → 130x1");
+// T68: the added/assist load's unit rides on the row; no added_unit = lbs (every row saved before)
+eq(bestE1RMForExercise({ name: "Pull-Ups", unit: "bodyweight", added_weight: 20, added_unit: "kg", reps: 1, sets: 1 }, 180), 180 + 20 * LBS_PER_KG, "20 kg added: 180 lbs bodyweight + 44.09 lbs (was 200)");
+eq(bestE1RMForExercise({ name: "Pull-Ups", unit: "bodyweight", added_weight: 20, added_unit: "lbs", reps: 1, sets: 1 }, 180), 200, "20 lbs added, stamped lbs: 200");
+eq(bestE1RMForExercise({ name: "Pull-Ups", unit: "bodyweight", added_weight: 45, reps: 5, sets: 1 }, 180), 263, "legacy row (no added_unit) unchanged");
+eq(bestE1RMForExercise({ name: "Dips", unit: "bodyweight", assist_weight: 20, added_unit: "kg", reps: 1, sets: 1 }, 180), 180 - 20 * LBS_PER_KG, "20 kg of assistance");
 eq(bestE1RMForExercise({ name: "Pull-Ups", unit: "bodyweight", reps: 5, sets: 1 }), 0, "no bodyweight passed → bodyweight lift returns 0");
 eq(bestE1RMForExercise({ name: "push-ups", unit: "bodyweight", reps: 10, sets: 3 }, 180), 0, "non-load-bearing bodyweight (push-up) → 0");
 eq(bestE1RMForExercise({ name: "Pull-Ups", unit: "bodyweight", assist_weight: 200, reps: 5, sets: 1 }, 180), 0, "assistance beyond bodyweight → load <= 0 → 0");
