@@ -152,7 +152,7 @@ function invariants(input, turn, text) {
   // PR log names the PR with its number
   if (turn.headline.kind === "pr") {
     const top = exercises[0];
-    out.prNamed = /\bPR\b|personal (best|record)|new best|all-time|lifetime best/i.test(text) && text.includes(String(top.weight));
+    out.prNamed = /\bPRs?\b|personal (best|record)|new best|all-time|lifetime best|(?:over|past|above|beat) (?:your )?(?:old|previous|last) (?:best|max)/i.test(text) && text.includes(String(top.weight));
   }
   // reps never misstated: no single/double/triple word unless every logged set of that shape agrees
   const repsSet = new Set(exercises.flatMap((e) => getExerciseSets(e).map((s) => s.reps)));
@@ -217,6 +217,9 @@ export function table(results) {
     const aw = median(INPUTS.filter((i) => c === "ALL" || i[0] === c).map((i) => countWords(i[1])));
     rows.push(`| ${c} | ${new Set(rs.map((r) => r.idx)).size} x ${Math.max(0, ...rs.map((r) => r.run)) + 1} | ${aw} | ${st(b)} | ${st(a)} |`);
   }
+  // invariants recomputed from the stored replies (so a checker fix applies to old runs)
+  const turns = INPUTS.map((inp) => buildTurn(inp));
+  for (const r of results) if (r.reply) r.inv = invariants(INPUTS[r.idx], turns[r.idx], r.reply);
   rows.push("", "Invariants (fails / checked):");
   for (const v of ["before", "after"]) {
     const rs = results.filter((r) => r.variant === v && r.inv);
