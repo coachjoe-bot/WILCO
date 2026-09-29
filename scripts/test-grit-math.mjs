@@ -14,7 +14,7 @@ import {
   scaledThresholds, BENCH_THRESHOLDS, TIER_NAMES, TIER_POINTS,
   REF_BW, bwLoadLabel, computeGritSnapshot, resolveLift,
   sessionTonnage, sessionTopSet,
-  implausibleJump, prCheckLines,
+  implausibleJump, prCheckLines, knownMaxLines,
 } from "../src/grit.js";
 
 let fail = 0, pass = 0;
@@ -385,6 +385,17 @@ console.log("\nimplausible jump:");
   const wild = prCheckLines([{ name: "Snatch", sets: 1, reps: 1, weight: 160, unit: "kg" }], best, "kg")[0];
   eq(/implausibly far above/.test(wild) && !/NEW PR/.test(wild), true, "an implausible jump gets the sanity-check verdict, not a celebration");
   eq(prCheckLines([{ name: "Push-ups", sets: 3, reps: 20, unit: "bodyweight" }], best, "lbs").length, 0, "bodyweight/unweighted work emits no verdict");
+}
+
+// ── T67: a kg athlete reads kg only (the "340 kg" misread) ────────────────────
+{
+  const best = { "back squat": { name: "Back Squat", e1rm: 340, actual: true } };
+  const l = prCheckLines([{ name: "Back Squat", sets: 5, reps: 3, weight: 145, unit: "kg" }], best, "kg")[0];
+  ok(/154\.2 kg actual 1RM/.test(l) && !/340/.test(l) && !/lbs/.test(l), `kg athlete: the lbs max is shown in kg only (got ${l})`);
+  const lb = prCheckLines([{ name: "Back Squat", sets: 5, reps: 3, weight: 300, unit: "lbs" }], best, "lbs")[0];
+  ok(/340 lbs actual 1RM/.test(lb) && !/kg/.test(lb), "lbs athlete: unchanged, lbs only");
+  eq(JSON.stringify(knownMaxLines([{ name: "Back Squat", e1rm: 340, actual: true }, { name: "Curls", e1rm: 47.3 }], "kg")), JSON.stringify(["Back Squat: 154.2 kg (actual 1RM)", "Curls: ~21.5 kg (est.)"]), "KNOWN 1RMs in kg for a kg athlete");
+  eq(JSON.stringify(knownMaxLines([{ name: "Back Squat", e1rm: 340, actual: true }, { name: "Curls", e1rm: 47.3 }], "lbs")), JSON.stringify(["Back Squat: 340 lbs (actual 1RM)", "Curls: ~47 lbs (est.)"]), "KNOWN 1RMs for lbs athletes: the old lines, byte for byte");
 }
 
 if (fail) { console.error(`\n${fail} FAILURE(S) (${pass} passed)`); process.exit(1); }

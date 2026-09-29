@@ -236,7 +236,8 @@ const fmtDay = (d) => { try { return new Date(d).toLocaleDateString("en-US", { m
 
 // PR CHECK lines are the verdicts (src/grit.js prCheckLines); read, never re-derive.
 function prVerdict(line) {
-  const lbs = [...String(line).matchAll(/(\d+(?:\.\d+)?) lbs/g)].map((m) => +m[1]);
+  // the line's loads, in the one unit it is written in (kg-only for a kg athlete, T67)
+  const lbs = [...String(line).matchAll(/(\d+(?:\.\d+)?) (?:lbs|kg)\b/g)].map((m) => +m[1]);
   let m;
   if ((m = line.match(/: NEW PR — made single at (.+?), ABOVE the previous best (.+?)\.\s*$/))) {
     return { kind: "pr", single: true, newText: m[1], prevText: m[2], jump: lbs.length >= 2 ? lbs[0] / lbs[lbs.length - 1] : 1 };
@@ -258,7 +259,32 @@ const SESSION_GAP_MS = 3 * 60 * 60 * 1000;
 //   painTurn:  the pain ledger's turn ({areas, serious, verdicts})
 //   planDay:   planDayFor(...) result, or null
 // -> {kind, line, alsoAsk}; kind in pain_serious | pr | pain | progress | first | plan_gap | none
-export function logHeadline({ exercises = [], prLines = [], lastDone = null, painTurn = null, planDay = null, sport = "", displayUnit = "lbs", now = new Date() } = {}) {
+//   todayPlanText: the resolver's session text for today (positionBlock's
+//              TODAY'S SESSION), or "" (T67: feeds planRest below)
+// planRest (T67, 09-29): today's planned lifts this log does not hold, when the
+// app asks no skipped-lift question (a partial log, or a lineup off the plan).
+// With today's session in his context, Joe added a paragraph naming what was
+// "still sitting there" on 1 log in 3 or so; Will's standard is acknowledgment
+// plus the one headline. Code names the lifts and says the reply leaves them out.
+export function logHeadline({ exercises = [], prLines = [], lastDone = null, painTurn = null, planDay = null, sport = "", displayUnit = "lbs", now = new Date(), todayPlanText = "" } = {}) {
+  const h = logHeadlineCore({ exercises, prLines, lastDone, painTurn, planDay, sport, displayUnit, now });
+  h.planRest = [];
+  if (!h.alsoAsk && todayPlanText) {
+    const exs = (Array.isArray(exercises) ? exercises : []).filter((e) => e && e.name);
+    const nowMs = new Date(now).getTime();
+    const doneThisSession = (name) => {
+      const id = resolveLift(name).id;
+      const r = lastDone ? (lastDone instanceof Map ? lastDone.get(id) : lastDone[id]) : null;
+      return !!(r && r.ex && Math.abs(nowMs - new Date(r.date).getTime()) < SESSION_GAP_MS);
+    };
+    h.planRest = plannedLifts(todayPlanText)
+      .filter((p) => !exs.some((e) => sameLift(e.name, p.name)) && !doneThisSession(p.name))
+      .map((p) => p.name);
+  }
+  return h;
+}
+
+function logHeadlineCore({ exercises = [], prLines = [], lastDone = null, painTurn = null, planDay = null, sport = "", displayUnit = "lbs", now = new Date() } = {}) {
   const exs = (Array.isArray(exercises) ? exercises : []).filter((e) => e && e.name);
   const nowMs = new Date(now).getTime();
   const getLast = (name) => {
@@ -392,5 +418,8 @@ export function logFocusBlock(h) {
   const reply = h.kind === "none"
     ? "The reply to this log is a short acknowledgment, and that is the whole reply."
     : `The reply to this log is a short acknowledgment plus the headline in one sentence${h.alsoAsk ? ", then that one question" : ""}.`;
-  return `LOG REPLY FOCUS (computed by the app for this log):\n${head}${h.alsoAsk ? `\nQuestion: ${h.alsoAsk}` : ""}\nEverything above this block is for your own understanding: the numbers are there so you get it right, not to be read back. ${reply} Leave out every other lift, estimate, plan difference and history note. If they asked a question or asked for detail in this same message, answer it as fully as they asked; this block never limits an answer they asked for.`;
+  const rest = Array.isArray(h.planRest) && h.planRest.length
+    ? `\nAlso on today's plan and not in this log: ${h.planRest.join(", ")}. They log those when they do them; the app asks nothing about them on this log, so the reply does not mention them.`
+    : "";
+  return `LOG REPLY FOCUS (computed by the app for this log):\n${head}${h.alsoAsk ? `\nQuestion: ${h.alsoAsk}` : ""}${rest}\nEverything above this block is for your own understanding: the numbers are there so you get it right, not to be read back. ${reply} Leave out every other lift, estimate, plan difference and history note. If they asked a question or asked for detail in this same message, answer it as fully as they asked; this block never limits an answer they asked for.`;
 }

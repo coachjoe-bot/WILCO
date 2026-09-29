@@ -104,7 +104,7 @@ import { validatePref, normalizePrefs, describePref, prefsPromptLines, nextSigna
 import { parseBlockInfo, stripBlockInfo } from "./programContract.js";
 import { lineDiff, findPlacement, mergeGuard, mergeSystemPrompt } from "./programDiff.js";
 import { snapshotProgramHistory, startNextBlock, closeCurrentBlock, setBlockEnd, blockPromptState, parseTimeline, dateToIso, refreshOpenBlockRecap, recapShortFallback, buildBlockSpanAnswer, blockSpanConflict, blockSpanNeedsAsk, wrapCardEligible, statesBlockEnd, resolveStatedSpan } from "./programHistory.js";
-import { decideTempWrite, tempTurnBefore, tempProgramFact, tempConfirmLine, planSlice, looksLikePlanText } from "./changeScope.js";
+import { decideTempWrite, tempTurnBefore, tempProgramFact, tempConfirmLine, planSlice, looksLikePlanText, keepRecOnScope, changeScopeFact } from "./changeScope.js";
 // First-run app tour (spotlight coach-marks + scripted Quick Log demo). Pure
 // display: fixtures never touch real data — see tour.jsx header.
 import { TourOffer, TourSpotlight, athleteTourSteps, tourWelcome, tourInteractiveAt, TOUR_QL_FIXTURE, TOUR_SCRIPT } from "./tour.jsx";
@@ -146,7 +146,7 @@ import {
   TIER_NAMES, TIER_COLORS, TIER_POINTS, TIER_DESC,
   BENCH_THRESHOLDS, tierForRatio, bwTierFactor, ageTierFactor, scaledThresholds, getBenchKey,
   sessionTonnage, sessionTopSet, goalTargets, liftSeriesPoints,
-  implausibleJump, prCheckLines,
+  implausibleJump, prCheckLines, knownMaxLines,
 } from "./grit.js";
 export {
   epley1RM, getExerciseSets, bestE1RMForExercise, effectiveDate, parseDbDate,
@@ -2080,8 +2080,9 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
       const k = resolveLift(m.normalized_exercise||m.exercise).id;
       byEx[k] = {name:m.exercise, e1rm:toLbs(m.weight,m.unit), actual:true};
     });
-    const rmLines = Object.values(byEx).sort((a,b)=>b.e1rm-a.e1rm).slice(0,15)
-      .map(r=>`${r.name}: ${r.actual?`${Math.round(r.e1rm)} lbs (actual 1RM)`:`~${Math.round(r.e1rm)} lbs (est.)`}`).join("\n");
+    // T67: in the athlete's own unit (grit.js knownMaxLines); a kg athlete used
+    // to read bare lbs numbers here and the model once said one back as kg.
+    const rmLines = knownMaxLines(Object.values(byEx).sort((a,b)=>b.e1rm-a.e1rm).slice(0,15), athlete.weight_unit).join("\n");
     if(rmLines) maxContext = `\n\nKNOWN 1RMs (an "actual 1RM" is the athlete's real recorded max and ALWAYS outranks an "est." entry; use ONLY to turn a program percentage or RPE target into a weight):\n${rmLines}`;
   }
 
@@ -2149,6 +2150,8 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
     positionContext = `\n\nWHERE THE ATHLETE IS IN THEIR PROGRAM: could not be resolved. Do NOT state a week or day as fact. If they ask for today's session, ask ONE plain question ("Which day of the week are you on?") and work from their answer.`;
   }
   if(opts.tempProgramFact) positionContext += `\n\n${opts.tempProgramFact}`; // T64 S6: temp program saved or not (src/changeScope.js tempProgramFact)
+  // T67: a change asked for today only is never a program rec (src/changeScope.js)
+  try{ const f = opts.changeScope ? changeScopeFact({scope: opts.changeScope, message, isLogTurn}) : ""; if(f) positionContext += `\n\n${f}`; }catch(_){ /* additive */ }
 
   let programContext = "";
   if(athlete.temp_program_text){
@@ -2170,7 +2173,8 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
     try{
       const planText = athlete.temp_program_text || athlete.program_text || "";
       const planDay = planDayFor({programText: planText, loggedNames: logExercises.map(e=>e?.name).filter(Boolean), resolverLabel: posNow?.label||null, week: posNow?.weekKnown ? posNow.week : null});
-      const headline = logHeadline({exercises: logExercises, prLines: prLinesForFocus, lastDone: byLift, painTurn: painLt?.turn||null, planDay, sport: athlete.sport||"", displayUnit: athlete.weight_unit, now: new Date()});
+      // T67: today's session text (the resolver's) names the planned lifts this log leaves out (planRest)
+      const headline = logHeadline({exercises: logExercises, prLines: prLinesForFocus, lastDone: byLift, painTurn: painLt?.turn||null, planDay, sport: athlete.sport||"", displayUnit: athlete.weight_unit, now: new Date(), todayPlanText: posNow && !posNow.isRestDay ? (posNow.sessionText||"") : ""});
       logFocus = `\n\n${logFocusBlock(headline)}`;
     }catch(_){ /* additive: a failure means no block, never a crash */ }
   }
@@ -9452,6 +9456,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       };
       const tempExplicitP = tempPre?.writePlan ? writeTempProgram(tempPre.writePlan.text).catch(()=>null) : null;
       if(tempPre?.inPlay) masterOpts.tempProgramFact = tempProgramFact({athlete:updatedAthlete, recentPlanFound:tempPre.plan, savingNow:!!tempExplicitP});
+      if(tempPre?.scope && !fromQuickLog) masterOpts.changeScope = tempPre.scope; // T67: read by changeScopeFact before Joe speaks
       try {
         reply = await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext,applyDelta,masterOpts);
       } catch(_streamErr){ /* fall through to the one-shot call below */ }
@@ -9527,6 +9532,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           reportError("ai", new Error("propose_program_rec dropped: pain verdict not address_now"), {severity:"info", error_type:"pain_rec_dropped", component:"painLedger", meta:{verdicts:painTurn.turn.verdicts}});
           for(let i=masterToolCalls.length-1;i>=0;i--) if(masterToolCalls[i].name==="propose_program_rec") masterToolCalls.splice(i,1);
         }
+        // T67: the same scope read Joe was handed (changeScopeFact) decides his
+        // rec: a change asked for today only is not a program change, unless
+        // they said it should outlive today (src/changeScope.js keepRecOnScope).
+        if(tempPre?.scope && masterToolCalls.some(tc=>tc.name==="propose_program_rec") && !keepRecOnScope(tempPre.scope, msg)){
+          reportError("ai", new Error("propose_program_rec dropped: change is for today only"), {severity:"info", error_type:"rec_dropped_today_only", component:"changeScope", meta:{signal:tempPre.scope.signal}});
+          for(let i=masterToolCalls.length-1;i>=0;i--) if(masterToolCalls[i].name==="propose_program_rec") masterToolCalls.splice(i,1);
+        }
         let rest = masterToolCalls.filter(tc=>tc.name!=="set_position" && tc.name!=="propose_preference"
           && !(fromQuickLog && (tc.name==="prefill_log_sheet" || tc.name==="pin_session_card" || tc.name==="show_start_buttons")));
         // T62 AUTO-PIN (Will 08-31): a prefill without a pin means the model
@@ -9573,7 +9585,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           return !!(t && painFollowUpPlan(t).draftRec);
         }catch(_){ return false; } })();
         const programWrite = !!(parsed.is_program_update || parsed.program_append || parsed.program_create_request || tempExplicitText || tempDecision.write);
-        const cg = replyGate("chat", reply, {toolCalls: MASTERMIND_ON ? masterToolCalls : [], appWrites:{program: programWrite, rec: painRec}});
+        // T67: the turn's computed facts, so the gate holds Joe to them (pain count,
+        // a load whose unit the app is asking about, rep words the log does not say)
+        const gateTurn = (()=>{ try{ return {painAreas: painTurn?.turn?.areas||[], unitPending: parsedForReply ? pendingUnitLoads(parsedForReply) : [], performed: parsedForReply ? logTurnExercises(parsedForReply, updatedAthlete.weight_unit) : []}; }catch(_){ return null; } })();
+        const cg = replyGate("chat", reply, {toolCalls: MASTERMIND_ON ? masterToolCalls : [], appWrites:{program: programWrite, rec: painRec}, ...(gateTurn?{turn:gateTurn}:{})});
         if(cg.text !== reply){
           const was = reply;
           reply = cg.text;

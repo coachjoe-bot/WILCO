@@ -982,9 +982,13 @@ export function feasibilityLine(rows, goalText, timelineText) {
 // Mirrors finalizeWorkout's celebration rules: a made single above the best on
 // file is an actual PR; an e1RM rise only counts while no actual 1RM exists;
 // an implausible jump gets a sanity-check verdict, not a celebration.
+// T67 (09-29): a kg athlete's lines carry kg ONLY. They used to read
+// "154.2 kg (340 lbs)", and the real model once read that back as "340 kg".
+// One unit per athlete, the one they work in; the comparison itself is done
+// here in lbs and never shown.
+export const showMax = (lbs, unit = "lbs") => unit === "kg" ? `${Math.round((lbs / LBS_PER_KG) * 10) / 10} kg` : `${Math.round(lbs)} lbs`;
 export function prCheckLines(exercises, best, unit = "lbs") {
-  const kg = unit === "kg";
-  const show = (lbs) => kg ? `${Math.round((lbs / LBS_PER_KG) * 10) / 10} kg (${Math.round(lbs)} lbs)` : `${Math.round(lbs)} lbs`;
+  const show = (lbs) => showMax(lbs, unit);
   const lines = [];
   for (const ex of Array.isArray(exercises) ? exercises : []) {
     if (!ex || !ex.name || ex.unit === "bodyweight" || isUnitPending(ex)) continue;
@@ -1014,4 +1018,11 @@ export function prCheckLines(exercises, best, unit = "lbs") {
     }
   }
   return lines;
+}
+
+// The chat's KNOWN 1RMs lines (T67): rows are {name, e1rm (lbs), actual?}, the
+// same map prCheckLines reads. A kg athlete reads kg, never a bare lbs number
+// the model has to convert (the same misread as the PR CHECK lines).
+export function knownMaxLines(rows, unit = "lbs") {
+  return (Array.isArray(rows) ? rows : []).map((r) => `${r.name}: ${r.actual ? "" : "~"}${showMax(r.e1rm, unit)} (${r.actual ? "actual 1RM" : "est."})`);
 }

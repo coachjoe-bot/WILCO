@@ -7,7 +7,7 @@
 import fs from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { changeScope, conversationWindow, conversationScope, countPlanDays, planSlice, isProgramEcho, findRecentPlan, tempTurnBefore, decideTempWrite, tempProgramFact, tempConfirmLine, looksLikePlanText } from "../src/changeScope.js";
+import { changeScope, conversationWindow, conversationScope, countPlanDays, planSlice, isProgramEcho, findRecentPlan, tempTurnBefore, decideTempWrite, tempProgramFact, tempConfirmLine, looksLikePlanText, keepRecOnScope, changeScopeFact, outlivesToday } from "../src/changeScope.js";
 import { asksTempProgram } from "../src/chatRouting.js";
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -430,6 +430,23 @@ const ATH = rp.athlete;
   ok(looksLikePlanText(planSlice(rp.turns[1].joe)), "Joe's real plan cut is a plan");
   ok(looksLikePlanText("Day 1 - Full Body\nDB Squat 4x8\nDay 2 - Full Body\nDB Row 4x8"), "a clean extraction is a plan");
   ok(!looksLikePlanText("Day 1 - Push\nDB Bench Press"), "one exercise line with no sets is not enough");
+}
+
+// ── T67: a today-only change is never a program rec ───────────────────────────
+{
+  const now = new Date(2026, 8, 29, 17, 0);
+  const sc = (m) => conversationScope({ messages: [{ role: "user", content: m, at: now.getTime() }], now });
+  const racks = "the squat racks are all taken today, swap my first lift for something I can do with dumbbells";
+  ok(!keepRecOnScope(sc(racks), racks), "T67 replay (09-29 pass, rec staged 3 of 5): a today-only swap drops the rec");
+  ok(/today's session only/.test(changeScopeFact({ scope: sc(racks), message: racks })), "and Joe is told before he speaks");
+  for (const m of ["swap squats for leg press today and from now on", "make what I logged today my new Monday", "swap bench for dumbbell press today, and put it in my program", "going forward, swap bench for floor press, starting today"])
+    ok(keepRecOnScope(sc(m), m) && !changeScopeFact({ scope: sc(m), message: m }), `a change they say outlives today keeps its rec: ${m}`);
+  for (const m of ["can you swap monday and tuesday", "swap bench for dumbbell press from now on", "no barbell this week, only dumbbells"])
+    ok(keepRecOnScope(sc(m), m), `not today-only, the rec is not the scope's call: ${m}`);
+  const earlier = conversationScope({ messages: [{ role: "user", content: "no rack today", at: now.getTime() - 60000 }, { role: "user", content: "swap monday and tuesday for me", at: now.getTime() }], now });
+  ok(keepRecOnScope(earlier, "swap monday and tuesday for me"), "only the CURRENT message's today-only read drops a rec");
+  ok(changeScopeFact({ scope: sc("Back squat 5x3 today"), message: "Back squat 5x3 today", isLogTurn: true }) === "", "a log that says today is a record, no scope fact");
+  ok(outlivesToday("every monday") && !outlivesToday("just for today"), "outlivesToday reads the athlete's words");
 }
 
 console.log(`\n${fail === 0 ? "✓" : "✗"} change-scope: ${fail === 0 ? "all checks" : fail + " checks"} ${fail === 0 ? "passed" : "failed"}.`);

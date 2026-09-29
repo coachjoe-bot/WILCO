@@ -134,3 +134,85 @@ export function claimGuard(replyText, { toolCalls = [], appWrites = {} } = {}) {
     .join("\n\n");
   return { text: out, changed: true, removed: claims.map((c) => c.text) };
 }
+
+// ── 3. turn guards (T67, 09-29): facts Joe was told not to state ─────────────
+// Measured on shipped code with the real model: the rule was in his context and
+// he still slipped now and then. Each guard enforces a fact the app already
+// computed for the turn, on the sentence that breaks it. Nothing else is touched.
+//   painCountGuard   a count about pain ("that's the second time that knee's
+//                    flared up"). AI contract: Joe never states a count the app
+//                    did not hand him, and the pain ledger hands him none.
+//   unitRestateGuard a sentence restating a load whose unit the app is asking
+//                    about (prAttempts unitCheckFact: "do not restate its weight")
+//   repWordGuard     single/double/triple where no logged set had that many reps
+//                    (PERFORMED: "never a rep word its numbers do not say")
+// Structure is kept: paragraphs, lines (numbered lists) and sentence order.
+
+const splitReply = (text) => String(text || "").split(/\n{2,}/).map((p) => p.split("\n").map((l) => l.split(/(?<=[.!?])\s+/)));
+const joinReply = (paras) => paras
+  .map((lines) => lines.map((sents) => sents.filter((s) => s !== null).join(" ").trim()).filter(Boolean).join("\n"))
+  .filter(Boolean)
+  .join("\n\n");
+// Drop every sentence the test flags; never empty a reply (then keep it whole).
+function dropSentences(text, test) {
+  const src = String(text || "");
+  const paras = splitReply(src);
+  const removed = [];
+  paras.forEach((lines) => lines.forEach((sents) => sents.forEach((s, i) => { if (s && test(s)) { removed.push(s); sents[i] = null; } })));
+  if (!removed.length) return { text: src, changed: false, removed };
+  const out = joinReply(paras);
+  if (!out.trim()) return { text: src, changed: false, removed: [] };
+  return { text: out, changed: true, removed };
+}
+
+// A pain word always counts; a body part counts only when it is an area the
+// pain ledger holds for this turn ("second session back" is not about pain).
+const PAIN_WORDS = /\b(pain|painful|hurts?|hurting|sore|soreness|ach(?:e|es|y|ing)|flare[sd]?|flaring|flare-?ups?|tweak(?:ed|y)?|niggl\w*|irritat\w*|injur\w*)\b/i;
+const PAIN_COUNT = /\b(?:second|third|fourth|fifth|2nd|3rd|4th|5th)\s+(?:time|day|session|mention|week|straight)\b|\btwice\b|\b(?:two|three|four|\d+)\s+(?:times|days|sessions)\s+(?:in a row|straight|running|now)\b|\b(?:two|three|four|\d+)\s+times\b|\bback[- ]to[- ]back\b|\bkeeps? (?:coming|showing) up\b/i;
+const areaWords = (areas) => (Array.isArray(areas) ? areas : []).flatMap((a) => String(a || "").toLowerCase().split(/[_\s]+/)).filter((w) => w.length > 2 && !["left", "right", "lower", "upper", "front", "rear"].includes(w));
+export const statesPainCount = (sentence, areas = []) => {
+  if (!PAIN_COUNT.test(sentence)) return false;
+  if (PAIN_WORDS.test(sentence)) return true;
+  return areaWords(areas).some((w) => new RegExp(`\\b${w}s?\\b`, "i").test(sentence));
+};
+// areas: the pain ledger's areas for this turn (painTurn.turn.areas), may be empty.
+export function painCountGuard(text, areas = []) {
+  return dropSentences(text, (s) => statesPainCount(s, areas));
+}
+
+// loads: [{weight}] pending a unit answer this turn.
+// performed: the turn's settled lifts; a number one of them also carries is left alone.
+export function unitRestateGuard(text, loads = [], performed = []) {
+  const settled = new Set((Array.isArray(performed) ? performed : []).flatMap((e) => [e?.weight, ...(Array.isArray(e?.set_details) ? e.set_details.map((s) => s?.weight) : [])]).map(Number));
+  const nums = (Array.isArray(loads) ? loads : []).map((l) => Number(l && l.weight)).filter((n) => Number.isFinite(n) && n > 0 && !settled.has(n));
+  if (!nums.length) return { text: String(text || ""), changed: false, removed: [] };
+  const res = nums.map((n) => new RegExp(`(?<![\\d.])${String(n).replace(".", "\\.")}(?![\\d])`));
+  // A question stays: Joe asking about the unit himself is the designed path
+  // (prAttempts replyAsksUnit: the app then does not ask a second time).
+  return dropSentences(text, (s) => !/\?\s*$/.test(s.trim()) && res.some((re) => re.test(s)));
+}
+
+// performed: this message's logged exercises ({set_details|reps}). A rep word is
+// rewritten only when no logged set had that rep count; the noun stays a set.
+const REP_WORD_N = { single: 1, double: 2, triple: 3 };
+// the word as a noun for a set: not single-leg, double-check, triple extension, "a single session"
+const REP_WORD_RE = /\b(single|double|triple)(s?)\b(?![- ](?:leg|arm|arms|legs|day|days|session|sessions|rep|reps|set|sets|digit|digits|check|checked|extension|time|times|out|file|handed|the|that|it|down|up))/gi;
+export function repWordGuard(text, performed = []) {
+  const src = String(text || "");
+  const reps = new Set();
+  for (const ex of Array.isArray(performed) ? performed : []) {
+    const sets = Array.isArray(ex?.set_details) && ex.set_details.length ? ex.set_details : [{ reps: ex?.reps }];
+    for (const s of sets) if (Number(s?.reps) > 0) reps.add(Number(s.reps));
+  }
+  if (!reps.size) return { text: src, changed: false, removed: [] };
+  const removed = [];
+  const out = src.replace(REP_WORD_RE, (m, w, pl, off, all) => {
+    const n = REP_WORD_N[w.toLowerCase()];
+    if (reps.has(n)) return m;
+    if (/\bnot a\s*$/i.test(all.slice(Math.max(0, off - 8), off))) return m; // "not a single"
+    removed.push(m);
+    const rep = pl ? "sets" : "set";
+    return /^[A-Z]/.test(w) ? rep[0].toUpperCase() + rep.slice(1) : rep;
+  });
+  return { text: out, changed: out !== src, removed };
+}

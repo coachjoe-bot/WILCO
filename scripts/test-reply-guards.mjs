@@ -9,7 +9,8 @@
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { FOLLOWUP_PRIORITY, classifyFollowUp, arbitrateFollowUp, claimGuard, findClaims, TRUTHFUL_NO_CHANGE } from "../src/replyGuards.js";
+import { FOLLOWUP_PRIORITY, classifyFollowUp, arbitrateFollowUp, claimGuard, findClaims, TRUTHFUL_NO_CHANGE, painCountGuard, statesPainCount, unitRestateGuard, repWordGuard } from "../src/replyGuards.js";
+import { replyGate } from "../src/replyGate.js";
 import { ledgerTurn, painFollowUpPlan, withMark, recStagedLine, keepPainRec, ledgerBlock } from "../src/painLedger.js";
 import { validateFact, ledgerRejects } from "../src/memory.js";
 
@@ -203,6 +204,54 @@ const rp = JSON.parse(fs.readFileSync(join(here, "../tests/replay/bug2-pain-voic
   for (const s of ["Your call, but I'd leave it.", "You're out of town for now, so keep it simple.", "Knees are out of the woods.", "That lift is out of your range for now, build to it.", "I staged nothing, the plan stands.", "Want me to pull front squat?"])
     ok(claimGuard(s, none).changed === false, `not a claim, must pass: ${s}`);
   ok(claimGuard("I staged a rec to swap front squat for leg press.", staged).changed === false, "a true claim passes when the rec was staged this turn");
+}
+
+// ── 4. T67 turn guards: facts Joe was told not to state ──────────────────────
+{
+  // pain counts
+  for (const s of ["That's the second time that knee's flared up.", "Knee pain twice this week now.", "Third session in a row with that ache.", "That tweak keeps coming up."])
+    ok(statesPainCount(s, []), `a pain count is caught: ${s}`);
+  ok(statesPainCount("Second time the knee has done that.", ["knee"]), "a ledger area counts as a pain word on its turn");
+  for (const s of ["Second session back after the break.", "Two times the bar speed dropped.", "Your second set moved faster.", "Knee felt fine, good.", "That's the second time you've hit 100 this month."])
+    ok(!statesPainCount(s, ["knee"]), `not a pain count, must pass: ${s}`);
+  const pc = painCountGuard("Right call to stop. That's the second time that knee's flared up, and it's getting worse. Want me to adjust squats?", ["knee"]);
+  eq(pc.text, "Right call to stop. Want me to adjust squats?", "the count sentence goes, the rest stays in order");
+  eq(painCountGuard("That's the second time the knee flared up.", ["knee"]).changed, false, "a reply is never emptied: nothing else to say, kept whole");
+  ok(/^1\. Deadlift/m.test(painCountGuard("Twice now that back has been sore, go light.\n1. Deadlift 3x5\n2. Row 3x8", []).text), "numbered lines keep their line breaks");
+
+  // unit restate
+  const u = unitRestateGuard("Logged: Front Squat 3x3 at 225. The app will confirm the unit. Deadlift 3x5 at 130 kg next.", [{ weight: 225 }]);
+  ok(!/225/.test(u.text) && /confirm the unit/.test(u.text) && /130 kg/.test(u.text), `the restated flagged load goes (got ${u.text})`);
+  eq(unitRestateGuard("Bench 225 moved well. Squat 3x3 at 225 too.", [{ weight: 225 }], [{ name: "Bench Press", weight: 225, unit: "lbs" }]).changed, false, "a number a settled lift also carries is left alone");
+  eq(unitRestateGuard("Logged.", []).changed, false, "no pending load, no change");
+  eq(unitRestateGuard("Was that 225 in kg or lbs?", [{ weight: 225 }]).changed, false, "Joe's own unit question stays (the app then does not ask again)");
+  ok(!/2250|1225/.test(unitRestateGuard("Total 2250 kg moved, 1225 last week.", [{ weight: 225 }]).removed.join(" ")), "digits inside a bigger number are not the load");
+
+  // rep words
+  const five3 = [{ name: "Back Squat", set_details: [{ weight: 155, reps: 3 }, { weight: 155, reps: 3 }] }];
+  eq(repWordGuard("Two straight jumps on top singles of work.", five3).text, "Two straight jumps on top sets of work.", "singles about triples become sets");
+  eq(repWordGuard("A clean double at 100.", five3).text, "A clean set at 100.", "a lone double becomes a set");
+  eq(repWordGuard("Solid triples today.", five3).changed, false, "a true rep word stays");
+  for (const s of ["Single-leg work next.", "Not a single miss.", "Double-check the bar.", "Triple extension was sharp.", "A single session won't matter.", "Double the rest."])
+    eq(repWordGuard(s, five3).changed, false, `not a rep word, must pass: ${s}`);
+  eq(repWordGuard("Nice singles.", []).changed, false, "no logged sets, no rewrite");
+
+  // the gate wires them in; no turn = only the pain guard on chat/check-in
+  const g = replyGate("chat", "Logged: Front Squat 3x3 at 225. Good work.", { toolCalls: [], turn: { painAreas: [], unitPending: [{ weight: 225 }], performed: [] }, record: false });
+  eq(g.text, "Good work.", "gate applies the unit guard with ctx.turn");
+  ok(g.removed.some((r) => /^unit_restate:/.test(r)), "gate reports what it removed");
+  eq(replyGate("chat", "Logged: Front Squat 3x3 at 225. Good work.", { record: false }).text, "Logged: Front Squat 3x3 at 225. Good work.", "no ctx.turn: the unit guard does not run");
+  eq(replyGate("checkin", "Glad it's better. Second time the knee pain eased off.", { record: false }).text, "Glad it's better.", "check-in: pain count removed without a turn");
+  eq(replyGate("proof_letter", "Knee pain twice this week.", { record: false }).text, "Knee pain twice this week.", "proof letter: not a conversational surface, untouched");
+
+  // replay: the real replies
+  const rp = JSON.parse(fs.readFileSync(join(here, "../tests/replay/t67-log-voice-0929.json"), "utf8"));
+  for (const c of rp.cases) {
+    const r = replyGate("chat", c.reply, { toolCalls: [], turn: c.turn, record: false });
+    eq(r.text !== c.reply, !!c.gate_changes, `replay ${c.id}: gate ${c.gate_changes ? "changes" : "leaves"} the reply`);
+    for (const n of c.never || []) ok(!r.text.includes(n), `replay ${c.id}: "${n}" is gone`);
+    for (const k of c.keeps || []) ok(r.text.includes(k), `replay ${c.id}: "${k}" stays (got ${r.text})`);
+  }
 }
 
 console.log(`\n${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ""}`);

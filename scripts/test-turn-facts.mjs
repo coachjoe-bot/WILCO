@@ -221,5 +221,34 @@ eq(head({ exercises: [kg("Back Squat", 3, 2, 155)], rows: HIST }).kind, "none", 
   eq(logTurnExercises({ exercises: [kg("Snatch", 1, 1, 90)], pr_attempts: [{ exercise: "Snatch", weight: 102, reps: 1, achieved: true }] }, "kg")[0].weight, 90, "real exercises win over pr_attempts");
 }
 
+// ── T67: planRest, today's planned lifts a log leaves out ─────────────────────
+{
+  const today = "Deadlift 3x5 @ 130 kg\nBarbell Row 3x8 @ 70 kg\nPull-ups 3x8";
+  const now = new Date("2026-09-29T17:00:00Z");
+  const zer = [{ name: "Zercher Squat", unit: "kg", sets: 3, reps: 5, weight: 100, set_details: [{ weight: 100, reps: 5 }, { weight: 100, reps: 5 }, { weight: 100, reps: 5 }] }];
+  const h = logHeadline({ exercises: zer, prLines: [], lastDone: new Map(), now, todayPlanText: today });
+  eq(JSON.stringify(h.planRest), JSON.stringify(["Deadlift", "Barbell Row", "Pull-ups"]), "an off-plan log names every planned lift it left out");
+  const block = logFocusBlock(h);
+  ok(/Also on today's plan and not in this log: Deadlift, Barbell Row, Pull-ups\./.test(block) && /does not mention them/.test(block), "the focus block says the reply leaves them out");
+  const dl = [{ name: "Deadlift", unit: "kg", sets: 3, reps: 5, weight: 130, set_details: [{ weight: 130, reps: 5 }] }];
+  eq(JSON.stringify(logHeadline({ exercises: dl, lastDone: new Map(), now, todayPlanText: today }).planRest), JSON.stringify(["Barbell Row", "Pull-ups"]), "a partial log names only what is left");
+  const earlier = new Map([[resolveLift("Barbell Row").id, { name: "Barbell Row", date: new Date(now.getTime() - 3600e3), ex: { name: "Barbell Row", unit: "kg", sets: 3, reps: 8, weight: 70 } }]]);
+  eq(JSON.stringify(logHeadline({ exercises: dl, lastDone: earlier, now, todayPlanText: today }).planRest), JSON.stringify(["Pull-ups"]), "a lift logged earlier this session is not left out");
+  eq(JSON.stringify(logHeadline({ exercises: zer, now }).planRest), JSON.stringify([]), "no plan text, nothing named");
+  ok(!/Also on today's plan/.test(logFocusBlock(logHeadline({ exercises: zer, now }))), "and the block says nothing about it");
+  // the designed skipped-lift question wins: planRest stays empty when alsoAsk is set
+  const prog = "Day 1 - Squat\nBack Squat 5x3 @ 80%\nFront Squat 3x3 @ 70%\nRomanian Deadlift 3x6";
+  const two = [{ name: "Back Squat", unit: "kg", sets: 5, reps: 3, weight: 142.5 }, { name: "Romanian Deadlift", unit: "kg", sets: 3, reps: 6, weight: 100 }];
+  const pd = planDayFor({ programText: prog, loggedNames: two.map((e) => e.name), resolverLabel: "Squat" });
+  const hq = logHeadline({ exercises: two, planDay: pd, now, todayPlanText: "Back Squat 5x3 @ 80%\nFront Squat 3x3 @ 70%\nRomanian Deadlift 3x6" });
+  ok(/Front Squat/.test(hq.alsoAsk || "") && hq.planRest.length === 0, "a session-shaped log keeps its ONE skipped-lift question and names nothing else");
+  // kg athletes: PR verdicts read kg-only lines (grit.js T67)
+  const best = { snatch: { name: "Snatch", e1rm: toLbs(100, "kg"), actual: true } };
+  const pr = prCheckLines([{ name: "Snatch", sets: 1, reps: 1, weight: 105, unit: "kg" }], best, "kg");
+  ok(/NEW PR/.test(pr[0]) && !/lbs/.test(pr[0]), `kg athlete's PR line carries kg only (got ${pr[0]})`);
+  const hp = logHeadline({ exercises: [{ name: "Snatch", sets: 1, reps: 1, weight: 105, unit: "kg" }], prLines: pr, now, sport: "Olympic Weightlifting", displayUnit: "kg" });
+  eq(hp.kind, "pr", "the headline still reads a kg-only PR line");
+}
+
 console.log(`\n${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ""}`);
 process.exit(fail ? 1 : 0);

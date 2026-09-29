@@ -1,0 +1,21 @@
+{
+  "bug": "T67 (loose-ends item 1, 09-29): Joe says more than the one thing on logs. Five real replies from real-model passes on shipped code, each breaking a fact the app had already computed for the turn.",
+  "source": "MISSION-CONTROL outputs: T65-v2-live-pass.json (plan paragraph, unit-ask restating and praise), T64-S2 pass (pain count, quoted in T64-S2-handoff.md), T64-S5-log-focus-before-after.json (rep word). Athlete: the QA fixture, kg display.",
+  "cases": [
+    {"id": "plan_paragraph", "turn": {"performed": [{"name": "Zercher Squat", "unit": "kg", "set_details": [{"weight": 100, "reps": 5}, {"weight": 100, "reps": 5}, {"weight": 100, "reps": 5}]}], "painAreas": [], "unitPending": []},
+     "reply": "Zercher squat, 100 kg for 3 sets of 5, nothing on file before this so it's your new starting mark. Solid load to open with.\n\nThat's not on today's Pull session though. Deadlift and rows still sitting there unlogged, want to knock those out too or is the Zercher swapping in for today?",
+     "fix": "context: LOG REPLY FOCUS names today's planned lifts not in the log and says the reply leaves them out (turnFacts planRest). The gate does not rewrite this one.", "gate_changes": false},
+    {"id": "pain_count", "turn": {"performed": [], "painAreas": ["knee"], "unitPending": []},
+     "reply": "Knees on fire is the right call to stop, not something to push through. That's the second time that knee's flared up, and it's getting worse, not better. If you want, I can adjust squatting in the program so we work around it while it settles.",
+     "gate_changes": true, "never": ["second time"], "keeps": ["right call to stop", "adjust squatting"]},
+    {"id": "unit_restate", "turn": {"performed": [], "painAreas": [], "unitPending": [{"exercise": "Front Squat", "weight": 225}]},
+     "reply": "Logged: Front Squat 3x3 at 225. That one's sitting with the app right now, they're confirming the unit before it banks, so I'll leave it there for the moment.",
+     "gate_changes": true, "never": ["225"], "keeps": ["confirming the unit"]},
+    {"id": "rep_word", "turn": {"performed": [{"name": "Back Squat", "unit": "kg", "set_details": [{"weight": 155, "reps": 3}, {"weight": 155, "reps": 3}, {"weight": 155, "reps": 3}, {"weight": 155, "reps": 3}, {"weight": 155, "reps": 3}]}], "painAreas": [], "unitPending": []},
+     "reply": "155 kg x 3 today, up from 150 on the 19th. Good jump.\n\nHold there one more week. You've made two straight jumps on top singles of work (150 for 5x3, now 155 for 5x3).",
+     "gate_changes": true, "never": ["singles"], "keeps": ["top sets of work", "155 kg x 3"]},
+    {"id": "rep_word_true", "turn": {"performed": [{"name": "Snatch", "unit": "kg", "set_details": [{"weight": 90, "reps": 1}, {"weight": 92, "reps": 1}]}], "painAreas": [], "unitPending": []},
+     "reply": "92 kg for two clean singles. Single-leg work stays as written.",
+     "gate_changes": false}
+  ]
+}
