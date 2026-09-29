@@ -60,6 +60,10 @@ export const makeAthlete = (overrides = {}) => ({
   ...overrides,
 });
 
+// A token the app's restoreAuthSession accepts: four dot-separated parts, the
+// fourth an expiry in ms (tokenExpMs in App.jsx).
+export const liveToken = () => `smoke.test.token.${Date.now() + 24 * 60 * 60 * 1000}`;
+
 const json = (body, status = 200) => ({
   status,
   contentType: "application/json",
@@ -114,6 +118,10 @@ export async function mockApi(page, options = {}) {
     coach = null,
     parseResult = emptyParse,
     chatReply = "Solid work. Keep stacking sessions.",
+    // The session token the identity mocks hand out. The default has no expiry
+    // field, so the app treats a reload as signed out. A spec that needs a cold
+    // boot INTO the app (restoreAuthSession) passes liveToken().
+    token = "smoketest-session-token",
     // T58/3b Builder-mode-in-chat: per-feature AI responses. The extractor
     // (Haiku, feature program_build) fills EVERY athlete cell in one answer so
     // specs reach the read-back gate in a single turn; the interviewer (Sonnet,
@@ -183,12 +191,12 @@ export async function mockApi(page, options = {}) {
         // Real endpoint: name+pin verified -> { athlete: stripPin(row), token }.
         const ok = body.pin === "1234" && body.name === athlete.name;
         return route.fulfill(json(
-          ok ? { athlete, token: "smoketest-session-token" }
+          ok ? { athlete, token }
              : { athlete: null, reason: body.pin === "1234" ? "not_found" : "wrong_pin" }
         ));
       }
       case "get-athlete": // athlete refreshing THEIR OWN record on boot
-        return route.fulfill(json({ athlete, token: "smoketest-session-token" }));
+        return route.fulfill(json({ athlete, token }));
       case "check-athlete-name":
         return route.fulfill(json({ exists: false }));
       case "coach-login": // real endpoint: pin-only, first bcrypt match wins
@@ -205,7 +213,7 @@ export async function mockApi(page, options = {}) {
           // 7-day trial stamp at creation (server-set, never client-writable).
           trial_ends_at: body.isSchool ? null : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
         });
-        return route.fulfill(json({ athlete: created, token: "smoketest-session-token" }));
+        return route.fulfill(json({ athlete: created, token }));
       }
       case "log-error":
       case "log-events": // fire-and-forget ingestion always answers 200 { ok:true }

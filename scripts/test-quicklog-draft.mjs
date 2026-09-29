@@ -16,6 +16,8 @@ globalThis.localStorage = {
 };
 
 const { qlKey, qlStamp, qlLoad, qlSave, qlClear, qlPositionConflict, QL_RESUME_MS,
+        qlStampHead, qlStampMatches, qlPeek, qlEdit, qlSetDock, qlSetSheetDate, qlRestamp,
+        qlResumeDock,
         openerLoad, openerSave,
         looksLikeProgramText, findChatProgram, programSaveOfferAllowed, markProgramSaveOffered,
         QL_PROGRAM_OFFER_MAX, markSupersededPrograms, QL_SUPERSEDED,
@@ -410,6 +412,108 @@ check("missing athlete id is never offered", !programSaveOfferAllowed("", D1));
   // A backdated draft must never be confused with today's
   check("yesterday and today differ", p("yesterday") !== null && p("today") === null);
   check("backdate window constant is exported", QL_MAX_BACKDATE_DAYS === 14);
+}
+
+// ─── THE WORKOUT IN PROGRESS (Will, TestFlight, 09-29) ───────────────────────
+// "If you start a workout and haven't finished it or cancelled it, your edits
+// should remain even after closing out of the app."
+{
+  const real = (id) => ({id, parsed_data:{exercises:[{name:"Bench Press", sets:3, reps:5, weight:185}]}});
+  const chat = (id) => ({id, parsed_data:{exercises:[]}});
+  const GEN = {draft:"Day 2\n\nFront Squat 4x2 @ 120kg", notes:"Focus: fast elbows", undoStack:[], prebuilt:true, position:{week:3, day:2}};
+  const EDITED = "Day 2\n\nFront Squat 4x2 @ 100kg/110kg/120kg/120kg";
+
+  // ── the sliding window (his account: 233 rows against a 100-row window) ──
+  // Parked against 100 rows holding real sessions at both ends. Three chat
+  // messages later the next boot's window has dropped the three oldest rows,
+  // one of them real. Nothing was logged. The sheet must still be there.
+  const mid = Array.from({length:96}, (_,i)=>chat("c"+i));
+  const before = [real("newest"), ...mid, real("old-a"), chat("old-b"), real("old-c")];
+  const after  = [chat("n1"), chat("n2"), chat("n3"), real("newest"), ...mid];
+  check("window fixture really does change the real-session count", qlStamp(before) !== qlStamp(after));
+  reset(); qlSave(ATH, before, GEN); qlEdit(ATH, before, {draft:EDITED, dock:true});
+  check("chat rows sliding old sessions out of the window do NOT drop the sheet", qlLoad(ATH, after)?.draft === EDITED);
+  reset(); qlSave(ATH, before, GEN);
+  check("...nor an untouched draft", qlLoad(ATH, after) !== null);
+  check("a session logged since still drops it (the guard is the newest session)", qlLoad(ATH, [real("brand-new"), ...after]) === null);
+  check("stamp head: reads the id past the count", qlStampHead("34:abc-123") === "abc-123");
+  check("stamp head: an id holding a colon survives", qlStampHead("2:2026-07-21T14:00:00Z") === "2026-07-21T14:00:00Z");
+  check("stamp head: empty history", qlStampHead(qlStamp([])) === "");
+  check("stamp match: a park with no stamp never matches", qlStampMatches(undefined, []) === false);
+  // A park written by the bundle before this one carries the same stamp shape.
+  reset(); store.set(qlKey(ATH), JSON.stringify({draft:EDITED, savedAt:Date.now(), stamp:"3:newest"}));
+  check("a park from the previous bundle still loads", qlLoad(ATH, after)?.draft === EDITED);
+
+  // ── an edit is the athlete's, and says so ──
+  reset(); qlSave(ATH, HIST, GEN); qlEdit(ATH, HIST, {draft:EDITED});
+  let r = qlLoad(ATH, HIST);
+  check("edit: the text is what they typed", r.draft === EDITED);
+  check("edit: the park is the athlete's now (prebuilt dropped)", r.prebuilt === false);
+  check("edit: the position the draft was built for survives", r.position && r.position.week === 3 && r.position.day === 2);
+  check("edit: the focus note survives when the edit carries none", r.notes === "Focus: fast elbows");
+  qlEdit(ATH, HIST, {draft:EDITED, notes:"Focus: hips"});
+  check("edit: a new note replaces the old", qlLoad(ATH, HIST).notes === "Focus: hips");
+  check("a generated draft is still the app's (prebuilt)", (reset(), qlSave(ATH, HIST, GEN), qlLoad(ATH, HIST).prebuilt === true));
+  reset(); qlSave(ATH, HIST, GEN); qlEdit(ATH, HIST, {draft:"   "});
+  check("edit: an emptied sheet clears the park", qlPeek(ATH) === null);
+  reset(); qlEdit(ATH, HIST, {draft:EDITED, dock:true});
+  check("edit with no park underneath still saves (they typed a whole sheet)", qlLoad(ATH, HIST)?.draft === EDITED);
+
+  // ── the bar ──
+  reset(); qlSave(ATH, HIST, GEN);
+  check("a generated draft has no bar", qlLoad(ATH, HIST).dock === false);
+  check("no bar, no card: nothing comes back on boot", qlResumeDock(qlLoad(ATH, HIST)) === false);
+  check("start raises the bar", qlSetDock(ATH, true) === true && qlLoad(ATH, HIST).dock === true);
+  check("the bar comes back on boot with no lock-screen card", qlResumeDock(qlLoad(ATH, HIST), {cardActive:false}) === true);
+  qlEdit(ATH, HIST, {draft:EDITED});
+  r = qlLoad(ATH, HIST);
+  check("an edit keeps the bar up", r.dock === true && r.draft === EDITED);
+  check("the X takes the bar down", qlSetDock(ATH, false) === true && qlLoad(ATH, HIST).dock === false);
+  check("cancelled: no bar on boot", qlResumeDock(qlLoad(ATH, HIST)) === false);
+  check("cancelled: the text is still parked", qlLoad(ATH, HIST).draft === EDITED && qlLoad(ATH, HIST).prebuilt === false);
+  check("a live card still raises the bar (the rule before this one)", qlResumeDock(qlLoad(ATH, HIST), {cardActive:true}) === true);
+  reset();
+  check("no park: raising the bar writes nothing", qlSetDock(ATH, true) === false && qlPeek(ATH) === null);
+  check("no park: nothing to resume", qlResumeDock(qlLoad(ATH, HIST), {cardActive:true}) === false);
+  reset(); qlSave(ATH, HIST, GEN); qlSetDock(ATH, true); qlClear(ATH);
+  check("finished (cleared): nothing comes back", qlResumeDock(qlLoad(ATH, HIST)) === false);
+
+  // ── the clock ──
+  // A draft built at 5am and STARTED at 2pm begins at 2pm.
+  reset(); store.set(qlKey(ATH), JSON.stringify({...GEN, savedAt: Date.now()-(QL_RESUME_MS+60*1000), stamp: qlStamp(HIST)}));
+  check("an expired untouched draft is gone", qlLoad(ATH, HIST) === null);
+  qlSetDock(ATH, true);
+  check("starting it restarts its clock", qlLoad(ATH, HIST)?.dock === true);
+  // ...but raising a bar that is already up must not, or it never expires.
+  const t0 = Date.now()-3*60*60*1000;
+  reset(); store.set(qlKey(ATH), JSON.stringify({...GEN, dock:true, savedAt:t0, stamp: qlStamp(HIST)}));
+  qlSetDock(ATH, true);
+  check("re-raising a bar that is up does not move the clock", qlPeek(ATH).savedAt === t0);
+  // A started sheet gets the athlete's same-day grace even if never typed on.
+  reset(); store.set(qlKey(ATH), JSON.stringify({...GEN, dock:true, savedAt: new Date().setHours(0,5,0,0), stamp: qlStamp(HIST)}));
+  check("a started sheet from early this morning is there all day", qlLoad(ATH, HIST) !== null);
+  reset(); store.set(qlKey(ATH), JSON.stringify({...GEN, dock:true, prebuilt:false, savedAt: Date.now()-26*60*60*1000, stamp: qlStamp(HIST)}));
+  check("yesterday's unfinished sheet does not haunt today", qlLoad(ATH, HIST) === null);
+
+  // ── the date on the sheet ──
+  reset(); qlSave(ATH, HIST, GEN); qlSetDock(ATH, true);
+  qlSetSheetDate(ATH, "2026-09-28");
+  check("the sheet's date is kept", qlLoad(ATH, HIST).sheetDate === "2026-09-28");
+  check("...apart from the old screen's targetDate (the pin path regenerates on that)", qlLoad(ATH, HIST).targetDate === null);
+  qlEdit(ATH, HIST, {draft:EDITED});
+  check("an edit keeps the date", qlLoad(ATH, HIST).sheetDate === "2026-09-28");
+  qlSetSheetDate(ATH, "");
+  check("back to today clears it", qlLoad(ATH, HIST).sheetDate === "");
+
+  // ── a lift logged in chat while the edited sheet is up ──
+  reset(); qlSave(ATH, HIST, GEN); qlSetDock(ATH, true); qlEdit(ATH, HIST, {draft:EDITED});
+  const logged = [real("mid-workout"), ...HIST];
+  check("before the re-stamp the chat log would drop the sheet", qlLoad(ATH, logged) === null);
+  check("re-stamp follows the history", qlRestamp(ATH, logged) === true && qlLoad(ATH, logged)?.draft === EDITED);
+  reset(); qlSave(ATH, HIST, GEN); qlSetDock(ATH, true);
+  check("an untouched sheet is NOT re-stamped (the session was logged another way)", qlRestamp(ATH, logged) === false && qlLoad(ATH, logged) === null);
+  reset(); qlSave(ATH, HIST, GEN); qlEdit(ATH, HIST, {draft:EDITED});
+  check("an edited park with the bar down is NOT re-stamped (double-log guard)", qlRestamp(ATH, logged) === false && qlLoad(ATH, logged) === null);
 }
 
 

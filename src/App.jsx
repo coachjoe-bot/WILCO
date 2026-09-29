@@ -44,6 +44,7 @@ import WORDMARK from "./assets/wilco-wordmark.png";
 // and pick it back up (expiry window, staleness check, clear-on-send).
 import {
   qlLoad, qlSave, qlClear, qlPositionConflict, splitQuickLogReply, streamQuickLogReply,
+  qlPeek, qlEdit, qlSetDock, qlSetSheetDate, qlRestamp, qlResumeDock,
   qlMarkUsed, qlPrebuildEligible, qlMarkPrebuilt, openerLoad, openerSave,
   openerChoiceMadeToday, markOpenerChoice,
   findChatProgram, looksLikeProgramText, programSaveOfferAllowed, markProgramSaveOffered,
@@ -52,11 +53,12 @@ import {
 // Lock-screen session card (T40): today's session pinned as a notification. The
 // card is a projection of the Quick Log draft — never model chat text.
 import {
-  asksTodaysWorkout, asksLockScreenCard, asksStartingWorkout, asksClearCard, buildSessionCard, sessionCardSupported, showSessionCard,
+  asksTodaysWorkout, asksLockScreenCard, asksStartingWorkout, asksClearCard, saysSwap, buildSessionCard, sessionCardSupported, showSessionCard,
   repinSessionCard, clearSessionCard, activeSessionCard, expireSessionCardIfStale,
   sessionCardDeclinedToday, markSessionCardDeclined,
   markWorkoutStart, workoutStartAt, clearWorkoutStart, workoutDurationSeconds,
 } from "./sessionCard.js";
+import { sheetRegenPlan } from "./sheetPlan.js";
 // Notification deep links (T51): a push carries `?n=<target>`; this turns it into
 // the screen the push was about, on both cold and warm starts.
 import {
@@ -7085,7 +7087,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           setMemoryRows(rows=>rows.filter(r=>!gone.has(r.id)));
         } else if(tc.name==="pin_session_card"){
           const had = activeSessionCard(updatedAthlete.id);
-          if(had) await refreshSessionCard(updatedAthlete, msgs);
+          if(had) await refreshSessionCard(updatedAthlete, msgs, "pin");
           else {
             const res = await pinSessionCard(updatedAthlete);
             // T62: the AUTO-pin's confirmation speaks in the APP's voice — Joe's
@@ -7108,10 +7110,12 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           // it — the model flags the presentation, CODE draws the exact same
           // buttons the opener uses. Never mid-workout: a pinned card means
           // the session already started.
-          if(!activeSessionCard(updatedAthlete.id)) setOpenerChoicePending(true);
+          // The bar is the same fact as the card (Will 09-29): a session that
+          // is up, card or no card, is already started.
+          if(!activeSessionCard(updatedAthlete.id) && !(qlPeek(updatedAthlete.id)||{}).dock) setOpenerChoicePending(true);
         } else if(tc.name==="clear_session_card"){
           clearSessionCard(updatedAthlete.id);
-          if(CHAT_FIRST_ON){ setSheetOpen(false); setDockWorkout(null); }
+          if(CHAT_FIRST_ON){ setSheetOpen(false); setDockWorkout(null); qlSetDock(updatedAthlete.id, false); }
         } else if(tc.name==="propose_program_rec"){
           // The program write-tool's ONLY power is staging a Rec (Will's hard
           // rule) — validated and located against the live program; anything
@@ -7121,6 +7125,16 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             joeBubble("Couldn't line that program change up exactly against your program. Give me the precise lift or day once more and I'll redo it.");
           }
         } else if(tc.name==="prefill_log_sheet"){
+          // The athlete's own edits outrank a rebuild (Will 09-29). Joe asks
+          // for the sheet; code decides whether that means a fresh draft, the
+          // sheet they already have, or their sheet with this turn's change
+          // applied to it.
+          const rp = await regenPlan(updatedAthlete, msgs, "prefill");
+          if(rp.plan!=="generate"){
+            if(rp.plan==="edit") await editParkedSheet(updatedAthlete, msgs, rp.msg);
+            if(CHAT_FIRST_ON) openDockFromStore();
+            continue;
+          }
           const gen = await generateQuickLogDraft({athlete:updatedAthlete, workoutHistory, messages:msgs, goals:athleteGoals, contextNotes:athleteContext});
           if(!gen.rest && gen.draft){
             // Unit conversion at park time — the park is unit-true, reads don't convert.
@@ -7205,6 +7219,11 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // edits, and what they typed is what they log (Will 08-28, the
         // "2.5 kg.5 kg.5 kg" re-conversion mangle).
         setSheetState({draft:rec.draft, notes:rec.notes||""}); setDockWorkout({title:dockTitleOf(rec.draft)});
+        // The bar is state that outlives the app (Will 09-29): the park
+        // records that it is up, so a cold boot raises it again with the same
+        // text and the same date, lock-screen card or no card.
+        setSheetDate(rec.sheetDate||"");
+        qlSetDock(athlete.id, true);
         return true;
       }
     }catch(_){}
@@ -7223,7 +7242,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         const gen = await generateQuickLogDraft({athlete, workoutHistory, messages, goals:athleteGoals, contextNotes:athleteContext});
         if(!gen.rest && gen.draft){
           const draft = draftInUnit(gen.draft, athlete.weight_unit); // converted once, parked converted
-          try{ qlSave(athlete.id, workoutHistory, {draft, notes:gen.notes, undoStack:[], prebuilt:true, position:quickLogPosOf(gen.ctx)}); }catch(_){}
+          try{ qlSave(athlete.id, workoutHistory, {draft, notes:gen.notes, undoStack:[], prebuilt:true, dock:true, position:quickLogPosOf(gen.ctx)}); }catch(_){}
           setSheetState({draft, notes:gen.notes||""}); setDockWorkout({title:dockTitleOf(draft)});
         } else { setSheetOpen(false); setDockWorkout(null); }
       }catch(_){ setSheetOpen(false); setDockWorkout(null); }
@@ -7234,17 +7253,31 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // through this ref so it never runs a stale closure over athlete/history.
   const openLogSurfaceRef = useRef(openLogSurface);
   openLogSurfaceRef.current = openLogSurface;
-  // Reopen the bar on boot when a session is mid-flight (an active lock-screen
-  // card = they started and haven't logged). Edits kept: the park survives.
+  // Reopen the bar on boot when a session is mid-flight: the park says the bar
+  // was up (started, not finished, not cancelled), or a lock-screen card is
+  // live. Edits kept: the park survives. The card used to be the ONLY signal,
+  // so an athlete without one (web, notifications off, a pin that failed)
+  // reopened to no bar and their sheet edits out of reach (Will 09-29).
   useEffect(()=>{
     if(!CHAT_FIRST_ON || !historyLoaded) return;
-    if(activeSessionCard(athlete.id)) openDockFromStore();
+    const cardActive = !!activeSessionCard(athlete.id);
+    if(qlResumeDock(qlLoad(athlete.id, workoutHistory, {cardActive}), {cardActive})) openDockFromStore();
   },[historyLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
   const sheetTypeEdit = (draft) => {   // direct typing on the sheet — auto-saves as it's made
     setSheetState(s=>({...s, draft}));
     setDockWorkout(w=>w?{title:dockTitleOf(draft)}:w);
-    try{ qlSave(athlete.id, workoutHistory, {draft, notes:sheetState.notes, undoStack:[], prebuilt:true}); }catch(_){}
+    // qlEdit, never qlSave: what they type is THEIR record of the session, and
+    // the park keeps the position, the bar and the date it already carried.
+    // These saves used to go out flagged `prebuilt`, which made typed work
+    // look like the app's own throwaway draft.
+    try{ qlEdit(athlete.id, workoutHistory, {draft, notes:sheetState.notes, dock:true, sheetDate}); }catch(_){}
     syncCardFromDraft(draft);
+  };
+  // The date on the sheet is part of the workout in progress.
+  const sheetPickDate = (v) => {
+    const d = v===localISODate(new Date()) ? "" : v;
+    setSheetDate(d);
+    try{ qlSetSheetDate(athlete.id, d); }catch(_){}
   };
   // "Tell Joe what to change" — the composer while the sheet is up. Same call
   // and reply contract as the old sheet's instruction box (QL_EDIT_SYS).
@@ -7266,11 +7299,59 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         const nextNotes = newNotes===null ? sheetState.notes : qlGuardNotes(newNotes, ctx);
         setSheetState({draft:t, notes:nextNotes});
         setDockWorkout(w=>w?{title:dockTitleOf(t)}:w);
-        try{ qlSave(athlete.id, workoutHistory, {draft:t, notes:nextNotes, undoStack:[], prebuilt:true}); }catch(_){}
+        try{ qlEdit(athlete.id, workoutHistory, {draft:t, notes:nextNotes, dock:true, sheetDate}); }catch(_){}
         syncCardFromDraft(t);
       }
     }catch(_){ /* draft unchanged; they can rephrase */ }
     setSheetBusy(false);
+  };
+  // A change that arrives through CHAT while the athlete's own edits are on
+  // the sheet (an in-chat swap, a today-only change Joe rebuilt the sheet for).
+  // Regenerating would hand them a clean draft and throw their typing away, so
+  // the message is applied to THEIR text instead: the same call and contract
+  // as the sheet's own instruction box. Reads the park, not React state, so it
+  // is right from any closure. Any failure leaves the sheet exactly as it was.
+  const editParkedSheet = async (a, msgs, ins) => {
+    const rec = qlLoad(a.id, workoutHistory, {cardActive: !!activeSessionCard(a.id)});
+    if(!rec || !String(ins||"").trim()) return false;
+    try{
+      const ctx = await quickLogBuildCtx({athlete:a, workoutHistory, messages:msgs||messages, goals:athleteGoals, contextNotes:athleteContext});
+      const unitLine = a.weight_unit==="kg" ? "\n\nThis athlete works in KG: write every weight with an explicit kg suffix." : "";
+      const revised = await askClaude(QL_EDIT_SYS,
+        `Today is ${qlTodayStr()}.${unitLine}\n\n${qlCtxBlock(ctx)}\n\nCURRENT FOCUS NOTE:\n${rec.notes||"(none)"}\n\nCURRENT DRAFT:\n${rec.draft.trim()}\n\nATHLETE'S INSTRUCTION:\n${ins}`,
+        800, [], "claude-sonnet-5", "quick_log_edit");
+      const { notes:rawNotes, log } = splitQuickLogReply(revised);
+      const t = log ? draftInUnit(log, a.weight_unit) : log;
+      if(!t || !t.trim()) return false;
+      const nextNotes = rawNotes===null ? rec.notes : qlGuardNotes(gateText("ql_note", rawNotes), ctx);
+      // They may have typed while the call was out: their newer text wins.
+      const now = qlPeek(a.id);
+      if(!now || now.draft !== rec.draft) return false;
+      qlEdit(a.id, workoutHistory, {draft:t, notes:nextNotes});
+      setSheetState({draft:t, notes:nextNotes||""});
+      setDockWorkout(w=>w?{title:dockTitleOf(t)}:w);
+      if(activeSessionCard(a.id)){
+        const card = buildSessionCard(t, {week: rec.position?.week ?? null});
+        if(card) await showSessionCard(a.id, card);
+      }
+      return true;
+    }catch(_){ return false; }
+  };
+  const lastUserText = (msgs) => {
+    const m = [...(msgs||[])].reverse().find(x=>x && x.role==="user");
+    return m ? (typeof m.content==="string" ? m.content : "") : "";
+  };
+  // One question, asked before ANY generator writes over the park: is the
+  // athlete's own work there, and does this turn really replace it? The rule
+  // is sheetRegenPlan (src/sheetPlan.js); this only gathers its inputs. The
+  // resolver is read only when there are edits to protect.
+  const regenPlan = async (a, msgs, reason) => {
+    const rec = qlLoad(a.id, workoutHistory, {cardActive: !!activeSessionCard(a.id)});
+    if(!rec || rec.prebuilt) return {plan:"generate", rec};
+    let position = null;
+    try{ position = quickLogPosOf(await quickLogBuildCtx({athlete:a, workoutHistory, messages:msgs||messages, goals:athleteGoals, contextNotes:athleteContext})); }catch(_){}
+    const msg = lastUserText(msgs||messages);
+    return {plan: sheetRegenPlan({rec, reason, msg, position}), rec, msg};
   };
   // FINISH WORKOUT: send as-is (blanks included) through the pure-log path,
   // clear the lock-screen card, take the bar down.
@@ -7292,6 +7373,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     clearTimeout(cardSyncRef.current);
     setSheetOpen(false); setDockWorkout(null); setSheetDate(""); setSheetInfo(false);
     try{ clearSessionCard(athlete.id); }catch(_){}
+    // Cancelled: the bar stays down on the next boot too. The text stays parked.
+    try{ qlSetDock(athlete.id, false); qlSetSheetDate(athlete.id, ""); }catch(_){}
   };
 
   // ── PROGRAM RECS (Will's 08-28 design; engine src/recs.js, mockup docs/mockups) ──
@@ -8322,7 +8405,24 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // row already sets athlete_id — this was its forgotten twin.)
       if(derivedOnly){
         if(opts.rowParsed) setWorkoutHistory(prev=>prev.map(w=>String(w.id)===String(opts.rowId)?{...w,parsed_data:opts.rowParsed}:w));
-      } else setWorkoutHistory(prev=>[{id:insertedId,athlete_id:updatedAthlete.id,raw_message:msg,bot_reply:reply,parsed_data:parsedFinal,created_at:new Date().toISOString(),...(durationSeconds!=null?{duration_seconds:durationSeconds}:{})},...prev]);
+      } else {
+        const newRow = {id:insertedId,athlete_id:updatedAthlete.id,raw_message:msg,bot_reply:reply,parsed_data:parsedFinal,created_at:new Date().toISOString(),...(durationSeconds!=null?{duration_seconds:durationSeconds}:{})};
+        setWorkoutHistory(prev=>[newRow,...prev]);
+        // The workout in progress and the log that just landed (Will 09-29):
+        //  - the log IS the parked sheet (a Retry after a failed Finish): the
+        //    workout is logged, so the park and the bar are spent;
+        //  - any other real log while their EDITED sheet is up (a lift typed
+        //    into chat mid-workout): the sheet is still theirs and still on
+        //    screen, so its stamp follows the history instead of reading as
+        //    stale on the next boot. qlRestamp touches nothing else.
+        try{
+          const pk = qlPeek(updatedAthlete.id);
+          if(pk && pk.draft.trim() && pk.draft.trim()===String(msg||"").trim()){
+            qlClear(updatedAthlete.id);
+            if(CHAT_FIRST_ON){ setSheetOpen(false); setDockWorkout(null); }
+          } else if(pk) qlRestamp(updatedAthlete.id, [newRow, ...workoutHistory]);
+        }catch(_){}
+      }
 
       if(newPRs.length>0){
         // Crew "pr" moment — ONLY when the lift changed TIER (a rank-up), not
@@ -8668,13 +8768,22 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // generator is told conversation overrides inference — then silently replace
   // the card (same tag, no buzz). On any failure the card keeps its last
   // content: stale beats gone mid-workout.
-  const refreshSessionCard = async (a, msgs) => {
+  const refreshSessionCard = async (a, msgs, reason="position") => {
     try{
       if(!activeSessionCard(a.id)) return;
+      // Their own edits on the sheet: the card follows THEIR text. A swap is
+      // applied to it; anything else leaves it alone and re-shows the card.
+      const rp = await regenPlan(a, msgs, reason);
+      if(rp.plan==="edit"){ await editParkedSheet(a, msgs, rp.msg); return; }
+      if(rp.plan==="keep"){
+        const card = buildSessionCard(rp.rec.draft, {week: rp.rec.position?.week ?? null});
+        if(card) await showSessionCard(a.id, card);
+        return;
+      }
       const gen = await generateQuickLogDraft({athlete:a, workoutHistory, messages: msgs||messages, goals:athleteGoals, contextNotes:athleteContext});
       if(gen.rest || !gen.draft){ await clearSessionCard(a.id); return; }
       const shown = draftInUnit(gen.draft, a.weight_unit); // converted once, parked converted
-      qlSave(a.id, workoutHistory, {draft:shown, notes:gen.notes, undoStack:[], prebuilt:true, position:quickLogPosOf(gen.ctx)});
+      qlSave(a.id, workoutHistory, {draft:shown, notes:gen.notes, undoStack:[], prebuilt:true, dock:!!(qlPeek(a.id)||{}).dock, position:quickLogPosOf(gen.ctx)});
       const card = buildSessionCard(shown, {week: gen.ctx?.position?.weekKnown ? gen.ctx.position.week : null});
       if(card) await showSessionCard(a.id, card);
       // Chat-first: a chat-driven regenerate lands on the OPEN surfaces too —
@@ -10013,7 +10122,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // sessionCardSupported gate here. Starting/pin asks below still
         // zero-tap: those ARE the start.
         if(asksTodaysWorkout(msg) && !explicitCardAsk && !startingNow && !chipSetThisSend
-           && hasProgram && !activeSessionCard(updatedAthlete.id) && !fromQuickLog){
+           && hasProgram && !activeSessionCard(updatedAthlete.id) && !dockWorkout && !fromQuickLog){
           setOpenerChoicePending(true); chipSetThisSend = true;
         }
         else if((explicitCardAsk || startingNow) && !chipSetThisSend && sessionCardSupported()
@@ -10051,9 +10160,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // hook above covers day corrections; this covers exercise changes.
       // (Plain if: mutually exclusive with the pin block above, which requires
       // NO active card — the old else-if hung off a block T56 had to wrap.)
-      if(activeSessionCard(updatedAthlete.id)
-         && /\bsub(?:bed|bing|stitut\w*)?\b|\bswap(?:ped|ping)?\b|\binstead of\b|\breplac(?:e|ed|ing)\b/i.test(msg)){
-        refreshSessionCard(updatedAthlete, newMsgs);
+      if(activeSessionCard(updatedAthlete.id) && saysSwap(msg)){
+        refreshSessionCard(updatedAthlete, newMsgs, "swap");
       }
 
       // Temporary adapted program — conditions described, extract program from Joe-bot's reply.
@@ -10199,7 +10307,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // stamps the history, so the moment a retry lands and prepends a row the
       // stamp mismatches and the re-parked copy is dropped.
       if(fromQuickLog){
-        try{ qlSave(athlete.id, workoutHistory, {draft:msg, notes:"", undoStack:[]}); setQuickLogParked(true); }catch(_){}
+        // dock: an unsent workout is a workout in progress, so the bar brings
+        // it back on the next open (the Retry chip is React state and does not
+        // survive one).
+        try{ qlSave(athlete.id, workoutHistory, {draft:msg, notes:"", undoStack:[], dock:true}); setQuickLogParked(true); }catch(_){}
       }
       // Offer a one-tap retry so the athlete never has to retype a workout log.
       setRetryPending(msg);
@@ -10652,7 +10763,7 @@ ${VOICE_ATHLETE}`;
                       Same answerOpenerChoice handlers; retired by a tap or by typing
                       (send() clears openerChoicePending). CA.accent/onAccent keep
                       both themes in their own colors. */}
-                  {m.role==="assistant"&&openerChoicePending&&i===messages.length-1&&(
+                  {m.role==="assistant"&&openerChoicePending&&!dockWorkout&&i===messages.length-1&&(
                     <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:14,userSelect:"none",WebkitUserSelect:"none"}}>
                       <button onClick={()=>answerOpenerChoice("yes")}
                         style={{background:CA.accent,border:"none",color:CA.onAccent,borderRadius:10,padding:"13px 16px",cursor:"pointer",fontSize:15,fontWeight:800,letterSpacing:.3,width:"100%",fontFamily:"'Inter'"}}>
@@ -11274,7 +11385,7 @@ ${VOICE_ATHLETE}`;
                 value={sheetDate || localISODate(new Date())}
                 min={localISODate(new Date(Date.now()-14*24*60*60*1000))}
                 max={localISODate(new Date())}
-                onChange={e=>setSheetDate(e.target.value===localISODate(new Date())?"":e.target.value)}
+                onChange={e=>sheetPickDate(e.target.value)}
                 style={{border:`1px solid ${CA.border}`,borderRadius:6,background:CA.navy,color:CA.text,fontSize:12,padding:"3px 5px",fontFamily:"inherit"}}/>
               <button onClick={()=>setSheetInfo(v=>!v)} aria-label="What is this date for?"
                 style={{width:18,height:18,borderRadius:"50%",border:`1px solid ${CA.muted}`,background:"none",color:CA.muted,fontSize:10,lineHeight:1,padding:0,textAlign:"center",cursor:"pointer",flexShrink:0}}>i</button>

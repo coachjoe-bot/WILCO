@@ -69,6 +69,11 @@ export const asksStartingWorkout = (msg) => {
   return STARTING_WORKOUT_RE.test(t) && !PAST_TENSE_RE.test(t);
 };
 
+// An exercise change said in chat ("subbed dips for pushdowns"). While a
+// session is up it has to reach the sheet and the card.
+export const SWAP_RE = /\bsub(?:bed|bing|stitut\w*)?\b|\bswap(?:ped|ping)?\b|\binstead of\b|\breplac(?:e|ed|ing)\b/i;
+export const saysSwap = (msg) => SWAP_RE.test(String(msg || ""));
+
 // ── card content, from the draft ─────────────────────────────────────────────
 // Input is the Quick Log draft's log text: first line = day label, then one
 // exercise per line "Name SETSxREPS @ WEIGHT (source)". The card shows real

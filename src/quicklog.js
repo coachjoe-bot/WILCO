@@ -37,6 +37,23 @@ export const qlStamp = (workoutHistory) => {
   return `${h.length}:${(h[0]&&(h[0].id??h[0].created_at))||""}`;
 };
 
+// What staleness is actually judged on: the NEWEST real session, never the
+// count. The history the app holds is a sliding window (the latest 100 rows,
+// and the table carries a row per chat message), so the count of real sessions
+// inside it moves on its own: send Joe three messages mid-workout, close the
+// app, and the next boot's window has dropped three old rows. When one of those
+// was a real session the count fell, the stamp "changed", and a sheet full of
+// the athlete's edits was thrown away on reopen (Will, TestFlight, 09-29). A
+// session logged since the park always becomes the newest real row, so the
+// head alone carries the whole double-log guard.
+export const qlStampHead = (stamp) => {
+  const s = String(stamp ?? "");
+  const i = s.indexOf(":");
+  return i < 0 ? s : s.slice(i+1);
+};
+export const qlStampMatches = (saved, workoutHistory) =>
+  typeof saved === "string" && qlStampHead(saved) === qlStampHead(qlStamp(workoutHistory));
+
 // The resumable draft, or null. Every rejection path (missing, corrupt, expired, stale,
 // empty) returns null so the caller just redrafts — a lost draft is never worth an error
 // state in front of someone mid-workout.
@@ -58,13 +75,26 @@ export const qlLoad = (athleteId, workoutHistory, {cardActive=false} = {}) => {
     // applies — though a real log also takes the card down, so they can't fight.
     const withinWindow = Date.now()-(d.savedAt||0) < QL_RESUME_MS;
     const sameLocalDay = !!d.savedAt && qlLocalDay(d.savedAt) === qlLocalDay();
-    if(!cardActive && (d.prebuilt ? !withinWindow : !(withinWindow || sameLocalDay))) return null;
-    if(d.stamp !== qlStamp(workoutHistory)) return null;
+    // The athlete's own: they changed it (any save from the sheet drops the
+    // prebuilt flag), or they STARTED it (the bar is up). Either one gets the
+    // same-day grace; only an untouched, unstarted speculative draft is held
+    // to the rolling window alone.
+    const owned = !d.prebuilt || !!d.dock;
+    if(!cardActive && (owned ? !(withinWindow || sameLocalDay) : !withinWindow)) return null;
+    if(!qlStampMatches(d.stamp, workoutHistory)) return null;
     return {
       draft: d.draft,
       notes: typeof d.notes==="string" ? d.notes : "",
       undoStack: Array.isArray(d.undoStack) ? d.undoStack : [],
       prebuilt: !!d.prebuilt,
+      // dock: the workout bar is up, a session is in progress. Survives a cold
+      // boot so the bar comes back with the same text; goes false on Finish
+      // (the park is cleared) and on the bar's X.
+      dock: !!d.dock,
+      // The sheet's "logging for" date ("" = today). Kept apart from targetDate,
+      // which belongs to the old Quick Log screen and makes the pin path
+      // regenerate.
+      sheetDate: typeof d.sheetDate==="string" ? d.sheetDate : "",
       // Resolved program position {week, day} this draft was built for — the
       // boot path compares it against the CURRENT resolved position and
       // regenerates on mismatch, so a draft built before "I'm on day 3" landed
@@ -90,7 +120,7 @@ export const qlLoad = (athleteId, workoutHistory, {cardActive=false} = {}) => {
 // the RESUME LOG nav label, which is a promise about the athlete's own unfinished
 // work. Any later save from the sheet omits the flag, so the moment they touch it
 // the draft becomes a normal parked one.
-export const qlSave = (athleteId, workoutHistory, {draft, notes, undoStack, prebuilt, prep, targetDate, position}) => {
+export const qlSave = (athleteId, workoutHistory, {draft, notes, undoStack, prebuilt, prep, targetDate, position, dock, sheetDate}) => {
   try{
     if(!draft||!draft.trim()){ qlClear(athleteId); return; }
     localStorage.setItem(qlKey(athleteId), JSON.stringify({
@@ -100,6 +130,8 @@ export const qlSave = (athleteId, workoutHistory, {draft, notes, undoStack, preb
       savedAt: Date.now(),
       stamp: qlStamp(workoutHistory),
       prebuilt: !!prebuilt,
+      dock: dock ? true : undefined,
+      sheetDate: typeof sheetDate==="string" && sheetDate ? sheetDate : undefined,
       prep: prep && (prep.warmup||prep.cooldown) ? {warmup:!!prep.warmup, cooldown:!!prep.cooldown} : undefined,
       targetDate: typeof targetDate==="string" && targetDate ? targetDate : undefined,
       position: position && (position.week!=null || position.day!=null) ? {week: position.week??null, day: position.day??null} : undefined,
@@ -118,6 +150,91 @@ export const qlPositionConflict = (saved, current) => {
   if(saved.week!=null && current.week!=null && saved.week!==current.week) return true;
   return false;
 };
+
+// ─── THE WORKOUT IN PROGRESS (Will, 09-29) ───────────────────────────────────
+// His rule: start a workout, change the sheet, close the app, and the changes
+// are still there when it opens. They go away only when the workout is finished
+// or cancelled. Four things used to break that, and each has its rule here:
+//   1. every edit on the chat sheet was saved as `prebuilt` (the app's own
+//      speculative draft). The flag's contract is above qlSave: a save from
+//      the sheet drops it, and that is how the app knows the text is the
+//      athlete's. With it stuck on, typed work looked like a throwaway draft;
+//   2. the bar only came back on boot when a lock-screen card was live, so an
+//      athlete with no card (web, notifications off, a failed pin) reopened to
+//      no bar at all;
+//   3. every generator wrote straight over the park: Joe's prefill tool, the
+//      card refresh, the in-chat swap (the rule is src/sheetPlan.js);
+//   4. the history stamp counted sessions inside a sliding window (qlStampHead).
+//
+// The raw park, no validity rules. For merges and for deciding what a write is
+// about to replace; never for deciding what to SHOW (that is qlLoad).
+export const qlPeek = (athleteId) => {
+  try{
+    const d = JSON.parse(localStorage.getItem(qlKey(athleteId))||"null");
+    return d && typeof d.draft==="string" ? d : null;
+  }catch(_){ return null; }
+};
+
+// The athlete changed the sheet. Everything the park already knew stays (the
+// position it was built for, the bar, the date): only the text and the note
+// move, and the prebuilt flag drops, which is what marks the park as theirs.
+// An emptied sheet clears the park, same as qlSave.
+export const qlEdit = (athleteId, workoutHistory, {draft, notes, dock, sheetDate} = {}) => {
+  const cur = qlPeek(athleteId) || {};
+  qlSave(athleteId, workoutHistory, {
+    draft,
+    notes: notes ?? cur.notes ?? "",
+    undoStack: [],
+    prebuilt: false,
+    dock: dock ?? !!cur.dock,
+    sheetDate: sheetDate ?? cur.sheetDate ?? "",
+    position: cur.position,
+    prep: cur.prep,
+    targetDate: cur.targetDate,
+  });
+};
+
+// Flip one field on the park without touching the text or its clock. No park,
+// no write: a flag has nothing to describe.
+const qlPatch = (athleteId, patch) => {
+  try{
+    const cur = qlPeek(athleteId);
+    if(!cur) return false;
+    localStorage.setItem(qlKey(athleteId), JSON.stringify({...cur, ...patch}));
+    return true;
+  }catch(_){ return false; }
+};
+
+// The bar went up (a workout started) or came down (the X). A START restarts
+// the park's clock: the session begins now, whenever the draft was generated.
+// Raising a bar that is already up (the boot resume, a second tool call) moves
+// nothing, or a sheet reopened once a day would never expire.
+export const qlSetDock = (athleteId, on) => {
+  const cur = qlPeek(athleteId);
+  if(!cur) return false;
+  if(on) return cur.dock ? true : qlPatch(athleteId, {dock:true, savedAt:Date.now()});
+  return qlPatch(athleteId, {dock:undefined});
+};
+
+export const qlSetSheetDate = (athleteId, sheetDate) =>
+  qlPatch(athleteId, {sheetDate: typeof sheetDate==="string" && sheetDate ? sheetDate : undefined});
+
+// A lift logged through chat while an edited sheet is up moves the newest real
+// session, which would read as "logged since the park" on the next boot and
+// drop the sheet. The sheet is still on screen and still theirs, so its stamp
+// follows the history. Only an in-progress park the athlete changed is
+// re-stamped: an untouched draft is left to go stale, the way it always has.
+export const qlRestamp = (athleteId, workoutHistory) => {
+  const cur = qlPeek(athleteId);
+  if(!cur || !cur.dock || cur.prebuilt) return false;
+  return qlPatch(athleteId, {stamp: qlStamp(workoutHistory)});
+};
+
+// Should the bar come back on this boot? Pure: the caller hands over what
+// qlLoad returned (so every expiry and staleness rule has already run) and
+// whether a lock-screen card is live.
+export const qlResumeDock = (rec, {cardActive=false} = {}) =>
+  !!rec && !!rec.draft && (!!rec.dock || !!cardActive);
 
 // ─── BACKGROUND PRE-BUILD ELIGIBILITY (a cost gate, not a feature flag) ──────
 // Pre-building today's draft makes QUICK LOG open instantly instead of behind a
