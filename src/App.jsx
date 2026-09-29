@@ -71,7 +71,7 @@ import { draftChangeRequest, fileChangeRequest, flagToSource } from "./changeReq
 import { FEATURE_INVENTORY } from "./features.js";
 import { toLbs, fmtWeightIn, displayStat, unitLabel, setDisplayUnit, getDisplayUnit, toDisplay, roundStat, exerciseUnit, exerciseLoadUnit } from "./units.js";
 // Declared maxes (pr_attempts): unit stamping + the actual-1RM write decision.
-import { stampLoadUnits, storedAttemptUnit, isDeclaredMax, declaredMaxWrite, liftRecentBestLbs } from "./prAttempts.js";
+import { stampLoadUnits, storedAttemptUnit, isDeclaredMax, declaredMaxWrite, unitCheckMessage } from "./prAttempts.js";
 import { effectiveTier, trialActive } from "./tiers.js";
 import { CREW_ENABLED, MASTERMIND_ENABLED, CHAT_FIRST_ENABLED } from "./flags.js";
 import { buildMastermindStatic } from "./ai/card.js";
@@ -8009,6 +8009,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // reply is generated in `send` CONCURRENTLY with the parse (parsedP), so it
       // is already on screen before this code has any idea what was logged.
       const suspectJumps = [];
+      // Loads the unit resolver could not settle (unit_suspect, src/prAttempts.js):
+      // filed as resolved, held back from PRs, and asked about by unit.
+      const unitChecks = [];
       try {
         const prevCount = updatedAthlete.total_sessions_logged||0;
         // Authoritative session count comes from the SQL view (v_athlete_session_counts,
@@ -8201,7 +8204,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           // implausibly while the other unit reads plausibly. Never a silent flip:
           // it goes through the same ask.
           const suspect = implausibleJump(knownBestLbs, exE1RM) || !!ex.unit_suspect;
-          if(suspect) suspectJumps.push({exercise:ex.name, weight:topSet.weight, unit:exerciseUnit(ex), reps:topSet.reps||1, e1rm:exE1RM, knownBest:Math.round(knownBestLbs || (ex.unit_suspect ? liftRecentBestLbs(workoutHistory, ex.name) : 0))});
+          if(ex.unit_suspect) unitChecks.push({exercise:ex.name, weight:topSet.weight, unit:exerciseUnit(ex)});
+          else if(suspect) suspectJumps.push({exercise:ex.name, weight:topSet.weight, unit:exerciseUnit(ex), reps:topSet.reps||1, e1rm:exE1RM, knownBest:Math.round(knownBestLbs)});
 
           if(!suspect && bestSingle && toLbs(bestSingle.weight, ex.unit) > knownBestLbs){
             const unit = exerciseLoadUnit(ex);
@@ -8271,11 +8275,15 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             estLbs: prMap[k] ? epley1RM(toLbs(prMap[k].weight, prMap[k].unit), prMap[k].reps||1) : 0,
             displayUnit: updatedAthlete?.weight_unit,
           });
-          if(action==="suspect" || attempt.unit_suspect){
+          if(attempt.unit_suspect){
+            if(!unitChecks.some(c=>resolveLift(c.exercise).id===k)) unitChecks.push({exercise:attempt.exercise, weight:attempt.weight, unit});
+            continue;
+          }
+          if(action==="suspect"){
             // Same "hold up before I bank it" flow the exercises loop uses below —
             // a declared max too far above the known best gets a sanity check
             // instead of a silent write, whichever unit the jump landed in.
-            suspectJumps.push({exercise:attempt.exercise, weight:attempt.weight, unit, reps:1, e1rm:newLbs, knownBest:Math.round(oldLbs || (attempt.unit_suspect ? liftRecentBestLbs(workoutHistory, attempt.exercise) : 0))});
+            suspectJumps.push({exercise:attempt.exercise, weight:attempt.weight, unit, reps:1, e1rm:newLbs, knownBest:Math.round(oldLbs)});
             continue;
           }
           if(action==="skip") continue; // not actually a new max — leave the existing manual 1RM as-is
@@ -8433,6 +8441,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         setTimeout(()=>setMessages(prev=>[...prev,{role:"assistant",content:
           `Hold up before I bank ${one?"that":"those"}.\n${lines}\n\nThat's a bigger jump than one session usually adds, so I want to check ${one?"it":"them"} rather than log a number you didn't lift. ${one?"Is that right":"Are those right"}, or ${one?"was it":"were they"} a typo? Tell me the real number and I'll fix it.`
         }]),900);
+      }
+      if(unitChecks.length){
+        const ask = unitCheckMessage(unitChecks);
+        if(ask) setTimeout(()=>setMessages(prev=>[...prev,{role:"assistant",content:ask}]), suspectJumps.length?1800:900);
       }
 
       // WILCO Crew V1 — write whatever moments this turn detected (pr/week/

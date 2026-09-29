@@ -20,7 +20,7 @@
 //     late August, kg after). Today's display unit says nothing about a June row,
 //     so the row's own evidence is read first.
 import { toLbs, attemptUnit } from "./units.js";
-import { implausibleJump, resolveLift, effectiveDate, bestE1RMForExercise, epley1RM } from "./grit.js";
+import { implausibleJump, resolveLift, effectiveDate, bestE1RMForExercise, epley1RM, IMPLAUSIBLE_JUMP_FLOOR_LBS, IMPLAUSIBLE_JUMP_MIN_LBS, IMPLAUSIBLE_JUMP_PCT } from "./grit.js";
 
 const isUnit = (u) => u === "kg" || u === "lbs";
 const lower = (s) => String(s || "").toLowerCase().trim();
@@ -225,6 +225,18 @@ const historyUnit = (logs) => {
   const kg = last5.filter((l) => l.stored === "kg").length, lb = last5.length - kg;
   return kg === lb ? last5[0].stored : kg > lb ? "kg" : "lbs";
 };
+// "Implausible against the lift's own history", in BOTH directions, on grit.js's
+// implausibleJump thresholds (lbs): a jump over the recent best, or a collapse
+// below it by the same margin. A unit read the wrong way is a factor of 2.2, so
+// the switch-over case the guard exists for ("C&J 130" filed as lbs by a kg
+// lifter whose last WRITTEN C&J was 290 lbs) is a collapse, not a jump. The
+// "other unit is plausible" half keeps ordinary light days out: a light day read
+// in the other unit is a 2x jump, never plausible.
+const offBest = (best, e1) => {
+  if (!(e1 > 0)) return false;
+  if (implausibleJump(best, e1)) return true;
+  return best >= IMPLAUSIBLE_JUMP_FLOOR_LBS && best - e1 >= IMPLAUSIBLE_JUMP_MIN_LBS && best / e1 >= 1 + IMPLAUSIBLE_JUMP_PCT - 1e-9;
+};
 const loadE1 = (it, unit) => (it.kind === "ex"
   ? bestE1RMForExercise({ ...it.src, unit })
   : epley1RM(toLbs(Number(it.src.weight) || 0, unit), Number(it.src.reps) || 1)) || 0;
@@ -282,7 +294,7 @@ export const resolveLoadUnits = (parsed, { displayUnit, message = "", normalizeN
       const best = logs.reduce((m, l) => Math.max(m, l.e1), 0);
       if (best > 0 && it.nums.length) {
         const other = it.unit === "kg" ? "lbs" : "kg";
-        it.suspect = implausibleJump(best, loadE1(it, it.unit)) && !implausibleJump(best, loadE1(it, other));
+        it.suspect = offBest(best, loadE1(it, it.unit)) && !offBest(best, loadE1(it, other));
       }
     }
   }
@@ -363,4 +375,17 @@ export const declaredMaxWrite = (attempt, { existing = null, estLbs = 0, display
   // Not actually a new max: leave the standing actual 1RM as it is.
   if (existing && newLbs <= oldLbs) return { action: "skip", unit, newLbs, oldLbs };
   return { action: existing ? "update" : "insert", unit, newLbs, oldLbs };
+};
+
+// The ask when the unit guard fired (unit_suspect): which unit was it? Stated in
+// the unit it was filed under, with the other reading beside it. Deterministic,
+// never a model call. checks: [{exercise, weight, unit}].
+export const unitCheckMessage = (checks) => {
+  const list = (Array.isArray(checks) ? checks : []).filter((c) => c && c.exercise && c.weight != null && isUnit(c.unit));
+  if (!list.length) return "";
+  const lbl = (u) => (u === "kg" ? "kg" : "lbs");
+  const flip = (u) => (u === "kg" ? "lbs" : "kg");
+  const lines = list.map((c) => `${c.exercise} at ${c.weight} ${lbl(c.unit)} doesn't line up with your recent ${c.exercise} numbers. ${c.weight} ${lbl(flip(c.unit))} would.`);
+  const one = list.length === 1;
+  return `Quick check before I bank ${one ? "that" : "those"}.\n${lines.join("\n")}\n\n${one ? "Which was it" : "Which were they"}, kg or lbs? I'll file ${one ? "it" : "them"} the way you say.`;
 };

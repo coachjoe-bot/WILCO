@@ -104,7 +104,7 @@ test("kg athlete who benches in lbs: an unlabelled bench follows the lift's own 
   const ex = inserts(calls, "workouts").find((r) => r.parsed_data?.exercises?.[0]?.name === "Bench Press").parsed_data.exercises[0];
   expect([ex.unit, ex.unit_source, !!ex.unit_suspect]).toEqual(["lbs", "history", false]);
   await page.waitForTimeout(1500);
-  await expect(page.getByText(/Hold up before I bank/)).toHaveCount(0);
+  await expect(page.getByText(/Hold up before I bank|Quick check before I bank/)).toHaveCount(0);
 });
 
 test("a load that only makes sense in the other unit is kept as resolved and ASKED about, never flipped", async ({ page }) => {
@@ -120,7 +120,8 @@ test("a load that only makes sense in the other unit is kept as resolved and ASK
   await expect.poll(() => inserts(calls, "workouts").some((r) => r.parsed_data?.exercises?.[0]?.name === "Bench Press")).toBe(true);
   const ex = inserts(calls, "workouts").find((r) => r.parsed_data?.exercises?.[0]?.name === "Bench Press").parsed_data.exercises[0];
   expect([ex.unit, ex.unit_source, ex.unit_suspect]).toEqual(["kg", "history", true]);
-  await expect(page.getByText(/Hold up before I bank that/)).toBeVisible({ timeout: 15000 });
-  // The ask quotes the lift's real best, never 0.
-  await expect(page.getByText(/best on record is 0\b/)).toHaveCount(0);
+  // The unit ask, by unit, never a silent flip and never the generic jump copy.
+  await expect(page.getByText(/Quick check before I bank that/)).toBeVisible({ timeout: 15000 });
+  await expect(page.getByText(/Bench Press at 225 kg doesn't line up/)).toBeVisible();
+  await expect(page.getByText(/Hold up before I bank/)).toHaveCount(0);
 });

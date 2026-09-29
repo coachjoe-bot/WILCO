@@ -36,19 +36,22 @@ const isBarbell = (name) => BARBELL.test(name || "") && !NOT_BARBELL.test(name |
 const athletes = (await sb("athletes?weight_unit=eq.kg&select=id,name")).filter((a) => !QA.has(a.id));
 const out = [];
 for (const a of athletes) {
-  const rows = await sb(`workouts?athlete_id=eq.${a.id}&created_at=gte.${since}&select=id,created_at,raw_message,parsed_data&order=created_at.asc`);
+  // Every row, so each log is resolved against the history the client held then.
+  const all = await sb(`workouts?athlete_id=eq.${a.id}&select=id,created_at,raw_message,parsed_data&order=created_at.desc&limit=5000`);
+  const rows = all.filter((r) => r.created_at >= since).reverse();
   for (const r of rows) {
+    const history = all.filter((h) => h.created_at < r.created_at);
     const pd = typeof r.parsed_data === "string" ? JSON.parse(r.parsed_data) : r.parsed_data;
     const exs = Array.isArray(pd?.exercises) ? pd.exercises : [];
     if (!exs.length) continue;
-    const resolved = resolveLoadUnits(pd, { displayUnit: "kg", message: r.raw_message || "", normalizeName: normalizeExName });
+    const resolved = resolveLoadUnits(pd, { displayUnit: "kg", message: r.raw_message || "", normalizeName: normalizeExName, history, now: Date.parse(r.created_at) });
     exs.forEach((ex, i) => {
       if (!ex || ex.unit === "bodyweight" || !(Number(ex.weight) > 0)) return;
       const nums = [ex.weight, ...(Array.isArray(ex.set_details) ? ex.set_details.map((s) => s.weight) : [])].filter((n) => Number(n) > 0);
       const v = resolved.exercises[i];
       out.push({
         athlete: a.name, date: r.created_at.slice(0, 10), row: r.id, lift: ex.name, weight: ex.weight,
-        set_details: nums.join("/"), stored: ex.unit, t65: v.unit, t65_source: v.source,
+        set_details: nums.join("/"), stored: ex.unit, t65: v.unit, t65_source: v.unitSource, t65_suspect: v.suspect,
         written: v.written,
         barbell: isBarbell(ex.name), raw: (r.raw_message || "").replace(/\s+/g, " ").slice(0, 220),
       });
@@ -63,7 +66,7 @@ const disagree = out.filter((x) => x.stored !== x.t65);
 if (process.argv.includes("--json")) {
   console.log(JSON.stringify({ since, exercises: out.length, barbell: out.filter((x) => x.barbell).length, candidates, carriedKg, disagree }, null, 2));
 } else {
-  const line = (x) => `  ${x.date} ${x.lift} ${x.set_details} stored:${x.stored} t65:${x.t65} (${x.t65_source}) written:${x.written ?? "none"}  "${x.raw}"`;
+  const line = (x) => `  ${x.date} ${x.lift} ${x.set_details} stored:${x.stored} t65:${x.t65} (${x.t65_source}${x.t65_suspect ? ", SUSPECT" : ""}) written:${x.written ?? "none"}  "${x.raw}"`;
   console.log(`kg athletes: ${athletes.length} · weighted exercises since ${since}: ${out.length}`);
   const bb = out.filter((x) => x.barbell);
   const cell = (u, w) => bb.filter((x) => x.stored === u && (w ? !!x.written : !x.written)).length;
@@ -72,6 +75,7 @@ if (process.argv.includes("--json")) {
   candidates.forEach((x) => console.log(line(x)));
   console.log(`\nBarbell lift stored KG, no unit written on its numbers (parser carried kg): ${carriedKg.length}`);
   carriedKg.forEach((x) => console.log(line(x)));
+  console.log(`\nBarbell lifts T65 would file differently: ${disagree.filter((x) => x.barbell).length} · suspect flags: ${out.filter((x) => x.t65_suspect).length}`);
   console.log(`\nStored unit differs from what T65 would store: ${disagree.length}`);
   disagree.forEach((x) => console.log(line(x)));
 }

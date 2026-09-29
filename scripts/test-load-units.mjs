@@ -10,7 +10,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { resolveLoadUnits, stampLoadUnits, stampAttemptUnits, loadChains, writtenUnit, liftRecentBestLbs } from "../src/prAttempts.js";
+import { resolveLoadUnits, stampLoadUnits, stampAttemptUnits, loadChains, writtenUnit, liftRecentBestLbs, unitCheckMessage } from "../src/prAttempts.js";
 import { normalizeExName, bestE1RMForExercise, implausibleJump, toLbs } from "../src/grit.js";
 import { exerciseUnit, exerciseLoadUnit } from "../src/units.js";
 import { draftInUnit } from "../src/boot.js";
@@ -190,7 +190,9 @@ eq(exerciseLoadUnit({ unit: "kg" }), "kg", "load unit kg");
   const app = readFileSync(join(here, "../src/App.jsx"), "utf8");
   ok(/stampLoadUnits\(parsed, \{[^}]*history: workoutHistory/.test(app), "finalizeWorkout hands the resolver the athlete's history");
   ok(/stampLoadUnits\(p, \{[^}]*history: workoutHistory/.test(app), "send() hands the resolver the athlete's history");
-  ok(/unit_suspect/.test(app.slice(app.indexOf("const finalizeWorkout = async"), app.indexOf("const finalizeWorkout = async") + 40000)), "finalizeWorkout reads unit_suspect into the hold-up ask");
+  const finSrc = app.slice(app.indexOf("const finalizeWorkout = async"), app.indexOf("const finalizeWorkout = async") + 40000);
+  ok(/const suspect = implausibleJump\(knownBestLbs, exE1RM\) \|\| !!ex\.unit_suspect;/.test(finSrc), "a unit-suspect set is held back from PRs and the 1RM promotion");
+  ok(/if\(ex\.unit_suspect\) unitChecks\.push/.test(finSrc) && /if\(attempt\.unit_suspect\)/.test(finSrc) && /unitCheckMessage\(unitChecks\)/.test(finSrc), "finalizeWorkout asks by unit for every unit-suspect load");
   ok(/"weight":number\|null,"unit":"lbs"\|"kg"\|"bodyweight"\|null/.test(app), "parse schema lets an exercise carry unit:null");
   ok(!/it is "lbs" \(this app's default\)/.test(app), "the lbs-default rule is gone from the rulebook");
   ok(/parsed = stampLoadUnits\(parsed, \{displayUnit: updatedAthlete\?\.weight_unit, message: msg/.test(app), "finalizeWorkout stamps every load before saving");
@@ -294,6 +296,25 @@ console.log("lift history (step 4) and the plausibility guard:");
   // both units implausible (a typo): not the unit guard's call (the finalize jump check still asks)
   v = V("bench 3x5 at 900", "lbs", [ex("Bench Press", 900, null, { sets: 3, reps: 5 })], benchLbs);
   eq([v.exercises[0].unit, v.exercises[0].suspect], ["lbs", false], "a typo implausible in both units is left to the existing jump check");
+  // the guard, the other direction: a unit switch-over. The last WRITTEN C&J was
+  // lbs (before the athlete moved to kg); today's unlabelled 130 read as lbs is a
+  // collapse below the best, and 130 kg fits it. Asked, never silently flipped.
+  const cjSwitch = [row(10, "Clean & Jerk 3x1 @ 70/90/100/110/120", [ladder("Clean & Jerk", [70, 90, 100, 110, 120], "kg")]),
+    row(40, "Clean and jerk singles at 135/185/225/255/275/290lbs", [ladder("Clean & Jerk", [135, 185, 225, 255, 275, 290], "lbs")])];
+  v = V("Clean and Jerk singles @ 70/90/100/110/120/130", "kg", [ladder("Clean & Jerk", [70, 90, 100, 110, 120, 130], null)], cjSwitch);
+  eq([v.exercises[0].unit, v.exercises[0].unitSource, v.exercises[0].suspect], ["lbs", "history", true], "switch-over: history says lbs (last written), 130 lbs collapses below a 290 lb best, 130 kg fits -> suspect, asks");
+  // an ordinary light day is never suspect (the other unit would be a 2x jump)
+  v = V("bench 3x5 at 135", "kg", [ex("Bench Press", 135, null, { sets: 3, reps: 5 })], benchLbs);
+  eq([v.exercises[0].unit, v.exercises[0].suspect], ["lbs", false], "a light day in the lift's unit is not suspect");
+  v = V("bench 3x8 at 60", "kg", [ex("Bench Press", 60, null, { sets: 3, reps: 8 })], benchKg);
+  eq([v.exercises[0].unit, v.exercises[0].suspect], ["kg", false], "a deload in kg is not suspect");
+  // the ask copy
+  eq(unitCheckMessage([{ exercise: "Clean & Jerk", weight: 130, unit: "lbs" }]),
+    "Quick check before I bank that.\nClean & Jerk at 130 lbs doesn't line up with your recent Clean & Jerk numbers. 130 kg would.\n\nWhich was it, kg or lbs? I'll file it the way you say.", "unit ask, one lift");
+  ok(/those[\s\S]*Which were they/.test(unitCheckMessage([{ exercise: "A", weight: 1, unit: "kg" }, { exercise: "B", weight: 2, unit: "lbs" }])), "unit ask, two lifts");
+  eq(unitCheckMessage([]), "", "no checks, no message");
+  ok(!/[\u2014!]/.test(unitCheckMessage([{ exercise: "Bench Press", weight: 225, unit: "kg" }])), "house style: no em dash, no exclamation");
+
   // steps 1-3 always outrank history, and history never overrides a written unit
   v = V("bench 3x5 at 100kg", "kg", [ex("Bench Press", 100, null)], benchLbs);
   eq([v.exercises[0].unit, v.exercises[0].unitSource], ["kg", "written"], "written kg beats lbs history");
