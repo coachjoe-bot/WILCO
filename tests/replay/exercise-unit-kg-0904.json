@@ -1,0 +1,66 @@
+{
+  "bug": "T65: logged sets carried the parser's unit, and the parser's rulebook said an unlabelled load is lbs (this app's default). A kg athlete's 'squat 5x3 at 140' could be saved as a 140 LB squat, and in practice the parser sometimes carried kg across lifts and sometimes did not. These are the founder's real rows (read-only copies, 2026-09-29) run through the T65 resolver.",
+  "source": "Founder account 0704b840-45db-4bff-81eb-064154092e7f (weight_unit kg, writes kg since 2026-08-17). Copied read-only; nothing was repaired.",
+  "rows": [
+    {
+      "name": "09-04 C&J + back squat: parser carried kg onto unlabelled ladders",
+      "row_id": "365d5b58-84b8-4efb-93b1-8d771d253a87",
+      "created_at": "2026-09-04T19:54:11Z",
+      "display_unit": "kg",
+      "raw_message": "Day 5 – Clean & Jerk/Back Squat\n\nClean and Jerk singles @ 70/90/100/110/120/130\nBack Squat singles @ 70/110/130/150/170 then I missed 180kg",
+      "parsed": {
+        "exercises": [
+          { "name": "Clean & Jerk", "sets": 6, "reps": 1, "weight": 130, "unit": "kg", "set_details": [{ "reps": 1, "weight": 70 }, { "reps": 1, "weight": 90 }, { "reps": 1, "weight": 100 }, { "reps": 1, "weight": 110 }, { "reps": 1, "weight": 120 }, { "reps": 1, "weight": 130 }] },
+          { "name": "Back Squat", "sets": 5, "reps": 1, "weight": 170, "unit": "kg", "set_details": [{ "reps": 1, "weight": 70 }, { "reps": 1, "weight": 110 }, { "reps": 1, "weight": 130 }, { "reps": 1, "weight": 150 }, { "reps": 1, "weight": 170 }] }
+        ],
+        "pr_attempts": [
+          { "exercise": "Clean & Jerk", "weight": 130, "reps": 1, "achieved": true },
+          { "exercise": "Back Squat", "weight": 170, "reps": 1, "achieved": true },
+          { "exercise": "Back Squat", "weight": 180, "reps": 1, "achieved": false }
+        ]
+      },
+      "stored": { "exercises": ["kg", "kg"] },
+      "expect": { "exercises": ["kg", "kg"], "pr_attempts": ["kg", "kg", "kg"] },
+      "expect_if_lbs_athlete": { "exercises": ["lbs", "kg"], "pr_attempts": ["lbs", "kg", "kg"], "why": "an lbs athlete: 180kg is written on the squat only, so the squat ladder is kg (same lift) and the C&J ladder follows the athlete (T46: a unit never carries to the next lift)" }
+    },
+    {
+      "name": "08-18 bench ladder, no unit written, stored lbs",
+      "row_id": "f634ea82-f11e-4454-9f3d-635914412c89",
+      "created_at": "2026-08-18T18:53:16Z",
+      "display_unit": "kg",
+      "raw_message": "Day 2 – Bench/Dips\n\nBench 5x2 @ 185/205/205 (stopped because I felt it in my pec) I’ll have to go slower and with less weight in the future\nDips 3x6 (bodyweight, upper arm to parallel only, no deep stretch) I did these assisted because my pec is hurting",
+      "parsed": {
+        "exercises": [
+          { "name": "Bench Press", "sets": 3, "reps": 2, "weight": 205, "unit": "lbs", "set_details": [{ "reps": 2, "weight": 185 }, { "reps": 2, "weight": 205 }, { "reps": 2, "weight": 205 }] },
+          { "name": "Dip", "sets": 3, "reps": 6, "unit": "bodyweight" }
+        ],
+        "pr_attempts": []
+      },
+      "stored": { "exercises": ["lbs", "bodyweight"] },
+      "expect": { "exercises": ["kg", "bodyweight"], "pr_attempts": [] },
+      "known_best": { "exercise": "Bench", "weight": 275, "unit": "lbs", "source": "manual_one_rms" },
+      "expect_implausible_jump": true,
+      "note": "The one barbell lift stored as lbs with no unit written since the switch. It was most likely right as lbs (the founder benches in lbs: 245 lb single on 08-10, 275 lb max on file). T65 files it in the athlete's unit (205 kg), and the T46 implausible-jump guard then holds it back and asks, because 205 kg x2 is far past a 275 lb max. The guard compares both in lbs."
+    },
+    {
+      "name": "08-25 back extension @ 45, no unit written, stored lbs",
+      "row_id": "fa31291e-e331-4c04-95cd-58327b8a6523",
+      "created_at": "2026-08-25T12:38:30Z",
+      "display_unit": "kg",
+      "raw_message": "Day 1 – Front Squat/Pulls\n\nFront Squat 4x3 @ 70kg/100kg/120 (stopped because my knees are feeling it. \nSnatch Pull 4x3 @ 100/110/110/110kg\nBack Extension 3x12 @ 45",
+      "parsed": {
+        "exercises": [
+          { "name": "Front Squat", "sets": 4, "reps": 3, "weight": 120, "unit": "kg", "set_details": [{ "reps": 3, "weight": 70 }, { "reps": 3, "weight": 100 }, { "reps": 3, "weight": 120 }, { "reps": 3, "weight": 120 }] },
+          { "name": "Snatch Pull", "sets": 4, "reps": 3, "weight": 110, "unit": "kg", "set_details": [{ "reps": 3, "weight": 100 }, { "reps": 3, "weight": 110 }, { "reps": 3, "weight": 110 }, { "reps": 3, "weight": 110 }] },
+          { "name": "Back Extension", "sets": 3, "reps": 12, "weight": 45, "unit": "lbs" }
+        ],
+        "pr_attempts": []
+      },
+      "stored": { "exercises": ["kg", "kg", "lbs"] },
+      "expect": { "exercises": ["kg", "kg", "kg"], "pr_attempts": [] },
+      "known_best": { "exercise": "Back Extension", "e1rm_lbs": 63 },
+      "expect_implausible_jump": false,
+      "note": "A plate the founder usually labels in lbs (45lbs on 08-17, 09-15). Unlabelled here, T65 files it as 45 kg. The known best (63 lb e1RM) is under the guard's 65 lb floor, so nothing asks. Open risk for mixed-unit lifters, reported to the founder."
+    }
+  ]
+}
