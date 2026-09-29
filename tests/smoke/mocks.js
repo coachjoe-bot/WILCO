@@ -163,7 +163,14 @@ export async function mockApi(page, options = {}) {
   // Determinism guards, installed before any page script runs:
   // - never offer the Face ID enrollment interstitial after login
   // - never let the unguarded index.html sw register() reject into the console
-  await page.addInitScript(() => {
+  // - pre-seed the AI-processing consent gate (App.jsx AiConsentGate, App Store
+  //   5.1.2(i)) as already-granted for these fixture ids, the same way a real
+  //   "yes" would have left localStorage. The smoke fixtures represent already-
+  //   onboarded accounts, so without this every spec that logs an athlete/coach
+  //   straight in (not through signup) would hang behind the new blocking card.
+  //   A spec that specifically wants to exercise the gate should clear this key
+  //   itself after the fact. Key name must match AI_CONSENT_CACHE_KEY in App.jsx.
+  await page.addInitScript((consentIds) => {
     try {
       if (window.PublicKeyCredential) {
         window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable =
@@ -172,8 +179,13 @@ export async function mockApi(page, options = {}) {
       if (navigator.serviceWorker) {
         navigator.serviceWorker.register = () => new Promise(() => {});
       }
+      if (consentIds && consentIds.length) {
+        const m = {};
+        consentIds.forEach((id) => { if (id) m[id] = true; });
+        localStorage.setItem("wilco_ai_consent_v1", JSON.stringify(m));
+      }
     } catch (_) {}
-  });
+  }, [athlete.id, coach && coach.id].filter(Boolean));
 
   // Catch-all for any /api/* endpoint not specifically handled below
   // (send-coach-welcome, trigger-proof-feed, push, ...). Registered FIRST so the
@@ -224,11 +236,18 @@ export async function mockApi(page, options = {}) {
   });
 
   // ── /api/data — the authenticated read/write gateway ───────────────────────
+  // legal_acceptances defaults to an already-granted ai_processing row (belt-
+  // and-suspenders with the localStorage seed above — AiConsentGate checks the
+  // cache first and never reaches this read for the fixtures' own ids, but a
+  // spec that clears the cache to test the gate itself still needs a sane
+  // default here). Pass dataReads:{legal_acceptances:[]} to test the "not yet
+  // granted" blocking card.
+  const effectiveDataReads = { legal_acceptances: [{ id: "mock-legal-ai", document: "ai_processing" }], ...dataReads };
   await page.route("**/api/data", (route) => {
     const body = record(route) || {};
     switch (body.op) {
       case "read": { // gateway reads return a bare PostgREST-style array
-        const canned = dataReads[body.table];
+        const canned = effectiveDataReads[body.table];
         if (canned) return route.fulfill(json(typeof canned === "function" ? (canned(body) || []) : canned));
         return route.fulfill(json([]));
       }
