@@ -219,3 +219,28 @@ export function repWordGuard(text, performed = []) {
   });
   return { text: out, changed: out !== src, removed };
 }
+
+// planRestGuard (T67, prod pass 09-29): the deployed client still got "barbell
+// rows and pull-ups whenever you get to them" on 4 of 5 partial logs; the fact
+// in LOG REPLY FOCUS shortened it to a clause and did not remove it. The turn's
+// planRest (turnFacts logHeadline: today's planned lifts this log leaves out,
+// empty whenever the app asks its one skipped-lift question) is enforced here:
+// a sentence naming one of them goes. Never when the athlete asked something in
+// the same message (an answer they asked for is never limited).
+const headNoun = (name) => String(name || "").toLowerCase().replace(/\([^)]*\)/g, " ").trim().split(/\s+/).pop().replace(/[^a-z-]/g, "").replace(/s$/, "");
+const nameRe = (words) => new RegExp(`\\b${words.map((w) => w.replace(/-/g, "[- ]?")).join("[- ]+")}s?\\b`, "i");
+export function planRestGuard(text, planRest = [], { performed = [], asked = false } = {}) {
+  const src = String(text || "");
+  const rest = (Array.isArray(planRest) ? planRest : []).filter(Boolean);
+  if (!rest.length || asked) return { text: src, changed: false, removed: [] };
+  const loggedHeads = new Set((Array.isArray(performed) ? performed : []).map((e) => headNoun(e?.name)).filter(Boolean));
+  const res = rest.map((name) => {
+    const words = String(name).toLowerCase().replace(/\([^)]*\)/g, " ").trim().split(/\s+/).map((w) => w.replace(/[^a-z-]/g, "")).filter(Boolean);
+    if (!words.length) return null;
+    words[words.length - 1] = words[words.length - 1].replace(/s$/, "");
+    const head = words[words.length - 1];
+    // "Romanian Deadlift" left out of a log that holds "Deadlift": only the full name counts
+    return loggedHeads.has(head) || head.length < 3 ? nameRe(words) : nameRe([head]);
+  }).filter(Boolean);
+  return dropSentences(src, (sent) => !/\?\s*$/.test(sent.trim()) && res.some((re) => re.test(sent)));
+}

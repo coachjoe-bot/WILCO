@@ -10,9 +10,10 @@
 //      is replaced by one truthful line (AI contract rule 6)
 //   5. T67 turn guards (src/replyGuards.js): a count about pain is removed on
 //      Joe's conversational surfaces (chat, check-in); with ctx.turn (the turn's
-//      computed facts: painAreas, unitPending, performed) a restated load whose
+//      computed facts: painAreas, unitPending, performed, planRest, asked) a restated load whose
 //      unit the app is asking about is removed and a rep word the logged sets do
-//      not say becomes "set"
+//      not say becomes "set"; a sentence naming a planned lift the log left
+//      out (planRest) is removed unless the athlete asked something
 // Returns {text, changed, removed, words}. MEASURE, never enforce: `words` is
 // reported, nothing is ever truncated for length.
 //
@@ -23,7 +24,7 @@
 // they are stored).
 
 import { stripToolNameNoise } from "./chatRouting.js";
-import { claimGuard, painCountGuard, unitRestateGuard, repWordGuard } from "./replyGuards.js";
+import { claimGuard, painCountGuard, unitRestateGuard, repWordGuard, planRestGuard } from "./replyGuards.js";
 
 // Sentinel marking where a sentence-opening interjection was cut, so the next
 // word can be capitalized ("Damn, sorry you got hit" -> "Sorry you got hit").
@@ -185,6 +186,8 @@ export function replyGate(surface, text, ctx = {}) {
   if (turn) {
     const u = unitRestateGuard(out, turn.unitPending, turn.performed);
     if (u.changed) { out = u.text; removed.push(...u.removed.map((s) => `unit_restate: ${s}`)); }
+    const pr = planRestGuard(out, turn.planRest, { performed: turn.performed, asked: !!turn.asked });
+    if (pr.changed) { out = pr.text; removed.push(...pr.removed.map((x) => `plan_rest: ${x}`)); }
     const r = repWordGuard(out, turn.performed);
     if (r.changed) { out = r.text; removed.push(...r.removed.map((s) => `rep_word: ${s}`)); }
   }

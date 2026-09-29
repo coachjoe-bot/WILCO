@@ -44,3 +44,23 @@ test("chat turn: no LOG REPLY FOCUS block", async ({ page }) => {
   await expect.poll(() => chatBodies(calls).length, { timeout: 10000 }).toBeGreaterThan(0);
   expect(chatBodies(calls).map(sysOf).join("\n")).not.toContain("LOG REPLY FOCUS");
 });
+
+// T67 (prod pass 09-29): on a partial log the deployed app still got "rows and
+// pull-ups whenever you get to them" 4 of 5. The turn's planRest is handed to
+// Joe AND enforced at the output gate: the settled bubble and the stored reply
+// carry the acknowledgment and the headline, nothing about the lifts left out.
+test("T67 partial log: a sentence about the planned lifts left out never settles", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: "Day 1 - Pull\nDeadlift 3x5 @ 275\nBarbell Row 3x8 @ 155\nPull-ups 3x8\n\nDay 2 - Press\nBench Press 3x5 @ 185" });
+  const SLIP = "275 for 3x5, clean work. Barbell rows and pull-ups whenever you get to them.";
+  const { calls } = await mockApi(page, { athlete, chatReply: SLIP, parseResult: { ...emptyParse, exercises: [LB("Deadlift", 3, 5, 275)] } });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  await page.getByPlaceholder(/Tell Coach Joe about your workout/).fill("Deadlift 3x5 @ 275, moved well");
+  await page.getByRole("button", { name: "→" }).click();
+  // exact: the mock's opener bubble carries the same text inside a longer line
+  await expect(page.getByText("275 for 3x5, clean work.", { exact: true })).toBeVisible({ timeout: 15000 });
+  await expect.poll(() => chatBodies(calls).length, { timeout: 10000 }).toBeGreaterThan(0);
+  expect(sysOf(chatBodies(calls).at(-1))).toContain("Also on today's plan and not in this log: Barbell Row, Pull-ups.");
+  await expect(page.getByText(SLIP, { exact: true })).toHaveCount(0, { timeout: 10000 });
+  await expect.poll(() => calls.filter((c) => c.body?.table === "workouts" && /insert|update/.test(c.body?.op || "") && /whenever you get to them/.test(JSON.stringify(c.body))).length).toBe(0);
+  expect(calls.some((c) => c.body?.table === "workouts" && /275 for 3x5, clean work\./.test(JSON.stringify(c.body)))).toBe(true);
+});

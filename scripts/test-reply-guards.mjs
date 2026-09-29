@@ -9,7 +9,7 @@
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { FOLLOWUP_PRIORITY, classifyFollowUp, arbitrateFollowUp, claimGuard, findClaims, TRUTHFUL_NO_CHANGE, painCountGuard, statesPainCount, unitRestateGuard, repWordGuard } from "../src/replyGuards.js";
+import { FOLLOWUP_PRIORITY, classifyFollowUp, arbitrateFollowUp, claimGuard, findClaims, TRUTHFUL_NO_CHANGE, painCountGuard, statesPainCount, unitRestateGuard, repWordGuard, planRestGuard } from "../src/replyGuards.js";
 import { replyGate } from "../src/replyGate.js";
 import { ledgerTurn, painFollowUpPlan, withMark, recStagedLine, keepPainRec, ledgerBlock } from "../src/painLedger.js";
 import { validateFact, ledgerRejects } from "../src/memory.js";
@@ -244,6 +244,19 @@ const rp = JSON.parse(fs.readFileSync(join(here, "../tests/replay/bug2-pain-voic
   eq(replyGate("chat", "Logged: Front Squat 3x3 at 225. Good work.", { record: false }).text, "Logged: Front Squat 3x3 at 225. Good work.", "no ctx.turn: the unit guard does not run");
   eq(replyGate("checkin", "Glad it's better. Second time the knee pain eased off.", { record: false }).text, "Glad it's better.", "check-in: pain count removed without a turn");
   eq(replyGate("proof_letter", "Knee pain twice this week.", { record: false }).text, "Knee pain twice this week.", "proof letter: not a conversational surface, untouched");
+
+  // planRest: the five real replies from the deployed app (prod pass 09-29, partial log)
+  const rest = ["Barbell Row", "Pull-ups"], did = [{ name: "Deadlift", set_details: [{ weight: 130, reps: 5 }] }];
+  eq(planRestGuard("130 across all three, solid work. Barbell row and pull-ups still on deck whenever you get to them.", rest, { performed: did }).text, "130 across all three, solid work.", "prod reply 1");
+  eq(planRestGuard("Solid, 130 for 3x5 moving well is exactly where it should be. Get after the rows and pull-ups.", rest, { performed: did }).text, "Solid, 130 for 3x5 moving well is exactly where it should be.", "prod reply 2");
+  eq(planRestGuard("130 for 3x5, clean work. Solid pull day so far, barbell rows and pull-ups whenever you get to them.", rest, { performed: did }).text, "130 for 3x5, clean work.", "prod reply 4");
+  eq(planRestGuard("Solid work, 130 across all 3 sets of 5. Good pull day so far.", rest, { performed: did }).changed, false, "prod reply 3 was clean and stays");
+  eq(planRestGuard("Rows and pull-ups are next: 3x8 each at 70.", rest, { performed: did, asked: true }).changed, false, "they asked something: nothing is removed");
+  eq(planRestGuard("Rows whenever you get to them.", rest, { performed: did }).changed, false, "a reply is never emptied");
+  eq(planRestGuard("Deadlift at 130 moved well. Romanian deadlifts are still there.", ["Romanian Deadlift"], { performed: did }).text, "Deadlift at 130 moved well.", "a left-out lift sharing the logged lift's noun needs its full name, so the headline stays");
+  eq(planRestGuard("Your pull-up numbers are up. Want rows added?", ["Barbell Row"], { performed: did }).text, "Your pull-up numbers are up. Want rows added?", "a question is never removed");
+  eq(planRestGuard("Good work.", [], { performed: did }).changed, false, "no planRest, no change");
+  eq(replyGate("chat", "130 for 3x5. Get after the rows and pull-ups.", { toolCalls: [], turn: { painAreas: [], unitPending: [], performed: did, planRest: rest, asked: false }, record: false }).text, "130 for 3x5.", "the gate applies it with ctx.turn");
 
   // replay: the real replies
   const rp = JSON.parse(fs.readFileSync(join(here, "../tests/replay/t67-log-voice-0929.json"), "utf8"));

@@ -2176,6 +2176,7 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
       // T67: today's session text (the resolver's) names the planned lifts this log leaves out (planRest)
       const headline = logHeadline({exercises: logExercises, prLines: prLinesForFocus, lastDone: byLift, painTurn: painLt?.turn||null, planDay, sport: athlete.sport||"", displayUnit: athlete.weight_unit, now: new Date(), todayPlanText: posNow && !posNow.isRestDay ? (posNow.sessionText||"") : ""});
       logFocus = `\n\n${logFocusBlock(headline)}`;
+      if(opts && typeof opts==="object") opts.headline = headline; // T67: send() hands planRest to the output gate
     }catch(_){ /* additive: a failure means no block, never a crash */ }
   }
 
@@ -9484,7 +9485,11 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // One-shot fallback: mastermind persona/memory ride along, tools don't
         // (the JSON path returns text only) — a dropped stream costs the turn's
         // actions, never the reply.
-        reply = gateText("chat", await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext,null,MASTERMIND_ON?{mastermind:true, memoryRows, pureLog:fromQuickLog, parsedLog:parsedForReply, tempProgramFact:masterOpts.tempProgramFact}:{parsedLog:parsedForReply, tempProgramFact:masterOpts.tempProgramFact}));
+        // T67: the same turn facts the streamed call got (sheet fact, pain turn,
+        // change scope, temp fact); only the tool callback is left off.
+        const oneShotOpts = {...masterOpts, onToolUse: undefined};
+        reply = gateText("chat", await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext,null,oneShotOpts));
+        if(oneShotOpts.headline) masterOpts.headline = oneShotOpts.headline;
         setMessages(prev=>{ const u=[...prev]; const last=u[u.length-1]; if(last && last.role==="assistant") u[u.length-1]={role:"assistant",content:reply}; return u; });
       }
       // A held reply keeps the typing dot up until releaseReply shows the bubble
@@ -9587,7 +9592,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         const programWrite = !!(parsed.is_program_update || parsed.program_append || parsed.program_create_request || tempExplicitText || tempDecision.write);
         // T67: the turn's computed facts, so the gate holds Joe to them (pain count,
         // a load whose unit the app is asking about, rep words the log does not say)
-        const gateTurn = (()=>{ try{ return {painAreas: painTurn?.turn?.areas||[], unitPending: parsedForReply ? pendingUnitLoads(parsedForReply) : [], performed: parsedForReply ? logTurnExercises(parsedForReply, updatedAthlete.weight_unit) : []}; }catch(_){ return null; } })();
+        const gateTurn = (()=>{ try{ return {painAreas: painTurn?.turn?.areas||[], unitPending: parsedForReply ? pendingUnitLoads(parsedForReply) : [], performed: parsedForReply ? logTurnExercises(parsedForReply, updatedAthlete.weight_unit) : [], planRest: masterOpts.headline?.planRest||[], asked: /\?/.test(msg)}; }catch(_){ return null; } })();
         const cg = replyGate("chat", reply, {toolCalls: MASTERMIND_ON ? masterToolCalls : [], appWrites:{program: programWrite, rec: painRec}, ...(gateTurn?{turn:gateTurn}:{})});
         if(cg.text !== reply){
           const was = reply;
