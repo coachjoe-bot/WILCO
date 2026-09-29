@@ -311,7 +311,7 @@ Wilco Training LLC  |  TrainWilco.com  |  support@trainwilco.com801 Internationa
 
 // Short explanatory body for the AI-processing consent gate (no document text —
 // same treatment as ParentalBody above). Read for the exact "what/who/why" the
-// disclosure covers before changing this copy; App Store review checked all four.
+// disclosure covers before changing this copy; guideline 5.1.2(i) needs all of it.
 // `role` swaps the athlete-worded body for a coach-worded one (the coach-side
 // gate in App.jsx's AiConsentGate) — same four categories, described as the
 // athletes' data a coach's own AI calls (program parse, check-in, briefs) send.

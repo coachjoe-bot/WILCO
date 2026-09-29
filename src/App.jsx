@@ -249,27 +249,18 @@ const checkoutFromPath = (pathname, search) => {
   return { token: p.get("t")||"", tier: p.get("tier")||"", billing: p.get("billing")==="annual"?"annual":"monthly" };
 };
 
-// Open the standalone external checkout page in the device's DEFAULT browser
-// (iOS only — callers gate on isNativeIOS() first). Apple's external-purchase-
-// link guideline wants the real Safari app, not an in-app sheet, so this uses
-// @capacitor/app's openUrl (UIApplication.open under the hood), which hands the
-// URL to the OS the same way tapping a link in Messages would — the WILCO app
-// backgrounds and Safari opens on top of it. This used to be `@capacitor/browser`'s
-// Browser.open(), which is SFSafariViewController: a sheet that stays inside
-// WILCO, not the system browser Apple's review guidance is asking for (App Store
-// blocker, 2026-09-29). No associated-domains entitlement claims app.trainwilco.com
-// (checked ios/App/App/App.entitlements), so this can't bounce back into our own
-// WebView. `@capacitor/app` is already a project dependency (used for the badge
-// listener above) — no new package needed. Dynamically imported so the native-only
-// path never enters the web/PWA bundle; the catch is belt-and-suspenders for the
-// rare case the import itself fails, not the expected path.
+// Open the standalone external checkout page in the device's default browser
+// (iOS only, callers gate on isNativeIOS() first). An external purchase link has
+// to leave the app for real Safari; `@capacitor/browser` Browser.open() was an
+// SFSafariViewController sheet that stays inside WILCO. A top-level navigation
+// to a host outside the app is handed to the OS by Capacitor itself
+// (WebViewDelegationHandler: not an allowNavigation host, so it cancels the load
+// and calls UIApplication.open). Proven in the simulator 2026-09-29: Safari
+// launches as its own process with the "WILCO" back chip. Keep
+// app.trainwilco.com OUT of server.allowNavigation in capacitor.config.json, or
+// checkout would load inside the WebView instead.
 const openExternalCheckout = async (url) => {
-  try {
-    const { App: CapApp } = await import("@capacitor/app");
-    await CapApp.openUrl({ url });
-  } catch (_) {
-    window.location.href = url;
-  }
+  window.location.href = url;
 };
 
 // Mint a short-lived, single-use checkout token (api/identity.js) and hand the
@@ -4287,6 +4278,7 @@ export default function WilcoApp() {
 function AiConsentGate({ role, id, onDecline, children }) {
   const [state, setState] = useState(() => {
     if(aiConsentCached(id)){ AI_CONSENT_OK = true; return "ok"; }
+    AI_CONSENT_OK = false; // never inherit the last account's permission
     return "checking";
   });
   useEffect(()=>{
@@ -5610,8 +5602,8 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
             rows={3}
             style={{...inpA(),resize:"none",lineHeight:1.5}}/>
           <div style={{color:CA.muted,fontSize:11,marginTop:6,lineHeight:1.5}}>Helps Joe give safer recommendations.</div>
-          {/* App Store guideline 1.4.1: this reminder used to live only inside the
-              Terms, which review flagged as not visible enough. */}
+          {/* App Store guideline 1.4.1: the reminder has to be visible in the app,
+              and it used to live only inside the Terms. */}
           <div style={{color:CA.muted,fontSize:11,marginTop:4,lineHeight:1.5}}>WILCO gives training guidance only. For pain or injury, check with a doctor before you train through it.</div>
         </div>
         {student&&(

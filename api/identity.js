@@ -115,7 +115,7 @@ async function athleteLogin(req, res, body) {
   const pin = pin4(body.pin);
   const key = `athlete-login:${clientIp(req)}:${name.toLowerCase()}`;
   await rateLimit(key, { max: 5, windowMin: 15 });
-  // App Store review flagged this: PINs are 4 digits (10,000 possibilities), and
+  // Readiness audit 2026-09-29: PINs are 4 digits (10,000 possibilities), and
   // the limiter above is keyed by IP+name, so an attacker rotating IPs is
   // unthrottled against one target name. This second counter is keyed on the
   // name ALONE (no IP), so rotating IPs doesn't reset it — same authThrottle
