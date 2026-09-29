@@ -39,20 +39,55 @@ async function cleanup() {
 }
 const setUnit = (u) => rest(`athletes?id=eq.${QA}`, { method: "PATCH", body: JSON.stringify({ weight_unit: u }) });
 
-// want: lift-name pattern -> { weight, unit }. wrong: text that would only appear
-// if a load were filed in the wrong unit (the misfiled number shown back).
+// want: lift-name pattern -> { weight, unit, source (which resolver step), suspect }.
+// wrong: text that would only appear if a load were filed in the wrong unit.
+// T65 v2 scenarios run against per-lift history seeded below (seedHistory).
 const SCENARIOS = [
-  { id: "kg-squat", name: "kg athlete, 'squat 5x3 at 140'", unit: "kg", msg: "squat 5x3 at 140",
-    want: [{ lift: /squat/i, weight: 140, unit: "kg" }], wrong: [/140\s?lbs?\b/i, /63\.5\s?kg/i] },
+  { id: "kg-bench-hist", name: "kg athlete, bench history in lbs: 'bench 3x5 at 205'", unit: "kg", msg: "bench 3x5 at 205",
+    want: [{ lift: /bench/i, weight: 205, unit: "lbs", source: ["history"] }], wrong: [/205\s?kg/i] },
+  { id: "kg-backext-hist", name: "kg athlete, back extension history in lbs: 'back extensions 3x12 at 45'", unit: "kg", msg: "back extensions 3x12 at 45",
+    want: [{ lift: /extension/i, weight: 45, unit: "lbs", source: ["history"] }], wrong: [/45\s?kg/i] },
+  { id: "lbs-frontsquat-suspect", name: "lbs athlete, front squat history in kg, 'front squat 3x3 at 225' (only fits lbs)", unit: "lbs", msg: "front squat 3x3 at 225",
+    want: [{ lift: /front squat/i, weight: 225, unit: "kg", source: ["history"], suspect: true }], wrong: [] },
+  { id: "kg-first-lift", name: "kg athlete, first-ever lift: 'zercher squat 3x5 at 100'", unit: "kg", msg: "zercher squat 3x5 at 100",
+    want: [{ lift: /zercher/i, weight: 100, unit: "kg", source: ["display"] }], wrong: [/100\s?lbs?\b/i, /45\.4\s?kg/i] },
   { id: "kg-clean-curls", name: "kg athlete, 'clean 100, then curls 40lb'", unit: "kg", msg: "clean 100, then curls 40lb",
-    want: [{ lift: /clean/i, weight: 100, unit: "kg" }, { lift: /curl/i, weight: 40, unit: "lbs" }], wrong: [/100\s?lbs?\b/i, /\b45(\.4)?\s?kg/i, /40\s?kg/i] },
+    want: [{ lift: /clean/i, weight: 100, unit: "kg", source: ["history", "display"] }, { lift: /curl/i, weight: 40, unit: "lbs", source: ["written"] }], wrong: [/100\s?lbs?\b/i, /\b45(\.4)?\s?kg/i, /40\s?kg/i] },
   { id: "lbs-squat-bench", name: "lbs athlete, 'squat 180kg, then bench 135'", unit: "lbs", msg: "squat 180kg, then bench 135",
-    want: [{ lift: /squat/i, weight: 180, unit: "kg" }, { lift: /bench/i, weight: 135, unit: "lbs" }], wrong: [/135\s?kg/i, /\b298\b/, /180\s?lbs?\b/i] },
+    want: [{ lift: /squat/i, weight: 180, unit: "kg", source: ["written"] }, { lift: /bench/i, weight: 135, unit: "lbs", source: ["history", "display"] }], wrong: [/135\s?kg/i, /\b298\b/, /180\s?lbs?\b/i] },
   { id: "kg-sheet", name: "kg athlete sends the pre-filled log sheet unchanged", unit: "kg", sheet: true,
     want: "all-weighted-kg", wrong: [] },
   { id: "lbs-plain", name: "lbs athlete, plain typed log (nothing changes)", unit: "lbs", msg: "bench 3x5 at 185, rows 3x8 at 135",
-    want: [{ lift: /bench/i, weight: 185, unit: "lbs" }, { lift: /row/i, weight: 135, unit: "lbs" }], wrong: [/185\s?kg/i, /135\s?kg/i] },
+    want: [{ lift: /bench/i, weight: 185, unit: "lbs", source: ["history", "display"] }, { lift: /row/i, weight: 135, unit: "lbs", source: ["history", "display"] }], wrong: [/185\s?kg/i, /135\s?kg/i] },
 ].filter((s) => !ONLY || ONLY.has(s.id));
+
+// Per-lift history in mixed units, backdated so each scenario's cleanup (rows
+// created during the run) leaves it standing. Reseed after the pass removes it.
+const ago = (d) => new Date(Date.now() - d * 86400000).toISOString();
+const hist = (d, raw, exercises) => ({ athlete_id: QA, created_at: ago(d), raw_message: raw, bot_reply: "Logged.", parsed_data: { exercises, pain_flags: [], pr_attempts: [] } });
+async function seedHistory() {
+  await rest("workouts", { method: "POST", headers: { Prefer: "return=minimal" }, body: JSON.stringify([
+    hist(4, "Bench 3x5 @ 205lbs", [{ name: "Bench Press", sets: 3, reps: 5, weight: 205, unit: "lbs" }]),
+    hist(11, "Bench 3x5 @ 200lbs", [{ name: "Bench Press", sets: 3, reps: 5, weight: 200, unit: "lbs" }]),
+    hist(6, "Back Extensions 3x12 45lbs", [{ name: "Back Extension", sets: 3, reps: 12, weight: 45, unit: "lbs" }]),
+    hist(5, "Front Squat 3x3 @ 100kg", [{ name: "Front Squat", sets: 3, reps: 3, weight: 100, unit: "kg" }]),
+    hist(12, "Front Squat 3x3 @ 97.5kg", [{ name: "Front Squat", sets: 3, reps: 3, weight: 97.5, unit: "kg" }]),
+    hist(7, "Clean 3x2 @ 95kg", [{ name: "Clean", sets: 3, reps: 2, weight: 95, unit: "kg" }]),
+    hist(8, "DB curls 3x10 @ 35lbs", [{ name: "Dumbbell Curl", sets: 3, reps: 10, weight: 35, unit: "lbs" }]),
+  ]) });
+}
+// Stay under the claude proxy limiter (100 calls / 15 min per athlete): wait
+// until the athlete's recent call count leaves room for one more scenario.
+const LIMIT_KEY = `claude:athlete:${QA}`;
+async function paceForLimiter(budget = 72) {
+  for (;;) {
+    const since15 = encodeURIComponent(new Date(Date.now() - 15 * 60000).toISOString());
+    const n = (await rest(`rate_limits?key=eq.${encodeURIComponent(LIMIT_KEY)}&created_at=gte.${since15}&select=id`)).length;
+    if (n <= budget) return n;
+    console.log(`    (pacing: ${n} AI calls in the last 15 min, waiting)`);
+    await new Promise((r) => setTimeout(r, 30000));
+  }
+}
 
 // Text that states a stored load (or its estimated max) under the WRONG unit:
 // a kg set's number or e1RM-in-lbs written as kg/lbs the other way round.
@@ -77,7 +112,8 @@ page.on("response", async (res) => {
   try { const j = await res.json(); parseReplies.push((j.content || []).map((c) => c.text || "").join("")); } catch {}
 });
 const dismiss = async () => { for (const label of [/Not now/i, /No thanks/i, /^Later$/i, /Keep going/i]) { const b = page.getByRole("button", { name: label }).first(); if (await b.isVisible().catch(() => false)) await b.click().catch(() => {}); } };
-const clearLocal = () => page.evaluate(() => { for (const k of Object.keys(localStorage)) if (/^wilco_(chat_|quicklog|today_opener_|opener_choice_)/.test(k)) localStorage.removeItem(k); });
+// The today-opener cache is kept: regenerating it on every reload costs an AI call.
+const clearLocal = () => page.evaluate(() => { for (const k of Object.keys(localStorage)) if (/^wilco_(chat_|quicklog)/.test(k)) localStorage.removeItem(k); });
 const settle = async () => {
   const t0 = Date.now();
   let last = "", stableSince = Date.now();
@@ -94,6 +130,7 @@ const settle = async () => {
 let failed = 0, total = 0;
 try {
   await cleanup();
+  await seedHistory();
   await page.goto(BASE + "/");
   await page.getByRole("button", { name: /Athlete Login/i }).click();
   await page.getByPlaceholder(/name/i).first().fill(NAME);
@@ -103,6 +140,7 @@ try {
 
   for (let run = 1; run <= RUNS; run++) for (const sc of SCENARIOS) {
     total++;
+    await paceForLimiter();
     await cleanup();
     await setUnit(sc.unit);
     await clearLocal();
@@ -136,7 +174,9 @@ try {
       continue;
     }
     await settle();
-    const screen = await page.evaluate(() => document.body.innerText);
+    const screenRaw = await page.evaluate(() => document.body.innerText);
+    // The app's own unit ask names both readings on purpose; judge only the rest.
+    const screen = screenRaw.replace(/Quick check before I bank[\s\S]*?the way you say\./g, "[unit ask]");
 
     const rows = await rest(`workouts?athlete_id=eq.${QA}&created_at=gte.${since}&select=raw_message,parsed_data,bot_reply&order=created_at.desc&limit=3`);
     const row = rows.find((r) => (r.raw_message || "").trim() === msg) || rows[0];
@@ -158,7 +198,11 @@ try {
         const p = prs.find((x) => w.lift.test(x.exercise || ""));
         // Estimated max agrees with the stored pair (Epley on the lbs value).
         inv[`est:${w.weight}${w.unit}`] = !!p && p.unit === w.unit && Math.abs(Number(p.estimated_1rm) - epley1RM(toLbs(Number(p.weight), p.unit), p.reps || 1)) <= 2;
+        if (w.source) inv[`source:${w.weight}`] = !!e && w.source.includes(e.unit_source);
+        inv[`suspect:${w.weight}`] = !!e && !!e.unit_suspect === !!w.suspect;
       }
+      const anySuspect = sc.want.some((w) => w.suspect);
+      inv.unitAskShownIffSuspect = /Quick check before I bank/.test(screenRaw) === anySuspect;
     }
     const replyText = row?.bot_reply || "";
     // A match inside a QUESTION ("is 140 kg right, or did you mean 140 lbs?") is
@@ -172,11 +216,11 @@ try {
     if (!okAll) failed++;
     if (!inv.rowSaved) {
       await page.screenshot({ path: `${OUT.replace(/\.json$/, "")}-${sc.id}-run${run}.png`, fullPage: true }).catch(() => {});
-      fs.writeFileSync(`${OUT.replace(/\.json$/, "")}-${sc.id}-run${run}.txt`, screen);
+      fs.writeFileSync(`${OUT.replace(/\.json$/, "")}-${sc.id}-run${run}.txt`, screenRaw);
     }
-    results.push({ run, id: sc.id, name: sc.name, displayUnit: sc.unit, msg, parserEx, slips, saved: exs.map((e) => ({ name: e.name, weight: e.weight, unit: e.unit })), prs, reply: replyText, inv });
+    results.push({ run, id: sc.id, name: sc.name, displayUnit: sc.unit, msg, parserEx, slips, saved: exs.map((e) => ({ name: e.name, weight: e.weight, unit: e.unit, unit_source: e.unit_source, unit_suspect: !!e.unit_suspect })), prs, reply: replyText, inv });
     fs.writeFileSync(OUT, JSON.stringify(results, null, 2));
-    console.log(`${okAll ? "✓" : "✗"} run ${run} ${sc.name}\n    sent:   ${JSON.stringify(msg.slice(0, 200))}\n    parser: ${JSON.stringify(parserEx)}\n    saved:  ${JSON.stringify(exs.map((e) => `${e.name} ${e.weight} ${e.unit}`))}\n    prs:    ${JSON.stringify(prs.map((p) => `${p.exercise} ${p.weight}${p.unit} x${p.reps} e1rm ${p.estimated_1rm}`))}\n    inv:    ${JSON.stringify(inv)}${slips.length ? `\n    SLIPS:  ${JSON.stringify(slips)}` : ""}\n    reply:  ${JSON.stringify(replyText.slice(0, 260))}`);
+    console.log(`${okAll ? "✓" : "✗"} run ${run} ${sc.name}\n    sent:   ${JSON.stringify(msg.slice(0, 200))}\n    parser: ${JSON.stringify(parserEx)}\n    saved:  ${JSON.stringify(exs.map((e) => `${e.name} ${e.weight} ${e.unit} (${e.unit_source}${e.unit_suspect ? ", suspect" : ""})`))}\n    prs:    ${JSON.stringify(prs.map((p) => `${p.exercise} ${p.weight}${p.unit} x${p.reps} e1rm ${p.estimated_1rm}`))}\n    inv:    ${JSON.stringify(inv)}${slips.length ? `\n    SLIPS:  ${JSON.stringify(slips)}` : ""}\n    reply:  ${JSON.stringify(replyText.slice(0, 260))}`);
     await page.waitForTimeout(5000); // slow pace: the gateway rate-limits bursts
   }
 } finally {
