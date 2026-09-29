@@ -1,0 +1,24 @@
+{
+  "bug": "T64 S5 (screenshot 5): a three-line log got three paragraphs: praise, the lateral raise's estimated max, then a question about the skipped split jerk. Nothing told Joe which ONE thing mattered.",
+  "source": "workouts row 0b810591 (founder, 2026-09-02 21:24 UTC). Exercises: tests/replay/bug5-clean-double.json. Plan: the temp swap Joe drafted at 20:32 UTC (row 08a1be44) and pinned at 20:33 (row e6c5cb78), which named Split Jerk from Rack. History: the founder's real prior rows for the lifts in play (read-only SELECT 09-28).",
+  "exercises_from": "bug5-clean-double.json",
+  "now": "2026-09-02T21:24:16Z",
+  "starting_state": {
+    "sport": "Olympic Weightlifting",
+    "display_unit": "kg",
+    "plan_text": "Day 3 – Snatch Balance/Split Jerk (Temp Swap: Overhead Stability)\n1. Behind the Neck Snatch Grip Push Press: 5x2 @ 60kg, climb if it's clean, stop at first miss\n2. Split Jerk from Rack: 4x1 @ 117.5kg, climbing, stop at first miss (keep this as is)\n3. Push Press: 3x5, add 5lb from last week's load\n4. Pick your shoulder finisher: Arnold Press or lateral raise work, 3 sets",
+    "history": [
+      {"created_at": "2026-08-28T19:14:09Z", "parsed_data": {"exercises": [{"name": "Clean & Jerk", "reps": 1, "sets": 5, "unit": "kg", "weight": 120, "set_details": [{"reps": 1, "warmup": true, "weight": 70}, {"reps": 1, "warmup": true, "weight": 90}, {"reps": 1, "warmup": true, "weight": 100}, {"reps": 1, "weight": 110}, {"reps": 1, "weight": 120}]}]}},
+      {"created_at": "2026-08-19T13:23:45Z", "parsed_data": {"exercises": [{"name": "Split Jerk from Rack", "reps": 2, "sets": 5, "unit": "kg", "weight": 100, "set_details": [{"reps": 2, "weight": 80}, {"reps": 2, "weight": 90}, {"reps": 2, "weight": 95}, {"reps": 2, "weight": 100}, {"reps": 2, "weight": 100}]}]}},
+      {"created_at": "2026-08-03T22:16:56Z", "parsed_data": {"exercises": [{"name": "Lateral Raise", "reps": 12, "sets": 3, "unit": "lbs", "weight": 35, "load_basis": "each"}]}},
+      {"created_at": "2026-07-27T11:11:46Z", "parsed_data": {"exercises": [{"name": "DB Lateral Raise", "reps": 12, "sets": 3, "unit": "lbs", "weight": 25, "load_basis": "each", "feel": "good"}]}}
+    ]
+  },
+  "invariants": [
+    "headline is about the snatch-grip push press reaching 100 kg for 3",
+    "alsoAsk is ONE question about the split jerk that was on the plan",
+    "nothing about lateral raises in the headline or the question, estimated max or otherwise",
+    "the injected LOG REPLY FOCUS block has no word or sentence counts"
+  ],
+  "expect": {"kind": "first", "line_has": ["Behind the Neck Snatch Grip Push Press", "100 kg x 3"], "ask_has": ["Split Jerk from Rack"], "never": ["lateral", "raise", "estimated"]}
+}

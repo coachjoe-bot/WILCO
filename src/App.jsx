@@ -77,7 +77,7 @@ import { blueprintPct } from "./programBuilder.js";
 import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps } from "./memory.js";
 import { activeGoals, goalsToSupersede, sameGoalText } from "./goals.js";
 import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, recSummaryFallback, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
-import { performedBlock } from "./turnFacts.js";
+import { performedBlock, logHeadline, logFocusBlock, planDayFor, prLinesForReply, logTurnExercises } from "./turnFacts.js";
 import { ledgerTurn, ledgerBlock, normArea, painFollowUpPlan, applyStamps, recStagedLine, withMark, normalizeMarks, flagClearedFor, keepPainRec, painStatus, currentPainAreas, currentPainLines, painNoteGuard, areaLabel } from "./painLedger.js";
 import { buildAgenda, agendaTurnPrompt, parseAgendaTurn, advanceAgenda, initialAgendaState, isEndIntent, painStampsFrom, closingLine, digestNoteFrom } from "./checkinAgenda.js";
 import { programPurpose, purposeLine } from "./programPurpose.js";
@@ -2031,13 +2031,13 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
   // Pushdown… closest match: Triceps Rope Pushdown", Will, 2026-08-10). Names
   // group through resolveLift so wording variants land on one entry.
   let lastDoneContext = "";
+  const byLift = new Map(); // hoisted: the LOG REPLY FOCUS headline reads the same index (T64 S5)
   if(workoutHistory?.length>0){
-    const byLift = new Map();
     [...workoutHistory].sort((a,b)=>effectiveDate(b)-effectiveDate(a)).forEach(w=>{
       (w.parsed_data?.exercises||[]).forEach(e=>{
         if(!e.name) return;
         const id = resolveLift(e.name).id;
-        if(!byLift.has(id)) byLift.set(id, {name:e.name, date:effectiveDate(w), detail:formatSetDetails(e)});
+        if(!byLift.has(id)) byLift.set(id, {name:e.name, date:effectiveDate(w), detail:formatSetDetails(e), ex:e});
       });
     });
     const lines = [...byLift.values()].slice(0,40)
@@ -2088,15 +2088,23 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
   // already held behind the WORKOUT stamp there, so sequencing is free).
   let prCheckContext = "";
   const pl = opts.parsedLog;
-  if(pl?.exercises?.length && !pl.is_program_update && !pl.is_temp_program_update && !pl.program_create_request && !pl.log_correction?.is_mistake_fix){
+  // T64 S5: a LOG turn (same gate as the PR CHECK block). Its reply gets the
+  // LOG REPLY FOCUS block below: code ranks the one thing worth saying.
+  // A stated PR the parser files only under pr_attempts ("hit a 102kg snatch
+  // today") is performed work too: logTurnExercises turns it into a single.
+  const logExercises = logTurnExercises(pl, athlete.weight_unit);
+  const isLogTurn = !!(logExercises.length && !pl.is_program_update && !pl.is_temp_program_update && !pl.program_create_request && !pl.log_correction?.is_mistake_fix);
+  let prLinesForFocus = [];
+  if(isLogTurn){
     try{
-      const lines = prCheckLines(pl.exercises, byEx, athlete.weight_unit);
-      if(lines.length) prCheckContext = `\n\nPR CHECK — THIS MESSAGE'S LOG (computed by the app from their records; these verdicts are FINAL — never re-derive, re-convert, or re-compare the numbers yourself):\n${lines.map(l=>`- ${l}`).join("\n")}\nA line marked NEW PR is confirmed above their previous best: open the reply with genuine, specific celebration scaled to how central that lift is to their sport (a weightlifter's snatch or clean and jerk PR is a headline day, not a footnote), then coach. Never describe a NEW PR weight as under, below, or "right under" anything.`;
+      const lines = prCheckLines(logExercises, byEx, athlete.weight_unit);
+      prLinesForFocus = lines;
+      if(lines.length) prCheckContext = `\n\nPR CHECK — THIS MESSAGE'S LOG (computed by the app from their records; these verdicts are FINAL — never re-derive, re-convert, or re-compare the numbers yourself):\n${prLinesForReply(lines, logExercises).map(l=>`- ${l}`).join("\n")}\nA line marked NEW PR is confirmed above their previous best: when it is the headline, celebrate it genuinely and specifically, scaled to how central that lift is to their sport (a weightlifter's snatch or clean and jerk PR is a headline day, not a footnote). Never describe a NEW PR weight as under, below, or "right under" anything.`;
     }catch(_){ /* verdicts are additive — a failure just means no block */ }
     // T64 S2 (bug 5): what was PERFORMED, from set_details. Joe called a logged
     // 5x3 "a clean double" because only the plan's 5x2 was in front of him.
     try{
-      const perf = performedBlock(pl.exercises, {displayUnit: athlete.weight_unit, planText: athlete.temp_program_text || athlete.program_text || ""});
+      const perf = performedBlock(logExercises, {displayUnit: athlete.weight_unit, planText: athlete.temp_program_text || athlete.program_text || ""});
       if(perf) prCheckContext += `\n\n${perf}`;
     }catch(_){ /* additive */ }
   }
@@ -2106,6 +2114,7 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
   // "today's day" from the program text on its own while Quick Log used the
   // resolver, and the two disagreed about what day the athlete was on.
   let positionContext = "";
+  let posNow = null; // also read by the LOG REPLY FOCUS plan-day match (T64 S5)
   try {
     const chatSessions = groupIntoSessions(workoutHistory||[])
       .map(s=>effectiveDate(s.entries[s.entries.length-1]))
@@ -2121,6 +2130,7 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
       override: athlete.program_position_override || null,
       sessions: chatSessions,
     });
+    posNow = pos;
     const posBlock = positionBlock(pos);
     if(posBlock) positionContext = `\n\nWHERE THE ATHLETE IS IN THEIR PROGRAM (resolved by the app — treat as authoritative):\n${posBlock}\nWhen giving today's session, use THIS position. Do NOT re-derive the day by counting sessions or reading the program's printed dates. This block is computed FRESH for this message and SUPERSEDES anything earlier in the conversation — including your own previous replies. If you stated a different week or day earlier, that statement is stale: answer from THIS position without mentioning or explaining the correction. Never ask the athlete where they are in the week when this block is present; the app already knows.`;
   } catch(_){
@@ -2138,6 +2148,21 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
     }
   } else if(athlete.program_text){
     programContext = `\n\nATHLETE'S CURRENT PROGRAM:\n${athlete.program_text}\nReference this when giving programming feedback.`;
+  }
+
+  // T64 S5: LOG REPLY FOCUS. Log replies ran three paragraphs because the turn
+  // hands Joe many true facts and nothing said which one matters. Code ranks
+  // them (src/turnFacts.js logHeadline) from what this turn already computed:
+  // the PR CHECK verdicts, the LAST TIME index, the pain ledger's turn, and the
+  // program day this log matches. It rides LAST in the dynamic tail.
+  let logFocus = "";
+  if(isLogTurn){
+    try{
+      const planText = athlete.temp_program_text || athlete.program_text || "";
+      const planDay = planDayFor({programText: planText, loggedNames: logExercises.map(e=>e?.name).filter(Boolean), resolverLabel: posNow?.label||null, week: posNow?.weekKnown ? posNow.week : null});
+      const headline = logHeadline({exercises: logExercises, prLines: prLinesForFocus, lastDone: byLift, painTurn: painLt?.turn||null, planDay, sport: athlete.sport||"", displayUnit: athlete.weight_unit, now: new Date()});
+      logFocus = `\n\n${logFocusBlock(headline)}`;
+    }catch(_){ /* additive: a failure means no block, never a crash */ }
   }
 
   // Dynamic tail only — everything static (persona, rules, goal/sport tables)
@@ -2187,14 +2212,14 @@ ${athlete.weight_unit==="kg"?"This athlete works in KG. State every weight you s
     // in the transcript, narrated it like an interrogation ("let's log what you
     // actually did") and re-called prefill_log_sheet on a session that had just
     // ended (Will's phone, 08-28).
-    const pureLogBlock = opts.pureLog ? `\n\nTHIS MESSAGE IS A FINISHED WORKOUT LOG the athlete just sent from the log sheet. The app is already parsing and saving it; the text IS what they did. React to completed work: acknowledge it and coach what stands out. Where it differs from the program or from the sheet you drafted, that is an audible they chose — worth a coaching observation, never an error, never a reason to sound like you doubt the log. Do not call prefill_log_sheet or pin_session_card; the session is over and the sheet already came down. If one detail that matters is genuinely missing (a weight, sets), ask ONE specific question that names the exercise, right here in chat.` : "";
-    const sysObjM = {cached:buildMastermindStatic(), dynamic:sys+goalsContext+memBlock+pureLogBlock};
+    const pureLogBlock = opts.pureLog ? `\n\nTHIS MESSAGE IS A FINISHED WORKOUT LOG the athlete just sent from the log sheet. The app is already parsing and saving it; the text IS what they did. ${logFocus ? "React to completed work as the LOG REPLY FOCUS block below says." : "React to completed work: acknowledge it and coach what stands out."} Where it differs from the program or from the sheet you drafted, that is an audible they chose${logFocus ? ", never an error" : " — worth a coaching observation, never an error"}, never a reason to sound like you doubt the log. Do not call prefill_log_sheet or pin_session_card; the session is over and the sheet already came down. If one detail that matters is genuinely missing (a weight, sets), ask ONE specific question that names the exercise, right here in chat.` : "";
+    const sysObjM = {cached:buildMastermindStatic(), dynamic:sys+goalsContext+memBlock+pureLogBlock+logFocus};
     const userMsgM = `${hist}\n\n${athlete.name}: ${message}`;
     if(onDelta) return askClaudeStream(sysObjM, userMsgM, {maxTokens:900, model:"claude-sonnet-5", feature:"mastermind_chat", onDelta, toolset:"mastermind_athlete", onToolUse:opts.onToolUse});
     return askClaude(sysObjM, userMsgM, 900, [], "claude-sonnet-5", "mastermind_chat");
   }
 
-  const sysObj = {cached:JOEBOT_STATIC_SYS, dynamic:sys+goalsContext+contextMemory};
+  const sysObj = {cached:JOEBOT_STATIC_SYS, dynamic:sys+goalsContext+contextMemory+logFocus};
   const userMsg = `${hist}\n\n${athlete.name}: ${message}`;
   // Stream when the caller wants live rendering; otherwise the classic one-shot call.
   // 800 tokens (was 450): technical/programming answers were getting guillotined
