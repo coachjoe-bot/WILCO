@@ -341,7 +341,7 @@ export function logHeadline({ exercises = [], prLines = [], lastDone = null, pai
   const mainFirsts = firsts.filter((x) => x.main);
   if (mainFirsts.length) {
     const x = pick(mainFirsts, (y) => lbsOf(y.ex, y.cur.load));
-    return { kind: "first", line: `${x.ex.name}: top set ${setText(x.ex, x.cur, displayUnit)}, the heaviest work in this log (nothing earlier on file to compare it with).`, alsoAsk };
+    return { kind: "first", line: `${x.ex.name}: top set ${setText(x.ex, x.cur, displayUnit)}, the heaviest work in this log.`, alsoAsk };
   }
 
   // e as the headline, when nothing above applied

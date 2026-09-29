@@ -49,7 +49,7 @@ const SCENARIOS = {
     },
     msg: () => bug5.input_message,
     check: (reply) => ({
-      headline: /snatch[- ]grip|behind the neck|btn/i.test(reply) && /100/.test(reply),
+      headline: /push press/i.test(reply) && /\b100\b/.test(reply), // only the BTN snatch-grip press reached 100 (plain push press topped at 90)
       asksSplitJerk: /split jerk/i.test(reply),
       oneQuestion: (reply.match(/\?/g) || []).length <= 1,
       noLateral: !/lat(eral)? raise/i.test(reply),
@@ -115,6 +115,9 @@ for (const name of order) {
   for (let run = 1; run <= RUNS; run++) {
     const sc = SCENARIOS[name];
     await cleanup();
+    // finalizeWorkout files a stated PR's 1RM in manual_one_rms (in lbs when the parse carries no unit): clear
+    // this pass's rows each run so one run's write never becomes the next run's "actual 1RM"
+    await rest(`manual_one_rms?athlete_id=eq.${QA}&created_at=gte.${encodeURIComponent(SESSION_START)}`, { method: "DELETE" }).catch(() => {});
     await sc.setup();
     await clearLocal();
     if (process.env.THEME) await page.evaluate((t) => localStorage.setItem("wilco_theme", t), process.env.THEME);
@@ -145,10 +148,11 @@ for (const name of order) {
     const tail = (idx >= 0 ? after.slice(idx + msg.split("\n").pop().length) : after.slice(-2000)).trim();
     const reply = (saved && saved[0] && saved[0].bot_reply) || tail.split(/\n(?:Tell Coach Joe|Type naturally)/)[0].trim();
     const sys = chatBodies.map((b) => String(b.system || "")).join("\n");
+    const userMsgs = chatBodies.map((b) => JSON.stringify(b.messages || "")).join("\n");
     const focus = (sys.match(/LOG REPLY FOCUS[\s\S]*$/) || [""])[0];
     const inv = { focusSent: !!focus, banned: !hasBannedWord(reply), ...sc.check(reply) };
     if (SHOTS && run === 1) await page.screenshot({ path: `${SHOTS}/realai-${name}-${process.env.THEME || "light"}.png` });
-    results.push({ name, run, msg, parse: parseReplies.slice(-1)[0] || null, reply, replySource: saved && saved[0] && saved[0].bot_reply ? "stored bot_reply" : "dom", words: countWords(reply), focus, inv, tail: tail.slice(0, 1500) });
+    results.push({ name, run, sysLateral: (sys.match(/[^\n]*Lat[^\n]*/gi) || []).slice(0, 8), histTail: userMsgs.slice(-1500), msg, parse: parseReplies.slice(-1)[0] || null, reply, replySource: saved && saved[0] && saved[0].bot_reply ? "stored bot_reply" : "dom", words: countWords(reply), focus, inv, tail: tail.slice(0, 1500) });
     fs.writeFileSync(OUT, JSON.stringify(results, null, 2));
     console.log(`${name} #${run}: ${countWords(reply)} words ${JSON.stringify(inv)}\n  ${JSON.stringify(reply.slice(0, 400))}`);
     await page.waitForTimeout(4000);
