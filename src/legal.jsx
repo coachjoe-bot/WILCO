@@ -337,7 +337,7 @@ function AiConsentBody({ C, role = "athlete", signup = false }) {
       <p style={{ marginBottom: 12 }}>
         {signup
           ? "You can delete your account and your data at any time in Settings."
-          : `AI coaching is the core of WILCO, so ${coach ? "a coach account can't use WILCO" : "we can't create an account"} without this. You can delete your account and your data at any time in Settings.`}
+          : `AI coaching is the core of WILCO, so ${coach ? "a coach account" : "the app"} can't run without this. You can delete your account and your data at any time in Settings.`}
       </p>
     </div>
   );
@@ -450,7 +450,7 @@ export function LegalModal({ C, kicker, title, text, parental, aiConsent, aiRole
     </>
   ) : docBody;
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: C.navy, display: "flex", flexDirection: "column", maxWidth: 600, margin: "0 auto" }}>
+    <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: C.navy, display: "flex", flexDirection: "column", maxWidth: 600, margin: "0 auto", fontFamily: "'Inter',system-ui,-apple-system,sans-serif" }}>
       <div style={{ padding: "calc(16px + env(safe-area-inset-top,0px)) 20px 12px", borderBottom: `1px solid ${C.border}` }}>
         {kicker && <div style={{ color: C.gold, ...DISP, fontSize: 13, letterSpacing: 2, marginBottom: 4 }}>{kicker}</div>}
         <div style={{ color: C.text, fontSize: 18, fontWeight: 700 }}>{title}</div>
@@ -473,7 +473,7 @@ export function LegalModal({ C, kicker, title, text, parental, aiConsent, aiRole
             <span style={{ color: C.text, fontSize: 13, lineHeight: 1.5 }}>{checkboxLabel}</span>
           </label>
         )}
-        <button onClick={onAccept} disabled={!canContinue} style={localBtn(canContinue ? C.gold : C.navy3, canContinue ? "#000" : C.muted, { opacity: canContinue ? 1 : 0.7, cursor: canContinue ? "pointer" : "not-allowed" })}>
+        <button onClick={onAccept} disabled={!canContinue} style={localBtn(canContinue ? C.gold : C.navy3, canContinue ? (C.onAccent || "#000") : C.muted, { opacity: canContinue ? 1 : 0.7, cursor: canContinue ? "pointer" : "not-allowed" })}>
           {busy ? "Please wait..." : primaryLabel}
         </button>
         {!readOnly && (
