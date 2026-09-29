@@ -76,7 +76,7 @@ export const groupIntoSessions = (workouts) => {
 export { epley1RM };
 
 // T55: conversion comes from the single-source units module.
-import { toLbs } from "./units.js";
+import { toLbs, exerciseLoadUnit } from "./units.js";
 import { normArea, classifyPain, normalizeMarks, flagClearedFor } from "./painLedger.js";
 
 // Working sets of a logged exercise: prefer set_details (excluding warm-ups), else the
@@ -109,7 +109,7 @@ export const buildLiftHistory = (sessions) => {
       }
       const k = ex.name.toLowerCase().trim();
       if (!byLift[k]) byLift[k] = [];
-      byLift[k].push({ date, e1rm, weight: top.weight, reps: top.reps || 1, sets: sets.length, unit: ex.unit === "kg" ? "kg" : "lbs" });
+      byLift[k].push({ date, e1rm, weight: top.weight, reps: top.reps || 1, sets: sets.length, unit: exerciseLoadUnit(ex) });
     }
   }
   return byLift;

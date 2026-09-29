@@ -24,6 +24,7 @@ import {
   buildLiftHistory, detectPlateaus,
 } from "./proofcore.js";
 import { computeGritSnapshot, TIER_NAMES, TIER_COLORS, getBenchKey, resolveLift } from "./grit.js";
+import { exerciseUnit, exerciseLoadUnit } from "./units.js";
 // Shared team-analytics math (C2): the server endpoint (api/coach-analytics) computes
 // the roster aggregations with THIS module; the client imports weekBounds from it so
 // both cut the identical Mon–Sun week.
@@ -1252,7 +1253,7 @@ function CoachDashboard({coach,onLogout}) {
             const k = normalizeExName(ex.name);
             if(!best[k]||e1rm>best[k].e1rm){
               const topSet = getExerciseSets(ex).reduce((b,s)=>epley1RM(toLbs(s.weight,ex.unit),s.reps)>epley1RM(toLbs(b.weight,ex.unit),b.reps)?s:b, {weight:ex.weight??0, reps:ex.reps||1});
-              best[k] = {exercise:ex.name,weight:topSet.weight,reps:topSet.reps||1,e1rm,unit:ex.unit||"lbs"};
+              best[k] = {exercise:ex.name,weight:topSet.weight,reps:topSet.reps||1,e1rm,unit:exerciseUnit(ex)};
             }
           }
         }
@@ -2527,7 +2528,7 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
             const exLine = (ex)=>{
               const sets = getExerciseSets(ex); const working = sets.some(s=>!s.warmup)?sets.filter(s=>!s.warmup):sets;
               const reps = working.reduce((m,s)=>Math.max(m,s.reps||0),0)||ex.reps||0;
-              const top = working.reduce((m,s)=>Math.max(m,toLbs(s.weight||0,ex.unit||"lbs")),0)||toLbs(ex.weight||0,ex.unit||"lbs");
+              const top = working.reduce((m,s)=>Math.max(m,toLbs(s.weight||0,exerciseLoadUnit(ex))),0)||toLbs(ex.weight||0,exerciseLoadUnit(ex));
               return `${working.length||ex.sets||1}×${reps||"?"}${top?` @ ${Math.round(top)}lbs`:""}`;
             };
             const b = r.adhB;
@@ -4478,7 +4479,7 @@ function AthleteDetail({athlete,coachId,workouts,prs,requests=[],onResolveReques
                   const lift = resolveLift(ex.name);
                   const k = lift.id;
                   const isBW = ex.unit==="bodyweight";
-                  const unit = isBW ? "lbs" : (ex.unit||"lbs");
+                  const unit = exerciseLoadUnit(ex);
                   if(!byEx[k]) byEx[k]={key:k,name:lift.name,unit,entries:[]};
                   let topSet;
                   if(isBW){

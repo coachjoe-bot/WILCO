@@ -116,7 +116,7 @@ export const getExerciseSets = (ex) => {
 
 // Conversion lives in units.js (T55: single source, one constant). Imported for
 // local use and re-exported because grit.js is where most existing code gets it.
-import { toLbs, toKg, LBS_PER_KG, getDisplayUnit, toDisplay, roundStat } from "./units.js";
+import { toLbs, toKg, LBS_PER_KG, getDisplayUnit, toDisplay, roundStat, exerciseUnit, exerciseLoadUnit } from "./units.js";
 export { toLbs, toKg, LBS_PER_KG };
 
 // Load-bearing bodyweight movements — dips, pull-ups, chin-ups, muscle-ups — where
@@ -660,7 +660,7 @@ export function computeGritSnapshot(workouts, manualRMs, opts = {}) {
       if (!lift.tracked) return;
       const e1rm = bestE1RMForExercise(ex, bodyweight);
       if (!e1rm) return;
-      const unit = ex.unit === "bodyweight" ? "lbs" : (ex.unit || "lbs");
+      const unit = exerciseLoadUnit(ex);
       if (!byEx[lift.id]) byEx[lift.id] = { key: lift.id, name: lift.name, e1rm, unit };
       else if (e1rm > byEx[lift.id].e1rm) byEx[lift.id].e1rm = e1rm;
     });
@@ -772,7 +772,7 @@ export function sessionTopSet(exercises) {
       const w = s.weight || 0;
       if (w <= 0 || !(s.reps > 0)) continue;
       const lbs = toLbs(w, ex.unit);
-      if (lbs > bestLbs) { bestLbs = lbs; best = { name: cleanerName(ex.name), weight: w, reps: s.reps, unit: ex.unit || "lbs" }; }
+      if (lbs > bestLbs) { bestLbs = lbs; best = { name: cleanerName(ex.name), weight: w, reps: s.reps, unit: exerciseUnit(ex) }; }
     }
   }
   return best;

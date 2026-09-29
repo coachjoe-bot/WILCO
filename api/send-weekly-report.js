@@ -8,6 +8,7 @@
 // day it was typed. Re-exported from src/grit.js so this file cannot drift from
 // the client's grouping (see api/_grit.js).
 import { effectiveDate } from "./_grit.js";
+import { exerciseLoadUnit } from "./_units.js";
 import { emailFooter, unsubHeaders, isUnsubscribed } from "./_email.js";
 
 export const maxDuration = 60;
@@ -217,7 +218,7 @@ function buildEmail(coach, workouts, prs, weekLabel, signupUrl) {
             s += ` <span style="color:#555">${e.sets}×${e.reps}</span>`;
           }
           if(e.weight) {
-            const u = e.unit === "kg" ? "kg" : "lbs";
+            const u = exerciseLoadUnit(e);
             s += ` <span style="color:#555">@ ${e.weight}${u}</span>`;
           }
           return s;

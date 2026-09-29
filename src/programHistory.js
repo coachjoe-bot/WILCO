@@ -25,6 +25,7 @@
 // import back would be a cycle). React-free; block-decision logic unit tested by
 // scripts/test-program-history.mjs.
 import { lineDiff } from "./programDiff.js";
+import { exerciseLoadUnit } from "./units.js";
 import { currentPosition, parseBlockSpan, programTextIdentity } from "./programPosition.js";
 import { parseBlockInfo, stripBlockInfo } from "./programContract.js";
 import { gateText } from "./replyGate.js";
@@ -118,7 +119,7 @@ export function digestWorkouts(rows) {
     const parts = exs.slice(0, 8).map((e) => {
       if (!e || !e.name) return null;
       const sr = e.sets && e.reps ? ` ${e.sets}x${e.reps}` : "";
-      const wt = e.weight ? ` @${e.weight}${e.unit === "kg" ? "kg" : "lbs"}` : "";
+      const wt = e.weight ? ` @${e.weight}${exerciseLoadUnit(e)}` : "";
       return `${e.name}${sr}${wt}`;
     }).filter(Boolean);
     if (parts.length) lines.push(`${d}: ${parts.join(", ")}`);

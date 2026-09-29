@@ -239,9 +239,9 @@ console.log("source guards:");
   }
   const app = readFileSync(join(srcDir, "App.jsx"), "utf8");
   ok(/"pr_attempts":\[\{[^\]]*"unit":"kg"\|"lbs"\|null/.test(app), "parse schema carries unit on pr_attempts");
-  ok(/parsed = stampAttemptUnits\(parsed, \{displayUnit: updatedAthlete\?\.weight_unit, message: msg/.test(app), "finalizeWorkout stamps before saving");
+  ok(/parsed = stampLoadUnits\(parsed, \{displayUnit: updatedAthlete\?\.weight_unit, message: msg/.test(app), "finalizeWorkout stamps before saving");
   ok(/declaredMaxWrite\(attempt,/.test(app), "finalizeWorkout decides through declaredMaxWrite");
-  ok(/parseWorkout\(msg,[^\n]*\)\s*\.then\(p=>stampAttemptUnits\(p,/.test(app), "send() stamps the parse at the source");
+  ok(/parseWorkout\(msg,[^\n]*\)\s*\.then\(p=>stampLoadUnits\(p,/.test(app), "send() stamps the parse at the source");
 }
 
 console.log(`\n${fail === 0 ? "✓" : "✗"} pr-attempts: ${pass} passed, ${fail} failed`);
