@@ -108,7 +108,7 @@ test("every step anchors to something real, all the way to the closing card", as
 
   // 13. Both stamps fire, in send()'s real order, and Joe's reply is scripted.
   await expect(page.getByText("LOGGED WITH WILCO")).toBeVisible({ timeout: 6000 });
-  await expect(page.getByText("NEW MAX")).toBeVisible({ timeout: 8000 });
+  await expect(page.getByText("NEW MAX", { exact: true })).toBeVisible({ timeout: 8000 });
   await expect(page.getByText(/Good job on that bench press personal record/)).toBeVisible({ timeout: 10000 });
 
   // 14. What just happened. "See that?" was cut (Will 09-01) — it opens on the verb.
@@ -219,7 +219,7 @@ test("walking the sample workout never writes the real quicklog park", async ({ 
 
   await page.getByText(/fill in numbers, make any adjustments/).click();
   await page.locator('[data-tour="finish-btn"]').click();
-  await expect(page.getByText("NEW MAX")).toBeVisible({ timeout: 8000 });
+  await expect(page.getByText("NEW MAX", { exact: true })).toBeVisible({ timeout: 8000 });
   await expect(page.getByText(/Good job on that bench press personal record/)).toBeVisible({ timeout: 10000 });
 
   parkKey = await page.evaluate((id) => {
