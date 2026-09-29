@@ -303,7 +303,7 @@ export function logHeadline({ exercises = [], prLines = [], lastDone = null, pai
   const mainPrs = prs.filter((x) => x.main);
   const prLine = (x) => x.v.single
     ? `${x.ex.name}: new PR, a single at ${x.v.newText}; previous best ${x.v.prevText}.`
-    : `${x.ex.name}: new PR, top set ${setText(x.ex, topSet(x.ex), displayUnit)} works out to ${x.v.estText}; previous best ${x.v.prevText}.`;
+    : `${x.ex.name}: new estimated PR from a top set of ${setText(x.ex, topSet(x.ex), displayUnit)} (estimate ${x.v.estText}, previous best ${x.v.prevText}). Say the set; the estimate numbers are for you.`;
   if (mainPrs.length) {
     const x = pick(mainPrs, (y) => y.v.jump);
     return { kind: "pr", line: prLine(x), alsoAsk };
@@ -341,7 +341,7 @@ export function logHeadline({ exercises = [], prLines = [], lastDone = null, pai
   const mainFirsts = firsts.filter((x) => x.main);
   if (mainFirsts.length) {
     const x = pick(mainFirsts, (y) => lbsOf(y.ex, y.cur.load));
-    return { kind: "first", line: `${x.ex.name}: first time on file, top set ${setText(x.ex, x.cur, displayUnit)}.`, alsoAsk };
+    return { kind: "first", line: `${x.ex.name}: top set ${setText(x.ex, x.cur, displayUnit)}, the heaviest work in this log (nothing earlier on file to compare it with).`, alsoAsk };
   }
 
   // e as the headline, when nothing above applied
@@ -354,6 +354,30 @@ export function logHeadline({ exercises = [], prLines = [], lastDone = null, pai
     if (steps.length) return { kind: "progress", line: stepLine(pick(steps, (y) => y.gain)), alsoAsk };
   }
   return { kind: "none", line: "", alsoAsk: null };
+}
+
+// PR CHECK lines as Joe reads them on a log turn: an accessory's ESTIMATED PR is
+// a true fact the app tracks, and a reply that celebrates it is the screenshot 5
+// failure. The verdict stays; the line says it is not a talking point.
+export function prLinesForReply(lines, exercises = []) {
+  return (Array.isArray(lines) ? lines : []).map((l) => {
+    const ex = (exercises || []).find((e) => e && e.name && String(l).startsWith(`${e.name}: `));
+    return ex && !isMainLift(ex.name) && /: NEW ESTIMATED PR/.test(l)
+      ? `${l} Accessory estimate: the app tracks it; leave it out unless they ask.`
+      : l;
+  });
+}
+
+// A stated PR the parser files only under pr_attempts ("hit a 102kg snatch
+// today, new PR" parses with exercises empty) is still performed work: as a
+// single it feeds the log-turn facts. Unit: the attempt's own, else the
+// athlete's display unit (the athlete wrote the number in their unit).
+export function logTurnExercises(parsed, displayUnit = "lbs") {
+  if (!parsed) return [];
+  if (Array.isArray(parsed.exercises) && parsed.exercises.length) return parsed.exercises;
+  return (Array.isArray(parsed.pr_attempts) ? parsed.pr_attempts : [])
+    .filter((p) => p && p.achieved && p.exercise && p.weight > 0)
+    .map((p) => ({ name: p.exercise, sets: 1, reps: p.reps > 0 ? p.reps : 1, weight: p.weight, unit: p.unit === "kg" || p.unit === "lbs" ? p.unit : (displayUnit === "kg" ? "kg" : "lbs") }));
 }
 
 // The block for a log turn's dynamic tail. Short on purpose; no word counts.

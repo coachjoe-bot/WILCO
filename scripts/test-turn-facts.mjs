@@ -5,7 +5,7 @@
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { performedLine, performedLines, performedBlock, planSchemeFor, logHeadline, logFocusBlock, planDayFor, plannedLifts, isMainLift, sameLift } from "../src/turnFacts.js";
+import { performedLine, performedLines, performedBlock, planSchemeFor, logHeadline, logFocusBlock, planDayFor, plannedLifts, isMainLift, sameLift, prLinesForReply, logTurnExercises } from "../src/turnFacts.js";
 import { prCheckLines, bestE1RMForExercise, resolveLift, effectiveDate } from "../src/grit.js";
 import { toLbs } from "../src/units.js";
 
@@ -100,6 +100,11 @@ ok(sameLift("Split Jerk", "Split Jerk from Rack") && !sameLift("Push Press", "Be
   const h = head({ exercises: [kg("Snatch", 3, 1, 105)], rows: HIST });
   eq(h.kind, "pr", "made single above the best is the headline"); ok(/105 kg/.test(h.line) && /100 kg/.test(h.line), `PR line carries new and old (got ${h.line})`);
 }
+// an estimated PR: the set is what gets said, the estimate stays with Joe
+{
+  const h = head({ exercises: [kg("Back Squat", 5, 3, 160)], rows: HIST, manual: [] });
+  eq(h.kind, "pr", "estimated PR on a main lift"); ok(/top set of 160 kg x 3/.test(h.line) && /Say the set; the estimate numbers are for you\./.test(h.line), `est PR line (got ${h.line})`);
+}
 // c. a mild acknowledge_once does NOT outrank a PR; alone, it leads
 {
   const pt = { areas: ["elbow"], serious: false, verdicts: { elbow: "acknowledge_once" } };
@@ -189,11 +194,30 @@ eq(head({ exercises: [kg("Back Squat", 3, 2, 155)], rows: HIST }).kind, "none", 
   const st = rp.starting_state;
   const h = head({ exercises: src.parsed_exercises, rows: st.history, unit: st.display_unit, sport: st.sport, plan: st.plan_text, now: new Date(rp.now) });
   eq(h.kind, rp.expect.kind, "Sep 2: kind");
+  ok(!/first time/i.test(h.line), "the headline never reads back \"first time on file\"");
   for (const s of rp.expect.line_has) ok(h.line.includes(s), `Sep 2 headline has "${s}" (got ${h.line})`);
   for (const s of rp.expect.ask_has) ok((h.alsoAsk || "").includes(s), `Sep 2 question has "${s}" (got ${h.alsoAsk})`);
   for (const s of rp.expect.never) ok(!new RegExp(s, "i").test(`${h.line} ${h.alsoAsk}`), `Sep 2: nothing about "${s}"`);
   ok(!/Push Press was|Push Press and/.test(h.alsoAsk || ""), "both push presses were logged: neither is asked about");
   ok(!/\b\d+\s+(?:words?|sentences?)\b/i.test(logFocusBlock(h)), "Sep 2 block: no counts");
+}
+
+// accessory estimated PR lines are marked, main-lift lines untouched
+{
+  const exs = [kg("Back Squat", 5, 3, 170), { name: "DB Lateral Raise", sets: 3, reps: 12, weight: 35, unit: "lbs" }];
+  const { best } = indexes(HIST);
+  const out = prLinesForReply(prCheckLines(exs, best, "kg"), exs);
+  ok(/DB Lateral Raise: NEW ESTIMATED PR.*leave it out unless they ask\.$/.test(out.find((l) => l.startsWith("DB Lateral Raise")) || ""), "accessory estimate marked");
+  ok(!/leave it out/.test(out.find((l) => l.startsWith("Back Squat")) || "x leave it out"), "main-lift line untouched");
+}
+// a stated PR filed only under pr_attempts still feeds the log turn
+{
+  const parsed = { exercises: [], pr_attempts: [{ exercise: "Snatch", weight: 102, reps: 1, achieved: true }, { exercise: "Clean and Jerk", weight: 130, reps: 1, achieved: false }] };
+  const exs = logTurnExercises(parsed, "kg");
+  eq(exs.length, 1, "missed attempts never become work"); eq(exs[0].unit, "kg", "unit from the athlete's display unit");
+  const h = head({ exercises: exs, rows: HIST });
+  eq(h.kind, "pr", "stated snatch PR is the headline"); ok(/102 kg/.test(h.line) && /100 kg/.test(h.line), `stated PR line (got ${h.line})`);
+  eq(logTurnExercises({ exercises: [kg("Snatch", 1, 1, 90)], pr_attempts: [{ exercise: "Snatch", weight: 102, reps: 1, achieved: true }] }, "kg")[0].weight, 90, "real exercises win over pr_attempts");
 }
 
 console.log(`\n${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ""}`);

@@ -77,7 +77,7 @@ import { blueprintPct } from "./programBuilder.js";
 import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps } from "./memory.js";
 import { activeGoals, goalsToSupersede, sameGoalText } from "./goals.js";
 import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, recSummaryFallback, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
-import { performedBlock, logHeadline, logFocusBlock, planDayFor } from "./turnFacts.js";
+import { performedBlock, logHeadline, logFocusBlock, planDayFor, prLinesForReply, logTurnExercises } from "./turnFacts.js";
 import { ledgerTurn, ledgerBlock, normArea, painFollowUpPlan, applyStamps, recStagedLine, withMark, normalizeMarks, flagClearedFor, keepPainRec, painStatus, currentPainAreas, currentPainLines, painNoteGuard, areaLabel } from "./painLedger.js";
 import { buildAgenda, agendaTurnPrompt, parseAgendaTurn, advanceAgenda, initialAgendaState, isEndIntent, painStampsFrom, closingLine, digestNoteFrom } from "./checkinAgenda.js";
 import { programPurpose, purposeLine } from "./programPurpose.js";
@@ -2090,18 +2090,21 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
   const pl = opts.parsedLog;
   // T64 S5: a LOG turn (same gate as the PR CHECK block). Its reply gets the
   // LOG REPLY FOCUS block below: code ranks the one thing worth saying.
-  const isLogTurn = !!(pl?.exercises?.length && !pl.is_program_update && !pl.is_temp_program_update && !pl.program_create_request && !pl.log_correction?.is_mistake_fix);
+  // A stated PR the parser files only under pr_attempts ("hit a 102kg snatch
+  // today") is performed work too: logTurnExercises turns it into a single.
+  const logExercises = logTurnExercises(pl, athlete.weight_unit);
+  const isLogTurn = !!(logExercises.length && !pl.is_program_update && !pl.is_temp_program_update && !pl.program_create_request && !pl.log_correction?.is_mistake_fix);
   let prLinesForFocus = [];
   if(isLogTurn){
     try{
-      const lines = prCheckLines(pl.exercises, byEx, athlete.weight_unit);
+      const lines = prCheckLines(logExercises, byEx, athlete.weight_unit);
       prLinesForFocus = lines;
-      if(lines.length) prCheckContext = `\n\nPR CHECK — THIS MESSAGE'S LOG (computed by the app from their records; these verdicts are FINAL — never re-derive, re-convert, or re-compare the numbers yourself):\n${lines.map(l=>`- ${l}`).join("\n")}\nA line marked NEW PR is confirmed above their previous best: when it is the headline, celebrate it genuinely and specifically, scaled to how central that lift is to their sport (a weightlifter's snatch or clean and jerk PR is a headline day, not a footnote). Never describe a NEW PR weight as under, below, or "right under" anything.`;
+      if(lines.length) prCheckContext = `\n\nPR CHECK — THIS MESSAGE'S LOG (computed by the app from their records; these verdicts are FINAL — never re-derive, re-convert, or re-compare the numbers yourself):\n${prLinesForReply(lines, logExercises).map(l=>`- ${l}`).join("\n")}\nA line marked NEW PR is confirmed above their previous best: when it is the headline, celebrate it genuinely and specifically, scaled to how central that lift is to their sport (a weightlifter's snatch or clean and jerk PR is a headline day, not a footnote). Never describe a NEW PR weight as under, below, or "right under" anything.`;
     }catch(_){ /* verdicts are additive — a failure just means no block */ }
     // T64 S2 (bug 5): what was PERFORMED, from set_details. Joe called a logged
     // 5x3 "a clean double" because only the plan's 5x2 was in front of him.
     try{
-      const perf = performedBlock(pl.exercises, {displayUnit: athlete.weight_unit, planText: athlete.temp_program_text || athlete.program_text || ""});
+      const perf = performedBlock(logExercises, {displayUnit: athlete.weight_unit, planText: athlete.temp_program_text || athlete.program_text || ""});
       if(perf) prCheckContext += `\n\n${perf}`;
     }catch(_){ /* additive */ }
   }
@@ -2156,8 +2159,8 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
   if(isLogTurn){
     try{
       const planText = athlete.temp_program_text || athlete.program_text || "";
-      const planDay = planDayFor({programText: planText, loggedNames: pl.exercises.map(e=>e?.name).filter(Boolean), resolverLabel: posNow?.label||null, week: posNow?.weekKnown ? posNow.week : null});
-      const headline = logHeadline({exercises: pl.exercises, prLines: prLinesForFocus, lastDone: byLift, painTurn: painLt?.turn||null, planDay, sport: athlete.sport||"", displayUnit: athlete.weight_unit, now: new Date()});
+      const planDay = planDayFor({programText: planText, loggedNames: logExercises.map(e=>e?.name).filter(Boolean), resolverLabel: posNow?.label||null, week: posNow?.weekKnown ? posNow.week : null});
+      const headline = logHeadline({exercises: logExercises, prLines: prLinesForFocus, lastDone: byLift, painTurn: painLt?.turn||null, planDay, sport: athlete.sport||"", displayUnit: athlete.weight_unit, now: new Date()});
       logFocus = `\n\n${logFocusBlock(headline)}`;
     }catch(_){ /* additive: a failure means no block, never a crash */ }
   }

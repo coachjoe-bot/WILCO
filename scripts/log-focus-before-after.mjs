@@ -27,7 +27,7 @@ import { buildMastermindStatic } from "../src/ai/card.js";
 import { replyGate, hasBannedWord, countWords } from "../src/replyGate.js";
 import { prCheckLines, bestE1RMForExercise, resolveLift, getExerciseSets } from "../src/grit.js";
 import { toLbs } from "../src/units.js";
-import { performedBlock, logHeadline, logFocusBlock, planDayFor, isMainLift } from "../src/turnFacts.js";
+import { performedBlock, logHeadline, logFocusBlock, planDayFor, isMainLift, prLinesForReply } from "../src/turnFacts.js";
 import { ledgerTurn, ledgerBlock } from "../src/painLedger.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -110,7 +110,7 @@ function buildTurn(input) {
   const rm = Object.values(byEx).sort((a, b) => b.e1rm - a.e1rm).slice(0, 15).map((r) => `${r.name}: ${r.actual ? `${Math.round(r.e1rm)} lbs (actual 1RM)` : `~${Math.round(r.e1rm)} lbs (est.)`}`).join("\n");
   const prLines = prCheckLines(exercises, byEx, unit);
   const perf = performedBlock(exercises, { displayUnit: unit, planText: PROGRAM });
-  const prBlock = (tail) => prLines.length ? `\n\nPR CHECK — THIS MESSAGE'S LOG (computed by the app from their records; these verdicts are FINAL — never re-derive, re-convert, or re-compare the numbers yourself):\n${prLines.map((l) => `- ${l}`).join("\n")}\n${tail}` : "";
+  const prBlock = (tail, lines = prLines) => lines.length ? `\n\nPR CHECK — THIS MESSAGE'S LOG (computed by the app from their records; these verdicts are FINAL — never re-derive, re-convert, or re-compare the numbers yourself):\n${lines.map((l) => `- ${l}`).join("\n")}\n${tail}` : "";
   const head = `TODAY'S DATE: ${NOW.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" })}
 Athlete: Will, Sport: Olympic Weightlifting
 GOAL: Get as strong as possible on the competition lifts.
@@ -135,7 +135,7 @@ ${rm}`;
   const headline = logHeadline({ exercises, prLines, lastDone: byLift, painTurn: lt.turn, planDay, sport: "Olympic Weightlifting", displayUnit: unit, now: NOW });
   return {
     before: `${head}${prBlock(OLD_PR_TAIL)}${tailCommon}`,
-    after: `${head}${prBlock(NEW_PR_TAIL)}${tailCommon}\n\n${logFocusBlock(headline)}`,
+    after: `${head}${prBlock(NEW_PR_TAIL, prLinesForReply(prLines, exercises))}${tailCommon}\n\n${logFocusBlock(headline)}`,
     headline, prLines, exercises,
   };
 }

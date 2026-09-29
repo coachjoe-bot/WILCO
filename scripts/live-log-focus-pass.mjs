@@ -68,7 +68,7 @@ const SCENARIOS = {
     msg: () => "Front squat 5x2 @ 100/110/120/120/120kg, snatch pull 4x2 @ 110/120/120/120kg",
     check: (reply) => ({
       noInvention: !/\b(PR|up from|jump|heavier|progress|climb|stronger|missing|skipp|pain|estimat|max)\b/i.test(reply),
-      noDouble: !/\bdoubles?\b/i.test(reply) || /\b5 sets of 2|5x2\b/i.test(reply),
+      repsTrue: !/\b(singles?|triples?)\b/i.test(reply), // every set was 2 reps: "double" is true, single/triple are not
     }),
   },
   pr: {
@@ -90,6 +90,13 @@ page.on("request", (req) => {
   if (req.method() !== "POST" || !/\/api\/claude/.test(req.url())) return;
   let b = null; try { b = req.postDataJSON(); } catch { return; }
   if (b && /mastermind_chat|joebot_chat/.test(b.feature || "")) chatBodies.push(b);
+});
+let parseReplies = [];
+page.on("response", async (res) => {
+  if (!/\/api\/claude/.test(res.url())) return;
+  let b = null; try { b = res.request().postDataJSON(); } catch { return; }
+  if (!b || b.feature !== "workout_parse") return;
+  try { const j = await res.json(); parseReplies.push((j.content || []).map((c) => c.text || "").join("")); } catch {}
 });
 async function dismiss() { for (const label of [/Not now/i, /No thanks/i, /^Later$/i, /Keep going/i]) { const b = page.getByRole("button", { name: label }).first(); if (await b.isVisible().catch(() => false)) await b.click().catch(() => {}); } }
 const clearLocal = () => page.evaluate(() => { for (const k of Object.keys(localStorage)) if (/^wilco_(chat_|quicklog|today_opener_|opener_choice_)/.test(k)) localStorage.removeItem(k); });
@@ -118,7 +125,7 @@ for (const name of order) {
     await composer.waitFor({ timeout: 45000 });
     await page.waitForTimeout(2500);
     await dismiss();
-    chatBodies = [];
+    chatBodies = []; parseReplies = [];
     const msg = sc.msg();
     await composer.fill(msg);
     await page.getByRole("button", { name: "→", exact: true }).click();
@@ -141,7 +148,7 @@ for (const name of order) {
     const focus = (sys.match(/LOG REPLY FOCUS[\s\S]*$/) || [""])[0];
     const inv = { focusSent: !!focus, banned: !hasBannedWord(reply), ...sc.check(reply) };
     if (SHOTS && run === 1) await page.screenshot({ path: `${SHOTS}/realai-${name}-${process.env.THEME || "light"}.png` });
-    results.push({ name, run, msg, reply, replySource: saved && saved[0] && saved[0].bot_reply ? "stored bot_reply" : "dom", words: countWords(reply), focus, inv, tail: tail.slice(0, 1500) });
+    results.push({ name, run, msg, parse: parseReplies.slice(-1)[0] || null, reply, replySource: saved && saved[0] && saved[0].bot_reply ? "stored bot_reply" : "dom", words: countWords(reply), focus, inv, tail: tail.slice(0, 1500) });
     fs.writeFileSync(OUT, JSON.stringify(results, null, 2));
     console.log(`${name} #${run}: ${countWords(reply)} words ${JSON.stringify(inv)}\n  ${JSON.stringify(reply.slice(0, 400))}`);
     await page.waitForTimeout(4000);
