@@ -123,15 +123,9 @@ test("the plan step states the universal trial and the free card is honest about
   await scrollLegalToEnd();
   await page.getByText("I have read and agree to the Terms & Conditions.").click();
   await page.getByRole("button", { name: "Continue →", exact: true }).click();
-  // App Store 5.1.2(i): the AI-processing disclosure now sits between Terms and
-  // Privacy (legal.jsx ConsentFlow's "ai" stage, 2026-09-29).
-  await expect(page.getByText("AI and your data")).toBeVisible();
+  await expect(page.getByText("I agree to the Privacy Policy and allow WILCO to send my training data to Anthropic to power my coaching.")).toBeVisible();
   await scrollLegalToEnd();
-  await page.getByText("I allow WILCO to send this data to Anthropic to power my coaching.").click();
-  await page.getByRole("button", { name: "Continue →", exact: true }).click();
-  await expect(page.getByText("I have read and agree to the Privacy Policy.")).toBeVisible();
-  await scrollLegalToEnd();
-  await page.getByText("I have read and agree to the Privacy Policy.").click();
+  await page.getByText("I agree to the Privacy Policy and allow WILCO to send my training data to Anthropic to power my coaching.").click();
   await page.getByRole("button", { name: "Create Account", exact: true }).click();
 
   // ── The plan step: every plan starts with the 7-day trial, stated plainly ──

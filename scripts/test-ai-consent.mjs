@@ -4,8 +4,7 @@
 // permission — a line inside Terms/Privacy doesn't count. Source-contract
 // checks only (in the style of scripts/test-tier-trial.mjs) since exercising
 // the real signup/login flow needs a browser — that's tests/smoke/tier-trial.spec.js
-// and tests/smoke/install-prompt.spec.js, both updated to click through the new
-// "ai" ConsentFlow stage.
+// and tests/smoke/install-prompt.spec.js, which walk the 2-step signup consent.
 //
 // Run with: node scripts/test-ai-consent.mjs
 
@@ -26,7 +25,7 @@ ok(legal.includes("Anthropic"), "the provider is named: Anthropic");
 ok(legal.includes("Claude AI model"), "the model is named: Claude");
 ok(/what is shared|messages to the coach/i.test(legal) && legal.includes("workout logs") && legal.includes("injury and pain notes") && legal.includes("form check"),
   "the disclosure lists what is shared: chat messages, workout logs/program, goals, injury/pain notes, form-check video frames");
-ok(legal.includes("delete your account and your data at any time in Settings"),
+ok(legal.includes("You can delete your account and your data at any time in Settings"),
   "the disclosure states account/data deletion is available any time in Settings");
 // Task spec: only claim Anthropic doesn't train on WILCO's data if that sentence
 // ALREADY exists in the Privacy text — it doesn't (checked 2026-09-29), so the
@@ -34,22 +33,29 @@ ok(legal.includes("delete your account and your data at any time in Settings"),
 ok(!/Anthropic does not use (it|your data|this data) to train/i.test(legal),
   "does NOT claim Anthropic excludes WILCO data from model training (not in PRIVACY_TEXT, so not invented here)");
 
-console.log("\nConsentFlow — the ai stage sits between terms and privacy, in order:");
+console.log("\nConsentFlow — two steps, the AI block rides on the Privacy step:");
 {
   const cf = legal.slice(legal.indexOf("export function ConsentFlow"));
   const iParental = cf.indexOf('stage === "parental"');
   const iTerms = cf.indexOf('stage === "terms"');
-  const iAi = cf.indexOf('stage === "ai"');
-  ok(iParental !== -1 && iTerms !== -1 && iAi !== -1, "parental, terms and ai stages all exist");
-  ok(iParental < iTerms && iTerms < iAi, "stage checks appear in order: parental, terms, ai (then the privacy fallthrough)");
-  const termsBlock = cf.slice(iTerms, iAi);
-  ok(/onAccept=\{\(\) => setStage\("ai"\)\}/.test(termsBlock), "accepting Terms advances to the ai stage, not straight to privacy");
-  const aiBlock = cf.slice(iAi);
-  ok(/onAccept=\{\(\) => setStage\("privacy"\)\}/.test(aiBlock), "accepting the ai stage advances to privacy");
-  ok(/aiConsent$|aiConsent\s/.test(aiBlock.split("\n").slice(0, 3).join("\n")) || /<LegalModal key="ai" C=\{C\} aiConsent/.test(aiBlock),
-    "the ai stage renders LegalModal with aiConsent (AiConsentBody), not a document text blob");
-  ok(/checkboxLabel="I allow WILCO to send this data to Anthropic to power my coaching\."/.test(aiBlock),
-    "the checkbox label names Anthropic and the purpose (coaching)");
+  ok(iParental !== -1 && iTerms !== -1 && iParental < iTerms, "parental then terms stages exist, in order");
+  ok(!/stage === "ai"|setStage\("ai"\)|key="ai"/.test(cf), "there is NO separate ai stage in ConsentFlow");
+  ok(!/STEP \d OF 3/.test(cf), "no 3-step kickers remain");
+  const termsBlock = cf.slice(iTerms);
+  ok(/kicker="STEP 1 OF 2"/.test(termsBlock) && /kicker="STEP 2 OF 2"/.test(termsBlock), "kickers read STEP 1 OF 2 and STEP 2 OF 2");
+  ok(/onAccept=\{\(\) => setStage\("privacy"\)\}/.test(termsBlock), "accepting Terms advances straight to privacy");
+  const priv = cf.slice(cf.indexOf('<LegalModal key="privacy"'));
+  ok(/<LegalModal key="privacy"[^>]*\bleadBlock\b/.test(priv), "the privacy stage renders LegalModal with leadBlock (the AI block above the policy)");
+  ok(priv.includes('checkboxLabel="I agree to the Privacy Policy and allow WILCO to send my training data to Anthropic to power my coaching."'),
+    "the one privacy checkbox label names the policy, Anthropic and the purpose, exactly");
+  ok((cf.match(/checkboxLabel=/g) || []).length === 3, "signup has exactly three checkboxes at most (parental, terms, privacy), none added");
+  const modal = legal.slice(legal.indexOf("export function LegalModal"), legal.indexOf("export function ConsentFlow"));
+  ok(/<AiConsentBody C=\{C\} role=\{aiRole\|\|"athlete"\} signup \/>/.test(modal) && modal.includes("AI and your data"),
+    "leadBlock renders AiConsentBody with a small 'AI and your data' heading inside the scroll body");
+  ok(/scrollRef\} onScroll/.test(modal) && /noteScroll\(scrollRef\.current\)/.test(modal) && /checked && readToEnd && !busy/.test(modal),
+    "the read-to-end scroll gate is still wired to the same scroll area and the checkbox");
+  ok(/noCheckbox \? !busy/.test(modal) && /!readOnly && !noCheckbox && \(\s*<label/.test(modal),
+    "noCheckbox hides the checkbox and enables the primary button at once");
 }
 
 console.log("\nApp.jsx — recording acceptance on signup:");
@@ -74,6 +80,14 @@ ok(/onDecline=\{\(\)=>\{[\s\S]{0,200}setView\("coachLogin"\);/.test(app), "decli
 ok(/function resetAiConsentGate\(\)/.test(app) && (app.match(/resetAiConsentGate\(\)/g) || []).length >= 3,
   "the gate resets on logout/decline (not just closes), so the next sign-in on this device is asked again");
 
+{
+  const gate = app.slice(app.indexOf("function AiConsentGate("), app.indexOf("function WilcoRoot"));
+  const card = gate.slice(gate.indexOf("<LegalModal"));
+  ok(/<LegalModal[^>]*\bnoCheckbox\b/.test(card) && !/checkboxLabel/.test(card), "the login gate card has no checkbox");
+  ok(card.includes('primaryLabel="Allow and continue"'), 'the gate primary button reads "Allow and continue"');
+  ok(card.includes('declineLabel="Not now"') && /onDecline=\{onDecline\}/.test(card), 'the quiet decline link reads "Not now" and still signs out');
+}
+
 console.log("\napi/data.js — the read gateway can actually answer the question:");
 ok(/legal_acceptances: "athlete_id",/.test(data), "legal_acceptances is in READ_OWN_COL (previously write-only — the classic DB-CHECK-vs-gateway-allowlist gap)");
 
@@ -89,7 +103,7 @@ ok(/<LegalModal C=\{CA\} aiConsent readOnly/.test(app), "reopening it uses Legal
 
 console.log("\nlegal.jsx — LegalModal supports the readOnly reopen without a fake accept:");
 ok(/readOnly\s*\}\)/.test(legal) || /readOnly\s*\)/.test(legal), "LegalModal accepts a readOnly prop");
-ok(/canContinue = readOnly \|\|/.test(legal), "readOnly bypasses the checkbox/scroll gate instead of requiring a silent auto-check");
+ok(/canContinue = readOnly \? true/.test(legal), "readOnly bypasses the checkbox/scroll gate instead of requiring a silent auto-check");
 
 console.log(`\n${fail === 0 ? `All ${pass} checks green.` : `${fail} FAILED (${pass} passed)`}`);
 process.exit(fail === 0 ? 0 : 1);

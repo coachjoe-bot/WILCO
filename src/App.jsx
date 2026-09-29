@@ -4311,13 +4311,11 @@ function AiConsentGate({ role, id, onDecline, children }) {
   // state === "needed": same full-screen card ConsentFlow uses at signup,
   // coach-worded when role==="coach" (aiRole below).
   return (
-    <LegalModal C={CA} aiConsent aiRole={role}
+    <LegalModal C={CA} aiConsent aiRole={role} noCheckbox
       kicker="ONE MORE THING"
       title={role==="coach" ? "AI and your athletes' data" : "AI and your data"}
-      checkboxLabel={role==="coach"
-        ? "I allow WILCO to send my athletes' data to Anthropic to power their coaching."
-        : "I allow WILCO to send this data to Anthropic to power my coaching."}
-      primaryLabel="Continue"
+      primaryLabel="Allow and continue"
+      declineLabel="Not now"
       onAccept={async ()=>{
         markAiConsentGranted(id);
         if(role==="athlete"){ try{ await sbInsert("legal_acceptances", {athlete_id:id, document:"ai_processing", version:AI_CONSENT_VERSION}); }catch{ /* best-effort, same as signup's recordAcceptances — the cache already grants this session */ } }
@@ -5130,7 +5128,8 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
   // Terms version that never existed; parental_consent covers the Terms'
   // liability waiver, so it rides on TERMS_VERSION too). "ai_processing" added
   // 2026-09-29 for the App Store 5.1.2(i) AI-data-sharing disclosure — its own
-  // stage in ConsentFlow (legal.jsx), its own version constant. On a fresh
+  // version constant. It has no checkbox of its own: the Privacy step in ConsentFlow
+  // (legal.jsx) carries the AI block and its one checkbox grants both. On a fresh
   // signup this row lands here, same turn as terms/privacy; markAiConsentGranted
   // also flips the in-memory + localStorage cache so this SAME session's first
   // AI call isn't held up re-reading the row it just wrote.
