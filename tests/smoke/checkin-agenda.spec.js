@@ -98,6 +98,13 @@ test("check-in: two answers in one message, nothing re-asked, no go-deeper, no c
 
   // the digest locks and the knee's "all good" stamps cleared_at in pain_marks
   await expect.poll(() => dataCalls.some((c) => c.body?.op === "update" && c.body?.table === "proof_digests" && c.body?.data?.content_json?.checkin_done === true), { timeout: 10000 }).toBe(true);
+  // T68: the check-in's summary is ONE situational fact in athlete_memory (12
+  // weeks), and the retired athlete_context blob is never touched.
+  const noteWrites = dataCalls.filter((c) => c.body?.op === "insert" && c.body?.table === "athlete_memory" && /check-in/.test(String(c.body?.data?.content || "")));
+  expect(noteWrites.length).toBe(1);
+  expect(noteWrites[0].body.data.kind).toBe("situational");
+  expect(Date.parse(noteWrites[0].body.data.expires_at)).toBeGreaterThan(Date.now() + 80 * 864e5);
+  expect(dataCalls.some((c) => c.body?.table === "athlete_context")).toBe(false);
   const marks = () => dataCalls.find((c) => c.body?.op === "update" && c.body?.table === "athletes" && c.body?.data?.pain_marks);
   await expect.poll(() => !!marks(), { timeout: 10000 }).toBe(true);
   expect(marks().body.data.pain_marks.knee.cleared_at).toBeTruthy();
