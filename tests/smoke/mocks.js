@@ -211,8 +211,14 @@ export async function mockApi(page, options = {}) {
         return route.fulfill(json({ athlete, token }));
       case "check-athlete-name":
         return route.fulfill(json({ exists: false }));
-      case "coach-login": // real endpoint: pin-only, first bcrypt match wins
-        return route.fulfill(json(coach ? { coach, token: "smoketest-coach-token" } : { coach: null }));
+      case "coach-login": { // real endpoint: name-or-email (or coachId for Face ID) + pin, compared only against the matched row
+        if (!coach) return route.fulfill(json({ coach: null, reason: "not_found" }));
+        const who = String(body.name || "").trim().toLowerCase();
+        const matched = body.coachId ? body.coachId === coach.id
+          : who === String(coach.name).toLowerCase() || who === String(coach.email || "").toLowerCase();
+        if (!matched) return route.fulfill(json({ coach: null, reason: "not_found" }));
+        return route.fulfill(json(body.pin === (coach.pin || "9999") ? { coach, token: "smoketest-coach-token" } : { coach: null, reason: "wrong_pin" }));
+      }
       case "coach-dashboard": // roster + school for the caller (shape of identity.js coachDashboard)
         return route.fulfill(json({ athletes: coach ? [athlete] : [], coaches: [], school: [], schoolsAll: [], coachCounts: null }));
       case "create-athlete": {
@@ -357,6 +363,7 @@ export const makeCoach = (overrides = {}) => ({
 export async function loginAsCoach(page, coach) {
   await page.goto("/");
   await page.getByRole("button", { name: "Coach Login" }).click();
+  await page.getByPlaceholder("Your name, or the email you signed up with").fill(coach.name);
   await page.getByPlaceholder("----").fill(coach.pin || "9999");
   await page.getByRole("button", { name: "Access Dashboard ->" }).click();
   await page.getByText("WILCO COACH").waitFor();

@@ -159,5 +159,129 @@ console.log("\nper-target athlete-login throttle (source contract):");
     /reason: "ambiguous" \}\);\s*\}/.test(fn) && fn.indexOf('reason: "ambiguous"') < fn.indexOf("recordTargetFail()"), true);
 }
 
+// ── coach-login: name or email + PIN (App Store review, 2026-09-29) ──────────
+// Was PIN-only: one guess was bcrypt-tested against EVERY coach with a PIN. These
+// run the REAL handler against an in-memory stand-in for the Supabase REST API
+// (fetch is stubbed), so the identifier scoping, the ambiguity guard, the two
+// limiters and the legacy switch are exercised, not just grepped.
+console.log("\ncoach-login — name or email + PIN (behavioral, stubbed Supabase):");
+{
+  const { hashPin } = await import("../api/_supa.js");
+  const { default: identityHandler } = await import("../api/identity.js");
+  const db = { coaches: [], rate_limits: [] };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    const u = new URL(String(url).replace(/^undefined/, "http://stub"));
+    const table = u.pathname.split("/").pop();
+    const method = opts.method || "GET";
+    const json = (b, status = 200) => ({ ok: status < 400, status, json: async () => b, text: async () => JSON.stringify(b) });
+    const q = u.searchParams;
+    if (table === "rate_limits") {
+      if (method === "POST") { db.rate_limits.push({ key: JSON.parse(opts.body).key }); return json({}, 201); }
+      const key = (q.get("key") || "").replace(/^eq\./, "");
+      if (method === "DELETE") { db.rate_limits = db.rate_limits.filter((r) => r.key !== key); return json({}); }
+      return json(db.rate_limits.filter((r) => r.key === key).map((r, i) => ({ id: i })));
+    }
+    if (table === "coaches") {
+      let rows = db.coaches.slice();
+      const name = q.get("name"), email = q.get("email"), id = q.get("id");
+      if (name) { const want = name.replace(/^ilike\./, "").replace(/\\(.)/g, "$1").toLowerCase(); rows = rows.filter((c) => (c.name || "").toLowerCase() === want); }
+      if (email) rows = rows.filter((c) => c.email === email.replace(/^eq\./, ""));
+      if (id) rows = rows.filter((c) => c.id === id.replace(/^eq\./, ""));
+      if (q.get("pin") === "not.is.null") rows = rows.filter((c) => c.pin != null);
+      return json(rows);
+    }
+    return json([]);
+  };
+  const call = async (body, ip = "1.1.1.1") => {
+    const out = { status: 200, body: null };
+    const res = { setHeader() {}, status(n) { out.status = n; return res; }, json(b) { out.body = b; return res; }, end() { return res; } };
+    await identityHandler({ method: "POST", headers: { "x-forwarded-for": ip }, body: { action: "coach-login", ...body } }, res);
+    return out;
+  };
+  const savedFlag = process.env.COACH_PIN_ONLY_LOGIN;
+  delete process.env.COACH_PIN_ONLY_LOGIN;
+  db.coaches = [
+    { id: "co-a", name: "Coach Ada", email: "ada@school.test", pin: await hashPin("1111") },
+    { id: "co-b", name: "Coach Bo", email: "bo@school.test", pin: await hashPin("2222") },
+    { id: "co-c1", name: "Coach Twin", email: "t1@school.test", pin: await hashPin("3333") },
+    { id: "co-c2", name: "Coach Twin", email: "t2@school.test", pin: await hashPin("3333") },
+    { id: "co-nopin", name: "Coach Pending", email: "p@school.test", pin: null },
+  ];
+  let r = await call({ name: "coach ada", pin: "1111" });
+  check("name (any case) + right PIN signs in", [r.status, r.body.coach && r.body.coach.id, !!r.body.token, "pin" in (r.body.coach || {})], [200, "co-a", true, false]);
+  r = await call({ name: "Coach Ada", pin: "2222" });
+  check("another coach's PIN under this name does NOT sign in", [r.body.coach, r.body.reason], [null, "wrong_pin"]);
+  r = await call({ name: "Coach Nobody", pin: "1111" });
+  check("an unknown name is not_found (the PIN is never tried against other coaches)", [r.body.coach, r.body.reason], [null, "not_found"]);
+  r = await call({ name: "ADA@school.test", pin: "1111" });
+  check("email works when no name matches (lowercased)", r.body.coach && r.body.coach.id, "co-a");
+  r = await call({ name: "%", pin: "1111" });
+  check("a wildcard name matches nobody", [r.body.coach, r.body.reason], [null, "not_found"]);
+  r = await call({ name: "Coach Twin", pin: "3333" });
+  check("two coaches with the same name AND PIN are ambiguous, never first-match", [r.body.coach, r.body.reason], [null, "ambiguous"]);
+  r = await call({ name: "t2@school.test", pin: "3333" });
+  check("the email tells the twins apart", r.body.coach && r.body.coach.id, "co-c2");
+  r = await call({ name: "Coach Pending", pin: "0000" });
+  check("a coach with no PIN set cannot sign in", [r.body.coach, r.body.reason], [null, "not_found"]);
+  r = await call({ coachId: "co-b", pin: "2222" });
+  check("Face ID form { coachId, pin } signs in by exact id", r.body.coach && r.body.coach.id, "co-b");
+  r = await call({ coachId: "co-b", pin: "1111" });
+  check("{ coachId, pin } with the wrong PIN is wrong_pin", [r.body.coach, r.body.reason], [null, "wrong_pin"]);
+  r = await call({ coachId: "co-b) or (1=1", pin: "2222" });
+  check("a malformed coachId is rejected before any query", r.status, 400);
+  r = await call({ name: "   ", pin: "1111" });
+  check("an empty name is rejected (not treated as legacy PIN-only)", r.status, 400);
+
+  // limiters: 5 per IP+identifier, plus 15 failures per identifier across IPs
+  db.rate_limits = [];
+  for (let i = 0; i < 5; i++) await call({ name: "Coach Bo", pin: "0000" }, "9.9.9.9");
+  r = await call({ name: "Coach Bo", pin: "2222" }, "9.9.9.9");
+  check("the 6th attempt from one IP on one name is refused (429)", r.status, 429);
+  db.rate_limits = [];
+  for (let i = 0; i < 15; i++) await call({ name: "Coach Bo", pin: "0000" }, `10.0.0.${i}`);
+  r = await call({ name: "Coach Bo", pin: "2222" }, "10.0.1.1");
+  check("15 wrong PINs from 15 different IPs lock the name for everyone (429)", r.status, 429);
+  db.rate_limits = [];
+  for (let i = 0; i < 4; i++) await call({ name: "Coach Bo", pin: "0000" }, "7.7.7.7");
+  r = await call({ name: "Coach Bo", pin: "2222" }, "7.7.7.7");
+  const cleared = db.rate_limits.length;
+  check("success clears both counters", [r.body.coach && r.body.coach.id, cleared], ["co-b", 0]);
+  db.rate_limits = [];
+  for (let i = 0; i < 20; i++) await call({ name: "Nobody Here", pin: "0000" }, `11.0.0.${i}`);
+  check("typos that match nobody never build the per-name lockout", db.rate_limits.filter((x) => x.key.startsWith("coach-login-target:")).length, 0);
+
+  // legacy PIN-only bundles
+  db.rate_limits = [];
+  r = await call({ pin: "1111" });
+  check("legacy { pin } still works while COACH_PIN_ONLY_LOGIN is unset", r.body.coach && r.body.coach.id, "co-a");
+  process.env.COACH_PIN_ONLY_LOGIN = "on";
+  r = await call({ pin: "1111" });
+  check("legacy { pin } still works when the flag is anything but off", r.body.coach && r.body.coach.id, "co-a");
+  process.env.COACH_PIN_ONLY_LOGIN = "off";
+  r = await call({ pin: "1111" });
+  check("legacy { pin } gets a 400 telling the coach to update once the flag is off", [r.status, /update|refresh/i.test(r.body.error || ""), /name/i.test(r.body.error || "")], [400, true, true]);
+  r = await call({ name: "Coach Ada", pin: "1111" });
+  check("the flag being off does not affect name sign-in", r.body.coach && r.body.coach.id, "co-a");
+  if (savedFlag === undefined) delete process.env.COACH_PIN_ONLY_LOGIN; else process.env.COACH_PIN_ONLY_LOGIN = savedFlag;
+  globalThis.fetch = realFetch;
+}
+
+console.log("\ncoach-login (source contract):");
+{
+  const { readFileSync } = await import("node:fs");
+  const identity = readFileSync(new URL("../api/identity.js", import.meta.url), "utf8");
+  const fn = identity.slice(identity.indexOf("async function coachLogin"), identity.indexOf("async function resolveCoachCode"));
+  check("the rate-limit key carries the identifier", /coach-login:\$\{clientIp\(req\)\}:\$\{idKey\}/.test(fn), true);
+  check("the per-target counter has no IP in it", /coach-login-target:\$\{idKey\}/.test(fn) && /authThrottle\(targetKey, \{ max: 15, windowMin: 15 \}\)/.test(fn), true);
+  check("the PIN is only compared against the matched rows", /rows\.map\(\(c\) => verifyPin\(pin, c\.pin\)\)/.test(fn), true);
+  check("the legacy sweep is the only path that selects every coach with a PIN", (fn.match(/\?pin=not\.is\.null&select=\*/g) || []).length === 1, true);
+  check("the legacy switch is env COACH_PIN_ONLY_LOGIN, default allowed", /COACH_PIN_ONLY_LOGIN \|\| ""\)\.toLowerCase\(\) === "off"/.test(fn), true);
+  const app = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+  check("the client sends the name from the coach login form", /idApi\("coach-login",\{name:name\.trim\(\),pin\}\)/.test(app), true);
+  check("Face ID sends { coachId, pin } from the stored enrollment", /idApi\("coach-login",\{ coachId: e\.userId, pin: e\.pin \}\)/.test(app), true);
+  check("nothing in the client still posts a bare { pin } coach-login", !/idApi\("coach-login",\{\s*pin/.test(app), true);
+}
+
 console.log(`\n${fail === 0 ? "All" : ""} ${pass} auth-logic checks pass${fail ? `, ${fail} FAILED` : "."}`);
 process.exit(fail === 0 ? 0 : 1);

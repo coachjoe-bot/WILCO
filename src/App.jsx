@@ -935,7 +935,9 @@ async function biometricAssert(role){
 async function biometricLogin(role){
   const e = await biometricAssert(role);
   if(role==="coach"){
-    const res = await idApi("coach-login",{ pin: e.pin });
+    // { coachId, pin }: enrollments made before coach login took a name stored the id
+    // and the PIN but no name, so the id is what every Face ID sign-in can rely on.
+    const res = await idApi("coach-login",{ coachId: e.userId, pin: e.pin });
     if(!res.coach){ clearBioEnrollment("coach"); throw new Error("Saved Face ID sign-in is out of date, please log in with your PIN."); }
     CURRENT_AUTH = { role:"coach", id:res.coach.id, pin:e.pin, token:res.token };
     track("login","auth",{ role:"coach", method:"biometric" });
@@ -5873,6 +5875,7 @@ function LoginScreen({setView,setAthlete,setErr,err}) {
 
 // ─── COACH LOGIN ──────────────────────────────────────────────────────────────
 function CoachLoginScreen({setView,setCoach,setErr,err}) {
+  const [name,setName] = useState("");
   const [pin,setPin] = useState("");
   const [loading,setLoading] = useState(false);
   const [mode,setMode] = useState("login"); // "login" | "forgot"
@@ -5887,10 +5890,10 @@ function CoachLoginScreen({setView,setCoach,setErr,err}) {
   const enterDash = (coachObj,pinVal) => { setCoach({...coachObj,pin:pinVal}); persistAuthSession(coachObj); setView("coach"); };
 
   const login = async () => {
-    if(pin.length!==4){setErr("Enter your 4-digit PIN.");return;}
+    if(!name.trim()||pin.length!==4){setErr("Enter your name and 4-digit PIN.");return;}
     setLoading(true); setErr("");
     try {
-      const res = await idApi("coach-login",{pin});
+      const res = await idApi("coach-login",{name:name.trim(),pin});
       if(res.coach){
         CURRENT_AUTH={role:"coach",id:res.coach.id,pin,token:res.token};track("login","auth",{role:"coach"});
         // First PIN login on a biometric-capable device with no enrollment yet: offer Face ID.
@@ -5899,7 +5902,9 @@ function CoachLoginScreen({setView,setCoach,setErr,err}) {
         }
         enterDash(res.coach,pin);
       }
-      else setErr("PIN not found. Check your PIN or set up your coach account first.");
+      else if(res.reason==="ambiguous") setErr("More than one coach account matches that name and PIN. Sign in with your email address instead.");
+      else if(res.reason==="wrong_pin") setErr("Wrong PIN. Try again.");
+      else setErr("We couldn't find that coach account. Check the spelling, try your email, or set up your coach account first.");
     } catch(e){setErr(e.message||"Connection error.");}
     setLoading(false);
   };
@@ -5977,6 +5982,10 @@ function CoachLoginScreen({setView,setCoach,setErr,err}) {
       </div>
 
       {mode==="login"&&<>
+        <div style={{marginBottom:16}}>
+          <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>NAME OR EMAIL</label>
+          <input value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&login()} autoComplete="username" placeholder="Your name, or the email you signed up with" style={inpA()}/>
+        </div>
         <div style={{marginBottom:20}}>
           <label style={{color:CA.muted,fontSize:11,letterSpacing:1,display:"block",marginBottom:6}}>COACH PIN</label>
           <input type="password" inputMode="numeric" autoComplete="one-time-code" maxLength={4} value={pin}

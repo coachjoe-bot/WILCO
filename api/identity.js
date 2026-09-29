@@ -5,7 +5,7 @@
 //
 // Actions (POST { action, ... }):
 //   athlete-login        { name, pin }                  -> { athlete } | { athlete:null, reason }
-//   coach-login          { pin }                         -> { coach }   | { coach:null }
+//   coach-login          { name|coachId, pin }           -> { coach }   | { coach:null, reason }   (bare { pin } = legacy, see COACH_PIN_ONLY_LOGIN)
 //   resolve-coach-code   { code }                        -> { coach }   | { coach:null }   (pin hidden, pin_set flag)
 //   check-athlete-name   { name }                        -> { exists }
 //   get-athlete          { athleteId, pin }              -> { athlete } | { athlete:null }  (self refresh)
@@ -165,22 +165,90 @@ async function athleteLogin(req, res, body) {
   return res.status(200).json({ athlete: null, reason: byName.length ? "wrong_pin" : "not_found" });
 }
 
-// ── coach-login (pin only, matching existing behavior) ───────────────────────
+// ── coach-login (name or email + PIN, same shape as athlete-login) ───────────
+// Was PIN-only: a guess was bcrypt-tested against EVERY coach that had a PIN, so one
+// wrong-looking PIN could log in as whoever happened to own it, two coaches with the
+// same PIN collided (first match won), and the work grew with the coach count. Now
+// the identifier picks the row(s) and the PIN is compared ONLY against those.
+//
+//   { name, pin }     name = coaches.name (ilike, escaped) or, when no name matches
+//                     and it has an "@", coaches.email (eq, lowercased)
+//   { coachId, pin }  exact id, for Face ID sign-in: enrollments made before this
+//                     change stored the coach id and the PIN but no name
+//   { pin }           LEGACY, old cached client bundles only (see below)
 async function coachLogin(req, res, body) {
   const pin = pin4(body.pin);
-  // Key on IP so an attacker is capped across ALL pins (defends the 4-digit space).
-  await rateLimit(`coach-login:${clientIp(req)}`, { max: 10, windowMin: 15 });
-  // Hashed PINs can't be queried — pull coaches that have a PIN set and compare.
-  // bcrypt compares run in parallel (wall time ~one compare instead of one per
-  // coach); first matching index wins, same as the old sequential loop.
-  const coaches = await sbSelect("coaches", `?pin=not.is.null&select=*`);
-  const compared = await Promise.all(coaches.map((c) => verifyPin(pin, c.pin)));
+
+  // LEGACY PIN-ONLY. Bundles cached before the name field shipped still send only
+  // { pin }. They keep working while COACH_PIN_ONLY_LOGIN is anything but "off"
+  // (default: allowed, so nothing breaks at deploy). Once the new client is live
+  // and old bundles have aged out, flip COACH_PIN_ONLY_LOGIN=off and this branch
+  // answers 400 instead. It keeps the old per-IP limiter and PIN-against-everyone
+  // sweep exactly as they were, and nothing new should ever be added to it.
+  if (body.name == null && body.coachId == null) {
+    if (String(process.env.COACH_PIN_ONLY_LOGIN || "").toLowerCase() === "off") {
+      throw httpErr(400, "This version of WILCO is out of date. Refresh or update the app, then sign in with your name and PIN.");
+    }
+    // Key on IP so an attacker is capped across ALL pins (defends the 4-digit space).
+    await rateLimit(`coach-login:${clientIp(req)}`, { max: 10, windowMin: 15 });
+    // Hashed PINs can't be queried, so pull coaches that have a PIN set and compare.
+    const coaches = await sbSelect("coaches", `?pin=not.is.null&select=*`);
+    const compared = await Promise.all(coaches.map((c) => verifyPin(pin, c.pin)));
+    const hit = compared.indexOf(true);
+    if (hit !== -1) {
+      const c = coaches[hit];
+      return res.status(200).json({ coach: stripPin(c), token: mintSessionToken("coach", c.id) });
+    }
+    return res.status(200).json({ coach: null });
+  }
+
+  const byId = body.coachId != null;
+  let ident;
+  if (byId) {
+    ident = str(body.coachId, { max: 64, name: "Coach id" });
+    if (!/^[A-Za-z0-9-]+$/.test(ident)) throw httpErr(400, "Coach id is not valid");
+  } else {
+    ident = str(body.name, { max: 100, name: "Name" });
+  }
+  const idKey = (byId ? "id:" : "") + ident.toLowerCase();
+  // Same two limiters as athlete-login: per IP + identifier (5 per 15 min), and an
+  // IP-independent failed-attempt counter per identifier (15 per 15 min) so rotating
+  // IPs does not reset the guess budget against one coach. The second one records
+  // only a WRONG PIN against a real row, and is cleared on success.
+  const key = `coach-login:${clientIp(req)}:${idKey}`;
+  await rateLimit(key, { max: 5, windowMin: 15 });
+  const targetKey = `coach-login-target:${idKey}`;
+  const recordTargetFail = await authThrottle(targetKey, { max: 15, windowMin: 15 });
+
+  // Only coaches with a PIN set can sign in (a coach mid-setup has none).
+  let rows;
+  if (byId) {
+    rows = await sbSelect("coaches", `?id=eq.${enc(ident)}&pin=not.is.null&select=*`);
+  } else {
+    rows = await sbSelect("coaches", `?name=ilike.${enc(escapeLike(ident))}&pin=not.is.null&select=*`);
+    // Email only when the name matches nobody, so a name login can never be shadowed
+    // by someone else's email. eq keeps it out of pattern matching.
+    if (rows.length === 0 && ident.includes("@")) {
+      rows = await sbSelect("coaches", `?email=eq.${enc(ident.toLowerCase())}&pin=not.is.null&select=*`);
+    }
+  }
+  const compared = await Promise.all(rows.map((c) => verifyPin(pin, c.pin)));
   const hit = compared.indexOf(true);
+  // Two coaches can share a name and a PIN. NEVER pick the first: ask for the email.
+  // The PIN was right for both rows, so this is not a guess and is not counted.
+  if (compared.filter(Boolean).length > 1) {
+    return res.status(200).json({ coach: null, reason: "ambiguous" });
+  }
   if (hit !== -1) {
-    const c = coaches[hit];
+    const c = rows[hit];
+    await rateLimitReset(key);
+    await rateLimitReset(targetKey);
     return res.status(200).json({ coach: stripPin(c), token: mintSessionToken("coach", c.id) });
   }
-  return res.status(200).json({ coach: null });
+  // A wrong PIN against a real row is a guess worth counting. A name that matches
+  // nobody is not, and would let a typo lock out a real coach.
+  if (rows.length) await recordTargetFail();
+  return res.status(200).json({ coach: null, reason: rows.length ? "wrong_pin" : "not_found" });
 }
 
 // ── resolve-coach-code (setup + signup school resolution) ────────────────────

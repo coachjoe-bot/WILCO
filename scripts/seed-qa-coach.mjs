@@ -9,9 +9,10 @@
 //   • FIXED id — every write scoped to it; reseeding wipes ONLY this coach's rows.
 //   • Name "Claude QA Coach (test)" so no human report mistakes it; exclude BOTH
 //     QA ids from business metrics (see the report skills + views-manifest).
-//   • PIN: coach login is PIN-ONLY and FIRST-MATCH across every coach row
-//     (api/identity.js coachLogin), so a QA pin that collides with a real coach's
-//     pin would cross-wire accounts in BOTH directions. The seed bcrypt-compares
+//   • PIN: coach login used to be PIN-ONLY and FIRST-MATCH across every coach row,
+//     so a QA pin that collides with a real coach's pin would cross-wire accounts.
+//     It now takes name (or email) + PIN (api/identity.js coachLogin), but bundles
+//     still in the wild can send a bare PIN, so the seed keeps the check. It bcrypt-compares
 //     its candidate pin against every existing coach hash and regenerates until
 //     it is unique, then verifies by logging in through the real prod endpoint
 //     and asserting the returned id is the QA coach.
@@ -78,10 +79,10 @@ const main = async () => {
   // ── prove the pin resolves to THIS coach through the real prod endpoint ──
   const login = await (await fetch("https://app.trainwilco.com/api/identity", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "coach-login", pin }),
+    body: JSON.stringify({ action: "coach-login", name: "Claude QA Coach (test)", pin }),
   })).json();
   if (!login?.coach || login.coach.id !== QA_COACH_ID) {
-    throw new Error(`coach-login resolved to ${login?.coach?.id || "null"} — NOT the QA coach; reseed (pin ambiguity)`);
+    throw new Error(`coach-login resolved to ${login?.coach?.id || "null"} — NOT the QA coach; reseed`);
   }
 
   // ── append creds to .env.qa (strip any stale QA_COACH lines first) ──
