@@ -87,6 +87,8 @@ export const qlLoad = (athleteId, workoutHistory, {cardActive=false} = {}) => {
       notes: typeof d.notes==="string" ? d.notes : "",
       undoStack: Array.isArray(d.undoStack) ? d.undoStack : [],
       prebuilt: !!d.prebuilt,
+      // When the park was last written (a generate, an edit, a start).
+      savedAt: d.savedAt||0,
       // dock: the workout bar is up, a session is in progress. Survives a cold
       // boot so the bar comes back with the same text; goes false on Finish
       // (the park is cleared) and on the bar's X.

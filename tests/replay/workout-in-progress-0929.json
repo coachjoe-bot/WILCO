@@ -1,0 +1,18 @@
+{
+  "bug": "T66 (Will, TestFlight, 09-29): start a workout, change the log sheet, close the app, the changes are gone",
+  "source": "founder account, 233 workouts rows against the app's 100-row history window. real_flags_newest_first is the real shape of his newest 110 rows on 2026-09-29 (1 = a logged session, 0 = a chat message); no row content is stored here",
+  "real_flags_newest_first": "11011000110010100010100000001100010011000000101010100000001011000101000100100100010010010001100010100100010100",
+  "window": 100,
+  "steps": [
+    "boot: the app loads the newest 100 rows",
+    "Start Workout, then edit the sheet: the park is stamped against those rows",
+    "send N chat messages mid-workout (each one is a new row, none a logged session)",
+    "close the app, open it: the app loads the newest 100 rows again, so the N oldest rows of the first window are gone"
+  ],
+  "chat_messages_mid_workout": [1, 2, 3, 5, 8],
+  "invariants": [
+    "the sheet resumes with the athlete's text for every N",
+    "for at least one N the count of logged sessions inside the window changed (the condition the old stamp failed on)",
+    "a session logged after the park still drops it"
+  ]
+}

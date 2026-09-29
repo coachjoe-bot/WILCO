@@ -180,7 +180,7 @@ test("Joe's prefill on an edited sheet keeps the athlete's text", async ({ page 
     toolTurns += 1;
     route.fulfill({ contentType: "text/event-stream", body:
       `data: ${JSON.stringify({ text: "Let's get it." })}\n\n` +
-      `data: ${JSON.stringify({ tool_use: { name: "prefill_log_sheet", input: {} } })}\n\n` +
+      `data: ${JSON.stringify({ tool_use: { id: "t1", name: "prefill_log_sheet", input: {} } })}\n\n` +
       `data: ${JSON.stringify({ stop_reason: "end_turn" })}\n\n` });
   });
   const draftsBefore = calls.filter((c) => c.body?.feature === "quick_log_draft").length;
@@ -198,44 +198,68 @@ test("Joe's prefill on an edited sheet keeps the athlete's text", async ({ page 
   await expect(page.getByRole("textbox", { name: SHEET })).toHaveValue(EDITED);
 });
 
-// A today-only change said in chat lands on THEIR text through the sheet's own
-// edit call (quick_log_edit), never through a fresh draft.
-test("Joe's prefill with a change in the message edits the athlete's sheet, it does not replace it", async ({ page }) => {
+// Nothing said in chat rewrites a sheet they changed, by model or by code. The
+// first build sent the message through the sheet's edit call; on the simulator
+// a mistyped start came back as a rebuilt sheet with the added lift gone.
+for (const said of ["no barbell for overhead today, use dumbbells", "Starting my workoutstar", "subbed dips for pushdowns"]) {
+  test(`Joe's prefill never rewrites their sheet from chat: "${said}"`, async ({ page }) => {
+    const athlete = makeAthlete({ program_text: PROGRAM });
+    const { calls } = await mockApi(page, { athlete, chatReply: DRAFT_REPLY, token: liveToken() });
+    await startAndEdit(page, athlete);
+    await page.getByText("Day 1 - Push", { exact: true }).first().click();
+
+    let toolTurns = 0, sheetFactSent = false;
+    await page.route("**/api/claude", (route) => {
+      const body = route.request().postDataJSON() || {};
+      if (body.feature !== "mastermind_chat") return route.fallback();
+      sheetFactSent = sheetFactSent || /LOG SHEET \(fact from the app\)/.test(String(body.system || ""));
+      if (!body.stream) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ content: [{ type: "text", text: "Got it." }], usage: {} }) });
+      toolTurns += 1;
+      route.fulfill({ contentType: "text/event-stream", body:
+        `data: ${JSON.stringify({ text: "Got it." })}\n\n` +
+        `data: ${JSON.stringify({ tool_use: { id: "t1", name: "prefill_log_sheet", input: {} } })}\n\n` +
+        `data: ${JSON.stringify({ tool_use: { id: "t2", name: "pin_session_card", input: {} } })}\n\n` +
+        `data: ${JSON.stringify({ stop_reason: "end_turn" })}\n\n` });
+    });
+    const before = calls.filter((c) => /quick_log_(draft|edit)/.test(c.body?.feature || "")).length;
+    await page.getByPlaceholder(/Tell Coach Joe about your workout/).fill(said);
+    await page.getByRole("button", { name: "→", exact: true }).click();
+    await expect.poll(() => toolTurns).toBe(1);
+    await page.waitForTimeout(2500); // the tools run after the reply settles
+
+    const park = await parkOf(page, athlete);
+    expect(park.draft).toBe(EDITED);
+    expect(park.prebuilt).toBe(false);
+    expect(park.dock).toBe(true);
+    // No model touched the sheet: not a fresh draft, not an edit.
+    expect(calls.filter((c) => /quick_log_(draft|edit)/.test(c.body?.feature || "")).length).toBe(before);
+    // Joe was told the sheet is theirs before he spoke.
+    expect(sheetFactSent).toBe(true);
+    await page.getByText("Day 1 - Push", { exact: true }).first().click();
+    await expect(page.getByRole("textbox", { name: SHEET })).toHaveValue(EDITED);
+  });
+}
+
+// They named a different session after editing: the one time chat replaces it.
+test("naming a different day after editing does rebuild the sheet", async ({ page }) => {
   const athlete = makeAthlete({ program_text: PROGRAM });
   const { calls } = await mockApi(page, { athlete, chatReply: DRAFT_REPLY, token: liveToken() });
   await startAndEdit(page, athlete);
   await page.getByText("Day 1 - Push", { exact: true }).first().click();
-
-  const AFTER = EDITED.replace("Overhead Press 3x8 @ 100", "Dumbbell Press 3x8 @ 45");
-  let editSawTheirText = false;
   await page.route("**/api/claude", (route) => {
     const body = route.request().postDataJSON() || {};
-    if (body.feature === "quick_log_edit") {
-      const sent = JSON.stringify(body.messages || "");
-      editSawTheirText = sent.includes("Bench Press 3x5 @ 190") && sent.includes("no barbell for overhead");
-      return route.fulfill({ contentType: "application/json", body: JSON.stringify({ content: [{ type: "text", text: AFTER }], usage: {} }) });
-    }
     if (body.feature !== "mastermind_chat") return route.fallback();
-    if (!body.stream) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ content: [{ type: "text", text: "Dumbbells it is." }], usage: {} }) });
+    if (!body.stream) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ content: [{ type: "text", text: "Day 2 it is." }], usage: {} }) });
     route.fulfill({ contentType: "text/event-stream", body:
-      `data: ${JSON.stringify({ text: "Dumbbells it is." })}\n\n` +
-      `data: ${JSON.stringify({ tool_use: { name: "prefill_log_sheet", input: {} } })}\n\n` +
+      `data: ${JSON.stringify({ text: "Day 2 it is." })}\n\n` +
+      `data: ${JSON.stringify({ tool_use: { id: "t1", name: "set_position", input: { day: 2 } } })}\n\n` +
+      `data: ${JSON.stringify({ tool_use: { id: "t2", name: "prefill_log_sheet", input: { day_label: "Day 2" } } })}\n\n` +
       `data: ${JSON.stringify({ stop_reason: "end_turn" })}\n\n` });
   });
-  const draftsBefore = calls.filter((c) => c.body?.feature === "quick_log_draft").length;
-  await page.getByPlaceholder(/Tell Coach Joe about your workout/).fill("no barbell for overhead today, use dumbbells");
+  const before = calls.filter((c) => c.body?.feature === "quick_log_draft").length;
+  await page.getByPlaceholder(/Tell Coach Joe about your workout/).fill("I'm actually doing day 2 today");
   await page.getByRole("button", { name: "→", exact: true }).click();
-  await expect.poll(async () => (await parkOf(page, athlete))?.draft, { timeout: 15000 }).toBe(AFTER);
-  expect(editSawTheirText).toBe(true);
-  expect(calls.filter((c) => c.body?.feature === "quick_log_draft").length).toBe(draftsBefore);
-  // Their other edits are still there, and the park is still theirs and still up.
-  const park = await parkOf(page, athlete);
-  expect(park.draft).toContain("Bench Press 3x5 @ 190");
-  expect(park.draft).toContain("Dips 3x12");
-  expect(park.prebuilt).toBe(false);
-  expect(park.dock).toBe(true);
-  await page.getByText("Day 1 - Push", { exact: true }).first().click();
-  await expect(page.getByRole("textbox", { name: SHEET })).toHaveValue(AFTER);
+  await expect.poll(() => calls.filter((c) => c.body?.feature === "quick_log_draft").length, { timeout: 15000 }).toBeGreaterThan(before);
 });
 
 // An untouched sheet is the app's own draft: Joe's rebuild replaces it, as before.
@@ -251,7 +275,7 @@ test("Joe's prefill on an UNTOUCHED sheet still rebuilds it", async ({ page }) =
     if (!body.stream) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ content: [{ type: "text", text: "Let's get it." }], usage: {} }) });
     route.fulfill({ contentType: "text/event-stream", body:
       `data: ${JSON.stringify({ text: "Let's get it." })}\n\n` +
-      `data: ${JSON.stringify({ tool_use: { name: "prefill_log_sheet", input: {} } })}\n\n` +
+      `data: ${JSON.stringify({ tool_use: { id: "t1", name: "prefill_log_sheet", input: {} } })}\n\n` +
       `data: ${JSON.stringify({ stop_reason: "end_turn" })}\n\n` });
   });
   const draftsBefore = calls.filter((c) => c.body?.feature === "quick_log_draft").length;

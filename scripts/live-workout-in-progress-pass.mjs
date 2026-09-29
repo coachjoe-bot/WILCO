@@ -9,8 +9,10 @@
 //   reopen   Start Workout, edit the sheet, reload: the bar is back with the edit
 //   start    edited sheet up, tell real Joe "starting my workout": the edit stands,
 //            no fresh draft is generated
-//   change   edited sheet up, tell real Joe about a today-only change: their other
-//            edits stand, no fresh draft is generated
+//   change   edited sheet up, tell real Joe about a today-only change: the sheet is
+//            untouched (chat never rewrites their sheet), no model call touches it
+//   garbled  the simulator's mistyped start ("Starting my workoutstar"), which the
+//            first build sent through the edit call and lost a lift on
 //   cancel   the X, reload: no bar
 //   finish   Finish Workout: the log lands, the park is empty, reload: no bar
 // Writes ONLY QA rows; restores the QA athlete's fields. Hold the fixture lock
@@ -55,6 +57,12 @@ const browser = await chromium.launch();
 const ctx = await browser.newContext({ viewport: { width: 430, height: 900 } });
 const page = await ctx.newPage();
 let ai = [];       // every AI call this turn: {feature, tools:[names]}
+let sheetFact = false;
+page.on("request", (req) => {
+  if (req.method() !== "POST" || !/\/api\/claude/.test(req.url())) return;
+  let b = null; try { b = req.postDataJSON(); } catch { return; }
+  if (b && /mastermind_chat/.test(b.feature || "") && /LOG SHEET \(fact from the app\)/.test(String(b.system || ""))) sheetFact = true;
+});
 page.on("response", async (res) => {
   if (!/\/api\/claude/.test(res.url())) return;
   let b = null; try { b = res.request().postDataJSON(); } catch { return; }
@@ -118,9 +126,9 @@ await page.getByText("WILCO", { exact: true }).first().waitFor({ timeout: 45000 
 await page.waitForTimeout(4000);
 await dismiss();
 
-const order = (process.env.SCEN || "reopen,start,change,cancel,finish").split(",");
+const order = (process.env.SCEN || "reopen,start,change,garbled,cancel,finish").split(",");
 for (const name of order) {
-  const runs = name === "start" || name === "change" ? RUNS : (name === "reopen" ? 2 : 1);
+  const runs = name === "start" || name === "change" || name === "garbled" ? RUNS : (name === "reopen" ? 2 : 1);
   for (let run = 1; run <= runs; run++) {
     try {
       await cleanup();
@@ -150,13 +158,13 @@ for (const name of order) {
         }, { aiOnReopen: ai.map((c) => c.feature) });
       }
 
-      if (name === "start" || name === "change") {
+      if (name === "start" || name === "change" || name === "garbled") {
         await closeSheet();
         await reopen();                       // the report's order: edit, close the app, come back, talk to Joe
         await composer().waitFor({ timeout: 45000 });
         await dismiss();
-        ai = [];
-        const msg = name === "start" ? "starting my workout" : "the squat racks are all taken today, swap my first lift for something I can do with dumbbells";
+        ai = []; sheetFact = false;
+        const msg = name === "start" ? "starting my workout" : name === "garbled" ? "Starting my workoutstar" : "the squat racks are all taken today, swap my first lift for something I can do with dumbbells";
         await composer().fill(msg);
         await page.getByRole("button", { name: "→", exact: true }).click();
         await settle();
@@ -175,8 +183,10 @@ for (const name of order) {
           barUp: await barX().isVisible().catch(() => false) || /PROGRAM REC/.test(body),   // a rec bar sits over the workout bar when Joe stages one
           noStartButtonsMidWorkout: !(await page.getByRole("button", { name: "Start Workout" }).isVisible().catch(() => false)),
         };
-        if (name === "start") inv.textUntouched = !!after && after.draft === edited;
-        if (name === "change" && tools.includes("prefill_log_sheet")) inv.changeWentThroughEditCall = features.includes("quick_log_edit");
+        inv.textUntouched = !!after && after.draft === edited;
+        inv.noModelTouchedTheSheet = !features.includes("quick_log_edit") && !features.includes("quick_log_draft");
+        inv.joeToldTheSheetIsTheirs = sheetFact;
+        inv.joeDidNotClaimARebuild = !/\b(rebuilt|reset|re-?built|prefilled|updated (?:your|the) (?:sheet|log)|(?:sheet|log) is updated|swapped (?:it )?on (?:your|the) sheet)\b/i.test(reply);
         note(name, run, inv, { tools, features, reply, changed: !!after && after.draft !== edited, firstEditedLine, draftAfter: after && after.draft });
       }
 

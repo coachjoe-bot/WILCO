@@ -1,6 +1,6 @@
 # WILCO AI contract — how the AI and the code work together
 
-Written 2026-09-28 from Will's rulings (08-10, 08-24, 08-28, 09-01, 09-28) and a full audit of who decided what in the app at that time. Every session that changes AI behavior reads this first. It describes the system Will already chose; it adds no new architecture.
+Written 2026-09-28 from Will's rulings (08-10, 08-24, 08-28, 09-01, 09-28; rule 13 added 09-29) and a full audit of who decided what in the app at that time. Every session that changes AI behavior reads this first. It describes the system Will already chose; it adds no new architecture.
 
 ## Who owns what
 
@@ -24,6 +24,7 @@ Written 2026-09-28 from Will's rulings (08-10, 08-24, 08-28, 09-01, 09-28) and a
 10. **Manner, not caps.** Answer first. No preamble, no restating what the athlete said, no filler praise. Numbers over adjectives. Stop when the point is made. Go deep when the athlete asks for depth. No profanity, ever, even when the athlete uses it.
 11. **Pain is tracked quietly and spoken about rarely.** The ledger records every mention with its date and degree, counts clean sessions as recovery evidence, clears areas on its own as they improve, and reopens them if they flare. It tells every surface whether to speak. Serious reports are always addressed. Program changes for pain come from the athlete asking, or from a serious report.
 12. **Server and database changes are additive.** New optional fields, new nullable columns, new allowlist entries. They ship dark before the client that uses them.
+13. **A log sheet the athlete changed is theirs** (Will 09-29). What they typed on the sheet is their record of the session. It stays through an app close until the workout is finished or cancelled. Joe's tools and the app's own generators never replace it, and nothing said in chat rewrites it, by model or by code. They change it on the sheet: by typing, or by opening it and telling Joe there. A new sheet is built only when they name a different session or ask for a fresh sheet. Joe is handed the fact each turn (`sheetFactLine`). The rule is `src/sheetPlan.js`; the park that holds the sheet is `src/quicklog.js`.
 
 ## Joining the system (checklist for any new feature)
 

@@ -58,7 +58,7 @@ import {
   sessionCardDeclinedToday, markSessionCardDeclined,
   markWorkoutStart, workoutStartAt, clearWorkoutStart, workoutDurationSeconds,
 } from "./sessionCard.js";
-import { sheetRegenPlan } from "./sheetPlan.js";
+import { sheetRegenPlan, sheetFactLine, namedPositionSince } from "./sheetPlan.js";
 // Notification deep links (T51): a push carries `?n=<target>`; this turns it into
 // the screen the push was about, on both cold and warm starts.
 import {
@@ -2223,7 +2223,7 @@ ${athlete.weight_unit==="kg"?"This athlete works in KG. State every weight you s
     // actually did") and re-called prefill_log_sheet on a session that had just
     // ended (Will's phone, 08-28).
     const pureLogBlock = opts.pureLog ? `\n\nTHIS MESSAGE IS A FINISHED WORKOUT LOG the athlete just sent from the log sheet. The app is already parsing and saving it; the text IS what they did. ${logFocus ? "React to completed work as the LOG REPLY FOCUS block below says." : "React to completed work: acknowledge it and coach what stands out."} Where it differs from the program or from the sheet you drafted, that is an audible they chose${logFocus ? ", never an error" : " — worth a coaching observation, never an error"}, never a reason to sound like you doubt the log. Do not call prefill_log_sheet or pin_session_card; the session is over and the sheet already came down. If one detail that matters is genuinely missing (a weight, sets), ask ONE specific question that names the exercise, right here in chat.` : "";
-    const sysObjM = {cached:buildMastermindStatic(), dynamic:sys+goalsContext+memBlock+pureLogBlock+logFocus};
+    const sysObjM = {cached:buildMastermindStatic(), dynamic:sys+goalsContext+memBlock+pureLogBlock+logFocus+(opts.sheetFact||"")};
     const userMsgM = `${hist}\n\n${athlete.name}: ${message}`;
     if(onDelta) return askClaudeStream(sysObjM, userMsgM, {maxTokens:900, model:"claude-sonnet-5", feature:"mastermind_chat", onDelta, toolset:"mastermind_athlete", onToolUse:opts.onToolUse});
     return askClaude(sysObjM, userMsgM, 900, [], "claude-sonnet-5", "mastermind_chat");
@@ -7058,7 +7058,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // `parsed` inside send() so they ride the existing, tested branches (position
   // write + pref chip). Everything here is additive and fire-and-forget; every
   // failure is reported, never surfaced mid-conversation.
-  const executeMasterTools = async (calls, updatedAthlete, msgs) => {
+  const executeMasterTools = async (calls, updatedAthlete, msgs, turn = {}) => {
     for(const tc of calls){
       try{
         if(tc.name==="remember_fact"){
@@ -7087,7 +7087,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           setMemoryRows(rows=>rows.filter(r=>!gone.has(r.id)));
         } else if(tc.name==="pin_session_card"){
           const had = activeSessionCard(updatedAthlete.id);
-          if(had) await refreshSessionCard(updatedAthlete, msgs, "pin");
+          if(had) await refreshSessionCard(updatedAthlete, msgs, "pin", turn.named);
           else {
             const res = await pinSessionCard(updatedAthlete);
             // T62: the AUTO-pin's confirmation speaks in the APP's voice — Joe's
@@ -7126,12 +7126,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           }
         } else if(tc.name==="prefill_log_sheet"){
           // The athlete's own edits outrank a rebuild (Will 09-29). Joe asks
-          // for the sheet; code decides whether that means a fresh draft, the
-          // sheet they already have, or their sheet with this turn's change
-          // applied to it.
-          const rp = await regenPlan(updatedAthlete, msgs, "prefill");
+          // for the sheet; code decides whether that means a fresh draft or
+          // the sheet they already have, raised again untouched.
+          const rp = await regenPlan(updatedAthlete, msgs, "prefill", turn.named);
           if(rp.plan!=="generate"){
-            if(rp.plan==="edit") await editParkedSheet(updatedAthlete, msgs, rp.msg);
             if(CHAT_FIRST_ON) openDockFromStore();
             continue;
           }
@@ -7305,53 +7303,22 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     }catch(_){ /* draft unchanged; they can rephrase */ }
     setSheetBusy(false);
   };
-  // A change that arrives through CHAT while the athlete's own edits are on
-  // the sheet (an in-chat swap, a today-only change Joe rebuilt the sheet for).
-  // Regenerating would hand them a clean draft and throw their typing away, so
-  // the message is applied to THEIR text instead: the same call and contract
-  // as the sheet's own instruction box. Reads the park, not React state, so it
-  // is right from any closure. Any failure leaves the sheet exactly as it was.
-  const editParkedSheet = async (a, msgs, ins) => {
-    const rec = qlLoad(a.id, workoutHistory, {cardActive: !!activeSessionCard(a.id)});
-    if(!rec || !String(ins||"").trim()) return false;
-    try{
-      const ctx = await quickLogBuildCtx({athlete:a, workoutHistory, messages:msgs||messages, goals:athleteGoals, contextNotes:athleteContext});
-      const unitLine = a.weight_unit==="kg" ? "\n\nThis athlete works in KG: write every weight with an explicit kg suffix." : "";
-      const revised = await askClaude(QL_EDIT_SYS,
-        `Today is ${qlTodayStr()}.${unitLine}\n\n${qlCtxBlock(ctx)}\n\nCURRENT FOCUS NOTE:\n${rec.notes||"(none)"}\n\nCURRENT DRAFT:\n${rec.draft.trim()}\n\nATHLETE'S INSTRUCTION:\n${ins}`,
-        800, [], "claude-sonnet-5", "quick_log_edit");
-      const { notes:rawNotes, log } = splitQuickLogReply(revised);
-      const t = log ? draftInUnit(log, a.weight_unit) : log;
-      if(!t || !t.trim()) return false;
-      const nextNotes = rawNotes===null ? rec.notes : qlGuardNotes(gateText("ql_note", rawNotes), ctx);
-      // They may have typed while the call was out: their newer text wins.
-      const now = qlPeek(a.id);
-      if(!now || now.draft !== rec.draft) return false;
-      qlEdit(a.id, workoutHistory, {draft:t, notes:nextNotes});
-      setSheetState({draft:t, notes:nextNotes||""});
-      setDockWorkout(w=>w?{title:dockTitleOf(t)}:w);
-      if(activeSessionCard(a.id)){
-        const card = buildSessionCard(t, {week: rec.position?.week ?? null});
-        if(card) await showSessionCard(a.id, card);
-      }
-      return true;
-    }catch(_){ return false; }
-  };
   const lastUserText = (msgs) => {
     const m = [...(msgs||[])].reverse().find(x=>x && x.role==="user");
     return m ? (typeof m.content==="string" ? m.content : "") : "";
   };
   // One question, asked before ANY generator writes over the park: is the
   // athlete's own work there, and does this turn really replace it? The rule
-  // is sheetRegenPlan (src/sheetPlan.js); this only gathers its inputs. The
-  // resolver is read only when there are edits to protect.
-  const regenPlan = async (a, msgs, reason) => {
+  // is sheetRegenPlan (src/sheetPlan.js); this only gathers its inputs.
+  const regenPlan = async (a, msgs, reason, named=null) => {
     const rec = qlLoad(a.id, workoutHistory, {cardActive: !!activeSessionCard(a.id)});
     if(!rec || rec.prebuilt) return {plan:"generate", rec};
-    let position = null;
-    try{ position = quickLogPosOf(await quickLogBuildCtx({athlete:a, workoutHistory, messages:msgs||messages, goals:athleteGoals, contextNotes:athleteContext})); }catch(_){}
     const msg = lastUserText(msgs||messages);
-    return {plan: sheetRegenPlan({rec, reason, msg, position}), rec, msg};
+    // The session they named: this turn's claim when there is one, else the
+    // stored one if it is newer than the sheet. Never the resolver's position.
+    const said = named && (named.week!=null || named.day!=null) ? {week: named.week ?? null, day: named.day ?? null} : null;
+    const position = said || namedPositionSince(a.program_position_override, rec.savedAt);
+    return {plan: sheetRegenPlan({rec, reason, msg, position}), rec};
   };
   // FINISH WORKOUT: send as-is (blanks included) through the pure-log path,
   // clear the lock-screen card, take the bar down.
@@ -8768,13 +8735,12 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // generator is told conversation overrides inference — then silently replace
   // the card (same tag, no buzz). On any failure the card keeps its last
   // content: stale beats gone mid-workout.
-  const refreshSessionCard = async (a, msgs, reason="position") => {
+  const refreshSessionCard = async (a, msgs, reason="position", named=null) => {
     try{
       if(!activeSessionCard(a.id)) return;
-      // Their own edits on the sheet: the card follows THEIR text. A swap is
-      // applied to it; anything else leaves it alone and re-shows the card.
-      const rp = await regenPlan(a, msgs, reason);
-      if(rp.plan==="edit"){ await editParkedSheet(a, msgs, rp.msg); return; }
+      // Their own edits on the sheet: the card follows THEIR text, and
+      // nothing said in chat rewrites it.
+      const rp = await regenPlan(a, msgs, reason, named);
       if(rp.plan==="keep"){
         const card = buildSessionCard(rp.rec.draft, {week: rp.rec.position?.week ?? null});
         if(card) await showSessionCard(a.id, card);
@@ -9435,6 +9401,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // the legacy path (flag off = no toolset = the model can't call anything).
       const masterToolCalls = [];
       const masterOpts = MASTERMIND_ON ? {mastermind:true, memoryRows, pureLog:fromQuickLog, parsedLog:parsedForReply, onToolUse:(tc)=>masterToolCalls.push(tc)} : {parsedLog:parsedForReply};
+      // T66: the sheet is theirs. Joe is told before he speaks, so he never
+      // claims a rebuild the app will not do (a fact from code, not a rule).
+      if(MASTERMIND_ON && !fromQuickLog) try{ masterOpts.sheetFact = sheetFactLine(qlLoad(updatedAthlete.id, workoutHistory, {cardActive: !!activeSessionCard(updatedAthlete.id)})); }catch(_){}
       // T64 S2: the pain ledger's read of this turn, computed ONCE — Joe's
       // context gets it now, the coach_flag follow-up reads the same verdicts.
       const painTurn = (()=>{ try{ return painTurnFor({athlete:updatedAthlete, workoutHistory, message:msg, parsed:parsedForReply}); }catch(_){ return null; } })();
@@ -9566,7 +9535,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
            && !(asksTodaysWorkout(msg) && !asksStartingWorkout(msg))){
           rest = [...rest, {name:"pin_session_card", input:{}, auto:true}];
         }
-        if(rest.length) executeMasterTools(rest, updatedAthlete, newMsgs);
+        // turn.named: the session they named THIS turn (parser claim or Joe's
+        // set_position). The stored override is written further down, after
+        // these tools have started, so the sheet rule gets it handed over.
+        if(rest.length) executeMasterTools(rest, updatedAthlete, newMsgs, {named: parsed.program_position_claim || null});
       }
 
       // ── T64 S4: claim guard (AI contract rule 6), the gate's second half ─────

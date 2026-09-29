@@ -516,6 +516,32 @@ check("missing athlete id is never offered", !programSaveOfferAllowed("", D1));
   check("an edited park with the bar down is NOT re-stamped (double-log guard)", qlRestamp(ATH, logged) === false && qlLoad(ATH, logged) === null);
 }
 
+// ─── REPLAY: the founder's own history window (tests/replay/workout-in-progress-0929.json) ───
+{
+  const fs = await import("node:fs");
+  const rp = JSON.parse(fs.readFileSync(new URL("../tests/replay/workout-in-progress-0929.json", import.meta.url), "utf8"));
+  // Oldest row is id 0, so ids are stable as the window slides.
+  const flags = rp.real_flags_newest_first.split("");
+  const all = flags.map((f, i) => ({ id: "row-" + (flags.length - 1 - i), parsed_data: { exercises: f === "1" ? [{name:"Front Squat", sets:4, reps:2, weight:120}] : [] } }));
+  const bootWindow = all.slice(0, rp.window);
+  const TYPED = "Day 2 - Front Squat + Clean Pull\n\nFront Squat 4x2 @ 100kg/110kg/120kg/120kg";
+  let countMoved = 0;
+  for(const n of rp.chat_messages_mid_workout){
+    reset();
+    qlSave(ATH, bootWindow, {draft:"Day 2 - Front Squat + Clean Pull\n\nFront Squat 4x2 @ 120kg", notes:"", undoStack:[], prebuilt:true});
+    qlSetDock(ATH, true);
+    qlEdit(ATH, bootWindow, {draft:TYPED});
+    const chatRows = Array.from({length:n}, (_,i)=>({id:"chat-"+i, parsed_data:{exercises:[]}}));
+    const reopenWindow = [...chatRows, ...all].slice(0, rp.window);
+    if(qlStamp(reopenWindow) !== qlStamp(bootWindow)) countMoved++;
+    const back = qlLoad(ATH, reopenWindow);
+    check(`replay: ${n} chat message(s) mid-workout, the sheet resumes with his text`, !!back && back.draft === TYPED && back.dock === true && qlResumeDock(back) === true);
+    const logged = [{id:"logged-after", parsed_data:{exercises:[{name:"Clean Pull", sets:4, reps:2, weight:130}]}}, ...reopenWindow].slice(0, rp.window);
+    check(`replay: ${n} chat message(s), then a session logged with the bar down would drop a plain park`, (qlSetDock(ATH, false), qlLoad(ATH, logged) === null));
+  }
+  check("replay: the window's session count really moved for at least one N (the old stamp's failure)", countMoved > 0);
+}
+
 
 console.log(`\n${fail===0?"✓":"✗"} quick log draft: ${pass} passed, ${fail} failed`);
 process.exit(fail===0?0:1);
