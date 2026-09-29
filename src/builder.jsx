@@ -21,6 +21,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { CA, CA_BTN, DISP, IS_DARK, PAPER_GRID, Skeleton, askClaude, sbDelete, sbInsert, sbRead, sbUpdateWhere, sbUpsert, track } from "./App.jsx";
 import { epley1RM, normalizeExName, toLbs, computeGritSnapshot, ratioLimitersLine, feasibilityLine } from "./grit.js";
+import { storedAttemptUnit } from "./prAttempts.js";
 import { normalizePrefs, prefsPromptLines, validatePref, describePref, nextSignalState, clearedSignal } from "./trainingPrefs.js";
 import { campaignLine, parseBlockInfo } from "./programContract.js";
 import { diffStats, lineDiff, mergeGuard } from "./programDiff.js";
@@ -117,7 +118,7 @@ const todayStr = () => new Date().toISOString().slice(0, 10);
 // (made AND missed) exclusively to parsed_data.pr_attempts, which the Builder
 // never read; that's why it asked "how'd the bench max go?" about an attempt
 // already in the log.
-function recentAttemptsLine(rows) {
+function recentAttemptsLine(rows, displayUnit) {
   const out = [];
   for (const w of (Array.isArray(rows) ? rows : []).slice(0, 12)) {
     let pd = w?.parsed_data;
@@ -128,7 +129,7 @@ function recentAttemptsLine(rows) {
       // derive the weekday itself and it called a Sunday attempt "Tuesday" (T57).
       const dt = new Date(w.created_at || 0);
       const d = isNaN(dt.getTime()) ? "" : dt.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
-      out.push(`${a.exercise} ${a.weight}${a.unit === "kg" ? "kg" : " lb"}${a.reps > 1 ? ` x${a.reps}` : ""} on ${d}: ${a.achieved === false ? "MISSED" : "made"}`);
+      out.push(`${a.exercise} ${a.weight}${storedAttemptUnit(a, w, displayUnit, normalizeExName) === "kg" ? "kg" : " lb"}${a.reps > 1 ? ` x${a.reps}` : ""} on ${d}: ${a.achieved === false ? "MISSED" : "made"}`);
       if (out.length >= 6) return out.join("; ");
     }
   }
@@ -253,7 +254,7 @@ export function ProgramBuilderPane({ athlete, viewer = "athlete", coachId = null
       // instead of a number dump.
       limiters = ratioLimitersLine(snap.allLifts);
     } catch (_) {}
-    const attempts = recentAttemptsLine(workoutHistory);
+    const attempts = recentAttemptsLine(workoutHistory, athlete.weight_unit);
     return [
       line,
       attempts ? `RECENT MAX ATTEMPTS (already logged): ${attempts}` : "",
