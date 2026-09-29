@@ -188,3 +188,30 @@ test("T68: when Joe saves the fact with his own tool, the parser's copy stands d
   expect(memoryWrites(calls)[0].body.data.content).toBe("Weekend sessions are at a garage gym with no cable stack");
   expect(blobTouches(calls).length).toBe(0);
 });
+
+// T68: every open sheet has the same ✕ its bar has. The program sheet's ✕ (a
+// draft reopened from Drafts) takes the sheet AND the bar off the screen and
+// parks the draft, exactly as the bar's own ✕ does.
+for (const theme of ["light", "dark"]) {
+  test(`T68: the open program sheet's ✕ takes it off the screen (${theme})`, async ({ page }) => {
+    const athlete = makeAthlete({ program_text: PROGRAM });
+    await mockApi(page, { athlete, dataReads: { athlete_memory: MEMORY_ROWS(athlete.id), program_history: BLOCK_ROWS(athlete.id), program_drafts: DRAFT_ROWS(athlete.id) } });
+    if (theme === "dark") await page.addInitScript(() => { try { localStorage.setItem("wilco_theme", "dark"); } catch (_) {} });
+    await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+    // dark's tab label carries an icon, so match it loosely
+    await page.getByRole("button", { name: /^\W*program$/i }).first().click();
+    await page.getByRole("button", { name: "MEMORY" }).click();
+    await page.getByRole("button", { name: "Drafts", exact: true }).click();
+    await page.getByRole("button", { name: "Open & edit" }).first().click();
+    const x = page.locator('[data-sheet-x][aria-label="Take the program off the screen"]');
+    await expect(x).toBeVisible({ timeout: 15000 });
+    if (process.env.SHOTS) await page.screenshot({ path: `${process.env.SHOTS}/program-sheet-${theme}.png` });
+    const box = await x.boundingBox();
+    expect(box.width).toBeGreaterThanOrEqual(32);
+    expect(box.height).toBeGreaterThanOrEqual(32);
+    await x.click();
+    await expect(x).toBeHidden({ timeout: 10000 });
+    await expect(page.getByRole("button", { name: "Take the program off the screen" })).toHaveCount(0);
+    await expect(page.getByPlaceholder(/Tell Coach Joe/)).toBeVisible();
+  });
+}
