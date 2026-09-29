@@ -20,7 +20,7 @@
 //     late August, kg after). Today's display unit says nothing about a June row,
 //     so the row's own evidence is read first.
 import { toLbs, attemptUnit } from "./units.js";
-import { implausibleJump } from "./grit.js";
+import { implausibleJump, resolveLift, effectiveDate, bestE1RMForExercise, epley1RM } from "./grit.js";
 
 const isUnit = (u) => u === "kg" || u === "lbs";
 const lower = (s) => String(s || "").toLowerCase().trim();
@@ -116,40 +116,55 @@ const loadNumbers = (ex) => {
 // Resolves the unit of every load in a fresh parse and stamps it on the row, so
 // saved parsed_data is self-describing (units.js contract: storage is the raw
 // weight + unit pair). Order, for each exercise and each pr_attempts entry:
-//   1. the unit written on that number in the message (its load chain)
-//   2. the unit written on the SAME lift elsewhere in this message ("Back Squat
-//      singles @ 70/110/150 then I missed 180kg": the squat is kg)
-//   3. the parser's unit, ONLY if the message backs it: the unit stands alone as
-//      a word ("all in kilos") or is written on a number no OTHER lift claims.
-//      A unit written on another lift is that lift's (T46: "squat 180kg, then
-//      bench 135" is a 135 LB bench for an lbs athlete; "clean 100, then curls
-//      40lb" is a 100 KG clean for a kg athlete)
-//   4. (declared maxes only) the same lift's set in this message, as resolved
-//   5. the athlete's display unit
+//   1. "written"   the unit written on that number in the message (its load chain)
+//   2. "same-lift" the unit written on the SAME lift elsewhere in this message
+//                  ("Back Squat singles @ 70/110/150 then I missed 180kg": kg)
+//   3. "parser"    the parser's unit, ONLY if the message backs it: the unit
+//                  stands alone as a word ("all in kilos") or is written on a
+//                  number no OTHER lift claims. A unit written on another lift
+//                  is that lift's (T46: "squat 180kg, then bench 135" is a 135 LB
+//                  bench for an lbs athlete; "clean 100, then curls 40lb" is a
+//                  100 KG clean for a kg athlete)
+//      "set"       (declared maxes only) the same lift's set in this message
+//   4. "history"   the unit this athlete has used for THIS lift (resolveLift
+//                  identity) in the last 180 days: the most recent log where the
+//                  unit was WRITTEN in that row's message wins; with none written,
+//                  the unit stored on the majority of the lift's last 5 logs.
+//                  Athletes mix units by lift (the founder: bars in kg; dumbbells,
+//                  machines and his bench in lbs), so the setting alone misfiles.
+//   5. "display"   the athlete's unit setting
+// Guard on 4 and 5: when the load in the resolved unit is an implausible jump over
+// the lift's own recent best (grit.js implausibleJump, both in lbs) AND the other
+// unit reads as a plausible load, the unit is kept as resolved and the load is
+// marked `suspect`; finalizeWorkout then runs the existing "hold up before I bank
+// it" ask. Never a silent flip either way.
 // Why the parser's unit is not simply trusted: told to return null when nothing
-// is written, the real model still fills one in (live pass 09-28: "102 snatch"
-// came back kg, "165 press" came back lbs), and its old rulebook said an
-// unlabelled load is lbs. With no message to check against, the parser's unit
-// stands. "bodyweight" exercises are left exactly as parsed. Pure and
-// idempotent: same inputs, same stamp; the same object back when nothing changes.
-export const resolveLoadUnits = (parsed, { displayUnit, message = "", normalizeName = lower } = {}) => {
-  const exercises = Array.isArray(parsed?.exercises) ? parsed.exercises : [];
-  const attempts = Array.isArray(parsed?.pr_attempts) ? parsed.pr_attempts : [];
-  const du = displayUnit === "kg" ? "kg" : "lbs";
-  const chains = message ? loadChains(message) : [];
-  const liftOf = (name) => normalizeName(name || "");
+// is written, the real model still fills one in (live 09-29: "squat 180kg, then
+// bench 135" came back kg on the bench 5 of 5 times). With no message to check
+// against, the parser's unit stands. "bodyweight" exercises are left exactly as
+// parsed. A load already stamped (it carries `unit_source`) is final. Pure: the
+// history is handed in as data (the client's workoutHistory rows).
+const HISTORY_DAYS = 180;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const liftIdOf = (name) => resolveLift(name || "").id;
+const rowPD = (row) => {
+  const pd = row?.parsed_data;
+  if (typeof pd !== "string") return pd || {};
+  try { return JSON.parse(pd); } catch { return {}; }
+};
+const rowTime = (row) => { const t = effectiveDate(row)?.getTime?.(); return Number.isFinite(t) ? t : NaN; };
 
-  // Items in message order: exercises first (the parser lists them as performed),
-  // then declared maxes.
+// Chains + claims + the unit WRITTEN on each item's own numbers (step 1).
+const readMessage = (exercises, attempts, message, liftOf) => {
+  const chains = message ? loadChains(message) : [];
   const items = [
     ...exercises.map((ex, i) => ({ kind: "ex", i, src: ex, lift: liftOf(ex?.name), nums: loadNumbers(ex), bw: ex?.unit === "bodyweight" })),
     ...attempts.map((p, i) => ({ kind: "pr", i, src: p, lift: liftOf(p?.exercise), nums: loadNumbers({ weight: p?.weight }), bw: false })),
   ].filter((it) => it.src);
-
-  // Claim chains. Each exercise takes the first chain holding one of its numbers
-  // at or after the previous exercise's chain (so a number repeated across two
-  // lifts goes to the right one), then every chain up to the next exercise's
-  // that also holds its numbers (warm-ups written apart from working sets).
+  // Each exercise takes the first chain holding one of its numbers at or after the
+  // previous exercise's chain (a number repeated across two lifts goes to the right
+  // one), then every chain up to the next exercise's that also holds its numbers
+  // (warm-ups written apart from working sets).
   const exItems = items.filter((it) => it.kind === "ex");
   let cursor = 0;
   for (const it of exItems) {
@@ -174,13 +189,60 @@ export const resolveLoadUnits = (parsed, { displayUnit, message = "", normalizeN
     if (idx < 0) idx = chains.findIndex((c) => chainHas(c, it.nums));
     if (idx >= 0) it.claims.push(idx);
   }
-
-  // 1. written on its own numbers (one unit kind across its chains, else none)
   for (const it of items) {
     const kinds = new Set();
     for (const k of it.claims) for (const n of it.nums) { const u = tokenUnit(chains[k], n); if (u) kinds.add(u); }
     it.written = kinds.size === 1 ? [...kinds][0] : null;
   }
+  return { chains, items };
+};
+
+// The athlete's recent logs of each lift in `liftIds`, newest first:
+// [{ t, stored, written, e1 }] (weighted kg/lbs sets only, within 180 days of now).
+const liftHistory = (history, liftIds, now) => {
+  const out = new Map([...liftIds].map((id) => [id, []]));
+  if (!Array.isArray(history) || !out.size) return out;
+  for (const row of history) {
+    const t = rowTime(row);
+    if (!Number.isFinite(t) || t > now || now - t > HISTORY_DAYS * DAY_MS) continue;
+    const exs = Array.isArray(rowPD(row).exercises) ? rowPD(row).exercises : [];
+    const hits = exs.map((ex, i) => [ex, i]).filter(([ex]) => ex && isUnit(ex.unit) && loadNumbers(ex).length && out.has(liftIdOf(ex.name)));
+    if (!hits.length) continue;
+    const { items } = readMessage(exs, [], row?.raw_message || "", liftIdOf);
+    for (const [ex, i] of hits) {
+      const it = items.find((x) => x.kind === "ex" && x.i === i);
+      out.get(liftIdOf(ex.name)).push({ t, stored: ex.unit, written: it?.written || null, e1: bestE1RMForExercise(ex) || 0 });
+    }
+  }
+  for (const logs of out.values()) logs.sort((a, b) => b.t - a.t);
+  return out;
+};
+const historyUnit = (logs) => {
+  if (!logs || !logs.length) return null;
+  const w = logs.find((l) => l.written);
+  if (w) return w.written;
+  const last5 = logs.slice(0, 5);
+  const kg = last5.filter((l) => l.stored === "kg").length, lb = last5.length - kg;
+  return kg === lb ? last5[0].stored : kg > lb ? "kg" : "lbs";
+};
+const loadE1 = (it, unit) => (it.kind === "ex"
+  ? bestE1RMForExercise({ ...it.src, unit })
+  : epley1RM(toLbs(Number(it.src.weight) || 0, unit), Number(it.src.reps) || 1)) || 0;
+
+// The lift's best estimated 1RM (lbs) over the same 180-day history the resolver
+// reads, for the "hold up" ask when the unit guard fires and no prs/manual row stands.
+export const liftRecentBestLbs = (history, name, now = Date.now()) => {
+  const id = liftIdOf(name);
+  if (!id) return 0;
+  return (liftHistory(history, new Set([id]), Number(now) || Date.now()).get(id) || []).reduce((m, l) => Math.max(m, l.e1), 0);
+};
+
+export const resolveLoadUnits = (parsed, { displayUnit, message = "", normalizeName = lower, history = [], now = Date.now() } = {}) => {
+  const exercises = Array.isArray(parsed?.exercises) ? parsed.exercises : [];
+  const attempts = Array.isArray(parsed?.pr_attempts) ? parsed.pr_attempts : [];
+  const du = displayUnit === "kg" ? "kg" : "lbs";
+  const { chains, items } = readMessage(exercises, attempts, message, (name) => normalizeName(name || ""));
+
   // 3's evidence: a unit word standing alone, or a unit written on a chain that
   // no item of a DIFFERENT lift claims.
   const backed = (it, unit) => {
@@ -190,46 +252,68 @@ export const resolveLoadUnits = (parsed, { displayUnit, message = "", normalizeN
       return !items.some((o) => o.lift !== it.lift && o.claims.includes(k));
     });
   };
-  const resolve = (it) => {
-    if (it.written) return [it.written, "written"];
-    const twin = [...new Set(items.filter((o) => o !== it && o.lift && o.lift === it.lift && o.written).map((o) => o.written))];
-    if (twin.length === 1) return [twin[0], "same-lift"];
-    const parserUnit = it.src.unit;
-    if (isUnit(parserUnit) && (!message || backed(it, parserUnit))) return [parserUnit, "parser"];
-    return [null, null];
-  };
-  for (const it of items) [it.unit, it.source] = it.bw ? ["bodyweight", "bodyweight"] : resolve(it);
-  // 4 + 5
   for (const it of items) {
-    if (it.unit) continue;
-    if (it.kind === "pr") {
-      const twin = [...new Set(items.filter((o) => o.kind === "ex" && o.lift && o.lift === it.lift && isUnit(o.unit)).map((o) => o.unit))];
-      if (twin.length === 1) { it.unit = twin[0]; it.source = "set"; continue; }
+    if (it.src.unit_source && (isUnit(it.src.unit) || it.src.unit === "bodyweight")) {
+      [it.unit, it.source, it.suspect] = [it.src.unit, it.src.unit_source, !!it.src.unit_suspect];
+      continue;
     }
-    it.unit = du;
-    it.source = "display";
+    if (it.bw) { [it.unit, it.source] = ["bodyweight", "bodyweight"]; continue; }
+    if (it.written) { [it.unit, it.source] = [it.written, "written"]; continue; }
+    const twin = [...new Set(items.filter((o) => o !== it && o.lift && o.lift === it.lift && o.written).map((o) => o.written))];
+    if (twin.length === 1) { [it.unit, it.source] = [twin[0], "same-lift"]; continue; }
+    const parserUnit = it.src.unit;
+    if (isUnit(parserUnit) && (!message || backed(it, parserUnit))) { [it.unit, it.source] = [parserUnit, "parser"]; continue; }
   }
-  const verdict = (kind, i) => { const it = items.find((x) => x.kind === kind && x.i === i); return it ? { unit: it.unit, source: it.source, written: it.written } : null; };
+  // Declared maxes: the same lift's set in this message, as resolved.
+  for (const it of items) {
+    if (it.unit || it.kind !== "pr") continue;
+    const twin = [...new Set(items.filter((o) => o.kind === "ex" && o.lift && o.lift === it.lift && isUnit(o.unit)).map((o) => o.unit))];
+    if (twin.length === 1) [it.unit, it.source] = [twin[0], "set"];
+  }
+  // 4 + 5, with the plausibility guard.
+  const open = items.filter((it) => !it.unit);
+  if (open.length) {
+    const ids = new Set(open.map((it) => liftIdOf(it.kind === "ex" ? it.src.name : it.src.exercise)).filter(Boolean));
+    const hist = liftHistory(history, ids, Number(now) || Date.now());
+    for (const it of open) {
+      const logs = hist.get(liftIdOf(it.kind === "ex" ? it.src.name : it.src.exercise)) || [];
+      const hu = historyUnit(logs);
+      [it.unit, it.source] = hu ? [hu, "history"] : [du, "display"];
+      const best = logs.reduce((m, l) => Math.max(m, l.e1), 0);
+      if (best > 0 && it.nums.length) {
+        const other = it.unit === "kg" ? "lbs" : "kg";
+        it.suspect = implausibleJump(best, loadE1(it, it.unit)) && !implausibleJump(best, loadE1(it, other));
+      }
+    }
+  }
+  const verdict = (kind, i) => {
+    const it = items.find((x) => x.kind === kind && x.i === i);
+    return it ? { unit: it.unit, unitSource: it.source, source: it.source, written: it.written, suspect: !!it.suspect } : null;
+  };
   return { exercises: exercises.map((_, i) => verdict("ex", i)), pr_attempts: attempts.map((_, i) => verdict("pr", i)) };
 };
 
-// Stamp the resolved units onto the parse (see resolveLoadUnits for the order).
+// Stamp the resolved units onto the parse (see resolveLoadUnits for the order):
+// `unit`, `unit_source` (which step decided), and `unit_suspect: true` when the
+// guard fired. A stamped load is final, so a second stamp returns the same object.
 export const stampLoadUnits = (parsed, opts = {}) => {
   const exercises = Array.isArray(parsed?.exercises) ? parsed.exercises : [];
   const attempts = Array.isArray(parsed?.pr_attempts) ? parsed.pr_attempts : [];
   if (!exercises.length && !attempts.length) return parsed;
   const v = resolveLoadUnits(parsed, opts);
-
-  const exUnits = exercises.map((ex, i) => (v.exercises[i] ? v.exercises[i].unit : ex?.unit));
-  const prUnits = attempts.map((p, i) => (v.pr_attempts[i] ? v.pr_attempts[i].unit : p?.unit));
-  const exSame = exercises.every((ex, i) => !ex || ex.unit === exUnits[i]);
-  const prSame = attempts.every((p, i) => !p || p.unit === prUnits[i]);
-  if (exSame && prSame) return parsed;
-  return {
-    ...parsed,
-    ...(exSame ? {} : { exercises: exercises.map((ex, i) => (ex ? { ...ex, unit: exUnits[i] } : ex)) }),
-    ...(prSame ? {} : { pr_attempts: attempts.map((p, i) => (p ? { ...p, unit: prUnits[i] } : p)) }),
+  const apply = (x, r) => {
+    if (!x || !r) return x;
+    if (r.unitSource === "bodyweight") return x; // bodyweight work is left exactly as parsed
+    if (x.unit === r.unit && x.unit_source === r.unitSource && !!x.unit_suspect === r.suspect) return x;
+    const { unit_suspect, ...rest } = x;
+    return { ...rest, unit: r.unit, unit_source: r.unitSource, ...(r.suspect ? { unit_suspect: true } : {}) };
   };
+  const ex2 = exercises.map((x, i) => apply(x, v.exercises[i]));
+  const pr2 = attempts.map((x, i) => apply(x, v.pr_attempts[i]));
+  const exSame = ex2.every((x, i) => x === exercises[i]);
+  const prSame = pr2.every((x, i) => x === attempts[i]);
+  if (exSame && prSame) return parsed;
+  return { ...parsed, ...(exSame ? {} : { exercises: ex2 }), ...(prSame ? {} : { pr_attempts: pr2 }) };
 };
 
 // The 09-28 name, kept so the declared-max fix's call sites and suite read the

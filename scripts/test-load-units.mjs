@@ -10,7 +10,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { resolveLoadUnits, stampLoadUnits, stampAttemptUnits, loadChains, writtenUnit } from "../src/prAttempts.js";
+import { resolveLoadUnits, stampLoadUnits, stampAttemptUnits, loadChains, writtenUnit, liftRecentBestLbs } from "../src/prAttempts.js";
 import { normalizeExName, bestE1RMForExercise, implausibleJump, toLbs } from "../src/grit.js";
 import { exerciseUnit, exerciseLoadUnit } from "../src/units.js";
 import { draftInUnit } from "../src/boot.js";
@@ -188,6 +188,9 @@ eq(exerciseLoadUnit({ unit: "kg" }), "kg", "load unit kg");
     ok(hits.length === 0, `no hand-copied exercise unit default in ${f}${hits.length ? ` (line ${hits.map((h) => h[0]).join(", ")})` : ""}`);
   }
   const app = readFileSync(join(here, "../src/App.jsx"), "utf8");
+  ok(/stampLoadUnits\(parsed, \{[^}]*history: workoutHistory/.test(app), "finalizeWorkout hands the resolver the athlete's history");
+  ok(/stampLoadUnits\(p, \{[^}]*history: workoutHistory/.test(app), "send() hands the resolver the athlete's history");
+  ok(/unit_suspect/.test(app.slice(app.indexOf("const finalizeWorkout = async"), app.indexOf("const finalizeWorkout = async") + 40000)), "finalizeWorkout reads unit_suspect into the hold-up ask");
   ok(/"weight":number\|null,"unit":"lbs"\|"kg"\|"bodyweight"\|null/.test(app), "parse schema lets an exercise carry unit:null");
   ok(!/it is "lbs" \(this app's default\)/.test(app), "the lbs-default rule is gone from the rulebook");
   ok(/parsed = stampLoadUnits\(parsed, \{displayUnit: updatedAthlete\?\.weight_unit, message: msg/.test(app), "finalizeWorkout stamps every load before saving");
@@ -199,31 +202,120 @@ eq(exerciseLoadUnit({ unit: "kg" }), "kg", "load unit kg");
   ok(fin > 0 && stampAt > fin && insertAt > stampAt, "the workouts insert runs after the stamp");
 }
 
-// 14 ── replay: the founder's real rows (read-only copies)
+// 14 ── replay: the founder's real rows (read-only copies) with their own history
 console.log("replay exercise-unit-kg-0904:");
 {
   const rp = JSON.parse(readFileSync(join(here, "../tests/replay/exercise-unit-kg-0904.json"), "utf8"));
   for (const r of rp.rows) {
-    const got = R(r.raw_message, r.display_unit, r.parsed.exercises, r.parsed.pr_attempts || []);
-    eq(got.ex, r.expect.exercises, `${r.name}: exercises`);
-    eq(got.pr, r.expect.pr_attempts, `${r.name}: declared maxes`);
+    const opts = (du) => ({ displayUnit: du, message: r.raw_message, normalizeName: normalizeExName, history: r.history || [], now: Date.parse(r.created_at) });
+    const run = (exs, du) => resolveLoadUnits({ exercises: exs, pr_attempts: r.parsed.pr_attempts || [] }, opts(du));
+    const v = run(r.parsed.exercises, r.display_unit);
+    eq(v.exercises.map((x) => x.unit), r.expect.exercises, `${r.name}: exercises`);
+    eq(v.pr_attempts.map((x) => x.unit), r.expect.pr_attempts, `${r.name}: declared maxes`);
+    if (r.expect.unit_source) eq(v.exercises.map((x) => x.unitSource), r.expect.unit_source, `${r.name}: which step decided`);
+    if (r.expect.suspect) eq(v.exercises.map((x) => x.suspect), r.expect.suspect, `${r.name}: suspect flags`);
     // Same answer whatever the parser guessed on the unlabelled loads.
     for (const g of GUESSES) {
       const guessed = r.parsed.exercises.map((x) => (x.unit === "bodyweight" ? x : { ...x, unit: g }));
-      eq(R(r.raw_message, r.display_unit, guessed, r.parsed.pr_attempts || []).ex, r.expect.exercises, `${r.name}: exercises when the parser guessed ${g}`);
+      eq(run(guessed, r.display_unit).exercises.map((x) => x.unit), r.expect.exercises, `${r.name}: exercises when the parser guessed ${g}`);
     }
     if (r.expect_if_lbs_athlete) {
-      const lb = R(r.raw_message, "lbs", r.parsed.exercises.map((x) => ({ ...x, unit: null })), r.parsed.pr_attempts || []);
-      eq(lb.ex, r.expect_if_lbs_athlete.exercises, `${r.name}: same message from an lbs athlete, exercises`);
-      eq(lb.pr, r.expect_if_lbs_athlete.pr_attempts, `${r.name}: same message from an lbs athlete, maxes`);
+      const lb = run(r.parsed.exercises.map((x) => ({ ...x, unit: null })), "lbs");
+      eq(lb.exercises.map((x) => x.unit), r.expect_if_lbs_athlete.exercises, `${r.name}: same message from an lbs athlete, exercises`);
+      eq(lb.pr_attempts.map((x) => x.unit), r.expect_if_lbs_athlete.pr_attempts, `${r.name}: same message from an lbs athlete, maxes`);
     }
     if (r.expect_implausible_jump != null) {
-      const stamped = stampLoadUnits(r.parsed, { displayUnit: r.display_unit, message: r.raw_message, normalizeName: normalizeExName });
-      const exRow = stamped.exercises.find((x) => normalizeExName(x.name) === normalizeExName(r.parsed.exercises.find((y) => y.unit === "lbs" && y.weight)?.name));
+      const stamped = stampLoadUnits(r.parsed, opts(r.display_unit));
+      const target = r.parsed.exercises.find((y) => y.unit === "lbs" && y.weight);
+      const exRow = stamped.exercises.find((x) => normalizeExName(x.name) === normalizeExName(target?.name));
       const knownLbs = r.known_best.e1rm_lbs ?? toLbs(r.known_best.weight, r.known_best.unit);
       eq(implausibleJump(knownLbs, bestE1RMForExercise(exRow)), r.expect_implausible_jump, `${r.name}: implausible-jump guard (${Math.round(bestE1RMForExercise(exRow))} lbs vs ${Math.round(knownLbs)} lbs)`);
+      eq(!!exRow.unit_suspect, false, `${r.name}: no unit_suspect stamped`);
     }
   }
+}
+
+// 16 ── step 4: the unit this athlete has used for THIS lift (orchestrator 09-29)
+console.log("lift history (step 4) and the plausibility guard:");
+{
+  const NOW = Date.parse("2026-09-29T12:00:00Z");
+  const day = (n) => new Date(NOW - n * 86400000).toISOString();
+  const row = (n, raw, exercises) => ({ created_at: day(n), raw_message: raw, parsed_data: { exercises } });
+  const V = (message, du, exercises, history, attempts = []) =>
+    resolveLoadUnits({ exercises, pr_attempts: attempts }, { displayUnit: du, message, normalizeName: normalizeExName, history, now: NOW });
+  const benchLbs = [row(5, "Bench 5x3 @ 205lbs", [ex("Bench Press", 205, "lbs")]), row(12, "bench 3x5 at 195", [ex("Bench Press", 195, "lbs")])];
+
+  // a kg athlete's lbs lift
+  let v = V("bench 3x5 at 205", "kg", [ex("Bench Press", 205, null)], benchLbs);
+  eq([v.exercises[0].unit, v.exercises[0].unitSource, v.exercises[0].suspect], ["lbs", "history", false], "kg athlete, bench history written in lbs -> lbs, no suspect");
+  // first-ever lift: no history -> the athlete's setting
+  v = V("zercher squat 3x5 at 100", "kg", [ex("Zercher Squat", 100, null)], benchLbs);
+  eq([v.exercises[0].unit, v.exercises[0].unitSource], ["kg", "display"], "first-ever lift -> athlete's setting");
+  v = V("zercher squat 3x5 at 100", "lbs", [ex("Zercher Squat", 100, null)], []);
+  eq([v.exercises[0].unit, v.exercises[0].unitSource], ["lbs", "display"], "no history at all -> athlete's setting");
+  // lift identity through resolveLift: an alias of the same lift counts
+  v = V("bench press 3x5 at 205", "kg", [ex("Bench", 205, null)], benchLbs);
+  eq(v.exercises[0].unit, "lbs", "'Bench' and 'Bench Press' are the same lift");
+  // history older than 180 days is ignored
+  v = V("bench 3x5 at 100", "kg", [ex("Bench Press", 100, null)], [row(200, "Bench 3x5 @ 225lbs", [ex("Bench Press", 225, "lbs")])]);
+  eq([v.exercises[0].unit, v.exercises[0].unitSource], ["kg", "display"], "history older than 180 days is ignored");
+  v = V("bench 3x5 at 205", "kg", [ex("Bench Press", 205, null)], [row(179, "Bench 3x5 @ 205lbs", [ex("Bench Press", 205, "lbs")])]);
+  eq(v.exercises[0].unit, "lbs", "179 days old still counts");
+  // conflicting history: written evidence wins over newer unwritten rows
+  const conflict = [
+    row(2, "clean 3x2 at 100", [ex("Clean", 100, "lbs")]),
+    row(4, "clean 3x2 at 100", [ex("Clean", 100, "lbs")]),
+    row(9, "Clean 3x2 @ 100kg", [ex("Clean", 100, "kg")]),
+    row(20, "clean 3x2 @ 220 lbs", [ex("Clean", 220, "lbs")]),
+  ];
+  v = V("clean 3x2 at 100", "lbs", [ex("Clean", 100, null)], conflict);
+  eq([v.exercises[0].unit, v.exercises[0].unitSource], ["kg", "history"], "the most recent WRITTEN row (kg, 9 days) beats newer unwritten lbs rows");
+  // no written evidence: majority of the last 5 stored units
+  const unwritten = [
+    row(1, "clean 100", [ex("Clean", 100, "kg")]), row(3, "clean 100", [ex("Clean", 100, "lbs")]), row(5, "clean 100", [ex("Clean", 100, "kg")]),
+    row(7, "clean 100", [ex("Clean", 100, "kg")]), row(9, "clean 100", [ex("Clean", 100, "lbs")]), row(11, "clean 220", [ex("Clean", 220, "lbs")]),
+    row(13, "clean 220", [ex("Clean", 220, "lbs")]), row(15, "clean 220", [ex("Clean", 220, "lbs")]),
+  ];
+  v = V("clean 3x2 at 100", "lbs", [ex("Clean", 100, null)], unwritten);
+  eq([v.exercises[0].unit, v.exercises[0].unitSource], ["kg", "history"], "no written unit: majority of the last 5 (3 kg, 2 lbs) wins, older rows don't count");
+  // the guard: history is kg, today's number only makes sense in lbs
+  const benchKg = [row(6, "Bench 3x5 @ 100kg", [ex("Bench Press", 100, "kg", { sets: 3, reps: 5 })]), row(13, "bench 3x5 @ 97.5kg", [ex("Bench Press", 97.5, "kg", { sets: 3, reps: 5 })])];
+  v = V("bench 3x5 at 225", "lbs", [ex("Bench Press", 225, null, { sets: 3, reps: 5 })], benchKg);
+  eq([v.exercises[0].unit, v.exercises[0].unitSource, v.exercises[0].suspect], ["kg", "history", true], "kg history, 225 only makes sense in lbs -> kept kg, marked suspect (asks, never flips)");
+  const st = stampLoadUnits({ exercises: [ex("Bench Press", 225, null, { sets: 3, reps: 5 })] }, { displayUnit: "lbs", message: "bench 3x5 at 225", normalizeName: normalizeExName, history: benchKg, now: NOW });
+  eq([st.exercises[0].unit, st.exercises[0].unit_source, st.exercises[0].unit_suspect], ["kg", "history", true], "stamp stores unit, unit_source and unit_suspect");
+  eq(stampLoadUnits(st, { displayUnit: "lbs", message: "bench 3x5 at 225", history: benchKg, now: NOW }), st, "a stamped (suspect) load is final: same object");
+  ok(Math.abs(liftRecentBestLbs(benchKg, "Bench Press", NOW) - Math.round(toLbs(100, "kg") * (1 + 5 / 30))) <= 1, `the hold-up ask quotes the lift's history best (${liftRecentBestLbs(benchKg, "Bench Press", NOW)} lbs)`);
+  eq(liftRecentBestLbs(benchKg, "Zercher Squat", NOW), 0, "no history -> 0");
+  // the guard on step 5 too: no history for the unit call... but a display-unit reading that jumps
+  const onlyOld = [row(3, "front squat 3x3 @ 100", [ex("Front Squat", 100, "kg", { sets: 3, reps: 3 })])];
+  v = V("front squat 3x3 at 100", "kg", [ex("Front Squat", 100, null, { sets: 3, reps: 3 })], onlyOld);
+  eq([v.exercises[0].unit, v.exercises[0].suspect], ["kg", false], "a normal day in the history's unit is not suspect");
+  // both units implausible (a typo): not the unit guard's call (the finalize jump check still asks)
+  v = V("bench 3x5 at 900", "lbs", [ex("Bench Press", 900, null, { sets: 3, reps: 5 })], benchLbs);
+  eq([v.exercises[0].unit, v.exercises[0].suspect], ["lbs", false], "a typo implausible in both units is left to the existing jump check");
+  // steps 1-3 always outrank history, and history never overrides a written unit
+  v = V("bench 3x5 at 100kg", "kg", [ex("Bench Press", 100, null)], benchLbs);
+  eq([v.exercises[0].unit, v.exercises[0].unitSource], ["kg", "written"], "written kg beats lbs history");
+  v = V("all in kilos today: bench 100", "lbs", [ex("Bench Press", 100, "kg")], benchLbs);
+  eq([v.exercises[0].unit, v.exercises[0].unitSource], ["kg", "parser"], "a backed parser unit beats history");
+  // T46 cases unchanged with history present
+  v = V("squat 180kg, then bench 135", "lbs", [ex("Back Squat", 180, "kg"), ex("Bench Press", 135, "kg")], benchLbs);
+  eq(v.exercises.map((x) => x.unit), ["kg", "lbs"], "T46 lbs athlete with bench history in lbs");
+  v = V("clean 100, then curls 40lb", "kg", [ex("Clean", 100, "lbs"), ex("Dumbbell Curl", 40, "lbs")], []);
+  eq(v.exercises.map((x) => x.unit), ["kg", "lbs"], "T46 kg athlete, no history");
+  // declared maxes read history too, after their own set
+  v = V("hit a 225 bench single", "kg", [], benchLbs, [{ exercise: "Bench Press", weight: 225, unit: null, reps: 1, achieved: true }]);
+  eq([v.pr_attempts[0].unit, v.pr_attempts[0].unitSource], ["lbs", "history"], "declared max with lbs bench history -> lbs");
+  // history rows: bodyweight / unitless / weightless rows give no evidence
+  v = V("dips 3x8 at 20", "kg", [ex("Dip", 20, null)], [row(3, "dips 3x8", [{ name: "Dip", unit: "bodyweight", sets: 3, reps: 8 }])]);
+  eq([v.exercises[0].unit, v.exercises[0].unitSource], ["kg", "display"], "a bodyweight history row is no unit evidence");
+  // a JSON-string parsed_data row (as some reads return it) still counts
+  v = V("bench 3x5 at 205", "kg", [ex("Bench Press", 205, null)], [{ created_at: day(4), raw_message: "Bench 3x5 @ 205lbs", parsed_data: JSON.stringify({ exercises: [ex("Bench Press", 205, "lbs")] }) }]);
+  eq(v.exercises[0].unit, "lbs", "string parsed_data history row");
+  // a backdated row (parsed_data.log_date) is placed by its log date
+  v = V("bench 3x5 at 205", "kg", [ex("Bench Press", 205, null)], [{ created_at: day(1), raw_message: "Bench 3x5 @ 205lbs", parsed_data: { log_date: "2026-01-01", exercises: [ex("Bench Press", 205, "lbs")] } }]);
+  eq(v.exercises[0].unitSource, "display", "log_date older than 180 days -> ignored");
 }
 
 // 15 ── writtenUnit (the stored-row reader shares the chain reading)

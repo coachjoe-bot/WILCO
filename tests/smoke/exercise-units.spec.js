@@ -85,3 +85,42 @@ test("kg athlete sends the log sheet unchanged: the draft carries kg and every s
   const ex = inserts(calls, "workouts").find((r) => r.parsed_data?.exercises?.length === 3).parsed_data.exercises;
   expect(ex.map((e) => e.unit)).toEqual(["kg", "kg", "bodyweight"]);
 });
+
+// Orchestrator 09-29, step 4: the unit this athlete has used for THIS lift.
+const histRow = (id, daysAgo, raw, exercises) => ({ id, athlete_id: "11111111-1111-4111-8111-111111111111",
+  created_at: new Date(Date.now() - daysAgo * 86400000).toISOString(), raw_message: raw, parsed_data: { exercises } });
+
+test("kg athlete who benches in lbs: an unlabelled bench follows the lift's own history, no hold-up", async ({ page }) => {
+  const athlete = makeAthlete({ weight_unit: "kg" });
+  const parseResult = { ...emptyParse, exercises: [{ name: "Bench Press", sets: 3, reps: 5, weight: 205, unit: null }] };
+  const { calls } = await mockApi(page, { athlete, parseResult, chatReply: "Bench moved well.", dataReads: { workouts: [
+    histRow("h1", 4, "Bench 3x5 @ 205lbs", [{ name: "Bench Press", sets: 3, reps: 5, weight: 205, unit: "lbs" }]),
+    histRow("h2", 9, "Bench 3x5 @ 200lbs", [{ name: "Bench Press", sets: 3, reps: 5, weight: 200, unit: "lbs" }]),
+  ] } });
+  await loginAsAthlete(page, athlete);
+  await typeAndSend(page, "bench 3x5 at 205");
+
+  await expect.poll(() => inserts(calls, "workouts").some((r) => r.parsed_data?.exercises?.[0]?.name === "Bench Press")).toBe(true);
+  const ex = inserts(calls, "workouts").find((r) => r.parsed_data?.exercises?.[0]?.name === "Bench Press").parsed_data.exercises[0];
+  expect([ex.unit, ex.unit_source, !!ex.unit_suspect]).toEqual(["lbs", "history", false]);
+  await page.waitForTimeout(1500);
+  await expect(page.getByText(/Hold up before I bank/)).toHaveCount(0);
+});
+
+test("a load that only makes sense in the other unit is kept as resolved and ASKED about, never flipped", async ({ page }) => {
+  const athlete = makeAthlete({ weight_unit: "lbs" });
+  const parseResult = { ...emptyParse, exercises: [{ name: "Bench Press", sets: 3, reps: 5, weight: 225, unit: null }] };
+  const { calls } = await mockApi(page, { athlete, parseResult, chatReply: "Logged.", dataReads: { workouts: [
+    histRow("h1", 5, "Bench 3x5 @ 100kg", [{ name: "Bench Press", sets: 3, reps: 5, weight: 100, unit: "kg" }]),
+    histRow("h2", 12, "Bench 3x5 @ 97.5kg", [{ name: "Bench Press", sets: 3, reps: 5, weight: 97.5, unit: "kg" }]),
+  ] } });
+  await loginAsAthlete(page, athlete);
+  await typeAndSend(page, "bench 3x5 at 225");
+
+  await expect.poll(() => inserts(calls, "workouts").some((r) => r.parsed_data?.exercises?.[0]?.name === "Bench Press")).toBe(true);
+  const ex = inserts(calls, "workouts").find((r) => r.parsed_data?.exercises?.[0]?.name === "Bench Press").parsed_data.exercises[0];
+  expect([ex.unit, ex.unit_source, ex.unit_suspect]).toEqual(["kg", "history", true]);
+  await expect(page.getByText(/Hold up before I bank that/)).toBeVisible({ timeout: 15000 });
+  // The ask quotes the lift's real best, never 0.
+  await expect(page.getByText(/best on record is 0\b/)).toHaveCount(0);
+});

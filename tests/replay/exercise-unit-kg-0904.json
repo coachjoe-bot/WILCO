@@ -1,5 +1,5 @@
 {
-  "bug": "T65: logged sets carried the parser's unit, and the parser's rulebook said an unlabelled load is lbs (this app's default). A kg athlete's 'squat 5x3 at 140' could be saved as a 140 LB squat, and in practice the parser sometimes carried kg across lifts and sometimes did not. These are the founder's real rows (read-only copies, 2026-09-29) run through the T65 resolver.",
+  "bug": "T65: logged sets carried the parser's unit, and the parser's rulebook said an unlabelled load is lbs (this app's default). A kg athlete's 'squat 5x3 at 140' could be saved as a 140 LB squat, and in practice the parser sometimes carried kg across lifts and sometimes did not. These are the founder's real rows (read-only copies, 2026-09-29) run through the T65 resolver. T65 v2 (orchestrator 09-29): step 4 reads the unit this athlete has used for the same lift, so the two founder rows the first order would have misfiled stay lbs.",
   "source": "Founder account 0704b840-45db-4bff-81eb-064154092e7f (weight_unit kg, writes kg since 2026-08-17). Copied read-only; nothing was repaired.",
   "rows": [
     {
@@ -10,18 +10,124 @@
       "raw_message": "Day 5 – Clean & Jerk/Back Squat\n\nClean and Jerk singles @ 70/90/100/110/120/130\nBack Squat singles @ 70/110/130/150/170 then I missed 180kg",
       "parsed": {
         "exercises": [
-          { "name": "Clean & Jerk", "sets": 6, "reps": 1, "weight": 130, "unit": "kg", "set_details": [{ "reps": 1, "weight": 70 }, { "reps": 1, "weight": 90 }, { "reps": 1, "weight": 100 }, { "reps": 1, "weight": 110 }, { "reps": 1, "weight": 120 }, { "reps": 1, "weight": 130 }] },
-          { "name": "Back Squat", "sets": 5, "reps": 1, "weight": 170, "unit": "kg", "set_details": [{ "reps": 1, "weight": 70 }, { "reps": 1, "weight": 110 }, { "reps": 1, "weight": 130 }, { "reps": 1, "weight": 150 }, { "reps": 1, "weight": 170 }] }
+          {
+            "name": "Clean & Jerk",
+            "sets": 6,
+            "reps": 1,
+            "weight": 130,
+            "unit": "kg",
+            "set_details": [
+              {
+                "reps": 1,
+                "weight": 70
+              },
+              {
+                "reps": 1,
+                "weight": 90
+              },
+              {
+                "reps": 1,
+                "weight": 100
+              },
+              {
+                "reps": 1,
+                "weight": 110
+              },
+              {
+                "reps": 1,
+                "weight": 120
+              },
+              {
+                "reps": 1,
+                "weight": 130
+              }
+            ]
+          },
+          {
+            "name": "Back Squat",
+            "sets": 5,
+            "reps": 1,
+            "weight": 170,
+            "unit": "kg",
+            "set_details": [
+              {
+                "reps": 1,
+                "weight": 70
+              },
+              {
+                "reps": 1,
+                "weight": 110
+              },
+              {
+                "reps": 1,
+                "weight": 130
+              },
+              {
+                "reps": 1,
+                "weight": 150
+              },
+              {
+                "reps": 1,
+                "weight": 170
+              }
+            ]
+          }
         ],
         "pr_attempts": [
-          { "exercise": "Clean & Jerk", "weight": 130, "reps": 1, "achieved": true },
-          { "exercise": "Back Squat", "weight": 170, "reps": 1, "achieved": true },
-          { "exercise": "Back Squat", "weight": 180, "reps": 1, "achieved": false }
+          {
+            "exercise": "Clean & Jerk",
+            "weight": 130,
+            "reps": 1,
+            "achieved": true
+          },
+          {
+            "exercise": "Back Squat",
+            "weight": 170,
+            "reps": 1,
+            "achieved": true
+          },
+          {
+            "exercise": "Back Squat",
+            "weight": 180,
+            "reps": 1,
+            "achieved": false
+          }
         ]
       },
-      "stored": { "exercises": ["kg", "kg"] },
-      "expect": { "exercises": ["kg", "kg"], "pr_attempts": ["kg", "kg", "kg"] },
-      "expect_if_lbs_athlete": { "exercises": ["lbs", "kg"], "pr_attempts": ["lbs", "kg", "kg"], "why": "an lbs athlete: 180kg is written on the squat only, so the squat ladder is kg (same lift) and the C&J ladder follows the athlete (T46: a unit never carries to the next lift)" }
+      "stored": {
+        "exercises": [
+          "kg",
+          "kg"
+        ]
+      },
+      "expect": {
+        "exercises": [
+          "kg",
+          "kg"
+        ],
+        "pr_attempts": [
+          "kg",
+          "kg",
+          "kg"
+        ],
+        "unit_source": [
+          "display",
+          "same-lift"
+        ]
+      },
+      "expect_if_lbs_athlete": {
+        "exercises": [
+          "lbs",
+          "kg"
+        ],
+        "pr_attempts": [
+          "lbs",
+          "kg",
+          "kg"
+        ],
+        "why": "an lbs athlete: 180kg is written on the squat only, so the squat ladder is kg (same lift) and the C&J ladder follows the athlete (T46: a unit never carries to the next lift)"
+      },
+      "history": []
     },
     {
       "name": "08-18 bench ladder, no unit written, stored lbs",
@@ -31,16 +137,265 @@
       "raw_message": "Day 2 – Bench/Dips\n\nBench 5x2 @ 185/205/205 (stopped because I felt it in my pec) I’ll have to go slower and with less weight in the future\nDips 3x6 (bodyweight, upper arm to parallel only, no deep stretch) I did these assisted because my pec is hurting",
       "parsed": {
         "exercises": [
-          { "name": "Bench Press", "sets": 3, "reps": 2, "weight": 205, "unit": "lbs", "set_details": [{ "reps": 2, "weight": 185 }, { "reps": 2, "weight": 205 }, { "reps": 2, "weight": 205 }] },
-          { "name": "Dip", "sets": 3, "reps": 6, "unit": "bodyweight" }
+          {
+            "name": "Bench Press",
+            "sets": 3,
+            "reps": 2,
+            "weight": 205,
+            "unit": "lbs",
+            "set_details": [
+              {
+                "reps": 2,
+                "weight": 185
+              },
+              {
+                "reps": 2,
+                "weight": 205
+              },
+              {
+                "reps": 2,
+                "weight": 205
+              }
+            ]
+          },
+          {
+            "name": "Dip",
+            "sets": 3,
+            "reps": 6,
+            "unit": "bodyweight"
+          }
         ],
         "pr_attempts": []
       },
-      "stored": { "exercises": ["lbs", "bodyweight"] },
-      "expect": { "exercises": ["kg", "bodyweight"], "pr_attempts": [] },
-      "known_best": { "exercise": "Bench", "weight": 275, "unit": "lbs", "source": "manual_one_rms" },
-      "expect_implausible_jump": true,
-      "note": "The one barbell lift stored as lbs with no unit written since the switch. It was most likely right as lbs (the founder benches in lbs: 245 lb single on 08-10, 275 lb max on file). T65 files it in the athlete's unit (205 kg), and the T46 implausible-jump guard then holds it back and asks, because 205 kg x2 is far past a 275 lb max. The guard compares both in lbs."
+      "stored": {
+        "exercises": [
+          "lbs",
+          "bodyweight"
+        ]
+      },
+      "expect": {
+        "exercises": [
+          "lbs",
+          "bodyweight"
+        ],
+        "pr_attempts": [],
+        "unit_source": [
+          "history",
+          "bodyweight"
+        ],
+        "suspect": [
+          false,
+          false
+        ]
+      },
+      "known_best": {
+        "exercise": "Bench",
+        "weight": 275,
+        "unit": "lbs",
+        "source": "manual_one_rms"
+      },
+      "expect_implausible_jump": false,
+      "note": "The founder benches in lbs (245 lb single 08-10, 275 lb max on file) and wrote nothing on 08-18. Step 4: his most recent bench log with the unit WRITTEN is 06-21 ('185lbs 205lbs') -> lbs. Stays lbs as stored, no suspect flag. (The first T65 order filed it 205 kg and relied on the jump guard to ask.)",
+      "history": [
+        {
+          "created_at": "2026-08-10T14:40:51Z",
+          "raw_message": "Day 1 – Push A\n\nBench Press sets of 1 at 135/185/225/245 then I failed 265, so it definitely wasn’t my day today. So my bench 1RM stays at 275 this cycle. I’ll need to figure out how to program better for next block\n\nBottoms up KB press 22lbs 3x8ea\nTricep push down 3x8 @ 71.5lbs/77lbs/77lbs",
+          "parsed_data": {
+            "exercises": [
+              {
+                "name": "Bench Press",
+                "sets": 4,
+                "reps": 1,
+                "weight": 245,
+                "unit": "lbs",
+                "set_details": [
+                  {
+                    "reps": 1,
+                    "weight": 135
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 185
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 225
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 245
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "created_at": "2026-08-03T22:16:56Z",
+          "raw_message": "Day 1 – Push A\n\nBench Press 5x1 (climbing) @ 185/205/225/245/275 then I attempted and failed 285 barely\nStrict Press 3x5 @ 95lbs/115lbs/135lbs\nLat raises 3x12 @ 35lbs\nBottoms up KB press 3x5 ea @ 25lbs\nFinisher: 50 push ups",
+          "parsed_data": {
+            "exercises": [
+              {
+                "name": "Bench Press",
+                "sets": 5,
+                "reps": 1,
+                "weight": 275,
+                "unit": "lbs",
+                "set_details": [
+                  {
+                    "reps": 1,
+                    "weight": 185
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 205
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 225
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 245
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 275
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "created_at": "2026-07-23T17:18:43Z",
+          "raw_message": "Push B\n\nBench Press 2x8/6 @ 185/205\nArnold Press 2x8 @ 50lbs\nTricep pushdown 3x8 @ 71.5lbs\nMuscle-up 3x3 @ BW\nDB Lateral Raise 3x12 @ 25lbs\nRear delt fly 3x8 @ 40lbs\nBottoms-up KB press 2x8ea @ 22lbs",
+          "parsed_data": {
+            "exercises": [
+              {
+                "name": "Bench Press",
+                "sets": 2,
+                "reps": 6,
+                "weight": 205,
+                "unit": "lbs",
+                "set_details": [
+                  {
+                    "reps": 8,
+                    "weight": 185
+                  },
+                  {
+                    "reps": 6,
+                    "weight": 205
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "created_at": "2026-07-20T11:22:51Z",
+          "raw_message": "Push A — Block II, Week 3, Day 1\n\nBench Press 5x3/3/3/3/3 @ 185/205/225/245/255\nStrict Press 3x5 @ 95/115/155\nWeighted Dips 4x5 @ + 0/45/70/70\nClose-Grip DB Bench 2x6 @ 60ea\nDB lateral raise 2x15 @ 25lbs",
+          "parsed_data": {
+            "exercises": [
+              {
+                "name": "Bench Press",
+                "sets": 5,
+                "reps": 3,
+                "weight": 255,
+                "unit": "lbs",
+                "set_details": [
+                  {
+                    "reps": 3,
+                    "weight": 185
+                  },
+                  {
+                    "reps": 3,
+                    "weight": 205
+                  },
+                  {
+                    "reps": 3,
+                    "weight": 225
+                  },
+                  {
+                    "reps": 3,
+                    "weight": 245
+                  },
+                  {
+                    "reps": 3,
+                    "weight": 255
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "created_at": "2026-07-05T20:35:35Z",
+          "raw_message": "Day 1 – Push A\n\nBench Press 4x3 @ 185/205/225/245\nArnold Press 3x6 @ 50lbs ea. (less pain for shoulder than push press)\n Dips 3x10 unweighted (getting back into it slowly with pec and shoulder)\nClose-Grip Bench 2x6 @ 185lbs\nTricep push down 3x8 @ 71lbs\nDB Lateral Raise 3x10 @ 35lbs ea. \n\n245 felt decently easy but didn’t want to push it too hard yet",
+          "parsed_data": {
+            "exercises": [
+              {
+                "name": "Bench Press",
+                "sets": 4,
+                "reps": 3,
+                "weight": 245,
+                "unit": "lbs",
+                "set_details": [
+                  {
+                    "reps": 3,
+                    "weight": 185
+                  },
+                  {
+                    "reps": 3,
+                    "weight": 205
+                  },
+                  {
+                    "reps": 3,
+                    "weight": 225
+                  },
+                  {
+                    "reps": 3,
+                    "weight": 245
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "created_at": "2026-06-21T21:55:25Z",
+          "raw_message": "Workout log\nBench: 4x5 185lbs 205lbs, 225lbs, 245lbs\nPush press: 3x5 @ 135lbs, 155lbs, 155lbs,\nDips 3x8 unweighted because I still feel a slight strain in my left pec\nDB lateral raise 2x10 @30lbs, 35lbs\nIncline DB press 2x10 @ 50lbs\nHad to lower volume because I didn’t have as much time today",
+          "parsed_data": {
+            "exercises": [
+              {
+                "name": "Bench Press",
+                "sets": 4,
+                "reps": 5,
+                "weight": 245,
+                "unit": "lbs",
+                "set_details": [
+                  {
+                    "reps": 5,
+                    "weight": 185
+                  },
+                  {
+                    "reps": 5,
+                    "weight": 205
+                  },
+                  {
+                    "reps": 5,
+                    "weight": 225
+                  },
+                  {
+                    "reps": 5,
+                    "weight": 245
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
     },
     {
       "name": "08-25 back extension @ 45, no unit written, stored lbs",
@@ -50,17 +405,161 @@
       "raw_message": "Day 1 – Front Squat/Pulls\n\nFront Squat 4x3 @ 70kg/100kg/120 (stopped because my knees are feeling it. \nSnatch Pull 4x3 @ 100/110/110/110kg\nBack Extension 3x12 @ 45",
       "parsed": {
         "exercises": [
-          { "name": "Front Squat", "sets": 4, "reps": 3, "weight": 120, "unit": "kg", "set_details": [{ "reps": 3, "weight": 70 }, { "reps": 3, "weight": 100 }, { "reps": 3, "weight": 120 }, { "reps": 3, "weight": 120 }] },
-          { "name": "Snatch Pull", "sets": 4, "reps": 3, "weight": 110, "unit": "kg", "set_details": [{ "reps": 3, "weight": 100 }, { "reps": 3, "weight": 110 }, { "reps": 3, "weight": 110 }, { "reps": 3, "weight": 110 }] },
-          { "name": "Back Extension", "sets": 3, "reps": 12, "weight": 45, "unit": "lbs" }
+          {
+            "name": "Front Squat",
+            "sets": 4,
+            "reps": 3,
+            "weight": 120,
+            "unit": "kg",
+            "set_details": [
+              {
+                "reps": 3,
+                "weight": 70
+              },
+              {
+                "reps": 3,
+                "weight": 100
+              },
+              {
+                "reps": 3,
+                "weight": 120
+              },
+              {
+                "reps": 3,
+                "weight": 120
+              }
+            ]
+          },
+          {
+            "name": "Snatch Pull",
+            "sets": 4,
+            "reps": 3,
+            "weight": 110,
+            "unit": "kg",
+            "set_details": [
+              {
+                "reps": 3,
+                "weight": 100
+              },
+              {
+                "reps": 3,
+                "weight": 110
+              },
+              {
+                "reps": 3,
+                "weight": 110
+              },
+              {
+                "reps": 3,
+                "weight": 110
+              }
+            ]
+          },
+          {
+            "name": "Back Extension",
+            "sets": 3,
+            "reps": 12,
+            "weight": 45,
+            "unit": "lbs"
+          }
         ],
         "pr_attempts": []
       },
-      "stored": { "exercises": ["kg", "kg", "lbs"] },
-      "expect": { "exercises": ["kg", "kg", "kg"], "pr_attempts": [] },
-      "known_best": { "exercise": "Back Extension", "e1rm_lbs": 63 },
+      "stored": {
+        "exercises": [
+          "kg",
+          "kg",
+          "lbs"
+        ]
+      },
+      "expect": {
+        "exercises": [
+          "kg",
+          "kg",
+          "lbs"
+        ],
+        "pr_attempts": [],
+        "unit_source": [
+          "written",
+          "written",
+          "history"
+        ],
+        "suspect": [
+          false,
+          false,
+          false
+        ]
+      },
+      "known_best": {
+        "exercise": "Back Extension",
+        "e1rm_lbs": 63
+      },
       "expect_implausible_jump": false,
-      "note": "A plate the founder usually labels in lbs (45lbs on 08-17, 09-15). Unlabelled here, T65 files it as 45 kg. The known best (63 lb e1RM) is under the guard's 65 lb floor, so nothing asks. Open risk for mixed-unit lifters, reported to the founder."
+      "note": "'Back Extension 3x12 @ 45', nothing written. Step 4: 08-17 wrote '45lbs' on the same lift -> lbs, as stored. (The first T65 order filed it 45 kg silently.)",
+      "history": [
+        {
+          "created_at": "2026-08-17T14:27:25Z",
+          "raw_message": "Day 1 – Front Squat/Pulls\n\nFront Squat 2x3 @ 100kg (I only did 100 for two sets because my knees were flaring up)\nSnatch Pull 4x3 @ 100kg, 110kg, 110kg, 110kg\nBack Extensions 3x12 45lbs\nToes to bar 3x12",
+          "parsed_data": {
+            "exercises": [
+              {
+                "name": "Front Squat",
+                "sets": 2,
+                "reps": 3,
+                "weight": 100,
+                "unit": "kg"
+              },
+              {
+                "name": "Snatch Pull",
+                "sets": 4,
+                "reps": 3,
+                "weight": 110,
+                "unit": "kg",
+                "set_details": [
+                  {
+                    "reps": 3,
+                    "weight": 100
+                  },
+                  {
+                    "reps": 3,
+                    "weight": 110
+                  },
+                  {
+                    "reps": 3,
+                    "weight": 110
+                  },
+                  {
+                    "reps": 3,
+                    "weight": 110
+                  }
+                ]
+              },
+              {
+                "name": "Back Extension",
+                "sets": 3,
+                "reps": 12,
+                "weight": 45,
+                "unit": "lbs"
+              }
+            ]
+          }
+        },
+        {
+          "created_at": "2026-07-09T20:59:19Z",
+          "raw_message": "Deadlift 3x4 @ 315\nClean Pull 3x3 @275\nMuscle-ups 3x3\nClose grip lat pull down 3x8@ 130/145/160\nBack extension 2x8 @45lbs\nSide raises 2x8 @45lbs",
+          "parsed_data": {
+            "exercises": [
+              {
+                "name": "Back Extension",
+                "sets": 2,
+                "reps": 8,
+                "weight": 45,
+                "unit": "lbs"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }

@@ -71,7 +71,7 @@ import { draftChangeRequest, fileChangeRequest, flagToSource } from "./changeReq
 import { FEATURE_INVENTORY } from "./features.js";
 import { toLbs, fmtWeightIn, displayStat, unitLabel, setDisplayUnit, getDisplayUnit, toDisplay, roundStat, exerciseUnit, exerciseLoadUnit } from "./units.js";
 // Declared maxes (pr_attempts): unit stamping + the actual-1RM write decision.
-import { stampLoadUnits, storedAttemptUnit, isDeclaredMax, declaredMaxWrite } from "./prAttempts.js";
+import { stampLoadUnits, storedAttemptUnit, isDeclaredMax, declaredMaxWrite, liftRecentBestLbs } from "./prAttempts.js";
 import { effectiveTier, trialActive } from "./tiers.js";
 import { CREW_ENABLED, MASTERMIND_ENABLED, CHAT_FIRST_ENABLED } from "./flags.js";
 import { buildMastermindStatic } from "./ai/card.js";
@@ -7932,7 +7932,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // athlete's own words, else the ATHLETE'S unit, never a parser guess (T65).
       // Stamped here so the saved row, the PR/1RM writes below and every later
       // reader agree on it (see src/prAttempts.js stampLoadUnits).
-      parsed = stampLoadUnits(parsed, {displayUnit: updatedAthlete?.weight_unit, message: msg, normalizeName: normalizeExName});
+      parsed = stampLoadUnits(parsed, {displayUnit: updatedAthlete?.weight_unit, message: msg, normalizeName: normalizeExName, history: workoutHistory});
       let parsedFinal = isNewSession ? {...parsed,new_session:true} : parsed;
       // Stamp the Quick Log focus note onto the row it belongs to. Matched on the
       // exact draft text so it can only ever land on its own workout, and consumed
@@ -8196,8 +8196,12 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           // Too far past their known max to celebrate without asking. The `prs`
           // ladder still records it (nothing is thrown away), but this lift skips
           // the PR fanfare and the actual-1RM promotion this turn.
-          const suspect = implausibleJump(knownBestLbs, exE1RM);
-          if(suspect) suspectJumps.push({exercise:ex.name, weight:topSet.weight, unit:exerciseUnit(ex), reps:topSet.reps||1, e1rm:exE1RM, knownBest:Math.round(knownBestLbs)});
+          // unit_suspect: the unit resolver (src/prAttempts.js) filed this load by the
+          // lift's history or the athlete's setting, and in that unit it jumps
+          // implausibly while the other unit reads plausibly. Never a silent flip:
+          // it goes through the same ask.
+          const suspect = implausibleJump(knownBestLbs, exE1RM) || !!ex.unit_suspect;
+          if(suspect) suspectJumps.push({exercise:ex.name, weight:topSet.weight, unit:exerciseUnit(ex), reps:topSet.reps||1, e1rm:exE1RM, knownBest:Math.round(knownBestLbs || (ex.unit_suspect ? liftRecentBestLbs(workoutHistory, ex.name) : 0))});
 
           if(!suspect && bestSingle && toLbs(bestSingle.weight, ex.unit) > knownBestLbs){
             const unit = exerciseLoadUnit(ex);
@@ -8267,11 +8271,11 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             estLbs: prMap[k] ? epley1RM(toLbs(prMap[k].weight, prMap[k].unit), prMap[k].reps||1) : 0,
             displayUnit: updatedAthlete?.weight_unit,
           });
-          if(action==="suspect"){
+          if(action==="suspect" || attempt.unit_suspect){
             // Same "hold up before I bank it" flow the exercises loop uses below —
             // a declared max too far above the known best gets a sanity check
             // instead of a silent write, whichever unit the jump landed in.
-            suspectJumps.push({exercise:attempt.exercise, weight:attempt.weight, unit, reps:1, e1rm:newLbs, knownBest:Math.round(oldLbs)});
+            suspectJumps.push({exercise:attempt.exercise, weight:attempt.weight, unit, reps:1, e1rm:newLbs, knownBest:Math.round(oldLbs || (attempt.unit_suspect ? liftRecentBestLbs(workoutHistory, attempt.exercise) : 0))});
             continue;
           }
           if(action==="skip") continue; // not actually a new max — leave the existing manual 1RM as-is
@@ -8663,7 +8667,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             if(ed.new_sets!=null) upd.sets = ed.new_sets;
             if(ed.new_reps!=null) upd.reps = ed.new_reps;
             if(ed.new_weight!=null) upd.weight = ed.new_weight;
-            if(ed.new_unit) upd.unit = ed.new_unit;
+            if(ed.new_unit){ upd.unit = ed.new_unit; upd.unit_source = "correction"; delete upd.unit_suspect; }
             if(Array.isArray(ed.new_set_details) && ed.new_set_details.length) upd.set_details = ed.new_set_details;
             // Weight changed but no corrected per-set breakdown supplied → drop the stale
             // one rather than leave it contradicting the new flat values (same policy as
@@ -8686,7 +8690,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           else {
             // "that was kg, not lbs" fixes the declared-max twin too, not only the set.
             const fixUnit = ed.new_unit==="kg" || ed.new_unit==="lbs";
-            if(ed.new_weight!=null || fixUnit) pd.pr_attempts[pidx] = {...p, ...(ed.new_weight!=null?{weight:ed.new_weight}:{}), ...(fixUnit?{unit:ed.new_unit}:{})};
+            if(ed.new_weight!=null || fixUnit){
+              const {unit_suspect:_us, ...pRest} = p;
+              pd.pr_attempts[pidx] = {...(fixUnit?pRest:p), ...(ed.new_weight!=null?{weight:ed.new_weight}:{}), ...(fixUnit?{unit:ed.new_unit, unit_source:"correction"}:{})};
+            }
           }
           if(idx===-1) break; // legacy single-target behavior when no exercise matched
         }
@@ -9126,7 +9133,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // the reply context, finalizeWorkout and the saved row all read the same
       // (weight, unit) pair. A kg athlete's "squat 5x3 at 140" is 140 kg (T65).
       const parsedP = parseWorkout(msg,athlete.name,athlete.sport,knownExerciseNames(workoutHistory))
-        .then(p=>stampLoadUnits(p, {displayUnit: athlete.weight_unit, message: msg, normalizeName: normalizeExName}));
+        .then(p=>stampLoadUnits(p, {displayUnit: athlete.weight_unit, message: msg, normalizeName: normalizeExName, history: workoutHistory}));
       // ── Stamp-first choreography (Will, 08-24) ────────────────────────────
       // A message that reads as a workout log holds the coaching reply OFF
       // screen and fires the WORKOUT #N stamp the moment the parse confirms a
@@ -13032,7 +13039,10 @@ function EditWorkoutModal({session, onClose, onRowUpdated}) {
           continue; // nothing changed in this entry
         }
         const newExercises = keptRows.map(r=>{
-          const orig = origExercises[r.xi]||{};
+          // A unit the athlete picks by hand is final: record it as theirs and drop
+          // any resolver suspect flag (src/prAttempts.js stampLoadUnits).
+          const orig0 = origExercises[r.xi]||{};
+          const orig = r.unit!==exerciseUnit(orig0) ? (({unit_suspect, ...o})=>({...o, unit_source:"edit"}))(orig0) : orig0;
           if(r.setDetails){
             // A3: per-set edit — write the corrected set_details back and keep the
             // flat summary fields at the parse convention (sets = working-set count,

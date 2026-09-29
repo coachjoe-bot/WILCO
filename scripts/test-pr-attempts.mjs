@@ -58,8 +58,8 @@ console.log("stampAttemptUnits:");
   const none = { exercises: [{ name: "Squat" }], pr_attempts: [] };
   // T65: the same stamp now resolves exercise units too (one resolver).
   eq(stampAttemptUnits(none, { displayUnit: "kg" }).exercises[0].unit, "kg", "no attempts -> the exercise still gets the athlete's unit (T65)");
-  const noneDone = { exercises: [{ name: "Squat", unit: "kg" }], pr_attempts: [] };
-  eq(stampAttemptUnits(noneDone, { displayUnit: "kg" }), noneDone, "nothing to change -> same object");
+  const noneDone = stampAttemptUnits({ exercises: [{ name: "Squat", unit: "kg" }], pr_attempts: [] }, { displayUnit: "kg" });
+  eq(stampAttemptUnits(noneDone, { displayUnit: "kg" }), noneDone, "a stamped parse -> same object");
   eq(stampAttemptUnits(null, { displayUnit: "kg" }), null, "null parse passes through");
   const noField = { exercises: [] };
   eq(stampAttemptUnits(noField, { displayUnit: "kg" }), noField, "missing pr_attempts passes through");
@@ -88,8 +88,9 @@ console.log("stampAttemptUnits:");
   eq(guess("kg", "Squats @ 60kg/100/120/140", "lbs"), "kg", "a kg ladder: the unit sits on another number, parser's kg is backed");
   eq(guess("lbs", "Hit a 140kg back squat", "lbs"), "kg", "the unit written on the number beats the parser's unit");
   eq(guess("lbs", "", "kg"), "lbs", "no message to check against -> the parser's unit stands");
-  const same = { exercises: [], pr_attempts: [{ exercise: "Back Squat", weight: 140, unit: "kg", reps: 1, achieved: true }] };
-  eq(stampAttemptUnits(same, { displayUnit: "kg", message: "Hit a 140 back squat single" }), same, "nothing to change -> same object");
+  const same = stampAttemptUnits({ exercises: [], pr_attempts: [{ exercise: "Back Squat", weight: 140, unit: "kg", reps: 1, achieved: true }] }, { displayUnit: "kg", message: "Hit a 140 back squat single" });
+  eq(same.pr_attempts[0].unit_source, "display", "T65: the stamp records which step decided (unit_source)");
+  eq(stampAttemptUnits(same, { displayUnit: "kg", message: "Hit a 140 back squat single" }), same, "a stamped parse -> same object");
   const once = stampAttemptUnits({ exercises: [], pr_attempts: [{ exercise: "Back Squat", weight: 140, unit: "lbs", reps: 1, achieved: true }] }, { displayUnit: "kg", message: "140 squat single" });
   eq(stampAttemptUnits(once, { displayUnit: "kg", message: "140 squat single" }), once, "stamping twice with the same inputs changes nothing");
 }
