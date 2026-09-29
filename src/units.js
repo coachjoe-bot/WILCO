@@ -34,6 +34,20 @@ export const getDisplayUnit = () => DISPLAY_UNIT;
 export const attemptUnit = (attempt, displayUnit = DISPLAY_UNIT) =>
   attempt?.unit === "kg" || attempt?.unit === "lbs" ? attempt.unit : (displayUnit === "kg" ? "kg" : "lbs");
 
+// A logged set (parsed_data.exercises[]) → the unit its numbers are in. T65: every
+// row saved since carries a resolved "kg" | "lbs" | "bodyweight", stamped at parse
+// time by src/prAttempts.js stampLoadUnits (unit written on the number, the same
+// lift in the message, the parser's unit when the message backs it, then the
+// athlete's own unit). A row with no unit predates that: the pre-T65 parser always
+// filled one in and called an unlabelled load lbs, and on 2026-09-29 the only
+// unit-less rows in prod (7) carried no weight at all, so legacy reads as "lbs".
+// Every exercise reader resolves through here; do not hand-copy the ternary.
+export const exerciseUnit = (ex) =>
+  ex?.unit === "kg" || ex?.unit === "lbs" || ex?.unit === "bodyweight" ? ex.unit : "lbs";
+// The unit to do weight math in: a bodyweight set's added/assist load is lbs
+// (parser convention, see formatSetDetails in App.jsx).
+export const exerciseLoadUnit = (ex) => (exerciseUnit(ex) === "kg" ? "kg" : "lbs");
+
 // A raw stored (weight, unit) pair → number in the display unit. One conversion, ever.
 export const toDisplay = (weight, unit, displayUnit = DISPLAY_UNIT) =>
   displayUnit === "kg" ? toKg(Number(weight) || 0, unit === "kg" ? "kg" : "lbs")

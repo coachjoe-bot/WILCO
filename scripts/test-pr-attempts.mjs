@@ -56,7 +56,10 @@ console.log("stampAttemptUnits:");
   eq(mixed.pr_attempts[1].achieved, false, "stamp never touches achieved");
 
   const none = { exercises: [{ name: "Squat" }], pr_attempts: [] };
-  eq(stampAttemptUnits(none, { displayUnit: "kg" }), none, "no attempts -> same object");
+  // T65: the same stamp now resolves exercise units too (one resolver).
+  eq(stampAttemptUnits(none, { displayUnit: "kg" }).exercises[0].unit, "kg", "no attempts -> the exercise still gets the athlete's unit (T65)");
+  const noneDone = { exercises: [{ name: "Squat", unit: "kg" }], pr_attempts: [] };
+  eq(stampAttemptUnits(noneDone, { displayUnit: "kg" }), noneDone, "nothing to change -> same object");
   eq(stampAttemptUnits(null, { displayUnit: "kg" }), null, "null parse passes through");
   const noField = { exercises: [] };
   eq(stampAttemptUnits(noField, { displayUnit: "kg" }), noField, "missing pr_attempts passes through");
@@ -114,7 +117,9 @@ eq(writtenUnit("bench 225 pounds", 225), "lbs", "225 pounds");
 eq(writtenUnit("hit 102.5kg", 102.5), "kg", "decimal weight");
 eq(writtenUnit("hit 1102kg", 102), null, "never matches inside a longer number");
 eq(writtenUnit("hit 2.102kg", 102), null, "never matches a decimal tail");
-eq(writtenUnit("20kg/50/70/118", 118), null, "a unit on ANOTHER number is not this number's unit");
+// T65: a unit written anywhere in one load chain covers every number in it.
+eq(writtenUnit("20kg/50/70/118", 118), "kg", "a unit on the chain's first number covers the chain");
+eq(writtenUnit("squat 180kg, then bench 118", 118), null, "a unit on ANOTHER load expression is not this number's unit");
 eq(writtenUnit("snatch 102 today", 102), null, "no unit written");
 eq(writtenUnit("102 kgb", 102), null, "needs a word boundary");
 eq(writtenUnit("", 102), null, "empty message");
