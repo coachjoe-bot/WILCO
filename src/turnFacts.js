@@ -358,12 +358,15 @@ export function logHeadline({ exercises = [], prLines = [], lastDone = null, pai
 
 // PR CHECK lines as Joe reads them on a log turn: an accessory's ESTIMATED PR is
 // a true fact the app tracks, and a reply that celebrates it is the screenshot 5
-// failure. The verdict stays; the line says it is not a talking point.
+// failure. Live runs showed a note appended to the verdict line did not stop it
+// (the card's PR celebration rule latches onto "NEW ESTIMATED PR"; 2 of 5 runs),
+// so the line Joe reads for an accessory estimate is a plain logged line. The
+// app's own records and stamps are untouched; this is only what Joe is handed.
 export function prLinesForReply(lines, exercises = []) {
   return (Array.isArray(lines) ? lines : []).map((l) => {
     const ex = (exercises || []).find((e) => e && e.name && String(l).startsWith(`${e.name}: `));
     return ex && !isMainLift(ex.name) && /: NEW ESTIMATED PR/.test(l)
-      ? `${l} Accessory estimate: the app tracks it; leave it out unless they ask.`
+      ? `${ex.name}: accessory work, logged. The app tracks its estimate; it is not part of the reply unless they ask about it.`
       : l;
   });
 }

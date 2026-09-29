@@ -204,11 +204,12 @@ eq(head({ exercises: [kg("Back Squat", 3, 2, 155)], rows: HIST }).kind, "none", 
 
 // accessory estimated PR lines are marked, main-lift lines untouched
 {
-  const exs = [kg("Back Squat", 5, 3, 170), { name: "DB Lateral Raise", sets: 3, reps: 12, weight: 35, unit: "lbs" }];
+  const exs = [kg("Back Squat", 5, 3, 160), { name: "DB Lateral Raise", sets: 3, reps: 12, weight: 35, unit: "lbs" }];
   const { best } = indexes(HIST);
   const out = prLinesForReply(prCheckLines(exs, best, "kg"), exs);
-  ok(/DB Lateral Raise: NEW ESTIMATED PR.*leave it out unless they ask\.$/.test(out.find((l) => l.startsWith("DB Lateral Raise")) || ""), "accessory estimate marked");
-  ok(!/leave it out/.test(out.find((l) => l.startsWith("Back Squat")) || "x leave it out"), "main-lift line untouched");
+  const acc = out.find((l) => l.startsWith("DB Lateral Raise")) || "";
+  ok(/accessory work, logged/.test(acc) && !/PR|estimated 1RM|\d/.test(acc.replace("DB Lateral Raise", "")), `accessory estimate is a plain logged line with no numbers (got ${acc})`);
+  ok(/^Back Squat: NEW ESTIMATED PR/.test(out.find((l) => l.startsWith("Back Squat")) || ""), "main-lift verdict untouched");
 }
 // a stated PR filed only under pr_attempts still feeds the log turn
 {
