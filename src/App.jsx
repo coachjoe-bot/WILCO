@@ -7551,6 +7551,12 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     }catch(_){ return false; }
   };
 
+  // The opener's buttons wait for the rec restore below (recRestored), so a
+  // read that hangs or a boot that never loads history must not leave them
+  // hidden: after 5 s they arm regardless. A late bar can shift them; a Start
+  // Workout button that never appears is worse.
+  useEffect(()=>{ const t = setTimeout(()=>setRecRestored(true), 5000); return ()=>clearTimeout(t); },[]);
+
   // Boot: restore the bar for the latest un-parked rec, and run any expired
   // timed reverts. One read covers both.
   useEffect(()=>{

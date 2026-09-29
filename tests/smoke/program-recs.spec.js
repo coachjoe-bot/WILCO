@@ -450,3 +450,22 @@ for (const delay of [0, 1500]) {
     await expect(page.getByText("Day 1 - Push", { exact: true }).first()).toBeVisible({ timeout: 15000 });
   });
 }
+
+// T68: the opener's buttons wait for the rec restore, never forever. With the
+// rec read hanging, Start Workout still arms (5 s fallback) and starts the workout.
+test("T68: a rec read that never answers cannot hide Start Workout", async ({ page }) => {
+  test.setTimeout(60000);
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  await mockApi(page, { athlete, chatReply: DRAFT_REPLY });
+  await page.route("**/api/data", (route) => {
+    const b = route.request().postDataJSON() || {};
+    if (b.op === "read" && b.table === "program_drafts" && /rec/.test(String(b.params || ""))) return; // never answered
+    return route.fallback();
+  });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  const start = page.getByRole("button", { name: "Start Workout" });
+  await expect(start).toBeVisible({ timeout: 20000 });
+  await page.waitForTimeout(600); // the bubble's entrance
+  await start.click();
+  await expect(page.getByText("Day 1 - Push", { exact: true }).first()).toBeVisible({ timeout: 15000 });
+});
