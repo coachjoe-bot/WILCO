@@ -19,7 +19,7 @@
 import { CREW_ENABLED } from "../flags.js";
 import { JOE_IDENTITY, VOICE_LAW, WILCO_COACH_IDENTITY, VOICE_COACH } from "./voice.js";
 
-export const CARD_VERSION = "2026-08-31.1";
+export const CARD_VERSION = "2026-09-29.1";
 
 // ── TIER 1 — IDENTITY (law) ──────────────────────────────────────────────────
 // Built from the one voice source (src/ai/voice.js, T64 S4): the identity line
