@@ -74,7 +74,7 @@ const CLAIM_RES = [
   { ctx: false, re: /\bi\s+(?:just\s+)?(?:staged|drafted|queued|built|wrote|put together)\s+(?:a|an|the|you a)\s+(?:protective\s+|small\s+|quick\s+)?(?:change|rec|recommendation|swap|adjustment|tweak|program change)\b/i },
   // no subject at all: "Front squat's out for now." / "Dips are out of the rotation."
   { ctx: false, re: /\b[a-z][\w' -]{2,40}?(?:'s| is| are)\s+out\s+(?:for now|for (?:the|this) (?:week|block)|of (?:the|your) (?:program|rotation|block|plan))\b/i },
-  { ctx: false, re: /\b(?:i'?m|i am|i'?ve|i have)\s+(?:just\s+)?(?:staging|staged|drafting|drafted|putting together|put together|building|built|writing|written|queuing|queued)\s+(?:a|an|the|you a)?\s*(?:protective\s+|small\s+|quick\s+)?(?:change|changes|rec|recommendation|swap|adjustment|tweak|program change)\b/i },
+  { ctx: false, re: /\b(?:i'?m|i am|i'?ve|i have)\s+(?:just\s+)?(?:staging|staged|drafting|drafted|putting together|put together|building|built|writing|written|queuing|queued|setting up|set up|lining up|lined up|making|made|putting in|working in|working up)\s+(?:a|an|the|you a)?\s*(?:protective\s+|small\s+|quick\s+|temporary\s+)?(?:change|changes|rec|recommendation|swap|adjustment|adjustments|modification|tweak|program change)\b/i },
 ];
 
 export function findClaims(text) {

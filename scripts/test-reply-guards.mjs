@@ -181,6 +181,19 @@ const rp = JSON.parse(fs.readFileSync(join(here, "../tests/replay/bug2-pain-voic
   eq(ledgerRejects("Watching: squat (pain) reported 2026-09-01 - a repeat within 2 weeks earns a program rec"), null, "code watch notes are exempt");
 }
 
+// ── verifier BUG-2 (09-29): "setting up" an adjustment with nothing staged ──
+{
+  const none = { toolCalls: [], appWrites: {} };
+  const real = "Smart to stop. I'm setting up a protective adjustment on your squat work so we're not stacking more onto it.";
+  const out = claimGuard(real, none);
+  ok(out.changed === true && !/setting up/.test(out.text), `the verifier's real reply is rewritten: ${out.text}`);
+  ok(/^Smart to stop\./.test(out.text), "the rest of the reply survives");
+  for (const s of ["I'm making a small adjustment to your pressing.", "I've lined up a swap for Tuesday.", "I set up a tweak for that."])
+    ok(claimGuard(s, none).changed === true, `unstaged claim must be rewritten: ${s}`);
+  for (const s of ["Setting up tight under the bar made the difference.", "You made a good adjustment on the second set.", "Want me to set up an adjustment for that?", "Making weight is its own skill."])
+    ok(claimGuard(s, none).changed === false, `not a claim, must pass: ${s}`);
+}
+
 // ── integration additions (orchestrator's independent probe, 09-28) ─────────
 {
   const none = { toolCalls: [], appWrites: {} };
