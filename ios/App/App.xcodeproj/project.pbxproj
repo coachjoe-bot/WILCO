@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		162D03D34D636C8F4673988C /* SessionCardRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C2CC9333F76E5DB9F9A3DBC /* SessionCardRouter.swift */; };
 		1B1DD1C97AEDF3A3F0234E71 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B1FD75663CEF6A34B4FE3EE2 /* Foundation.framework */; };
+		1B723742BCF4164BA3F37A21 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 9B7E46FBC3B9DF5B02364546 /* PrivacyInfo.xcprivacy */; };
 		2FAD9763203C412B000D30F8 /* config.xml in Resources */ = {isa = PBXBuildFile; fileRef = 2FAD9762203C412B000D30F8 /* config.xml */; };
 		33503DD033294BAE4D2E0ED3 /* SessionCardWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B36D11220DF95BC2FE5AF4BB /* SessionCardWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		405F9FCD9A002AA67369337D /* SessionCardAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F28601D29D8FF76C8DBC20A /* SessionCardAttributes.swift */; };
@@ -20,6 +21,7 @@
 		504EC3121FED79650016851F /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 504EC3101FED79650016851F /* LaunchScreen.storyboard */; };
 		50B271D11FEDC1A000F3C39B /* public in Resources */ = {isa = PBXBuildFile; fileRef = 50B271D01FEDC1A000F3C39B /* public */; };
 		5A954D08D88EB1255319279F /* SessionCardViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 192C414D768DE27DA9995BB0 /* SessionCardViewController.swift */; };
+		8BBB94C329153C2A04D12E1A /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B38EB08F57A04A43AAAA2E48 /* PrivacyInfo.xcprivacy */; };
 		BFA089EAAC14CCBEF279160B /* SessionCardAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F28601D29D8FF76C8DBC20A /* SessionCardAttributes.swift */; };
 		DC6329B01227B670CFCB85C4 /* SessionCardLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01F4FB91C3D938EE7F42B779 /* SessionCardLiveActivity.swift */; };
 		F1DA16A5BAEF68EE8522CCE0 /* SessionCardPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AA19DC55181E81D515C3399 /* SessionCardPlugin.swift */; };
@@ -65,8 +67,10 @@
 		50B271D01FEDC1A000F3C39B /* public */ = {isa = PBXFileReference; lastKnownFileType = folder; path = public; sourceTree = "<group>"; };
 		5F28601D29D8FF76C8DBC20A /* SessionCardAttributes.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SessionCardAttributes.swift; sourceTree = "<group>"; };
 		958DCC722DB07C7200EA8C5F /* debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = debug.xcconfig; path = ../debug.xcconfig; sourceTree = SOURCE_ROOT; };
+		9B7E46FBC3B9DF5B02364546 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		B1FD75663CEF6A34B4FE3EE2 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		B36D11220DF95BC2FE5AF4BB /* SessionCardWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SessionCardWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		B38EB08F57A04A43AAAA2E48 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		ED5A498C87EC1FEE1D455088 /* Widget-Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = "Widget-Info.plist"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -99,6 +103,7 @@
 				192C414D768DE27DA9995BB0 /* SessionCardViewController.swift */,
 				ED5A498C87EC1FEE1D455088 /* Widget-Info.plist */,
 				0C2CC9333F76E5DB9F9A3DBC /* SessionCardRouter.swift */,
+				B38EB08F57A04A43AAAA2E48 /* PrivacyInfo.xcprivacy */,
 			);
 			name = WilcoSessionCard;
 			path = WilcoSessionCard;
@@ -135,6 +140,7 @@
 				504EC3131FED79650016851F /* Info.plist */,
 				2FAD9762203C412B000D30F8 /* config.xml */,
 				50B271D01FEDC1A000F3C39B /* public */,
+				9B7E46FBC3B9DF5B02364546 /* PrivacyInfo.xcprivacy */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -246,6 +252,7 @@
 				50379B232058CBB4000EE86E /* capacitor.config.json in Resources */,
 				504EC30D1FED79650016851F /* Main.storyboard in Resources */,
 				2FAD9763203C412B000D30F8 /* config.xml in Resources */,
+				1B723742BCF4164BA3F37A21 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -253,6 +260,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				8BBB94C329153C2A04D12E1A /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -427,7 +435,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 9;
 				DEVELOPMENT_TEAM = 57CPJ36JHX;
 				INFOPLIST_FILE = App/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
@@ -451,7 +459,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 9;
 				DEVELOPMENT_TEAM = 57CPJ36JHX;
 				INFOPLIST_FILE = App/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
@@ -473,7 +481,7 @@
 			buildSettings = {
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 9;
 				DEVELOPMENT_TEAM = 57CPJ36JHX;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "WilcoSessionCard/Widget-Info.plist";
@@ -499,7 +507,7 @@
 			buildSettings = {
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 9;
 				DEVELOPMENT_TEAM = 57CPJ36JHX;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "WilcoSessionCard/Widget-Info.plist";
