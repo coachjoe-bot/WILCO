@@ -19,6 +19,8 @@ const parkOf = (page, athlete) => page.evaluate((id) => JSON.parse(localStorage.
 // Boot, tap Start Workout, open the sheet, type the edit.
 const startAndEdit = async (page, athlete) => {
   await loginAsAthlete(page, athlete);
+  await page.getByRole("button", { name: "Start Workout" }).waitFor();
+  await page.waitForFunction(() => document.getAnimations().filter((a) => a.animationName === "fadeUp" && a.playState === "running").length === 0);
   await page.getByRole("button", { name: "Start Workout" }).click();
   const bar = page.getByText("Day 1 - Push", { exact: true }).first();
   await expect(bar).toBeVisible({ timeout: 15000 });
