@@ -53,7 +53,13 @@ export const BLOCK_OWNS_DATES = "Not saved: when a program ends is stored on the
 export function blockEndRejects(text, now = new Date()) {
   const t = String(text || "");
   if (/^Watching:/.test(t)) return null;
-  try { return statesBlockEnd(t, now) ? "block_end_date" : null; } catch (_) { return null; }
+  // Memory facts are written in the third person ("His program ends Oct 15",
+  // "Will's block runs through Oct 11"); the detector reads the athlete's own
+  // first-person words, so put the fact back in that voice before asking it.
+  const own = t
+    .replace(/^\s*(?:[A-Z][a-z]+|he|she|they|the athlete)\s+(?:said|says|stated|mentioned|confirmed)\s+(?:that\s+)?/i, "")
+    .replace(/\b(?:his|her|their|the athlete's|[A-Z][a-z]+'s)\s+(?=(?:current\s+|new\s+)?(?:program|block|cycle|training block)\b)/gi, "my ");
+  try { return (statesBlockEnd(t, now) || statesBlockEnd(own, now)) ? "block_end_date" : null; } catch (_) { return null; }
 }
 
 export function ledgerRejects(text) {
