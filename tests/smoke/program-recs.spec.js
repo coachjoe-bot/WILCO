@@ -277,3 +277,48 @@ test("watch rule (plateau): a repeat drafts the rec and the app confirms once", 
   await expect(page.getByText("PROGRAM REC — Bench - pause variation").first()).toBeVisible({ timeout: 15000 });
   await expect(page.getByText(/twice now/i)).toHaveCount(0);
 });
+
+// ─── T67: a change asked for today only is never a program rec ───────────────
+// Real-model pass 09-29 on main: "the squat racks are all taken today, swap my
+// first lift for something I can do with dumbbells", no workout started, and
+// Joe staged a program rec 4 of 5 times. The scope read the app already makes
+// (changeScope conversationScope) now tells Joe before he speaks and drops the
+// rec in code; a change they say should outlive today keeps it.
+const recTurn = async (page, athlete, calls, said) => {
+  let systemSeen = "";
+  await page.route("**/api/claude", (route) => {
+    const body = route.request().postDataJSON() || {};
+    if (body.feature !== "mastermind_chat") return route.fallback();
+    systemSeen = String(body.system || "");
+    if (!body.stream) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ content: [{ type: "text", text: "Goblet squats today." }], usage: {} }) });
+    route.fulfill({ contentType: "text/event-stream", body:
+      `data: ${JSON.stringify({ text: "Do dumbbell goblet squats in that slot, 4x10." })}\n\n` +
+      `data: ${JSON.stringify({ tool_use: { id: "t1", name: "propose_program_rec", input: { title: "Goblet squat swap", summary: "Bench press swapped for DB press.", why: "No rack.", duration: "1w", swaps: [{ find: "Bench Press 3x5 @ 185", replace: "DB Bench Press 3x8 @ 70", day: "Day 1 - Push" }] } } })}\n\n` +
+      `data: ${JSON.stringify({ stop_reason: "end_turn" })}\n\n` });
+  });
+  await page.getByPlaceholder(/Tell Coach Joe/).fill(said);
+  await page.getByRole("button", { name: "→", exact: true }).click();
+  await expect(page.getByText("Do dumbbell goblet squats in that slot, 4x10.")).toBeVisible({ timeout: 15000 });
+  await page.waitForTimeout(2500); // tools run after the reply settles
+  const staged = calls.filter((c) => c.body?.op === "insert" && c.body?.table === "program_drafts").length;
+  return { staged, systemSeen };
+};
+
+test("T67: a today-only swap said in chat stages no program rec, and Joe is told first", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const { calls } = await mockApi(page, { athlete, chatReply: DRAFT_REPLY });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  const { staged, systemSeen } = await recTurn(page, athlete, calls, "the bench is taken today, swap it for something with dumbbells");
+  expect(staged).toBe(0);
+  expect(systemSeen).toMatch(/CHANGE SCOPE \(app fact, this turn\)/);
+  await expect(page.getByText(/PROGRAM REC/)).toHaveCount(0);
+});
+
+test("T67: a swap they say should outlive today still stages its rec", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const { calls } = await mockApi(page, { athlete, chatReply: DRAFT_REPLY });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  const { staged, systemSeen } = await recTurn(page, athlete, calls, "swap bench for dumbbell press today and from now on");
+  expect(systemSeen).not.toMatch(/CHANGE SCOPE/);
+  expect(staged).toBe(1);
+});

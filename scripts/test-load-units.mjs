@@ -432,6 +432,9 @@ console.log("one voice per turn:");
   const fact = unitCheckFact(parsed);
   ok(/UNIT CHECK/.test(fact) && /Clean & Jerk/.test(fact) && /do not question that number/.test(fact) && /do not celebrate/.test(fact) && /do not restate its weight in either unit/.test(fact), "Joe gets the computed fact");
   ok(!/\b125\b/.test(fact), "the fact itself never states the number");
+  ok(/Nothing else is in this log/.test(fact) && /names no other lift as done/.test(fact), "T67: a flagged-only log says there is nothing else (Joe invented the plan's lifts 5 of 5)");
+  const mixed = unitCheckFact({ exercises: [{ ...parsed.exercises[0] }, ex("Back Squat", 140, "kg", { unit_source: "written" })] });
+  ok(/The rest of this log \(Back Squat\)/.test(mixed) && !/Nothing else/.test(mixed), "T67: the settled lifts are named");
   eq(unitCheckFact({ exercises: [ex("Back Squat", 140, "kg", { unit_source: "written" })] }), "", "no pending load, no fact");
   // the app's line is suppressed when Joe already asked
   eq(replyAsksUnit("Solid session. Was that 125 in kg or lbs?", loads), true, "Joe asked about the unit");

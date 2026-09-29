@@ -235,6 +235,7 @@ const rp = JSON.parse(fs.readFileSync(join(here, "../tests/replay/bug2-pain-voic
   for (const s of ["Single-leg work next.", "Not a single miss.", "Double-check the bar.", "Triple extension was sharp.", "A single session won't matter.", "Double the rest."])
     eq(repWordGuard(s, five3).changed, false, `not a rep word, must pass: ${s}`);
   eq(repWordGuard("Nice singles.", []).changed, false, "no logged sets, no rewrite");
+  eq(repWordGuard("New estimated PR, right around 101 kg for a single.", five3).changed, false, "an estimate's single is a 1RM, left alone (09-29 after-pass)");
 
   // the gate wires them in; no turn = only the pain guard on chat/check-in
   const g = replyGate("chat", "Logged: Front Squat 3x3 at 225. Good work.", { toolCalls: [], turn: { painAreas: [], unitPending: [{ weight: 225 }], performed: [] }, record: false });

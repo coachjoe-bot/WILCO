@@ -210,6 +210,9 @@ export function repWordGuard(text, performed = []) {
     const n = REP_WORD_N[w.toLowerCase()];
     if (reps.has(n)) return m;
     if (/\bnot a\s*$/i.test(all.slice(Math.max(0, off - 8), off))) return m; // "not a single"
+    // an estimate's "single" is a 1RM, not a logged set ("about 101 kg for a single")
+    const around = all.slice(Math.max(0, all.lastIndexOf(".", off) + 1), (all.indexOf(".", off) + 1 || all.length));
+    if (/\b(estimat\w*|e1rm|1rm|max(?:es)?|PR|projects?|worth)\b/i.test(around)) return m;
     removed.push(m);
     const rep = pl ? "sets" : "set";
     return /^[A-Z]/.test(w) ? rep[0].toUpperCase() + rep.slice(1) : rep;

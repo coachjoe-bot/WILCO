@@ -210,13 +210,15 @@ function invariants(sc, turn, reply, calls) {
   if (sc.cls === "pain") out.noCount = !/\b(?:second|third|fourth|2nd|3rd|4th)\s+(?:time|day|session|mention|straight)|\btwice\b|\b(?:two|three|\d+)\s+(?:times|days|sessions)\s+(?:in a row|straight|running)|\bback[- ]to[- ]back\b/i.test(reply);
   if (sc.unitSuspect) {
     out.noRestate = !sc.unitSuspect.some((n) => new RegExp(`(?<![\\d.])${n}(?![\\d])`).test(reply));
-    out.noPraise = !PRAISE.test(reply);
+    // praise of the flagged lift only (the settled lifts in the same log may be praised)
+    const flagged = sc.exercises.filter((e) => e.unit_suspect).map((e) => e.name.toLowerCase());
+    out.noPraise = !reply.split(/(?<=[.!?])\s+|\n+/).some((s) => PRAISE.test(s) && (flagged.some((f) => s.toLowerCase().includes(f)) || sc.unitSuspect.some((n) => s.includes(String(n)))));
     out.noUnitQ = !(reply.split(/(?<=[.!?])\s+|\n+/).some((s) => /\?\s*$/.test(s) && /\b(kgs?|kilos?|lbs?|pounds?|units?)\b/i.test(s)));
   }
   // rep words only where some logged set has that many reps (every log scenario)
   if (turn.logExercises.length) {
     const reps = new Set(turn.logExercises.flatMap((e) => (e.set_details || [{ reps: e.reps }]).map((s) => s.reps)));
-    const words = [...reply.matchAll(/\b(single|double|triple)s?\b(?!-| (?:leg|arm|day|session|rep\b|digit))/gi)].map((m) => REP_N[m[1].toLowerCase()]);
+    const words = [...reply.matchAll(/\b(single|double|triple)s?\b(?![- ](?:leg|legs|arm|arms|day|days|session|sessions|rep|reps|set|sets|digit|digits|check|checked|extension|time|times|out|the|that|it|down|up))/gi)].map((m) => REP_N[m[1].toLowerCase()]);
     out.repsTrue = words.every((n) => reps.has(n));
   }
   if (sc.cls === "dual" || turn.prLines.some((l) => / lbs\)/.test(l))) {
@@ -293,6 +295,19 @@ export function table(results) {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  if (process.argv.includes("--table")) console.log(table(JSON.parse(fs.readFileSync(OUT, "utf8"))));
+  if (process.argv.includes("--table")) (async () => {
+    const results = JSON.parse(fs.readFileSync(OUT, "utf8"));
+    const trees = {};
+    for (const v of VARIANTS) trees[v] = await loadTree(TREES[v]);
+    // invariants recomputed from the stored replies, so a checker fix applies to old runs
+    for (const r of results) {
+      const sc = S.find((x) => x.id === r.id);
+      if (!sc || !trees[r.variant] || r.err) continue;
+      const t = buildTurn(trees[r.variant], sc);
+      r.inv = invariants(sc, t, r.reply, r.calls.map((name) => ({ name })));
+      r.rawInv = invariants(sc, t, r.raw, r.rawCalls.map((name) => ({ name })));
+    }
+    console.log(table(results));
+  })();
   else main().catch((e) => { console.error(e.stack || e.message); process.exit(1); });
 }

@@ -414,7 +414,14 @@ export const unitCheckFact = (parsed) => {
   const loads = pendingUnitLoads(parsed);
   if (!loads.length) return "";
   const names = [...new Set(loads.map((l) => l.exercise))].join(", ");
-  return `UNIT CHECK (computed by the app, FINAL): the app itself is asking the athlete, in its own message right after yours, whether ${names} ${loads.length > 1 ? "were" : "was"} logged in kg or lbs. It will not bank ${loads.length > 1 ? "those lifts" : "that lift"} until they answer. In your reply: do not question that number, do not ask about its unit, do not celebrate it, do not call it a PR, and do not restate its weight in either unit. Talk about the rest of the session as usual, or keep it short if that was the only lift.`;
+  // T67 (09-29): "talk about the rest of the session" with nothing else in the
+  // log made Joe describe the day's planned lifts as logged, 5 of 5 on main.
+  // The app states what else this log holds.
+  const others = [...new Set((Array.isArray(parsed?.exercises) ? parsed.exercises : []).filter((x) => x?.name && !x.unit_suspect).map((x) => x.name))];
+  const rest = others.length
+    ? `The rest of this log (${others.join(", ")}) gets your usual reply.`
+    : "Nothing else is in this log: the reply is one short line that it is noted, and it names no other lift as done.";
+  return `UNIT CHECK (computed by the app, FINAL): the app itself is asking the athlete, in its own message right after yours, whether ${names} ${loads.length > 1 ? "were" : "was"} logged in kg or lbs. It will not bank ${loads.length > 1 ? "those lifts" : "that lift"} until they answer. In your reply: do not question that number, do not ask about its unit, do not celebrate it, do not call it a PR, and do not restate its weight in either unit. ${rest}`;
 };
 
 // Did Joe's reply already ask about a flagged lift's unit or number? Then the app
