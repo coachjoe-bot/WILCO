@@ -8265,6 +8265,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             estLbs: prMap[k] ? epley1RM(toLbs(prMap[k].weight, prMap[k].unit), prMap[k].reps||1) : 0,
             displayUnit: updatedAthlete?.weight_unit,
           });
+          if(action==="suspect"){
+            // Same "hold up before I bank it" flow the exercises loop uses below —
+            // a declared max too far above the known best gets a sanity check
+            // instead of a silent write, whichever unit the jump landed in.
+            suspectJumps.push({exercise:attempt.exercise, weight:attempt.weight, unit, reps:1, e1rm:newLbs, knownBest:Math.round(oldLbs)});
+            continue;
+          }
           if(action==="skip") continue; // not actually a new max — leave the existing manual 1RM as-is
           if(existing){
             await sbUpdate("manual_one_rms", existing.id, {weight:attempt.weight, unit, source:"workout", updated_at:new Date().toISOString()});

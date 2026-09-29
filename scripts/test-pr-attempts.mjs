@@ -146,6 +146,15 @@ console.log("declaredMaxWrite:");
   const writtenLb = declaredMaxWrite({ ...a, weight: 225, unit: "lbs" }, { existing: null, displayUnit: "kg" });
   eq(writtenLb.unit, "lbs", "kg athlete who wrote lbs -> stored as lbs");
   eq(writtenLb.newLbs, 225, "  ...compared at 225 lbs");
+
+  // Implausible jump (T46), same guard the exercises loop applies — computed off
+  // the RESOLVED unit so a kg/lbs mix-up trips it instead of minting a bogus max.
+  const implausible = declaredMaxWrite({ exercise: "Snatch", weight: 200, reps: 1, achieved: true, unit: "kg" }, { existing: { id: 1, weight: 100, unit: "kg" }, displayUnit: "kg" });
+  eq(implausible.action, "suspect", "200 kg vs a standing 100 kg max is an implausible jump, computed in kg");
+  const plausibleJump = declaredMaxWrite({ exercise: "Snatch", weight: 105, reps: 1, achieved: true, unit: "kg" }, { existing: { id: 1, weight: 100, unit: "kg" }, displayUnit: "kg" });
+  eq(plausibleJump.action, "update", "a normal +5 kg jump is not suspect");
+  const coldStart = declaredMaxWrite({ exercise: "Snatch", weight: 500, reps: 1, achieved: true, unit: "kg" }, { existing: null, estLbs: 0, displayUnit: "kg" });
+  eq(coldStart.action, "insert", "cold start (no prior max) passes through even at an absurd number, same as every other implausibleJump call site");
 }
 
 // 5 ── replay: the real 09-28 turn

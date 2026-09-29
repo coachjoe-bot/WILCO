@@ -15,6 +15,7 @@
 //     late August, kg after). Today's display unit says nothing about a June row,
 //     so the row's own evidence is read first.
 import { toLbs, attemptUnit } from "./units.js";
+import { implausibleJump } from "./grit.js";
 
 const isUnit = (u) => u === "kg" || u === "lbs";
 const lower = (s) => String(s || "").toLowerCase().trim();
@@ -74,12 +75,20 @@ export const isDeclaredMax = (p) => !!(p && p.reps === 1 && p.achieved && p.exer
 // What finalizeWorkout should do with one declared max (already stamped).
 //   existing  = the standing manual_one_rms row for the lift (or null)
 //   estLbs    = best estimated 1RM on record in lbs (only read when no row stands)
-// Returns {action:"insert"|"update"|"skip", unit, newLbs, oldLbs}. The weight is
-// stored RAW with its unit (units.js contract); lbs is for comparison only.
+// Returns {action:"insert"|"update"|"skip"|"suspect", unit, newLbs, oldLbs}. The
+// weight is stored RAW with its unit (units.js contract); lbs is for comparison only.
 export const declaredMaxWrite = (attempt, { existing = null, estLbs = 0, displayUnit } = {}) => {
   const unit = attemptUnit(attempt, displayUnit);
   const newLbs = toLbs(attempt.weight, unit);
   const oldLbs = existing ? toLbs(existing.weight, existing.unit) : (estLbs || 0);
+  // A declared max is still a claim, not a receipt (T46's guard, same one the
+  // exercises loop applies): too big a jump over the known best gets a sanity-check
+  // verdict instead of silently becoming the athlete's max. Computed off the
+  // RESOLVED unit, so a kg/lbs mix-up trips this instead of minting a bogus max —
+  // a fresh kg athlete's cold start (no prior max) still passes through untouched,
+  // same as every other implausibleJump call site (the floor gate needs a real
+  // baseline to compare against).
+  if (implausibleJump(oldLbs, newLbs)) return { action: "suspect", unit, newLbs, oldLbs };
   // Not actually a new max: leave the standing actual 1RM as it is.
   if (existing && newLbs <= oldLbs) return { action: "skip", unit, newLbs, oldLbs };
   return { action: existing ? "update" : "insert", unit, newLbs, oldLbs };
