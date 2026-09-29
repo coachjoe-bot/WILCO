@@ -570,3 +570,194 @@ export function wrapCardEligible({ openBlock, programText, spanAnswer, now = nul
   if (!kind) return { show: false, kind: null, endsAt, reason: "not_near_end" };
   return { show: true, kind, endsAt, reason: "ok" };
 }
+
+// ─── STATED BLOCK END (T64 S6, verifier BUG-1) ───────────────────────────────
+// "No my program wraps up sept 20th" reached the block-span branch (the parser
+// populated program_block_span) and got the two-tap confirm. Two ordinary
+// paraphrases, "hey just so you know this program actually wraps up Sept 15th,
+// not sooner" and "it wraps up October 1st", did not: the parser left the span
+// null, Joe answered conversationally, and the date went into athlete_context as
+// unscoped free text through the remember-this channel. The statement is
+// deterministic, so the model doesn't get a vote (same precedent as
+// chatRouting.asksProgramEdit): this recognizes an athlete saying when their
+// program / block / cycle ends or how long it runs, and returns the value in the
+// parser's own program_block_span shape so the message rides the SAME branch
+// (conflict check against the program's text, two-tap confirm, block-scoped
+// storage).
+//
+// statesBlockEnd(message, today) → null | {end_date, weeks, repeating, kind}
+//   end_date: "YYYY-MM-DD" resolved against the athlete's LOCAL today (the
+//             caller passes new Date() in the browser; local getters read the
+//             device zone). A month-day with no year that already passed this
+//             year stays this year when it passed within 60 days (they are
+//             telling you it ended or is ending now) and rolls to next year
+//             otherwise ("wraps up Jan 10" said in December).
+//   weeks:    "it's a 6 week block", "my program is 8 weeks long".
+//   repeating:"it just repeats", "no end date", "it doesn't end".
+// Never fires on: a question, a workout log, a sentence about something that is
+// not the program ("my season ends Oct 1", "class ends at 3"), another program
+// ("my last block was 8 weeks", "the next block will be 6 weeks"), or a wish
+// ("I want my program to end Oct 1"). Unit tested (30+ positives, 20+
+// negatives) by scripts/test-program-history.mjs.
+const SB_MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+const SB_MONTH = "(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\.?";
+const SB_NUMW = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16 };
+const SB_N = "(\\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen)";
+const SB_WD = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+const SB_WD_RE = "(sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?)";
+const SB_SUBJ = "\\b(?:(?:my|this|the|our|current|present)\\s+)?(?:current\\s+)?(?:training\\s+)?(?:program|programme|block|cycle|plan|mesocycle|meso|phase)(?:'s)?\\b";
+const SB_PRON = "\\b(?:it|this(?:\\s+one)?)\\b(?:\\s+(?:actually|really|officially|just|only|technically|probably|basically))*";
+const SB_OTHER_PROGRAM = /\b(?:next|new|last|previous|old|former|upcoming|other|his|her|their|coach'?s|friend'?s)\s+(?:training\s+)?(?:program|programme|block|cycle|plan|phase|one)\b/i;
+const SB_NON_PROGRAM = /\b(season|class(?:es)?|school|semester|term|trip|vacation|camp|meet|competition|comp|game|tournament|practice|lease|sale|job|shift|work|session|workout|deload|cut|bulk|diet|event|race|marathon|gym|cruise|visit|surgery|rehab|therapy)\b/i;
+const SB_VERB = "(?:wraps?\\s+up|wrapping\\s+up|will\\s+wrap\\s+up|ends?|ending|will\\s+end|finish(?:es)?|finishing|will\\s+finish|is\\s+finished|(?:runs?|running|goes|going|go|lasts?)\\s+(?:through|thru|until|till|til|to)|is\\s+over|'s\\s+over|will\\s+be\\s+over|is\\s+done|'s\\s+done|will\\s+be\\s+done)\\b";
+const SB_HEDGE = /\b(if|unless|would|could|might|wish|hope|want|wanted|was|were|ended|finished)\b/i;
+const SB_LOG = /\d+\s*[x×]\s*\d+|@\s*\d|\b\d+(?:\.\d+)?\s*(?:lbs?|kgs?|pounds|kilos)\b/i;
+const SB_QUESTION_START = /^\s*(?:when|what|what's|how|does|do|is|are|will|can|could|should|would|which|did|has|have)\b/i;
+
+const sbIso = (y, m, d) => `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+const sbValid = (y, m, d) => m >= 1 && m <= 12 && d >= 1 && d <= new Date(Date.UTC(y, m, 0)).getUTCDate();
+const sbDayNum = (y, m, d) => Date.UTC(y, m - 1, d) / 86400000;
+const sbNum = (w) => { const s = String(w || "").toLowerCase(); return SB_NUMW[s] || (/^\d+$/.test(s) ? parseInt(s, 10) : null); };
+const sbMonth = (name) => SB_MONTHS[String(name || "").toLowerCase().slice(0, 3)] || null;
+
+// Month-day with no stated year → the sensible year (see header).
+function sbResolveYear(m, d, t) {
+  let y = t.y;
+  if (!sbValid(y, m, d)) return null;
+  if (sbDayNum(y, m, d) < sbDayNum(t.y, t.m, t.d) - 60) y += 1;
+  return sbValid(y, m, d) ? sbIso(y, m, d) : null;
+}
+const sbAddDays = (t, n) => { const x = new Date(Date.UTC(t.y, t.m - 1, t.d + n)); return sbIso(x.getUTCFullYear(), x.getUTCMonth() + 1, x.getUTCDate()); };
+
+// The date named at the START of `tail` (the words right after the verb).
+function sbDateIn(tail, t) {
+  const s = tail.replace(/^[\s,:-]*(?:(?:on|by|around|about|at|in|as\s+of|sometime|the\s+week\s+of)\s+)*/i, "");
+  let m;
+  if ((m = s.match(/^(\d{4})-(\d{2})-(\d{2})\b/))) return sbValid(+m[1], +m[2], +m[3]) ? sbIso(+m[1], +m[2], +m[3]) : null;
+  if ((m = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/))) {
+    const mo = +m[1], d = +m[2];
+    if (m[3]) { const y = m[3].length === 2 ? 2000 + +m[3] : +m[3]; return sbValid(y, mo, d) ? sbIso(y, mo, d) : null; }
+    return sbResolveYear(mo, d, t);
+  }
+  if ((m = s.match(new RegExp(`^${SB_MONTH}\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b(?:\\s*,?\\s*(\\d{4})\\b)?`, "i")))) {
+    const mo = sbMonth(m[1]), d = +m[2];
+    if (m[3]) return sbValid(+m[3], mo, d) ? sbIso(+m[3], mo, d) : null;
+    return sbResolveYear(mo, d, t);
+  }
+  if ((m = s.match(new RegExp(`^(?:the\\s+)?(\\d{1,2})(?:st|nd|rd|th)?\\s+of\\s+${SB_MONTH}(?:\\s*,?\\s*(\\d{4})\\b)?`, "i")))) {
+    const mo = sbMonth(m[2]), d = +m[1];
+    if (m[3]) return sbValid(+m[3], mo, d) ? sbIso(+m[3], mo, d) : null;
+    return sbResolveYear(mo, d, t);
+  }
+  if ((m = s.match(new RegExp(`^(?:the\\s+)?end\\s+of\\s+(?:(the|this|next)\\s+month|${SB_MONTH})`, "i")))) {
+    let y = t.y, mo = t.m;
+    if (m[1] && m[1].toLowerCase() === "next") { mo += 1; if (mo > 12) { mo = 1; y += 1; } }
+    else if (m[2]) { mo = sbMonth(m[2]); if (sbDayNum(y, mo, 28) < sbDayNum(t.y, t.m, t.d) - 60) y += 1; }
+    return sbIso(y, mo, new Date(Date.UTC(y, mo, 0)).getUTCDate());
+  }
+  if ((m = s.match(/^tomorrow\b/i))) return sbAddDays(t, 1);
+  if ((m = s.match(new RegExp(`^(?:(next|this|on)\\s+)?${SB_WD_RE}\\b`, "i")))) {
+    const idx = SB_WD.findIndex((w) => w.startsWith(m[2].toLowerCase().slice(0, 3)));
+    let diff = (idx - t.wd + 7) % 7;
+    if (diff === 0) diff = 7; // "ends Friday" said on a Friday = next Friday
+    // "next Friday" said early in the week means the Friday of NEXT week.
+    if (m[1] && m[1].toLowerCase() === "next" && t.wd + diff <= 6) diff += 7;
+    return sbAddDays(t, diff);
+  }
+  if ((m = s.match(/^(?:the\s+(\d{1,2})(?:st|nd|rd|th)?|(\d{1,2})(?:st|nd|rd|th))\b/i))) {
+    const d = +(m[1] || m[2]);
+    let y = t.y, mo = t.m;
+    if (d < t.d) { mo += 1; if (mo > 12) { mo = 1; y += 1; } }
+    return sbValid(y, mo, d) ? sbIso(y, mo, d) : null;
+  }
+  return null;
+}
+
+export function statesBlockEnd(message, today = new Date()) {
+  const raw = String(message || "");
+  if (!raw.trim() || SB_LOG.test(raw)) return null;
+  const now = today instanceof Date ? today : new Date(today);
+  const t = { y: now.getFullYear(), m: now.getMonth() + 1, d: now.getDate(), wd: now.getDay() };
+  // Sentences, keeping the terminator so a question can be told apart.
+  const sentences = raw.match(/[^.!?\n]+[.!?]?/g) || [];
+  for (const sent of sentences) {
+    const s = sent.trim();
+    if (!s || /\?\s*$/.test(s) || SB_QUESTION_START.test(s)) continue;
+    if (SB_OTHER_PROGRAM.test(s)) continue;
+    const subjRe = new RegExp(`(${SB_SUBJ})`, "i");
+    const hasSubject = subjRe.test(s);
+    const nonProgram = SB_NON_PROGRAM.test(s);
+    // "it"/"this" only stands in for the program when nothing else is named.
+    const pronounOk = !nonProgram;
+
+    // ── repeating ──
+    const repRe = new RegExp(`(?:${SB_SUBJ}|${SB_PRON})[^.!?\\n]{0,20}?\\b(?:just\\s+)?(?:repeats|loops|keeps\\s+going|is\\s+ongoing|'s\\s+ongoing|doesn'?t\\s+(?:end|have\\s+an\\s+end)|does\\s+not\\s+end|never\\s+ends|has\\s+no\\s+end)`, "i");
+    const rm = s.match(repRe);
+    if (rm && (subjRe.test(rm[0]) || pronounOk) && !nonProgram) return { end_date: null, weeks: null, repeating: true, kind: "repeating" };
+    if (/\bno\s+end\s+date\b|\bsame\s+(?:week|thing)\s+every\s+week\b|\brun\s+it\s+until\s+i\s+(?:change|switch|stop)\b/i.test(s) && !nonProgram) {
+      return { end_date: null, weeks: null, repeating: true, kind: "repeating" };
+    }
+
+    // ── weeks remaining ("3 more weeks on this block", "4 weeks left in my program") ──
+    const leftRe = new RegExp(`\\b${SB_N}\\s+(?:more\\s+)?weeks?\\s+(?:left|to\\s+go|remaining)\\b|\\b${SB_N}\\s+more\\s+weeks?\\b`, "i");
+    const lm = s.match(leftRe);
+    if (lm && (hasSubject || (pronounOk && /\bit\b/i.test(s))) && !nonProgram) {
+      const n = sbNum(lm[1] || lm[2]);
+      if (n && n >= 1 && n <= 52) return { end_date: sbAddDays(t, n * 7), weeks: null, repeating: false, kind: "date" };
+    }
+
+    // ── length in weeks ──
+    const wkRes = [
+      new RegExp(`(?:${SB_SUBJ}|${SB_PRON})[^.!?\\n]{0,15}?\\b(?:is|'s|runs|lasts|goes|will\\s+(?:be|run|last))(?:\\s+for)?\\s+(?:a|an\\s+)?\\s*${SB_N}[-\\s]?weeks?\\b`, "i"),
+      new RegExp(`\\b(?:it'?s|it\\s+is|this\\s+is|i'?m\\s+(?:on|running|doing|in))\\s+(?:a|an|my)\\s+${SB_N}[-\\s]?weeks?(?:[-\\s]long)?\\s+(?:program|programme|block|cycle|plan|meso(?:cycle)?|phase)\\b`, "i"),
+    ];
+    for (const re of wkRes) {
+      const m = s.match(re);
+      if (!m) continue;
+      if (!subjRe.test(m[0]) && !pronounOk) continue;
+      const n = sbNum(m[m.length - 1]);
+      if (n && n >= 1 && n <= 52) return { end_date: null, weeks: n, repeating: false, kind: "weeks" };
+    }
+
+    // ── an end date ──
+    const lastDayRe = new RegExp(`\\b(?:the\\s+)?last\\s+(?:day|week)(?:\\s+of\\s+(?:${SB_SUBJ}|it))?\\s+(?:is|will\\s+be|'s)\\b`, "i");
+    const endRe = new RegExp(`(${SB_SUBJ}|${SB_PRON})([^.!?\\n]{0,30}?)\\b${SB_VERB}`, "ig");
+    const tries = [];
+    let m;
+    while ((m = endRe.exec(s))) {
+      const subj = m[1];
+      if (!subjRe.test(subj) && !pronounOk) continue;
+      if (SB_HEDGE.test(m[2] || "")) continue;
+      if (/^\s*(?:'s\s+)?(?:week|weeks|day|days|session|sessions|workout|workouts)\b/i.test(m[2] || "")) continue; // "my program week ends Sunday" is the week, not the program
+      tries.push(m.index + m[0].length);
+    }
+    const ld = s.match(lastDayRe);
+    if (ld && (hasSubject || pronounOk) && !nonProgram) tries.push(ld.index + ld[0].length);
+    for (const at of tries) {
+      if (/\b(if|unless|wish|hope|want|wanted)\b/i.test(s.slice(0, at))) continue;
+      const date = sbDateIn(s.slice(at, at + 45), t);
+      if (date) return { end_date: date, weeks: null, repeating: false, kind: "date" };
+    }
+  }
+  return null;
+}
+
+// Which span rides the block-span branch this turn. The detector is
+// deterministic, so when it fires it wins; when the parser also populated a
+// span and the two disagree, the caller logs it (error_events) so the parser's
+// misses stay visible. `blockEndStated` tells the remember-this channel that
+// this message's fact already has its one home (the block), so it must not be
+// saved a second time as a free-text note.
+export function resolveStatedSpan({ parserSpan = null, detected = null } = {}) {
+  const has = (s) => !!(s && (s.repeating === true || Number(s.weeks) >= 1 || s.end_date));
+  if (!detected) {
+    return has(parserSpan)
+      ? { span: parserSpan, source: "parser", disagree: false, blockEndStated: true }
+      : { span: null, source: null, disagree: false, blockEndStated: false };
+  }
+  const d = { weeks: detected.weeks ?? null, end_date: detected.end_date ?? null, repeating: detected.repeating === true };
+  if (!has(parserSpan)) return { span: d, source: "detector", disagree: false, blockEndStated: true };
+  const pw = Number(parserSpan.weeks) >= 1 ? Number(parserSpan.weeks) : null;
+  const same = (parserSpan.end_date || null) === d.end_date && pw === d.weeks && (parserSpan.repeating === true) === d.repeating;
+  return { span: d, source: "detector", disagree: !same, blockEndStated: true };
+}

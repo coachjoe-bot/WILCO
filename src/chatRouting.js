@@ -164,6 +164,25 @@ export const isFullProgramEcho = (prog, programText) =>
 export const PROGRAM_EDIT_ASK_RE = /\b(?:add|append|put|tack|stick)\b[^.!?\n]{0,60}\b(?:to|onto|into|in|on)\s+my\s+(?:program|plan|split|training plan)\b/i;
 export const asksProgramEdit = (message) => PROGRAM_EDIT_ASK_RE.test(String(message || ""));
 
+// ── explicit temp-program ask (T64 S6, verifier BUG-3) ───────────────────────
+// Live QA, 09-28: over three turns Joe laid out a full six-day dumbbell plan,
+// the athlete said "yes set me up with that temporary program for the week",
+// the parser raised no is_temp_program_update flag, nothing was written, and
+// Joe answered "Already built that for you above." The ask is deterministic,
+// so the model doesn't get a vote: an imperative set-up / make / save / lock /
+// switch aimed at "that/this/the plan", a temp/travel program, or "for the
+// week/trip" is an explicit request to save the plan Joe laid out
+// (src/changeScope.js tempTurnBefore finds which one). A question ("can you
+// set me up...?") counts too: it is still the athlete asking for it. Past
+// tense ("you set me up yesterday") stays out: the verbs are present-tense.
+const TEMP_TARGET = "(?:(?:that|this|the|it|a|my|your)\\s+)?(?:temp(?:orary)?|travel|trip|road|vacation|away|garage|hotel|dumbbell|db)\\s+(?:program|plan|week|schedule|routine|version)";
+const THAT_PLAN = "(?:that|those)\\s+(?:plan|program|week|schedule|routine|version|days)";
+export const TEMP_PROGRAM_ASK_RE = new RegExp(
+  "\\b(?:set\\s+(?:me|it|that|this)\\s+up|set\\s+up|make|save|lock|load|put\\s+me\\s+on|switch\\s+me\\s+(?:to|over\\s+to)|use|go\\s+with|run\\s+with|apply|start\\s+me\\s+on)\\b" +
+  "[^.!?\\n]{0,40}?(?:" + TEMP_TARGET + "|" + THAT_PLAN + "|\\b(?:that|it|this)\\s+in\\b[^.!?\\n]{0,20}\\bfor\\s+(?:the|this)\\s+(?:week|trip)\\b|\\b(?:that|this|it)\\s+(?:my|as\\s+my)\\s+(?:temp(?:orary)?\\s+)?(?:program|plan))",
+  "i");
+export const asksTempProgram = (message) => TEMP_PROGRAM_ASK_RE.test(String(message || ""));
+
 // ── Tool-name leakage filter (T62) ───────────────────────────────────────────
 // The model sometimes narrates its own tool calls INTO its prose — Will's 08-31
 // screenshot had "prefill_log_sheet, pin_session_card" as the first line of

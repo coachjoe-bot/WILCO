@@ -1,0 +1,32 @@
+{
+  "description": "T64 final verification BUG-3 (09-28, QA athlete, real model). A multi-day away situation arrived over three messages: the span in message 1, the equipment in message 2, Joe's full day-by-day plan in his reply to message 2, and the explicit ask in message 3. The gate read only the current message, the parser never raised is_temp_program_update, temp_program_text stayed null at every checkpoint, and Joe answered the ask with 'Already built that for you above.' Joe's plan text below is a faithful reconstruction of the shape the verifier captured (day headers Wednesday through Tuesday, dumbbells to 50 and an adjustable bench); the verifier quoted its opening lines verbatim.",
+  "now": "2026-09-28T18:00:00-04:00",
+  "tz": "America/New_York",
+  "athlete": {
+    "program_text": "Day 1 - Push\nBench Press 4x5 @ 185\nOverhead Press 3x8 @ 95\nDips 3x8\n\nDay 2 - Pull\nBarbell Row 4x8 @ 135\nPull-ups 3x8\n\nDay 3 - Legs\nBack Squat 4x5 @ 225\nRDL 3x8 @ 185",
+    "temp_program_text": null,
+    "program_locked": false
+  },
+  "turns": [
+    {
+      "athlete": "visiting family Wed through next Tuesday, garage gym only",
+      "minutesAgo": 6,
+      "joe": "Got it. What's in the garage? Dumbbells, bench, anything to pull from?"
+    },
+    {
+      "athlete": "just some dumbbells up to 50lb and an adjustable bench, no barbell",
+      "minutesAgo": 4,
+      "joe": "Here's how I'm sliding your week while you're out.\n\n**Wednesday (Push, DB version):**\n1. DB Bench Press 4x8 @ 50s\n2. Incline DB Press 3x10 @ 40s\n3. Seated DB Shoulder Press 3x10 @ 35s\n\n**Thursday (Pull, DB version):**\n1. One-arm DB Row 4x10 @ 50\n2. Chest-supported DB Row 3x12 @ 35s\n\n**Friday (Legs, DB version):**\n1. Goblet Squat 4x12 @ 50\n2. DB RDL 4x10 @ 50s\n3. Bulgarian Split Squat 3x10 @ 30s\n\n**Saturday:** rest\n\n**Sunday (Push, DB version):**\n1. DB Floor Press 4x10 @ 50s\n2. DB Lateral Raise 3x15 @ 20s\n\n**Monday (Pull, DB version):**\n1. DB Row 4x10 @ 50\n2. DB Curl 3x12 @ 30s\n\nReal bench progression toward 245 picks back up Tuesday when you've got the bar again."
+    },
+    {
+      "athlete": "yes set me up with that temporary program for the week",
+      "minutesAgo": 0,
+      "joeObserved": "Already built that for you above, that's the week. Wednesday's your push day with dumbbells, then pull, then legs over the weekend, straight back to bar work Tuesday."
+    }
+  ],
+  "expect": {
+    "turn2": { "write": true, "source": "reply" },
+    "turn3": { "explicitAsk": true, "planFound": true, "planDaysAtLeast": 5, "factBeforeWrite": "NOT been saved" },
+    "planSliceStartsWith": "Wednesday (Push, DB version):"
+  }
+}
