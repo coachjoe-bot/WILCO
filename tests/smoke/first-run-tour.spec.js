@@ -177,6 +177,55 @@ test("finishing clears every sample surface and writes nothing", async ({ page }
   expect(writesTo("athlete_memory").map(c=>c.body.op), "tour wrote a memory row").toEqual([]);
   expect(writesTo("workouts").map(c=>c.body.op), "tour logged a workout").toEqual([]);
   expect(writesTo("program_drafts").map(c=>c.body.op), "tour wrote a draft").toEqual([]);
+
+  // The sample sheet is React state only (setSheetState in tourStartWorkout),
+  // never routed through qlEdit/qlSave — those are what write the real park.
+  // If a future edit wires the tour's textarea through sheetTypeEdit by
+  // mistake, this is the only thing that would catch it: the sample bench
+  // session would land in the athlete's REAL localStorage park.
+  const parkKey = await page.evaluate((id) => {
+    try{ return localStorage.getItem(`wilco_quicklog_${id}`); }catch(_){ return "ERR"; }
+  }, athlete.id);
+  expect(parkKey, "tour wrote the real quicklog park").toBeNull();
+});
+
+test("walking the sample workout never writes the real quicklog park", async ({ page }) => {
+  const athlete = newAthlete();
+  await mockApi(page, { athlete });
+  await loginAsAthlete(page, athlete);
+  await startTour(page);
+
+  // Drive the tour all the way through the sample Start Workout → Finish
+  // Workout sequence — the one place fixture text stands in for a real draft.
+  await page.locator('[data-tour="program-btn"]').click();
+  await page.getByText(/This is where your program will live/).click();
+  await page.getByText(/paste it here or drop a screenshot/).click();
+  await page.getByText(/we'll get to it in a minute/).click();
+  await page.getByRole("button", { name: "MEMORY" }).click();
+  await page.getByText(/Past Blocks includes your training history/).click();
+  await page.getByText(/Drafts is your parking garage/).click();
+  await page.getByText(/what I read before every single reply/).click();
+  await expect(page.locator('[data-tour="tour-blueprint"]')).toBeVisible({ timeout: 6000 });
+  await page.getByText(/we'll write it together/).click();
+  await page.locator('[data-tour="start-workout-btn"]').click();
+  await page.locator('[data-tour="session-bar"]').click();
+  await expect(page.getByText("Bench Press 3x5 @ 175")).toBeVisible();
+
+  // The park must stay empty even mid-sheet, before Finish is ever tapped.
+  let parkKey = await page.evaluate((id) => {
+    try{ return localStorage.getItem(`wilco_quicklog_${id}`); }catch(_){ return "ERR"; }
+  }, athlete.id);
+  expect(parkKey, "the sample sheet wrote the real quicklog park before Finish").toBeNull();
+
+  await page.getByText(/fill in numbers, make any adjustments/).click();
+  await page.locator('[data-tour="finish-btn"]').click();
+  await expect(page.getByText("NEW MAX")).toBeVisible({ timeout: 8000 });
+  await expect(page.getByText(/Good job on that bench press personal record/)).toBeVisible({ timeout: 10000 });
+
+  parkKey = await page.evaluate((id) => {
+    try{ return localStorage.getItem(`wilco_quicklog_${id}`); }catch(_){ return "ERR"; }
+  }, athlete.id);
+  expect(parkKey, "finishing the sample workout wrote the real quicklog park").toBeNull();
 });
 
 test("declining leaves the tour reachable from Settings, worded for a first-timer", async ({ page }) => {
