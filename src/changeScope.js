@@ -44,7 +44,9 @@ const TOMORROW_ALONE_RE = /\btomorrow\b/i;
 
 // ── Signal 1: weekday ranges ("Friday to Sunday", "Fri-Sun", "Thursday and
 // Friday") plus the implicit-today-start form ("until Thursday"). ──────────
-const WEEKDAY_RANGE_RE = new RegExp(`\\b(?:from\\s+)?(${WD})\\s*(?:-|–|to|through|thru|until)\\s*(${WD})\\b`, "i");
+// S6: an optional "next"/"this" before the end day ("Wed through next Tuesday",
+// BUG-3's real opener) used to drop the whole range to "unclear".
+const WEEKDAY_RANGE_RE = new RegExp(`\\b(?:from\\s+)?(${WD})\\s*(?:-|–|to|through|thru|until)\\s*(?:(next|this)\\s+)?(${WD})\\b`, "i");
 const WEEKDAY_AND_RE = new RegExp(`\\b(${WD})\\s+and\\s+(${WD})\\b`, "i");
 const UNTIL_DAY_RE = new RegExp(`\\b(?:until|through|till|thru)\\s+(${WD})\\b`, "i");
 
@@ -61,6 +63,7 @@ const NEXT_N_DAYS_RE = new RegExp(`\\b(?:the\\s+)?next\\s+${NUM_WORD_RE}\\s+days
 const NEXT_N_WEEKS_RE = new RegExp(`\\bnext\\s+${NUM_WORD_RE}\\s+weeks\\b`, "i");
 const FOR_N_WEEKS_RE = new RegExp(`\\bfor\\s+(?:the\\s+next\\s+|another\\s+)?${NUM_WORD_RE}\\s+weeks?\\b`, "i");
 const FOR_NEXT_MONTH_RE = /\bfor\s+(?:the\s+)?next\s+month\b/i;
+const FOR_A_MONTH_RE = /\bfor\s+(?:a|one|the)\s+month\b/i; // S6: "in a boot for a month"
 const ALL_NEXT_WEEK_RE = /\ball\s+next\s+week\b/i;
 const ALL_WEEK_RE = /\ball\s+week\b/i;
 const WEEKEND_RE = /\b(?:over\s+the\s+weekend|through\s+the\s+weekend|this\s+weekend)\b/i;
@@ -177,7 +180,9 @@ function scopeFromWords({ message = "", extractedText = "", programShape = null,
   {
     const m = msg.match(WEEKDAY_RANGE_RE);
     if (m) {
-      const n = daysBetweenWeekdayNames(m[1], m[2]);
+      let n = daysBetweenWeekdayNames(m[1], m[3]);
+      // "Monday through next Monday" is eight days, not one.
+      if (n === 1 && m[2] && m[2].toLowerCase() === "next") n = 8;
       if (n != null) return finish(n, "high", "weekday_range");
     }
   }
@@ -271,7 +276,7 @@ function scopeFromWords({ message = "", extractedText = "", programShape = null,
     const m = msg.match(FOR_N_WEEKS_RE);
     if (m) { const n = wordToNum(m[1]); if (n) return finish(n * 7, "high", "relative_span"); }
   }
-  if (FOR_NEXT_MONTH_RE.test(msg)) return finish(30, "medium", "relative_span");
+  if (FOR_NEXT_MONTH_RE.test(msg) || FOR_A_MONTH_RE.test(msg)) return finish(30, "medium", "relative_span");
   if (ALL_NEXT_WEEK_RE.test(msg)) return finish(perWeek || 7, perWeek ? "high" : "medium", "relative_span");
   if (ALL_WEEK_RE.test(msg)) return finish(perWeek || 7, perWeek ? "high" : "medium", "relative_span");
   if (WEEKEND_RE.test(msg)) return finish(2, "medium", "relative_span");
@@ -339,3 +344,240 @@ export function changeScope({ parserDays = null, ...rest } = {}) {
   }
   return words;
 }
+
+// ─── T64 S6: SCOPE OVER THE CONVERSATION (verifier BUG-3) ───────────────────
+// A real trip arrives in pieces: "visiting family Wed through next Tuesday"
+// (the span), then "just dumbbells up to 50lb" (the conditions), then Joe's
+// day-by-day plan, then "yes set me up with that". The gate used to read ONLY
+// the message in hand, so no single turn ever carried everything and the temp
+// program was never written, while Joe, reading the whole transcript, said
+// "Already built that for you above." Everything below reads a bounded window
+// of the conversation instead. Pure: messages in, verdict out; App.jsx send()
+// only executes what these return. Unit tested by scripts/test-change-scope.mjs.
+//
+// The window: the athlete's last 6 messages, none older than 60 minutes
+// (message `at`, epoch ms, stamped by send()), plus every assistant message
+// from the oldest of those on. A message with no `at` (a transcript saved
+// before the stamp existed) ends the window: unknown age never counts.
+export const TEMP_WINDOW = Object.freeze({ maxUserMsgs: 6, maxAgeMs: 60 * 60 * 1000 });
+
+export function conversationWindow(messages, now = new Date(), { maxUserMsgs = TEMP_WINDOW.maxUserMsgs, maxAgeMs = TEMP_WINDOW.maxAgeMs } = {}) {
+  const list = Array.isArray(messages) ? messages : [];
+  const nowMs = (now instanceof Date ? now : new Date(now)).getTime();
+  const users = [];
+  let start = list.length;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i];
+    if (!m || m.role !== "user") continue;
+    const isCurrent = users.length === 0; // the message being sent is always in
+    const at = Number(m.at);
+    if (!isCurrent && (!Number.isFinite(at) || nowMs - at > maxAgeMs || at > nowMs + 60000)) break;
+    if (users.length >= maxUserMsgs) break;
+    users.unshift({ content: String(m.content || ""), at: Number.isFinite(at) ? at : nowMs, idx: i });
+    start = i;
+  }
+  const assistants = [];
+  for (let i = start; i < list.length; i++) {
+    const m = list[i];
+    if (m && m.role === "assistant") assistants.push({ content: String(m.content || ""), idx: i, tempSaved: !!m.tempSaved });
+  }
+  return { start, users, assistants };
+}
+
+// Day headers in a plan Joe wrote. Tolerant of chat formatting ("**Wednesday
+// (Push, DB version):**", "Day 2 — Pull", "Thu: DB rows") but a day name only
+// counts as a HEADER when punctuation or the end of the line follows it, so
+// prose ("Wednesday's your push day, then pull...") never reads as a plan.
+const HEADER_LEAD_RE = /^[\s>*#_•·\-–—]*(?:\d+[.)]\s+)?[*_]*/;
+const HEADER_DAY_RE = /^(day\s*\d+|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thur?s?|fri|sat|sun)\b(.*)$/i;
+const headerKey = (line) => {
+  const t = String(line || "").replace(HEADER_LEAD_RE, "");
+  const m = t.match(HEADER_DAY_RE);
+  if (!m) return null;
+  const rest = m[2] || "";
+  if (!(rest.trim() === "" || /^[*_]*\s*(?::|\(|-|–|—|,|\*|\||\/)/.test(rest))) return null;
+  const k = m[1].toLowerCase().replace(/\s+/g, "");
+  return k.startsWith("day") ? k : k.slice(0, 3);
+};
+export const countPlanDays = (text) => {
+  const seen = new Set();
+  for (const raw of String(text || "").split("\n")) { const k = headerKey(raw); if (k) seen.add(k); }
+  return seen.size;
+};
+
+// The deterministic cut of a plan out of a chat reply: from the first day header
+// to the end of the last day's block, dropping a closing prose paragraph (no
+// numbers in it) and markdown emphasis. The fallback when the extractor model
+// returns nothing usable, so a plan Joe laid out is never lost to a timeout.
+export function planSlice(text) {
+  const lines = String(text || "").split("\n");
+  const first = lines.findIndex((l) => headerKey(l));
+  if (first < 0) return "";
+  let body = lines.slice(first);
+  const lastHeader = body.reduce((acc, l, i) => (headerKey(l) ? i : acc), 0);
+  // After the last day's block, the first paragraph with no exercise-shaped
+  // line in it (a numbered/bulleted item, sets x reps, or an @ load) is Joe
+  // talking again, not the plan: cut there.
+  const EXERCISE_LINE = /^\s*(?:\d+[.)]|[-•*])\s+\S|\d+\s*[x×]\s*\d+|@\s*\d/i;
+  let end = body.length;
+  for (let i = lastHeader + 1; i < body.length; i++) {
+    if (body[i].trim() !== "") continue;
+    let j = i + 1;
+    while (j < body.length && body[j].trim() === "") j++;
+    const para = [];
+    while (j < body.length && body[j].trim() !== "") para.push(body[j++]);
+    if (para.length && !para.some((l) => EXERCISE_LINE.test(l) || headerKey(l))) { end = i; break; }
+  }
+  body = body.slice(0, end);
+  return body.map((l) => l.replace(/\*\*|__/g, "").replace(/\s+$/, "")).join("\n").trim();
+}
+
+// Is this "plan" just the athlete's regular (or current temp) program read back?
+// Joe listing the week they already have must never be saved as a temp program.
+const normLine = (l) => String(l || "").toLowerCase().replace(/[^a-z0-9@]+/g, " ").trim();
+export function isProgramEcho(planText, programTexts = []) {
+  const known = new Set();
+  for (const p of programTexts) for (const l of String(p || "").split("\n")) { const n = normLine(l); if (n) known.add(n); }
+  if (!known.size) return false;
+  const lines = String(planText || "").split("\n").map(normLine).filter((n) => n && !headerKey(n));
+  if (!lines.length) return false;
+  const hits = lines.filter((n) => known.has(n)).length;
+  return hits / lines.length >= 0.6;
+}
+
+// The most recent day-by-day plan Joe laid out inside the window (2+ day
+// headers, not the regular program echoed back). null when there is none.
+export function findRecentPlan({ messages, now = new Date(), programText = "", tempProgramText = "" } = {}) {
+  const { assistants } = conversationWindow(messages, now);
+  for (let i = assistants.length - 1; i >= 0; i--) {
+    const a = assistants[i];
+    const days = countPlanDays(a.content);
+    if (days >= 2 && !isProgramEcho(planSlice(a.content), [programText, tempProgramText])) {
+      return { text: a.content, idx: a.idx, days, saved: a.tempSaved };
+    }
+  }
+  return null;
+}
+
+// Words that tie a span to a training situation. Only used on the path where
+// the parser raised no flag at all, so a plain "busy this week" followed by Joe
+// laying out a week can't quietly replace anyone's program.
+const TEMP_CONDITION_RE = /\b(travel\w*|trip|away|visit\w*|vacation|holiday|hotel|cruise|beach|cabin|camp|garage|home gym|gym|dumbbells?|db|kettlebells?|kb|bands?|barbell|rack|platform|machines?|equipment|gear|out of town|on the road|injur\w*|boot|cast|sling|temp(?:orary)? (?:program|plan)|travel plan)\b/i;
+export const hasTempCondition = (texts) => (texts || []).some((t) => TEMP_CONDITION_RE.test(String(t || "")));
+
+// "Starting today" / "from today" opens a span; it is not a today-only scope.
+const neutralizeStart = (s) => String(s || "").replace(/\b(?:starting|beginning|from)\s+(?:today|tonight)\b/gi, "");
+
+// Scope judged over the conversation. Order (first definite read wins):
+//   1. the CURRENT message's own words, a today-only statement included
+//      ("actually just today" beats a span stated two messages ago);
+//   2. the parser's sensed span for the current message;
+//   3. the athlete's earlier in-window messages, newest first;
+//   4. day headers in the plan text supplied (extractedText);
+//   5. unclear: one day, low confidence.
+export function conversationScope({ messages, now = new Date(), parserDays = null, programShape = null, tz = null, extractedText = "" } = {}) {
+  const { users } = conversationWindow(messages, now);
+  const cur = users[users.length - 1];
+  const base = { programShape, tz };
+  if (cur) {
+    const r = changeScope({ ...base, message: neutralizeStart(cur.content), today: now });
+    if (r.signal === "today_only" || r.confidence !== "low") return { ...r, source: "current" };
+    const p = changeScope({ ...base, message: neutralizeStart(cur.content), today: now, parserDays });
+    if (p.signal === "parser_span") return { ...p, source: "current" };
+  }
+  for (let i = users.length - 2; i >= 0; i--) {
+    const r = changeScope({ ...base, message: neutralizeStart(users[i].content), today: new Date(users[i].at) });
+    if (r.signal === "today_only") return { ...r, source: "window" };
+    if (r.confidence !== "low") return { ...r, source: "window" };
+  }
+  const headerDays = countPlanDays(extractedText);
+  if (headerDays >= 2) return { days: clampDays(headerDays), confidence: "medium", signal: "day_headers", source: "plan" };
+  return { days: 1, confidence: "low", signal: "unclear", source: null };
+}
+
+// BEFORE Joe replies: is any of this in play, and does an explicit ask ("set me
+// up with that temporary program") have a plan to save? explicitAsk comes from
+// chatRouting.asksTempProgram. The write itself is App.jsx's; this only says
+// which plan, so Joe's context can state the truth before he speaks.
+export function tempTurnBefore({ messages, now = new Date(), athlete = {}, explicitAsk = false, fromQuickLog = false } = {}) {
+  const programText = athlete?.program_text || "";
+  const tempProgramText = athlete?.temp_program_text || "";
+  const plan = findRecentPlan({ messages, now, programText, tempProgramText });
+  const scope = conversationScope({ messages, now });
+  let writePlan = null;
+  let reason = null;
+  if (explicitAsk && !fromQuickLog) {
+    if (!plan) reason = "no_plan_in_window";
+    else if (scope.source === "current" && scope.signal === "today_only") reason = "today_only";
+    else if (plan.saved && tempProgramText) reason = "already_saved";
+    else { writePlan = plan; reason = "explicit_ask"; }
+  }
+  const inPlay = !fromQuickLog && (explicitAsk || !!tempProgramText || !!plan || scope.days >= 2);
+  return { explicitAsk: !!explicitAsk, plan, writePlan, reason, scope, inPlay };
+}
+
+// AFTER Joe replies: write a temp program from what he just laid out?
+//   - reply is a day-by-day plan (2+ day headers, not an echo) AND the
+//     conversation carries a multi-day span AND (the parser flagged it, or the
+//     window names a training condition): write from the REPLY.
+//   - the parser flagged is_temp_program_update and the conversation (or the
+//     plan's own headers) spans 2+ days: write from the reply when it is a
+//     plan, else from the most recent unsaved plan in the window, else the
+//     legacy extraction of the reply (kept: Joe's plan may use "Push day:"
+//     headers with no day names at all).
+// Never: a Quick Log send, a turn where Joe called prefill_log_sheet (his own
+// today-only call), a today-only scope, or a turn whose explicit ask already
+// wrote before the reply.
+export function decideTempWrite({ messages, now = new Date(), reply = "", flagged = false, parserDays = null, athlete = {}, fromQuickLog = false, joeHandledToday = false, explicitWrote = false, tz = null } = {}) {
+  const no = (reason) => ({ write: false, source: null, planText: null, reason });
+  if (fromQuickLog) return no("from_quick_log");
+  if (explicitWrote) return no("explicit_ask_wrote");
+  if (joeHandledToday) return no("joe_prefilled_today");
+  const programTexts = [athlete?.program_text || "", athlete?.temp_program_text || ""];
+  const replyDays = countPlanDays(reply);
+  const replyIsPlan = replyDays >= 2 && !isProgramEcho(planSlice(reply), programTexts);
+  const words = conversationScope({ messages, now, parserDays, tz });
+  if (words.signal === "today_only") return no("today_only");
+  const { users } = conversationWindow(messages, now);
+  if (replyIsPlan && words.days >= 2 && (flagged || hasTempCondition(users.map((u) => u.content)))) {
+    return { write: true, source: "reply", planText: reply, reason: "plan_in_reply", scope: words };
+  }
+  if (flagged) {
+    const recent = replyIsPlan ? null : findRecentPlan({ messages, now, programText: programTexts[0], tempProgramText: programTexts[1] });
+    const usable = recent && !(recent.saved && athlete?.temp_program_text) ? recent : null;
+    const scope = conversationScope({ messages, now, parserDays, tz, extractedText: replyIsPlan ? reply : (usable ? usable.text : "") });
+    if (scope.days < 2) return no("single_day");
+    if (replyIsPlan) return { write: true, source: "reply", planText: reply, reason: "flag_plan_in_reply", scope };
+    if (usable) return { write: true, source: "recent_plan", planText: usable.text, reason: "flag_recent_plan", scope };
+    return { write: true, source: "legacy_reply", planText: reply, reason: "flag_legacy", scope };
+  }
+  return no(replyIsPlan ? "no_multi_day_scope" : "no_plan");
+}
+
+// The fact Joe gets before he speaks whenever a temp program is in play. One
+// line, code-computed, so he can never say "already built" about something
+// unsaved (verifier BUG-3). recentPlanFound: tempTurnBefore().plan.
+export function tempProgramFact({ athlete = {}, recentPlanFound = null, savingNow = false } = {}) {
+  const head = "TEMP PROGRAM (app fact, this turn):";
+  if (savingNow) {
+    return `${head} the app is saving the day-by-day plan you laid out earlier in this conversation as their temporary program right now and confirms it in its own line. Do not lay the plan out again; a short acknowledgment is enough.`;
+  }
+  const saved = String(athlete?.temp_program_text || "").trim();
+  if (saved) {
+    const first = saved.split("\n").map((l) => l.trim()).find(Boolean) || "";
+    const newer = recentPlanFound && !recentPlanFound.saved
+      ? " A newer plan you laid out in this conversation has NOT been saved; never say it is."
+      : "";
+    return `${head} a temporary program IS saved and active; its first line is "${first.slice(0, 80)}".${newer}`;
+  }
+  if (recentPlanFound) {
+    return `${head} NO temporary program is saved. The day-by-day plan you laid out earlier in this conversation has NOT been saved; never say it is built, set or saved. It saves when they ask for it.`;
+  }
+  return `${head} NO temporary program is saved, and you have not laid out a day-by-day plan in this conversation. Never say one is built or saved; if they want one, lay out the days first, one header per day.`;
+}
+
+// The app's one confirmation line after a temp program write (unchanged copy,
+// moved here so the coach-locked wording is tested).
+export const tempConfirmLine = ({ locked = false } = {}) => locked
+  ? "✈️ Got it, I've set you up with a temporary program for while you're away. Your coach's program is untouched and waiting; I've let them know you're on the road. Tell me when you're back."
+  : "✈️ Got it, I've set a temporary program for while you're away. Tell me when you're back and I'll switch you to your regular programming.";

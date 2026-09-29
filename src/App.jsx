@@ -100,7 +100,7 @@ import { validatePref, normalizePrefs, describePref, prefsPromptLines, nextSigna
 import { parseBlockInfo, stripBlockInfo } from "./programContract.js";
 import { lineDiff, findPlacement, mergeGuard, mergeSystemPrompt } from "./programDiff.js";
 import { snapshotProgramHistory, startNextBlock, closeCurrentBlock, setBlockEnd, blockPromptState, parseTimeline, dateToIso, refreshOpenBlockRecap, recapShortFallback, buildBlockSpanAnswer, blockSpanConflict, blockSpanNeedsAsk, wrapCardEligible } from "./programHistory.js";
-import { changeScope } from "./changeScope.js";
+import { decideTempWrite, tempTurnBefore, tempProgramFact, tempConfirmLine, planSlice, countPlanDays } from "./changeScope.js";
 // First-run app tour (spotlight coach-marks + scripted Quick Log demo). Pure
 // display: fixtures never touch real data — see tour.jsx header.
 import { TourOffer, TourSpotlight, athleteTourSteps, tourWelcome, tourInteractiveAt, TOUR_QL_FIXTURE, TOUR_SCRIPT } from "./tour.jsx";
@@ -118,7 +118,7 @@ const ProgramEditPane = lazy(() => import("./builder.jsx").then(m => ({ default:
 import {
   needsAdvancedParser, looksLikeLifting, parseGotNothing, asksToRemember,
   looksLikeWorkoutLog, hasExplicitWorkingBasis, propagate1RM, isFullProgramEcho,
-  stripFailedAttempts, asksProgramEdit,
+  stripFailedAttempts, asksProgramEdit, asksTempProgram,
 } from "./chatRouting.js";
 export { isFullProgramEcho };
 // Boot layer: is this build still the deployed one, the warm-reopen snapshot, and
@@ -2129,6 +2129,7 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
     // Say plainly that position is unresolved so it asks instead of guessing.
     positionContext = `\n\nWHERE THE ATHLETE IS IN THEIR PROGRAM: could not be resolved. Do NOT state a week or day as fact. If they ask for today's session, ask ONE plain question ("Which day of the week are you on?") and work from their answer.`;
   }
+  if(opts.tempProgramFact) positionContext += `\n\n${opts.tempProgramFact}`; // T64 S6: temp program saved or not (src/changeScope.js tempProgramFact)
 
   let programContext = "";
   if(athlete.temp_program_text){
@@ -9057,7 +9058,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     }
 
     setInput("");
-    const newMsgs = [...messages,{role:"user",content:msg}];
+    // T64 S6: `at` stamps the athlete's message so the temp-program scope can read a
+    // bounded window of the conversation (src/changeScope.js conversationWindow).
+    const newMsgs = [...messages,{role:"user",content:msg,at:Date.now()}];
     setMessages(newMsgs);
     setLoading(true);
 
@@ -9185,6 +9188,39 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // context gets it now, the coach_flag follow-up reads the same verdicts.
       const painTurn = (()=>{ try{ return painTurnFor({athlete:updatedAthlete, workoutHistory, message:msg, parsed:parsedForReply}); }catch(_){ return null; } })();
       if(painTurn) masterOpts.painTurn = painTurn;
+      // ── T64 S6: temp program judged over the CONVERSATION (verifier BUG-3) ──
+      // Computed BEFORE Joe speaks so his context carries the truth: is a temp
+      // program saved, and is a plan he laid out earlier still unsaved. An
+      // explicit ask ("set me up with that temporary program", chatRouting
+      // asksTempProgram) saves the most recent plan he laid out in this
+      // conversation; the save runs beside the reply and the app's one
+      // confirmation line posts after the reply lands. src/changeScope.js decides.
+      const tempPre = (()=>{ try{ return tempTurnBefore({messages:newMsgs, now:new Date(), athlete:updatedAthlete, explicitAsk:asksTempProgram(msg), fromQuickLog}); }catch(_){ return null; } })();
+      const writeTempProgram = async (source, {legacy=false}={})=>{
+        let t = null;
+        try{ t = await extractProgramText(source); }catch(_){}
+        // Empty or echoed extraction: a plan with day headers falls back to the
+        // deterministic cut (a model timeout never loses the plan); the legacy
+        // no-headers path writes nothing, as before.
+        if(!t || !t.trim() || t.trim()===String(source).trim()) t = legacy ? null : planSlice(source);
+        if(!t || !t.trim()) return null;
+        await sbUpdate("athletes",athlete.id,{temp_program_text:t});
+        updatedAthlete.temp_program_text = t;
+        setAthlete(prev=>({...prev, temp_program_text: t}));
+        // Coach-visible trace in the program audit trail. Deliberately NOT
+        // coach_context: that table isn't athlete-writable and feeds the coach's
+        // Edition prompt (an athlete-authored row there would be a prompt-injection
+        // path). program_modifications is athlete-owned, feeds no prompt. Fixed
+        // wording, no athlete free text persisted.
+        if(updatedAthlete.coach_id){
+          try{ await sbInsert("program_modifications",{athlete_id: updatedAthlete.id, modification_type: "field_mode", description: "Training away from their usual setup, Joe set a temporary program. The coach's program is on hold, not changed.", old_value: null, new_value: null}); }catch(_){ /* best-effort */ }
+        }
+        // Mark the plan it came from, so a later "set me up with that" knows it's saved.
+        setMessages(prev=>{ const u=[...prev]; for(let i=u.length-1;i>=0;i--){ if(u[i].role==="assistant" && u[i].content===source){ u[i]={...u[i],tempSaved:true}; break; } } return u; });
+        return t;
+      };
+      const tempExplicitP = tempPre?.writePlan ? writeTempProgram(tempPre.writePlan.text).catch(()=>null) : null;
+      if(tempPre?.inPlay) masterOpts.tempProgramFact = tempProgramFact({athlete:updatedAthlete, recentPlanFound:tempPre.plan, savingNow:!!tempExplicitP});
       try {
         reply = await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext,applyDelta,masterOpts);
       } catch(_streamErr){ /* fall through to the one-shot call below */ }
@@ -9212,7 +9248,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // One-shot fallback: mastermind persona/memory ride along, tools don't
         // (the JSON path returns text only) — a dropped stream costs the turn's
         // actions, never the reply.
-        reply = gateText("chat", await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext,null,MASTERMIND_ON?{mastermind:true, memoryRows, pureLog:fromQuickLog, parsedLog:parsedForReply}:{parsedLog:parsedForReply}));
+        reply = gateText("chat", await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext,null,MASTERMIND_ON?{mastermind:true, memoryRows, pureLog:fromQuickLog, parsedLog:parsedForReply, tempProgramFact:masterOpts.tempProgramFact}:{parsedLog:parsedForReply, tempProgramFact:masterOpts.tempProgramFact}));
         setMessages(prev=>{ const u=[...prev]; const last=u[u.length-1]; if(last && last.role==="assistant") u[u.length-1]={role:"assistant",content:reply}; return u; });
       }
       // A held reply keeps the typing dot up until releaseReply shows the bubble
@@ -9289,12 +9325,20 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // says the program changed with neither is corrected in the bubble and in
       // the stored bot_reply. (The stream shows text as it types; the settle is
       // where a false claim is replaced.)
+      // T64 S6: the temp-program decision is made BEFORE the claim guard, so a
+      // reply that truthfully says the plan is set is never "corrected".
+      const tempExplicitText = tempExplicitP ? await tempExplicitP : null;
+      // An explicit temp ask is deterministic, so a parser read of the same
+      // message as a program replace/create/append never also runs: that would
+      // write Joe's travel plan over the REAL program (one owner per action).
+      if(tempPre?.explicitAsk && !fromQuickLog){ parsed.is_program_update = false; parsed.program_append = false; parsed.program_create_request = false; }
+      const tempDecision = (()=>{ try{ return decideTempWrite({messages:newMsgs, now:new Date(), reply, flagged:!!parsed.is_temp_program_update, parserDays:parsed.temp_span_days, athlete:updatedAthlete, fromQuickLog, joeHandledToday: MASTERMIND_ON && masterToolCalls.some(tc=>tc.name==="prefill_log_sheet"), explicitWrote:!!tempExplicitText}); }catch(_){ return {write:false}; } })();
       try{
         const painRec = (()=>{ try{
           const t = (parsed.pain_flags?.length && !(painTurn && painTurn.turn.exact)) ? painTurnFor({athlete:updatedAthlete, workoutHistory, message:msg, parsed}).turn : painTurn?.turn;
           return !!(t && painFollowUpPlan(t).draftRec);
         }catch(_){ return false; } })();
-        const programWrite = !!(parsed.is_program_update || parsed.program_append || parsed.is_temp_program_update || parsed.program_create_request);
+        const programWrite = !!(parsed.is_program_update || parsed.program_append || parsed.program_create_request || tempExplicitText || tempDecision.write);
         const cg = replyGate("chat", reply, {toolCalls: MASTERMIND_ON ? masterToolCalls : [], appWrites:{program: programWrite, rec: painRec}});
         if(cg.text !== reply){
           const was = reply;
@@ -9871,62 +9915,27 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // Two deterministic guards, neither a new model judgment call, both
       // additive to the existing v1 flag pipeline (is_temp_program_update stays
       // on parseWorkout; this never becomes a second decision path):
-      //  (a) changeScope reads the athlete's own words and only allows the
-      //      write when the change spans 2+ training days.
+      //  (a) the scope must span 2+ training days, and
       //  (b) if Joe already called prefill_log_sheet THIS SAME TURN, that IS
-      //      his deliberate today-only call — the flag is dropped rather than
-      //      a legacy branch overriding a call he already made, the same way a
-      //      prefill/pin call is already dropped on a finished sheet log a few
-      //      lines above. This is exactly Will's real 08-24 case: Joe's own
-      //      reply correctly judged "one session without the gear isn't worth
-      //      rewriting anything" and offered the sheet swap — the bug was the
-      //      code beneath him claiming a temp program he never promised.
-      const tempScope = changeScope({message: msg, today: new Date(), parserDays: parsed.temp_span_days});
-      const joeAlreadyHandledToday = MASTERMIND_ON && masterToolCalls.some(tc=>tc.name==="prefill_log_sheet");
-      if(parsed.is_temp_program_update && !fromQuickLog && tempScope.days>=2 && !joeAlreadyHandledToday){
+      //      his deliberate today-only call (Will's real 08-24 case: Joe
+      //      judged "one session without the gear isn't worth rewriting
+      //      anything"; the bug was the code beneath him claiming a temp
+      //      program he never promised).
+      // T64 S6 (verifier BUG-3): scope is judged over the CONVERSATION, not one
+      // message, and Joe's own day-by-day plan counts. A trip that arrives in
+      // pieces (span, then equipment, then Joe's plan, then "yes set me up")
+      // used to never write, while Joe said "Already built that for you above."
+      // src/changeScope.js decideTempWrite owns the rule; tempDecision was
+      // computed above, before the claim guard. No write → no bubble: Joe's
+      // reply is the whole answer, and his context told him nothing is saved.
+      if(tempExplicitText){
+        followUp(tempConfirmLine({locked:!!updatedAthlete.program_locked}), "action_done");
+      } else if(tempDecision.write){
         try {
-          const tempText = await extractProgramText(reply);
-          // extractProgramText now returns null on an empty extraction (the raw-input
-          // fallback that used to dump Joe's whole reply into the Program view was
-          // removed at the source, covering all four call sites). The !==reply guard
-          // stays as belt-and-braces against a model that simply echoes the reply.
-          // Confirm in chat either way — the write used to be silent, so athletes
-          // never knew Field Mode had engaged.
-          if(tempText && tempText.trim() && tempText.trim()!==reply.trim()){
-            await sbUpdate("athletes",athlete.id,{temp_program_text:tempText});
-            updatedAthlete.temp_program_text = tempText;
-            setAthlete(prev=>({...prev, temp_program_text: tempText}));
-            followUp(updatedAthlete.program_locked
-              ? "✈️ Got it, I've set you up with a temporary program for while you're away. Your coach's program is untouched and waiting; I've let them know you're on the road. Tell me when you're back."
-              : "✈️ Got it, I've set a temporary program for while you're away. Tell me when you're back and I'll switch you to your regular programming.");
-            // Leave a coach-visible trace in the program audit trail. Deliberately
-            // NOT coach_context: that table isn't athlete-writable (the write would
-            // 403), and its notes are concatenated into the coach's Edition prompt
-            // (api/trigger-proof-feed.js), so an athlete-authored row there would be
-            // a prompt-injection path into the coach's AI. program_modifications is
-            // athlete-owned, feeds no prompt, and is exactly the "what changed and
-            // why" ledger. Fixed wording — no athlete free text is persisted.
-            // No new push type either; notification policy v2.1 enumerates them, and
-            // the coach's AthleteDetail banner already shows Field Mode live.
-            if(updatedAthlete.coach_id){
-              try{
-                await sbInsert("program_modifications",{
-                  athlete_id: updatedAthlete.id,
-                  modification_type: "field_mode",
-                  description: "Training away from their usual setup, Joe set a temporary program. The coach's program is on hold, not changed.",
-                  old_value: null,
-                  new_value: null,
-                });
-              }catch(_){ /* best-effort — never blocks the athlete's temp program */ }
-            }
-          }
+          const t = await writeTempProgram(tempDecision.planText, {legacy: tempDecision.source==="legacy_reply"});
+          if(t) followUp(tempConfirmLine({locked:!!updatedAthlete.program_locked}), "action_done");
         } catch(e){}
       }
-      // days<2, or Joe already handled it via prefill_log_sheet: no write, no
-      // program_modifications row, no "✈️ Got it, I've set a temporary program"
-      // bubble. Joe's own reply (already on screen before any of this code
-      // runs) is the athlete's entire answer — it no longer gets contradicted
-      // by a hardcoded claim underneath it.
 
       // Revert — athlete is back, clear temp program
       if(parsed.is_program_revert && updatedAthlete.temp_program_text && !fromQuickLog){
