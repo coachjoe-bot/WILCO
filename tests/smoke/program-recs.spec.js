@@ -377,6 +377,8 @@ for (const delay of [0, 1500]) {
     await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
     const start = page.getByRole("button", { name: "Start Workout" });
     await expect(start).toBeVisible({ timeout: 15000 });
+    // The bubble's own 3px fade-up entrance is not the bug: let it finish, then measure.
+    await page.waitForFunction(() => document.getAnimations().filter((a) => a.animationName === "fadeUp" && a.playState === "running").length === 0);
     const first = await start.boundingBox();
     const t0 = Date.now();
     while (Date.now() - t0 < 3000) {

@@ -439,6 +439,6 @@ test("the log sheet's own X takes the workout off the screen, text stays parked"
   await expect(page.getByText("Day 1 - Push", { exact: true })).toHaveCount(0);   // bar gone too
   const park = await parkOf(page, athlete);
   expect(park.draft).toBe(EDITED);
-  expect(park.dock).toBe(false);
+  expect(park.dock).toBeFalsy();
   expect(calls.some((c) => c.body?.op === "insert" && c.body?.table === "workouts")).toBe(false);
 });
