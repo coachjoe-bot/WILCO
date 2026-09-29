@@ -374,6 +374,7 @@ for (const delay of [0, 1500]) {
         await route.fallback();
       });
     }
+    await page.setViewportSize({ width: 390, height: 480 });   // short phone: the opener bubble overflows the list, so the bar's mount is felt
     await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
     const start = page.getByRole("button", { name: "Start Workout" });
     await expect(start).toBeVisible({ timeout: 15000 });
@@ -390,6 +391,16 @@ for (const delay of [0, 1500]) {
     }
     // the rec bar did restore (it is why this spec exists)
     await expect(page.getByText("PROGRAM REC — Pec swap").first()).toBeVisible();
+    // ...and it did not push the last opener button under itself: the last button
+    // is still inside the visible chat list (the bar shrinks the list from below).
+    const clipped = await page.evaluate(() => {
+      const list = document.querySelector("[data-tour=chat]").getBoundingClientRect();
+      return ["Different Workout"].map((t) => {
+        const b = [...document.querySelectorAll("button")].find((x) => x.textContent.trim() === t).getBoundingClientRect();
+        return b.bottom > list.bottom + 1 || b.top < list.top - 1 ? t : null;
+      }).filter(Boolean);
+    });
+    expect(clipped, "opener buttons hidden by the bar").toEqual([]);
     await start.click();
     await expect(page.getByText("Day 1 - Push", { exact: true }).first()).toBeVisible({ timeout: 15000 });
   });

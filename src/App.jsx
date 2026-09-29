@@ -7570,7 +7570,15 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   },[historyLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
   // A bar mounting shrinks the chat list; keep a reader who was at the bottom
   // at the bottom, before paint, so nothing they can see slides.
-  useLayoutEffect(()=>{ if(chatPinnedRef.current) scrollChatBottom(); },[recPending?.draftId]); // eslint-disable-line react-hooks/exhaustive-deps
+  // (A reply start un-pins the list, so "at the bottom" is measured, not read from
+  // chatPinnedRef: within one bar height + slack of the end after the shrink.)
+  const openerArmed = openerChoicePending && recRestored;
+  useLayoutEffect(()=>{
+    const el = chatListRef.current; if(!el) return;
+    // The Start buttons arming is the opener landing: bring them into view, as it
+    // did before they were held for the restore.
+    if(openerArmed || chatPinnedRef.current || el.scrollHeight - el.scrollTop - el.clientHeight < 100) scrollChatBottom();
+  },[recPending?.draftId, openerArmed]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── T58/3b: BUILDER MODE IN CHAT + the program sheet ────────────────────────
   // The Builder tab dissolves into the thread: opt-in interview (blueprint strip
