@@ -26,6 +26,14 @@ let DISPLAY_UNIT = "lbs";
 export const setDisplayUnit = (u) => { DISPLAY_UNIT = u === "kg" ? "kg" : "lbs"; };
 export const getDisplayUnit = () => DISPLAY_UNIT;
 
+// A declared max / attempt (parsed_data.pr_attempts[]) → the unit its number is in.
+// The unit the athlete WROTE on that number wins. With none written, the number is
+// in the athlete's own display unit, never a hard "lbs": a kg lifter's "102 snatch"
+// filed as 102 lbs became a 46.3 kg ACTUAL 1RM that outranked every estimate (09-28).
+// Every pr_attempts reader resolves through here; do not hand-copy the ternary.
+export const attemptUnit = (attempt, displayUnit = DISPLAY_UNIT) =>
+  attempt?.unit === "kg" || attempt?.unit === "lbs" ? attempt.unit : (displayUnit === "kg" ? "kg" : "lbs");
+
 // A raw stored (weight, unit) pair → number in the display unit. One conversion, ever.
 export const toDisplay = (weight, unit, displayUnit = DISPLAY_UNIT) =>
   displayUnit === "kg" ? toKg(Number(weight) || 0, unit === "kg" ? "kg" : "lbs")

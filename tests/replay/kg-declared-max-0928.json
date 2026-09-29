@@ -1,0 +1,266 @@
+{
+  "bug": "09-28, T64 S5 real-AI pass: a kg athlete's declared snatch PR was filed as LBS. The parse schema had no unit on pr_attempts and the writer defaulted a missing unit to lbs, so 102 kg became a 102 lb (46.3 kg) ACTUAL 1RM. Joe then said 'your actual best on the books is 46.3kg'.",
+  "source": "QA athlete 99999999-9999-4999-8999-999999999999 (kg display unit), real parser output captured 09-28. No real athlete data.",
+  "input_message": "Hit a 102kg snatch today, new PR",
+  "starting_state": {
+    "display_unit": "kg",
+    "manual_one_rms": [],
+    "best_estimate_lbs": 0
+  },
+  "parsed_before_fix": {
+    "exercises": [],
+    "pr_attempts": [
+      {
+        "exercise": "Snatch",
+        "weight": 102,
+        "reps": 1,
+        "achieved": true
+      }
+    ]
+  },
+  "parsed_after_fix": {
+    "exercises": [],
+    "pr_attempts": [
+      {
+        "exercise": "Snatch",
+        "weight": 102,
+        "unit": "kg",
+        "reps": 1,
+        "achieved": true
+      }
+    ]
+  },
+  "variants": [
+    {
+      "name": "no standing row: the old default inserted 102 lbs",
+      "existing": null,
+      "expect": {
+        "action": "insert",
+        "unit": "kg",
+        "weight": 102,
+        "new_lbs_min": 224.8,
+        "new_lbs_max": 224.9
+      }
+    },
+    {
+      "name": "standing 95 kg row: the old default read 102 as lbs, called it lower, and dropped the PR",
+      "existing": {
+        "id": "row-1",
+        "weight": 95,
+        "unit": "kg",
+        "source": "workout"
+      },
+      "expect": {
+        "action": "update",
+        "unit": "kg",
+        "weight": 102
+      }
+    },
+    {
+      "name": "standing 105 kg row: 102 kg really is lower, so nothing is written",
+      "existing": {
+        "id": "row-1",
+        "weight": 105,
+        "unit": "kg",
+        "source": "workout"
+      },
+      "expect": {
+        "action": "skip",
+        "unit": "kg",
+        "weight": 102
+      }
+    }
+  ],
+  "invariants": [
+    "the attempt's unit resolves to kg whether the parser returned unit:kg or no unit at all",
+    "the row saved to workouts.parsed_data carries unit:kg on the attempt",
+    "manual_one_rms gets weight 102 unit kg, never 102 lbs",
+    "an lbs athlete sending the same numbers with no unit written still resolves to lbs",
+    "a unit written on the number beats the display unit in both directions",
+    "a stored row with no unit on the attempt is read by its own evidence (twin set, then the unit written on that number) before today's display unit"
+  ],
+  "legacy_rows": {
+    "why": "Rows saved before the fix carry no unit on pr_attempts, and the founder switched from lbs to kg in late August. His display unit is kg today, so a stored-row reader that fell back to it would turn a 225 lb snatch into 225 kg. Shapes below are his real rows (read-only SELECT 09-29), trimmed to the fields the resolver reads.",
+    "display_unit_today": "kg",
+    "rows": [
+      {
+        "name": "lbs era, twin set says lbs",
+        "row": {
+          "created_at": "2026-08-05T12:41:10Z",
+          "raw_message": "Snatch 3x1 @ 185/205/225\nClean & Jerk 3x1 @ 225/245/265",
+          "parsed_data": {
+            "exercises": [
+              {
+                "name": "Snatch",
+                "sets": 3,
+                "reps": 1,
+                "weight": 225,
+                "unit": "lbs"
+              },
+              {
+                "name": "Clean & Jerk",
+                "sets": 3,
+                "reps": 1,
+                "weight": 265,
+                "unit": "lbs"
+              }
+            ],
+            "pr_attempts": [
+              {
+                "exercise": "Snatch",
+                "weight": 225,
+                "reps": 1,
+                "achieved": true
+              },
+              {
+                "exercise": "Clean & Jerk",
+                "weight": 265,
+                "reps": 1,
+                "achieved": true
+              }
+            ]
+          }
+        },
+        "expect": [
+          "lbs",
+          "lbs"
+        ]
+      },
+      {
+        "name": "kg era, twin set says kg, the number itself has no unit beside it",
+        "row": {
+          "created_at": "2026-08-28T19:14:09Z",
+          "raw_message": "Snatch to heavy single singles @ 20kg/50/70/80/90/100/110/115/118\nClean and Jerk to heavy single 70/90/100/110/120",
+          "parsed_data": {
+            "exercises": [
+              {
+                "name": "Snatch",
+                "sets": 9,
+                "reps": 1,
+                "weight": 118,
+                "unit": "kg"
+              },
+              {
+                "name": "Clean & Jerk",
+                "sets": 5,
+                "reps": 1,
+                "weight": 120,
+                "unit": "kg"
+              }
+            ],
+            "pr_attempts": [
+              {
+                "exercise": "Snatch",
+                "weight": 118,
+                "reps": 1,
+                "achieved": true
+              },
+              {
+                "exercise": "Clean & Jerk",
+                "weight": 120,
+                "reps": 1,
+                "achieved": true
+              },
+              {
+                "exercise": "Clean & Jerk",
+                "weight": 125,
+                "reps": 1,
+                "achieved": false
+              }
+            ]
+          }
+        },
+        "expect": [
+          "kg",
+          "kg",
+          "kg"
+        ]
+      },
+      {
+        "name": "declaration only, kg written on the numbers",
+        "row": {
+          "created_at": "2026-06-23T17:47:04Z",
+          "raw_message": "My snatch and my clean aren't at those numbers, snatch is at a 115kg or, clean is at 130kg",
+          "parsed_data": {
+            "exercises": [],
+            "pr_attempts": [
+              {
+                "exercise": "Snatch",
+                "weight": 115,
+                "reps": 1,
+                "achieved": true
+              },
+              {
+                "exercise": "Clean",
+                "weight": 130,
+                "reps": 1,
+                "achieved": true
+              }
+            ]
+          }
+        },
+        "expect": [
+          "kg",
+          "kg"
+        ]
+      },
+      {
+        "name": "declaration only, lbs written on the number",
+        "row": {
+          "created_at": "2026-07-25T17:11:48Z",
+          "raw_message": "Snatch 1RM is 250lbs",
+          "parsed_data": {
+            "exercises": [],
+            "pr_attempts": [
+              {
+                "exercise": "Snatch",
+                "weight": 250,
+                "reps": 1,
+                "achieved": true
+              }
+            ]
+          }
+        },
+        "expect": [
+          "lbs"
+        ]
+      },
+      {
+        "name": "missed attempt above the twin's top set still takes the twin's unit",
+        "row": {
+          "created_at": "2026-09-04T19:54:11Z",
+          "raw_message": "Back Squat singles @ 70/110/130/150/170 then I missed 180kg",
+          "parsed_data": {
+            "exercises": [
+              {
+                "name": "Back Squat",
+                "sets": 5,
+                "reps": 1,
+                "weight": 170,
+                "unit": "kg"
+              }
+            ],
+            "pr_attempts": [
+              {
+                "exercise": "Back Squat",
+                "weight": 170,
+                "reps": 1,
+                "achieved": true
+              },
+              {
+                "exercise": "Back Squat",
+                "weight": 180,
+                "reps": 1,
+                "achieved": false
+              }
+            ]
+          }
+        },
+        "expect": [
+          "kg",
+          "kg"
+        ]
+      }
+    ]
+  }
+}
