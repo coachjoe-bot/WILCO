@@ -60,6 +60,7 @@ const ctx = await browser.newContext({ viewport: { width: 430, height: 900 } });
 const page = await ctx.newPage();
 let ai = [];       // every AI call this turn: {feature, tools:[names]}
 let sheetFact = false;
+let startRetaps = 0;   // Start Workout taps that had to be repeated, whole pass
 page.on("request", (req) => {
   if (req.method() !== "POST" || !/\/api\/claude/.test(req.url())) return;
   let b = null; try { b = req.postDataJSON(); } catch { return; }
@@ -105,6 +106,16 @@ async function startAndEdit() {
   const start = page.getByRole("button", { name: "Start Workout" });
   await start.waitFor({ timeout: 60000 });
   await start.click();
+  // A pending program rec restores a moment after boot and its bar shifts the
+  // screen, so an automated first tap can land where the button used to be
+  // (measured on prod 09-29: 2 of 6 with a rec pending, 0 of 6 without). Tap
+  // again if the buttons are still there. Counted, so a real regression in the
+  // Start tap cannot hide behind the retry.
+  for (let i = 0; i < 3 && !(await barX().isVisible().catch(() => false)); i++) {
+    await page.waitForTimeout(4000);
+    if (await barX().isVisible().catch(() => false)) break;
+    if (await start.isVisible().catch(() => false)) { startRetaps++; await start.click(); }
+  }
   await barX().waitFor({ timeout: 60000 });
   await openSheet();
   await page.waitForTimeout(1500);
@@ -264,5 +275,5 @@ for (const name of order) {
 await cleanup();
 await browser.close();
 const bad = results.filter((r) => !r.ok);
-console.log(`DONE ${results.length} runs, ${bad.length} failed`);
+console.log(`DONE ${results.length} runs, ${bad.length} failed, ${startRetaps} Start retaps`);
 process.exit(bad.length ? 1 : 0);
