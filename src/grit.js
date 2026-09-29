@@ -116,7 +116,7 @@ export const getExerciseSets = (ex) => {
 
 // Conversion lives in units.js (T55: single source, one constant). Imported for
 // local use and re-exported because grit.js is where most existing code gets it.
-import { toLbs, toKg, LBS_PER_KG, getDisplayUnit, toDisplay, roundStat, exerciseUnit, exerciseLoadUnit, isUnitPending } from "./units.js";
+import { toLbs, toKg, LBS_PER_KG, getDisplayUnit, toDisplay, roundStat, exerciseUnit, exerciseLoadUnit, isUnitPending, addedLoadUnit } from "./units.js";
 export { toLbs, toKg, LBS_PER_KG };
 
 // Load-bearing bodyweight movements — dips, pull-ups, chin-ups, muscle-ups — where
@@ -134,7 +134,9 @@ export const bestE1RMForExercise = (ex, bwLbs = 0) => {
   let bwLoad = 0;
   if (isBW) {
     if (!bwLbs || !LOAD_BEARING_BW.test((ex.name || "").toLowerCase())) return 0;
-    bwLoad = bwLbs + (ex.added_weight || 0) - (ex.assist_weight || 0);
+    // The added/assist load carries its own unit (T68 added_unit; no stamp = lbs).
+    const au = addedLoadUnit(ex);
+    bwLoad = bwLbs + toLbs(ex.added_weight || 0, au) - toLbs(ex.assist_weight || 0, au);
     if (bwLoad <= 0) return 0;
   }
   const all = getExerciseSets(ex);

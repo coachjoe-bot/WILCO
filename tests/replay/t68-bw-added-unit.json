@@ -15,7 +15,7 @@
       "expect_stored": { "unit": "bodyweight", "weight": null, "added_weight": 20, "added_unit": "kg", "added_unit_source": "display" },
       "expect_readers": {
         "performed_line_kg": "Weighted Pull-Up: 3 sets of 5, bodyweight plus 20 kg",
-        "performed_line_lbs": "Weighted Pull-Up: 3 sets of 5, bodyweight plus 44.1 lbs",
+        "performed_line_lbs": "Weighted Pull-Up: 3 sets of 5, bodyweight plus 44 lbs",
         "e1rm_lbs": 257
       }
     },

@@ -451,7 +451,7 @@ console.log("one voice per turn:");
   const app = readFileSync(join(here, "../src/App.jsx"), "utf8");
   ok(/unitCheckContext\?`\\n\\n\$\{unitCheckContext\}`:""/.test(app), "the fact rides in Joe's dynamic context");
   ok(/replyAsksUnit\(reply, unitChecks\) \? "" : unitCheckMessage\(unitChecks\)/.test(app), "finalizeWorkout suppresses its ask when Joe already asked");
-  ok(/if\(ex\.unit_suspect\)\{ unitChecks\.push/.test(app) && /await finalizeWorkout\(bank, pend\.msg, pend\.reply, athlete, false, false, \{derivedOnly:true/.test(app), "pending loads skip the derived writes; the answer runs them once in derivedOnly mode");
+  ok(/if\(ex\.unit_suspect\)\{ unitChecks\.push/.test(app) && /await finalizeWorkout\(bank, row\.raw_message\|\|"", row\.bot_reply\|\|"", athlete, false, false, \{derivedOnly:true/.test(app), "pending loads skip the derived writes; the answer runs them once in derivedOnly mode (T68: through the one bank function)");
 }
 
 // 20 ── T68 bug 1: the unit of an ADDED load on a bodyweight lift ("BW+20")
@@ -496,6 +496,12 @@ console.log("added load on a bodyweight lift (T68):");
   eq(R("Weighted pull-ups 3x5 BW+20", "kg", [wpu()]).ex, ["bodyweight"], "unit stays bodyweight");
   const v = resolveLoadUnits({ exercises: [wpu()], pr_attempts: [] }, { displayUnit: "kg", message: "Weighted pull-ups 3x5 BW+20", normalizeName: normalizeExName });
   eq([v.exercises[0].addedUnit, v.exercises[0].addedSource], ["kg", "display"], "the resolver's verdict names the added unit and its step");
+  // flush guard: every file that reads an added/assist load resolves its unit through units.js
+  for (const d of [join(here, "../src"), join(here, "../api")]) for (const f of readdirSync(d).filter((x) => /\.(js|jsx)$/.test(x))) {
+    const src = readFileSync(join(d, f), "utf8");
+    if (!/\b(added_weight|assist_weight)\b/.test(src)) continue;
+    ok(/addedLoad(Unit|In)/.test(src), `${f} reads added_weight/assist_weight and resolves the unit through addedLoadUnit/addedLoadIn`);
+  }
   // the readers' one helper
   ok(typeof UN.addedLoadUnit === "function", "units.addedLoadUnit exists");
   if (typeof UN.addedLoadUnit === "function") {
@@ -543,8 +549,9 @@ console.log("loads settled by an edit (T68):");
   }
   const app = readFileSync(join(here, "../src/App.jsx"), "utf8");
   ok(/const bankSettledUnits = async/.test(app), "App.jsx has ONE bank function");
-  ok((app.match(/bankSettledUnits\(/g) || []).length >= 3, "the chip answer, the chat correction and the manual edit all call it");
-  ok(/onUnitsSettled=\{/.test(app) && /onUnitsSettled&&/.test(app), "the My Log edit sheet reports settled units to it");
+  ok((app.match(/await bankSettledUnits\(/g) || []).length === 2, "the chip answer and the chat correction call it");
+  ok(/onUnitsSettled=\{bankSettledUnits\}/.test(app) && /onUnitsSettled&&await onUnitsSettled\(settledLoads\(pd, newParsedData\)/.test(app), "the My Log edit sheet reports its settled loads to the same function");
+  ok((app.match(/finalizeWorkout\([^)]*derivedOnly:true/g) || []).length === 1, "derivedOnly finalize has ONE caller");
 }
 
 // 22 ── T68 replay: the kg athlete's "BW+20" and its readers

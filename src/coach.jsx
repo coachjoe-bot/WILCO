@@ -24,7 +24,7 @@ import {
   buildLiftHistory, detectPlateaus,
 } from "./proofcore.js";
 import { computeGritSnapshot, TIER_NAMES, TIER_COLORS, getBenchKey, resolveLift } from "./grit.js";
-import { exerciseUnit, exerciseLoadUnit } from "./units.js";
+import { exerciseUnit, exerciseLoadUnit, addedLoadUnit } from "./units.js";
 // Shared team-analytics math (C2): the server endpoint (api/coach-analytics) computes
 // the roster aggregations with THIS module; the client imports weekBounds from it so
 // both cut the identical Mon–Sun week.
@@ -2528,7 +2528,8 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
             const exLine = (ex)=>{
               const sets = getExerciseSets(ex); const working = sets.some(s=>!s.warmup)?sets.filter(s=>!s.warmup):sets;
               const reps = working.reduce((m,s)=>Math.max(m,s.reps||0),0)||ex.reps||0;
-              const top = working.reduce((m,s)=>Math.max(m,toLbs(s.weight||0,exerciseLoadUnit(ex))),0)||toLbs(ex.weight||0,exerciseLoadUnit(ex));
+              const lu = ex.unit==="bodyweight" ? addedLoadUnit(ex) : exerciseLoadUnit(ex); // a bodyweight row's per-set loads carry their own unit (T68)
+              const top = working.reduce((m,s)=>Math.max(m,toLbs(s.weight||0,lu)),0)||toLbs(ex.weight||0,lu);
               return `${working.length||ex.sets||1}×${reps||"?"}${top?` @ ${Math.round(top)}lbs`:""}`;
             };
             const b = r.adhB;
@@ -4484,7 +4485,7 @@ function AthleteDetail({athlete,coachId,workouts,prs,requests=[],onResolveReques
                   let topSet;
                   if(isBW){
                     // Effective load = bodyweight (+added/−assist); best set = most reps.
-                    const bwLoad = (bodyweight||0)+(ex.added_weight||0)-(ex.assist_weight||0);
+                    const bwLoad = (bodyweight||0)+toLbs(ex.added_weight||0,addedLoadUnit(ex))-toLbs(ex.assist_weight||0,addedLoadUnit(ex));
                     const sets = getExerciseSets(ex);
                     const working = sets.some(s=>!s.warmup) ? sets.filter(s=>!s.warmup) : sets;
                     const reps = working.reduce((m,s)=>Math.max(m,s.reps||0),0) || (ex.reps||1);

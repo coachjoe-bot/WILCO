@@ -71,9 +71,9 @@ import { currentPosition, positionBlock, parseBlockSpan, programTextIdentity } f
 // governing when Joe offers to loop the human coach in (see file header).
 import { draftChangeRequest, fileChangeRequest, flagToSource } from "./changeRequest.js";
 import { FEATURE_INVENTORY } from "./features.js";
-import { toLbs, fmtWeightIn, displayStat, unitLabel, setDisplayUnit, getDisplayUnit, toDisplay, roundStat, exerciseUnit, exerciseLoadUnit } from "./units.js";
+import { toLbs, fmtWeightIn, displayStat, unitLabel, setDisplayUnit, getDisplayUnit, toDisplay, roundStat, exerciseUnit, exerciseLoadUnit, addedLoadUnit, addedLoadIn } from "./units.js";
 // Declared maxes (pr_attempts): unit stamping + the actual-1RM write decision.
-import { stampLoadUnits, storedAttemptUnit, isDeclaredMax, declaredMaxWrite, unitCheckMessage, unitCheckFact, replyAsksUnit, pendingUnitLoads, confirmPendingUnits, unitAnswer } from "./prAttempts.js";
+import { stampLoadUnits, storedAttemptUnit, isDeclaredMax, declaredMaxWrite, unitCheckMessage, unitCheckFact, replyAsksUnit, pendingUnitLoads, confirmPendingUnits, unitAnswer, settledLoads } from "./prAttempts.js";
 import { effectiveTier, trialActive } from "./tiers.js";
 import { CREW_ENABLED, MASTERMIND_ENABLED, CHAT_FIRST_ENABLED } from "./flags.js";
 import { buildMastermindStatic } from "./ai/card.js";
@@ -1340,9 +1340,10 @@ const TECHNIQUE_LABEL = { drop:"drop set", rest_pause:"rest-pause", cluster:"clu
 const withSetMods = (ex, base, hasWeight=false, warmupCount=0) => {
   let s = base;
   // Added / assisted bodyweight load (weighted pull-ups, assisted dips).
-  // Raw added/assist weights are ALWAYS lbs (parser convention); the display
-  // path converts them and stamps __wu with the display unit (T57).
-  const wu = ex.__wu || "lbs";
+  // The added/assist load carries its own unit (T68 added_unit; a row without one
+  // predates it and is lbs); the display path converts it and stamps __wu with
+  // the display unit (T57).
+  const wu = ex.__wu || addedLoadUnit(ex);
   if(ex.added_weight) s += ` +${ex.added_weight}${wu}`;
   else if(ex.assist_weight) s += ` −${ex.assist_weight}${wu} (assisted)`;
   // Bands / chains (resistance not on the bar).
@@ -1382,23 +1383,25 @@ export const formatSetDetails = (ex, {display=false} = {}) => {
     const du = getDisplayUnit();
     if(exerciseLoadUnit(ex)!==du){
       const cv = (w)=> (w||w===0) ? roundStat(toDisplay(w, ex.unit, du), du) : w;
-      // Added/assist weights are stored in lbs regardless of the row's unit
-      // (parser convention), so they convert FROM lbs, not from ex.unit.
-      const cvAdd = (w)=> (w||w===0) ? roundStat(toDisplay(w, "lbs", du), du) : w;
+      // Added/assist weights carry their own unit (addedLoadUnit), not the row's.
+      const cvAdd = (w)=> (w||w===0) ? roundStat(addedLoadIn(ex, w, du), du) : w;
       ex = {...ex, unit:du, __wu:du, weight:cv(ex.weight),
         added_weight: ex.added_weight!=null?cvAdd(ex.added_weight):ex.added_weight,
         assist_weight: ex.assist_weight!=null?cvAdd(ex.assist_weight):ex.assist_weight,
         set_details: Array.isArray(ex.set_details)?ex.set_details.map(x=>({...x,weight:x.weight!=null?cv(x.weight):x.weight})):ex.set_details};
     }
-  } else if(display && ex.unit==="bodyweight" && (ex.added_weight!=null||ex.assist_weight!=null)){
+  } else if(display && ex.unit==="bodyweight" && (ex.added_weight!=null||ex.assist_weight!=null||(Array.isArray(ex.set_details)&&ex.set_details.some(s=>s?.weight>0)))){
     // Weighted/assisted bodyweight rows never entered the block above, so a kg
-    // athlete saw "+45lbs" on an otherwise all-kg screen (T57).
+    // athlete saw "+45lbs" on an otherwise all-kg screen (T57). The load is read
+    // in ITS unit (T68: a kg athlete's "BW+20" is 20 kg, an lbs athlete's stays
+    // lbs) and shown in the display unit, per-set weights included.
     const du = getDisplayUnit();
-    if(du==="kg"){
-      const cvAdd = (w)=> (w||w===0) ? roundStat(toDisplay(w, "lbs", du), du) : w;
+    if(addedLoadUnit(ex)!==du){
+      const cvAdd = (w)=> (w||w===0) ? roundStat(addedLoadIn(ex, w, du), du) : w;
       ex = {...ex, __wu:du,
         added_weight: ex.added_weight!=null?cvAdd(ex.added_weight):ex.added_weight,
-        assist_weight: ex.assist_weight!=null?cvAdd(ex.assist_weight):ex.assist_weight};
+        assist_weight: ex.assist_weight!=null?cvAdd(ex.assist_weight):ex.assist_weight,
+        set_details: Array.isArray(ex.set_details)?ex.set_details.map(x=>({...x,weight:x.weight!=null?cvAdd(x.weight):x.weight})):ex.set_details};
     }
   }
   const allSets = getExerciseSets(ex);
@@ -1413,7 +1416,8 @@ export const formatSetDetails = (ex, {display=false} = {}) => {
   const working = allSets.filter(s=>!s.warmup);
   const sets = working.length ? working : allSets;
   const warmupCount = allSets.length - sets.length;
-  const u = exerciseUnit(ex)==="bodyweight" ? "" : exerciseLoadUnit(ex);
+  // A bodyweight row's per-set weights are added loads: label them with their unit (T68).
+  const u = exerciseUnit(ex)==="bodyweight" ? (sets.some(s=>s.weight>0) ? (ex.__wu||addedLoadUnit(ex)) : "") : exerciseLoadUnit(ex);
   const hasWeight = sets.some(s=>s.weight && s.weight>0);
   let base;
   // Olympic complex / rest-pause: one uniform rep scheme (e.g. "1+1", "8+3+2")
@@ -1692,8 +1696,8 @@ Rules:
 - RPE / RIR (effort): "RPE 8" or "@8" after a set = Rate of Perceived Exertion (scale 1–10, allow halves like 7.5) → set "rpe". "RIR 2", "2 in the tank", "2 reps in reserve", "left 2" → set "rir". If only one is stated, fill only that one — do NOT convert between them. "squat 5x3 225 RPE 8" → rpe:8.
 - PERCENT OF 1RM: "@ 80%", "80% of max", "at 82%" → set "percent_1rm":80 (number only). This is an intensity, NOT a weight — never put a percent in "weight". If both a percent and an absolute weight are given, record both.
 - TEMPO: a cadence like "tempo 30X1", "3-1-1-0", "3s eccentric", "2 count down" → set "tempo" to that cadence string. Do NOT put tempo in the name or notes.
-- WEIGHTED BODYWEIGHT (added load): a bodyweight movement done with EXTRA weight — "weighted pull-ups +45", "dips +90", "pull-ups w/ 25lb vest", "chin-ups holding a 35". Set "unit":"bodyweight", "weight":null, and "added_weight" to the extra pounds. "weighted pull-ups 3x5 +45" → {"name":"Weighted Pull-Up","sets":3,"reps":5,"unit":"bodyweight","added_weight":45}.
-- ASSISTED BODYWEIGHT (reduced load): band/machine assistance — "assisted pull-ups -40", "assisted dips with 50lb assist", "band-assisted pull-ups". Set "unit":"bodyweight", "weight":null, and "assist_weight" to the assistance pounds. "assisted dips 3x8 -40" → {"name":"Dip","sets":3,"reps":8,"unit":"bodyweight","assist_weight":40}.
+- WEIGHTED BODYWEIGHT (added load): a bodyweight movement done with EXTRA weight — "weighted pull-ups +45", "dips +90", "pull-ups w/ 25lb vest", "chin-ups holding a 35". Set "unit":"bodyweight", "weight":null, and "added_weight" to the extra weight as a number, exactly as written (never convert it between kg and lbs; the app works out the unit). "weighted pull-ups 3x5 +45" → {"name":"Weighted Pull-Up","sets":3,"reps":5,"unit":"bodyweight","added_weight":45}.
+- ASSISTED BODYWEIGHT (reduced load): band/machine assistance — "assisted pull-ups -40", "assisted dips with 50lb assist", "band-assisted pull-ups". Set "unit":"bodyweight", "weight":null, and "assist_weight" to the assistance as a number, exactly as written (never convert it). "assisted dips 3x8 -40" → {"name":"Dip","sets":3,"reps":8,"unit":"bodyweight","assist_weight":40}.
 - BANDS / CHAINS (accommodating resistance NOT on the bar): "squat 225 + red band", "bench with chains", "banded deadlift". Keep the bar weight in "weight" and put the description in "resistance" ("red band", "chains", "monster minis"). Do NOT add band/chain tension into the bar weight.
 - DUMBBELL / PER-HAND LOAD: when a dumbbell/kettlebell weight is stated per hand — "DB press 3x10 @ 50s", "50lb dumbbells each hand", "2x24kg" — set "load_basis":"each" and put the per-hand weight in "weight". A single/total load ("goblet squat 1x53") → "load_basis":"total" or null.
 - PLUS-SIGN "+" — decide what it means from context, in THIS priority order:
@@ -8567,6 +8571,20 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     }
   };
 
+  // ── ONE owner of "a pending load just got its unit" (T65 chips, T68 the rest) ──
+  // Every way the athlete can settle a flagged load ends here: the kg/lbs chips
+  // (confirmUnitAnswer), a chat correction (applyCorrection) and a manual edit in
+  // My Log (EditWorkoutModal via onUnitsSettled). `bank` is the settled loads
+  // ({exercises, pr_attempts}, prAttempts.js confirmPendingUnits / settledLoads);
+  // `row` is the workouts row; `parsed_data` is its saved parsed_data. Runs the
+  // derived writes once, for those loads only. An empty bank writes nothing.
+  const bankSettledUnits = async (bank, row, parsed_data) => {
+    if(!bank || (!(bank.exercises||[]).length && !(bank.pr_attempts||[]).length)) return false;
+    if(unitConfirmPending && String(unitConfirmPending.rowId)===String(row.id)) setUnitConfirmPending(null);
+    await finalizeWorkout(bank, row.raw_message||"", row.bot_reply||"", athlete, false, false, {derivedOnly:true, rowId:row.id, rowParsed:parsed_data});
+    return true;
+  };
+
   // ── T65: the athlete answered "kg or lbs?" ──────────────────────────────────
   // Writes the confirmed unit onto the row (unit_source "athlete_confirmed", which
   // the resolver counts as evidence for that lift from then on), then runs the
@@ -8586,7 +8604,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       await sbUpdate("workouts", pend.rowId, {parsed_data});
       const names = [...new Set([...bank.exercises.map(e=>e.name), ...bank.pr_attempts.map(p=>p.exercise)])].join(", ");
       setMessages(prev=>[...prev,{role:"assistant",content:`Got it. ${names} logged in ${unit==="kg"?"kg":"lbs"}.`}]);
-      await finalizeWorkout(bank, pend.msg, pend.reply, athlete, false, false, {derivedOnly:true, rowId:pend.rowId, rowParsed:parsed_data});
+      await bankSettledUnits(bank, {id:pend.rowId, raw_message:pend.msg, bot_reply:pend.reply}, parsed_data);
     }catch(_){
       setUnitConfirmPending(pend);
       setMessages(prev=>[...prev,{role:"assistant",content:"Couldn't save that. Tap kg or lbs again."}]);
@@ -8861,13 +8879,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // answer. Bank it now, once, through the same derived-writes path.
       try{
         const before = typeof target.parsed_data==="string" ? JSON.parse(target.parsed_data) : (target.parsed_data||{});
-        const wasPending = new Set([...(before.exercises||[]), ...(before.pr_attempts||[])].filter(x=>x?.unit_suspect).map(x=>normalizeExName(x.name||x.exercise||"")));
-        const settled = (x)=>x && !x.unit_suspect && x.unit_source==="correction" && wasPending.has(normalizeExName(x.name||x.exercise||""));
-        const bank = {exercises:(pd.exercises||[]).filter(settled), pr_attempts:(pd.pr_attempts||[]).filter(settled)};
-        if(bank.exercises.length || bank.pr_attempts.length){
-          if(unitConfirmPending && String(unitConfirmPending.rowId)===String(target.id)) setUnitConfirmPending(null);
-          await finalizeWorkout(bank, target.raw_message||"", target.bot_reply||"", athlete, false, false, {derivedOnly:true, rowId:target.id, rowParsed:pd});
-        }
+        await bankSettledUnits(settledLoads(before, pd), target, pd);
       }catch(_){ /* banking is additive; the corrected row is already saved */ }
 
       // Max cleanup + (if needed) program scale-back, per corrected lift.
@@ -11464,7 +11476,7 @@ ${VOICE_ATHLETE}`;
       )}
 
       {/* My Log Modal */}
-      {showLog&&<MyLogModal initialTab={myLogTab} workoutHistory={workoutHistory} athlete={athlete} onClose={()=>{setShowLog(false);setMyLogTab("workouts");}} proofDigest={proofDigest} onDigestRead={(d)=>setProofDigest(d)} onOpenProofChat={(past)=>{setShowLog(false);setChatDigest(past&&past.id?past:null);setShowProofChat(true);}} setWorkoutHistory={setWorkoutHistory} onSessionCountChanged={()=>syncSessionCountAfterChange(athlete,setAthlete)} onPainMarks={(m)=>setAthlete(prev=>({...prev,pain_marks:m}))}/>}
+      {showLog&&<MyLogModal initialTab={myLogTab} workoutHistory={workoutHistory} athlete={athlete} onClose={()=>{setShowLog(false);setMyLogTab("workouts");}} proofDigest={proofDigest} onDigestRead={(d)=>setProofDigest(d)} onOpenProofChat={(past)=>{setShowLog(false);setChatDigest(past&&past.id?past:null);setShowProofChat(true);}} setWorkoutHistory={setWorkoutHistory} onSessionCountChanged={()=>syncSessionCountAfterChange(athlete,setAthlete)} onPainMarks={(m)=>setAthlete(prev=>({...prev,pain_marks:m}))} onUnitsSettled={bankSettledUnits}/>}
 
       {/* Program View Modal */}
       {showProgram&&(
@@ -12705,7 +12717,7 @@ function CountUp({end, dur=800, style}) {
   return <span style={style}>{n}</span>;
 }
 
-function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead, onOpenProofChat, setWorkoutHistory, onSessionCountChanged, initialTab, onPainMarks}) {
+function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead, onOpenProofChat, setWorkoutHistory, onSessionCountChanged, initialTab, onPainMarks, onUnitsSettled}) {
   // initialTab is the notification deep link's landing tab (T51); every other
   // caller omits it and still opens on the workouts list.
   const [tab,setTab] = useState(initialTab || "workouts");
@@ -13147,6 +13159,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
         <EditWorkoutModal
           session={editSession}
           onClose={()=>setEditSession(null)}
+          onUnitsSettled={onUnitsSettled}
           /* Sessions in this timeline can come from EITHER the recent working set
              or the paged-in older rows. The modal used to update only
              workoutHistory, so editing a paged-in session persisted fine but left
@@ -13206,7 +13219,7 @@ const syncSessionCountAfterChange = async (athlete, setAthlete) => {
   return n;
 };
 
-function EditWorkoutModal({session, onClose, onRowUpdated}) {
+function EditWorkoutModal({session, onClose, onRowUpdated, onUnitsSettled}) {
   const parseEntry = (e) => typeof e.parsed_data==="string" ? (()=>{try{return JSON.parse(e.parsed_data);}catch{return {};}})() : (e.parsed_data||{});
 
   const [rows,setRows] = useState(()=>{
@@ -13285,6 +13298,10 @@ function EditWorkoutModal({session, onClose, onRowUpdated}) {
         const newParsedData = {...pd, exercises:newExercises};
         await sbUpdate("workouts", entry.id, {parsed_data:newParsedData});
         onRowUpdated&&onRowUpdated(entry.id, newParsedData);
+        // T68: picking a unit by hand on a load the app was asking about IS the
+        // answer the chips give. Bank it through the same function (nothing
+        // derived is written for a load still unsettled). The row is already saved.
+        try{ onUnitsSettled&&await onUnitsSettled(settledLoads(pd, newParsedData), entry, newParsedData); }catch(_){ /* banking is additive */ }
       }
       onClose();
     } catch(e){
