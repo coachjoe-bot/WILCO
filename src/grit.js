@@ -116,7 +116,7 @@ export const getExerciseSets = (ex) => {
 
 // Conversion lives in units.js (T55: single source, one constant). Imported for
 // local use and re-exported because grit.js is where most existing code gets it.
-import { toLbs, toKg, LBS_PER_KG, getDisplayUnit, toDisplay, roundStat, exerciseUnit, exerciseLoadUnit, isUnitPending } from "./units.js";
+import { toLbs, toKg, LBS_PER_KG, getDisplayUnit, toDisplay, roundStat, exerciseUnit, exerciseLoadUnit, isUnitPending, addedLoadUnit } from "./units.js";
 export { toLbs, toKg, LBS_PER_KG };
 
 // Load-bearing bodyweight movements — dips, pull-ups, chin-ups, muscle-ups — where
@@ -134,7 +134,9 @@ export const bestE1RMForExercise = (ex, bwLbs = 0) => {
   let bwLoad = 0;
   if (isBW) {
     if (!bwLbs || !LOAD_BEARING_BW.test((ex.name || "").toLowerCase())) return 0;
-    bwLoad = bwLbs + (ex.added_weight || 0) - (ex.assist_weight || 0);
+    // The added/assist load carries its own unit (T68 added_unit; no stamp = lbs).
+    const au = addedLoadUnit(ex);
+    bwLoad = bwLbs + toLbs(ex.added_weight || 0, au) - toLbs(ex.assist_weight || 0, au);
     if (bwLoad <= 0) return 0;
   }
   const all = getExerciseSets(ex);
@@ -991,7 +993,12 @@ export const showMax = (lbs, unit = "lbs") => unit === "kg" ? `${Math.round((lbs
 // mix units by lift: barbell in kg, bench in lbs). A kg athlete who typed
 // "bench 3x5 @ 225" was handed "102.1 kg" and the reply came back reconciling
 // the two aloud ("225 lbs is 102 kg, up around 112.5 on the kg side").
-export const factUnit = (ex, unit = "lbs") => (ex && (ex.unit === "kg" || ex.unit === "lbs") ? ex.unit : (unit === "kg" ? "kg" : "lbs"));
+// A bodyweight lift's added load speaks in the unit IT was logged in (units.js addedLoadUnit).
+export const factUnit = (ex, unit = "lbs") => {
+  if (ex && (ex.unit === "kg" || ex.unit === "lbs")) return ex.unit;
+  if (ex && ex.unit === "bodyweight" && (ex.added_unit === "kg" || ex.added_unit === "lbs")) return addedLoadUnit(ex);
+  return unit === "kg" ? "kg" : "lbs";
+};
 export function prCheckLines(exercises, best, unit = "lbs") {
   const lines = [];
   for (const ex of Array.isArray(exercises) ? exercises : []) {

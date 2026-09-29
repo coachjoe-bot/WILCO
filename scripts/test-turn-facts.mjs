@@ -39,6 +39,13 @@ eq(performedLine({ name: "Pull-Up", sets: 3, reps: 10, unit: "bodyweight" }), "P
 eq(performedLine({ name: "Pull-Up", unit: "bodyweight", set_details: [{ reps: 8 }, { reps: 8, weight: 25 }, { reps: 8, weight: 25 }] }), "Pull-Up: 3 sets: bodyweight x 8, +25 lbs x 8, +25 lbs x 8", "weighted bodyweight per set");
 eq(performedLine({ name: "Weighted Pull-Up", sets: 3, reps: 5, unit: "bodyweight", added_weight: 45 }), "Weighted Pull-Up: 3 sets of 5, bodyweight plus 45 lbs", "added weight");
 eq(performedLine({ name: "Weighted Sit-Up", unit: "bodyweight" }), null, "bodyweight with no reps is skipped");
+// T68: the unit of an added load rides on the row (added_unit); a row without it is lbs, as before
+eq(performedLine({ name: "Weighted Pull-Up", sets: 3, reps: 5, unit: "bodyweight", added_weight: 20, added_unit: "kg" }, { displayUnit: "kg" }), "Weighted Pull-Up: 3 sets of 5, bodyweight plus 20 kg", "kg athlete's BW+20 reads 20 kg, not 20 lbs");
+eq(performedLine({ name: "Weighted Pull-Up", sets: 3, reps: 5, unit: "bodyweight", added_weight: 20, added_unit: "kg" }, { displayUnit: "lbs" }), "Weighted Pull-Up: 3 sets of 5, bodyweight plus 20 kg", "the same row for an lbs reader: Joe is handed the unit it was logged in (T68), never a conversion");
+eq(performedLine({ name: "Weighted Pull-Up", sets: 3, reps: 5, unit: "bodyweight", added_weight: 45 }, { displayUnit: "lbs" }), "Weighted Pull-Up: 3 sets of 5, bodyweight plus 45 lbs", "a legacy row (no added_unit) keeps its meaning: lbs");
+eq(performedLine({ name: "Dip", sets: 3, reps: 8, unit: "bodyweight", assist_weight: 20, added_unit: "kg" }, { displayUnit: "kg" }), "Dip: 3 sets of 8, bodyweight, 20 kg assisted", "assist load in kg");
+eq(performedLine({ name: "Pull-Up", unit: "bodyweight", added_unit: "kg", set_details: [{ reps: 8 }, { reps: 8, weight: 25 }, { reps: 8, weight: 25 }] }, { displayUnit: "kg" }), "Pull-Up: 3 sets: bodyweight x 8, +25 kg x 8, +25 kg x 8", "per-set added loads in kg");
+eq(performedLine({ name: "Pull-Up", unit: "bodyweight", set_details: [{ reps: 8 }, { reps: 8, weight: 25 }] }), "Pull-Up: 2 sets: bodyweight x 8, +25 lbs x 8", "no display unit and no stamp: unchanged");
 // timed
 eq(performedLine({ name: "Plank", sets: 2, time_per_set_seconds: 60, unit: "bodyweight" }), "Plank: 2 sets of 60 s held", "timed work");
 // plan 5x2 vs logged 5x3 in a multi-line program; ambiguous plan says nothing

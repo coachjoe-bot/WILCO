@@ -11,7 +11,7 @@
 // Pure. Reads set_details first (the per-set truth), the flat fields second.
 
 import { resolveLift, getExerciseSets, liftTier, toLbs, factUnit } from "./grit.js";
-import { toDisplay, roundStat } from "./units.js";
+import { toDisplay, roundStat, addedLoadUnit, addedLoadIn } from "./units.js";
 import { parseProgramShape, extractDaySessionText } from "./programPosition.js";
 
 const fmtNum = (n) => (Number.isInteger(n) ? String(n) : String(Math.round(n * 10) / 10));
@@ -64,17 +64,21 @@ export function performedLine(ex, { displayUnit, planText } = {}) {
   const du = bodyweight ? (displayUnit === "kg" || displayUnit === "lbs" ? displayUnit : "lbs") : factUnit(ex, displayUnit);
   const w = (v) => (ex.unit === du || bodyweight ? fmtNum(v) : fmtNum(roundStat(toDisplay(v, ex.unit, du), du)));
   const U = unitLabel(bodyweight ? "lbs" : du);
+  // A bodyweight row's added/assist/per-set load is in ITS OWN unit (T68 added_unit,
+  // no stamp = lbs for the value); it is stated in the unit it was logged in.
+  const bu = factUnit(ex, displayUnit); // the unit the added load was logged in, else the reader's
+  const bw$ = (v) => `${fmtNum(roundStat(addedLoadIn(ex, v, bu), bu))} ${unitLabel(bu)}`;
   const each = ex.load_basis === "each" ? " each" : "";
   const n = sets.length;
   let body;
 
   if (bodyweight) {
-    const added = ex.added_weight > 0 ? ` plus ${fmtNum(ex.added_weight)} lbs` : ex.assist_weight > 0 ? `, ${fmtNum(ex.assist_weight)} lbs assisted` : "";
+    const added = ex.added_weight > 0 ? ` plus ${bw$(ex.added_weight)}` : ex.assist_weight > 0 ? `, ${bw$(ex.assist_weight)} assisted` : "";
     const perSetLoad = sets.some((s) => s.weight > 0);
     const statedReps = ex.reps > 0 || (Array.isArray(ex.set_details) && ex.set_details.some((s) => s && s.reps > 0));
     if (!statedReps) return null; // no reps, no time: nothing true to state
     if (perSetLoad) {
-      body = `${n} set${n === 1 ? "" : "s"}: ${sets.map((s) => (s.weight > 0 ? `+${fmtNum(s.weight)} lbs x ${s.reps}` : `bodyweight x ${s.reps}`)).join(", ")}`;
+      body = `${n} set${n === 1 ? "" : "s"}: ${sets.map((s) => (s.weight > 0 ? `+${bw$(s.weight)} x ${s.reps}` : `bodyweight x ${s.reps}`)).join(", ")}`;
     } else if (sameReps) {
       body = `${n} set${n === 1 ? "" : "s"} of ${scheme || repsList[0]}, bodyweight${added}`;
     } else {
@@ -224,13 +228,16 @@ const topSet = (ex) => {
     return !b || l > b.load || (l === b.load && s.reps > b.reps) ? { load: l, reps: s.reps } : b;
   }, null);
 };
-const lbsOf = (ex, load) => (ex.unit === "bodyweight" ? load : toLbs(load, ex.unit));
+const lbsOf = (ex, load) => (ex.unit === "bodyweight" ? toLbs(load, addedLoadUnit(ex)) : toLbs(load, ex.unit));
 
 // unit: the unit to say it in. A lift speaks in the unit it was logged in; a
 // comparison (today vs last time) is said in TODAY's unit for both numbers.
 function setText(ex, top, unit) {
   if (!top) return "";
-  if (ex.unit === "bodyweight") return top.load > 0 ? `bodyweight plus ${fmtNum(top.load)} lbs x ${top.reps}` : `bodyweight x ${top.reps}`;
+  if (ex.unit === "bodyweight") {
+    const bu = unit === "kg" || unit === "lbs" ? unit : addedLoadUnit(ex);
+    return top.load > 0 ? `bodyweight plus ${fmtNum(roundStat(addedLoadIn(ex, top.load, bu), bu))} ${unitLabel(bu)} x ${top.reps}` : `bodyweight x ${top.reps}`;
+  }
   const du = unit === "kg" || unit === "lbs" ? unit : ex.unit;
   const w = ex.unit === du ? fmtNum(top.load) : fmtNum(roundStat(toDisplay(top.load, ex.unit, du), du));
   return `${w} ${unitLabel(du)}${ex.load_basis === "each" ? " each" : ""} x ${top.reps}`;

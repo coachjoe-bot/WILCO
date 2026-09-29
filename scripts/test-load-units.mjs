@@ -12,9 +12,12 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { resolveLoadUnits, stampLoadUnits, stampAttemptUnits, loadChains, writtenUnit, liftRecentBestLbs, unitCheckMessage, unitCheckFact, replyAsksUnit, pendingUnitLoads, confirmPendingUnits, unitAnswer, CONFIRMED_SOURCES } from "../src/prAttempts.js";
 import { normalizeExName, bestE1RMForExercise, implausibleJump, toLbs, sessionTonnage, sessionTopSet, prCheckLines } from "../src/grit.js";
-import { logTurnExercises } from "../src/turnFacts.js";
+import { logTurnExercises, performedLine } from "../src/turnFacts.js";
 import { exerciseUnit, exerciseLoadUnit, isUnitPending } from "../src/units.js";
 import { draftInUnit } from "../src/boot.js";
+// T68 names, read off the namespace so a run against older code fails an assert instead of crashing the suite.
+import * as PA from "../src/prAttempts.js";
+import * as UN from "../src/units.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 let pass = 0, fail = 0;
@@ -448,7 +451,124 @@ console.log("one voice per turn:");
   const app = readFileSync(join(here, "../src/App.jsx"), "utf8");
   ok(/unitCheckContext\?`\\n\\n\$\{unitCheckContext\}`:""/.test(app), "the fact rides in Joe's dynamic context");
   ok(/replyAsksUnit\(reply, unitChecks\) \? "" : unitCheckMessage\(unitChecks\)/.test(app), "finalizeWorkout suppresses its ask when Joe already asked");
-  ok(/if\(ex\.unit_suspect\)\{ unitChecks\.push/.test(app) && /await finalizeWorkout\(bank, pend\.msg, pend\.reply, athlete, false, false, \{derivedOnly:true/.test(app), "pending loads skip the derived writes; the answer runs them once in derivedOnly mode");
+  ok(/if\(ex\.unit_suspect\)\{ unitChecks\.push/.test(app) && /await finalizeWorkout\(bank, row\.raw_message\|\|"", row\.bot_reply\|\|"", athlete, false, false, \{derivedOnly:true/.test(app), "pending loads skip the derived writes; the answer runs them once in derivedOnly mode (T68: through the one bank function)");
+}
+
+// 20 ── T68 bug 1: the unit of an ADDED load on a bodyweight lift ("BW+20")
+// The exercise's own unit is "bodyweight", so the load carried no unit and every
+// reader assumed lbs: a kg athlete's "Weighted pull-ups 3x5 BW+20" was read as 20
+// LBS everywhere. The same resolver order decides it now, and the answer is stored
+// beside the number as added_unit / added_unit_source. Old rows have no field and
+// keep today's meaning (lbs).
+console.log("added load on a bodyweight lift (T68):");
+{
+  const NOW = Date.now();
+  const AS = (message, du, exercises, history = []) => stampLoadUnits({ exercises, pr_attempts: [] }, { displayUnit: du, message, normalizeName: normalizeExName, history, now: NOW }).exercises;
+  const wpu = (extra = {}) => ({ name: "Weighted Pull-Up", sets: 3, reps: 5, unit: "bodyweight", weight: null, added_weight: 20, ...extra });
+  const pair = (x) => [x.unit, x.added_unit, x.added_unit_source];
+  eq(pair(AS("Weighted pull-ups 3x5 BW+20", "kg", [wpu()])[0]), ["bodyweight", "kg", "display"], "kg athlete, nothing written: the 20 is kg (was read as lbs)");
+  eq(pair(AS("Weighted pull-ups 3x5 BW+20", "lbs", [wpu()])[0]), ["bodyweight", "lbs", "display"], "lbs athlete: lbs, as before");
+  eq(pair(AS("Weighted pull-ups 3x5 BW+20lbs", "kg", [wpu()])[0]), ["bodyweight", "lbs", "written"], "written lbs beats a kg athlete");
+  eq(pair(AS("Weighted pull-ups 3x5 BW+20kg", "lbs", [wpu()])[0]), ["bodyweight", "kg", "written"], "written kg beats an lbs athlete");
+  eq(pair(AS("weighted pull-ups 3x5 +20 kilos", "lbs", [wpu()])[0]), ["bodyweight", "kg", "written"], "kilos is kg");
+  eq(AS("Weighted pull-ups 3x5 BW+20", "kg", [wpu()])[0].added_weight, 20, "the number is stored as typed, never converted");
+  ok(!AS("Weighted pull-ups 3x5 BW+20", "kg", [wpu()])[0].unit_suspect, "an added load is never flagged");
+  // assisted, and per-set weights on a bodyweight row
+  eq(pair(AS("assisted dips 3x8 -40", "kg", [{ name: "Dip", sets: 3, reps: 8, unit: "bodyweight", assist_weight: 40 }])[0]), ["bodyweight", "kg", "display"], "assist load: kg athlete -> kg");
+  eq(pair(AS("assisted dips 3x8 -40lb", "kg", [{ name: "Dip", sets: 3, reps: 8, unit: "bodyweight", assist_weight: 40 }])[0]), ["bodyweight", "lbs", "written"], "assist load written in lbs");
+  const ramp = { name: "Pull-Up", unit: "bodyweight", set_details: [{ weight: 0, reps: 8 }, { weight: 25, reps: 8 }, { weight: 25, reps: 8 }] };
+  eq(pair(AS("Pull-ups 3x8 BW/+25kg/+25kg", "lbs", [ramp])[0]), ["bodyweight", "kg", "written"], "per-set weights: the chain's unit covers them");
+  eq(pair(AS("Pull-ups 3x8 BW/25/25", "kg", [ramp])[0]), ["bodyweight", "kg", "display"], "per-set weights, nothing written: the athlete's unit");
+  // a unit never carries to the next lift; the same lift elsewhere in the message does
+  eq(AS("weighted pull-ups 3x5 +20kg, then dips 3x8 +45", "lbs", [wpu(), { name: "Dip", sets: 3, reps: 8, unit: "bodyweight", added_weight: 45 }]).map((x) => x.added_unit), ["kg", "lbs"], "kg stays on the pull-ups; the dips follow the athlete");
+  eq(AS("weighted pull-ups 3x5 +20kg, then 1x8 weighted pull-ups +10", "lbs", [wpu(), wpu({ sets: 1, reps: 8, added_weight: 10 })]).map((x) => [x.added_unit, x.added_unit_source]), [["kg", "written"], ["kg", "same-lift"]], "the same lift elsewhere in the message");
+  // step 4: this lift's recent added loads
+  const hrow = (daysAgo, added_unit, src, raw = "Weighted pull-ups 3x5 +20") => ({ id: `h${daysAgo}`, created_at: new Date(NOW - daysAgo * 86400000).toISOString(), raw_message: raw,
+    parsed_data: { exercises: [wpu(added_unit ? { added_unit, added_unit_source: src } : {})] } });
+  eq(pair(AS("Weighted pull-ups 3x5 +25", "kg", [wpu({ added_weight: 25 })], [hrow(3, "lbs", "written"), hrow(8, "lbs", "written"), hrow(15, "lbs", "history")])[0]), ["bodyweight", "lbs", "history"], "a kg athlete who loads pull-ups in lbs: the lift's history wins over the setting");
+  eq(pair(AS("Weighted pull-ups 3x5 +25", "lbs", [wpu({ added_weight: 25 })], [hrow(3, "kg", "written"), hrow(8, "kg", "display"), hrow(15, "lbs", "display")])[0]), ["bodyweight", "kg", "history"], "unit switch: the most recent written log settles it");
+  eq(pair(AS("Weighted pull-ups 3x5 +25", "kg", [wpu({ added_weight: 25 })], [hrow(3), hrow(8), hrow(15)])[0]), ["bodyweight", "kg", "display"], "old rows carry no added_unit: they are not evidence, the setting decides");
+  // stamped is final, idempotent, and only the weighted rows change
+  const once = stampLoadUnits({ exercises: [wpu()], pr_attempts: [] }, { displayUnit: "kg", message: "Weighted pull-ups 3x5 BW+20", normalizeName: normalizeExName });
+  eq(stampLoadUnits(once, { displayUnit: "lbs", message: "Weighted pull-ups 3x5 BW+20", normalizeName: normalizeExName }), once, "a stamped added load is final (even under another display unit)");
+  const plain = { exercises: [{ name: "Pull-Up", unit: "bodyweight", sets: 3, reps: 10 }], pr_attempts: [] };
+  eq(stampLoadUnits(plain, { displayUnit: "kg", message: "pull-ups 3x10" }), plain, "no added load: same object, no field");
+  eq(R("Weighted pull-ups 3x5 BW+20", "kg", [wpu()]).ex, ["bodyweight"], "unit stays bodyweight");
+  const v = resolveLoadUnits({ exercises: [wpu()], pr_attempts: [] }, { displayUnit: "kg", message: "Weighted pull-ups 3x5 BW+20", normalizeName: normalizeExName });
+  eq([v.exercises[0].addedUnit, v.exercises[0].addedSource], ["kg", "display"], "the resolver's verdict names the added unit and its step");
+  // flush guard: every file that reads an added/assist load resolves its unit through units.js
+  for (const d of [join(here, "../src"), join(here, "../api")]) for (const f of readdirSync(d).filter((x) => /\.(js|jsx)$/.test(x))) {
+    const src = readFileSync(join(d, f), "utf8");
+    if (!/\b(added_weight|assist_weight)\b/.test(src)) continue;
+    ok(/addedLoad(Unit|In)/.test(src), `${f} reads added_weight/assist_weight and resolves the unit through addedLoadUnit/addedLoadIn`);
+  }
+  // the readers' one helper
+  ok(typeof UN.addedLoadUnit === "function", "units.addedLoadUnit exists");
+  if (typeof UN.addedLoadUnit === "function") {
+    eq(UN.addedLoadUnit({ unit: "bodyweight", added_weight: 20, added_unit: "kg" }), "kg", "reads the stamp");
+    eq(UN.addedLoadUnit({ unit: "bodyweight", added_weight: 20 }), "lbs", "legacy row: lbs, exactly as before");
+    eq(UN.addedLoadUnit({ unit: "bodyweight", added_weight: 20, added_unit: "stone" }), "lbs", "junk stamp: lbs");
+    eq(Math.round(UN.addedLoadIn({ added_unit: "kg" }, 20, "lbs") * 10) / 10, 44.1, "20 kg is 44.1 lbs");
+    eq(UN.addedLoadIn({ added_unit: "kg" }, 20, "kg"), 20, "same unit: identity");
+    eq(UN.addedLoadIn({}, 45, "lbs"), 45, "legacy lbs row read in lbs: identity");
+  }
+  // e1RM: a kg athlete's +20 is 44 lbs of load, not 20
+  const kgRow = { name: "Weighted Pull-Up", unit: "bodyweight", sets: 1, reps: 5, added_weight: 20, added_unit: "kg" };
+  const lbRow = { ...kgRow, added_unit: undefined };
+  ok(bestE1RMForExercise(kgRow, 180) > bestE1RMForExercise(lbRow, 180), "e1RM: 20 kg adds more than 20 lbs");
+  eq(Math.round(bestE1RMForExercise(kgRow, 180)), Math.round((180 + 20 * UN.LBS_PER_KG) * (1 + 5 / 30)), "e1RM: (180 lb bodyweight + 20 kg) x5 through Epley");
+  ok(bestE1RMForExercise({ ...kgRow, added_weight: undefined, assist_weight: 20 }, 180) < bestE1RMForExercise({ ...lbRow, added_weight: undefined, assist_weight: 20 }, 180), "e1RM: 20 kg of assistance takes off more than 20 lbs");
+}
+
+// 21 ── T68 bug 2: which loads did a hand edit settle?
+console.log("loads settled by an edit (T68):");
+{
+  ok(typeof PA.settledLoads === "function", "prAttempts.settledLoads exists");
+  if (typeof PA.settledLoads === "function") {
+    const bench = { name: "Bench Press", sets: 3, reps: 5, weight: 225, unit: "kg", unit_source: "history", unit_suspect: true };
+    const squat = { name: "Back Squat", sets: 5, reps: 3, weight: 140, unit: "kg", unit_source: "written" };
+    const before = { exercises: [bench, squat], pr_attempts: [{ exercise: "Bench Press", weight: 225, reps: 1, achieved: true, unit: "kg", unit_source: "history", unit_suspect: true }] };
+    const edited = (u) => ({ ...bench, unit: u, unit_source: "edit", unit_suspect: undefined });
+    const noFlag = (x) => { const { unit_suspect, ...r } = x; return r; };
+    // the athlete picks the other unit in the edit sheet: the flag is gone, the load is settled
+    let b = PA.settledLoads(before, { exercises: [noFlag(edited("lbs")), squat], pr_attempts: before.pr_attempts });
+    eq(b.exercises.map((x) => [x.name, x.unit, x.unit_source]), [["Bench Press", "lbs", "edit"]], "the edited flagged lift is settled, with its new unit");
+    eq(b.pr_attempts, [], "a declared max still asking is not settled");
+    // a change to a different lift, or to reps only, settles nothing
+    eq(PA.settledLoads(before, { exercises: [bench, { ...squat, weight: 145 }], pr_attempts: before.pr_attempts }), { exercises: [], pr_attempts: [] }, "editing an unflagged lift settles nothing");
+    eq(PA.settledLoads(before, { exercises: [{ ...bench, reps: 4 }, squat], pr_attempts: before.pr_attempts }), { exercises: [], pr_attempts: [] }, "flag still set: still unsettled, nothing to bank");
+    // a row that was never flagged
+    const clean = { exercises: [squat], pr_attempts: [] };
+    eq(PA.settledLoads(clean, { exercises: [{ ...squat, unit: "lbs", unit_source: "edit" }], pr_attempts: [] }), { exercises: [], pr_attempts: [] }, "an unflagged row edited: nothing to bank (behaves as before)");
+    // deleting the flagged lift banks nothing
+    eq(PA.settledLoads(before, { exercises: [squat], pr_attempts: before.pr_attempts }), { exercises: [], pr_attempts: [] }, "a removed lift banks nothing");
+    // the chip path and the edit path agree on what a settled load looks like
+    const chip = confirmPendingUnits(before, "lbs");
+    eq(PA.settledLoads(before, chip.parsed_data).exercises.map((x) => x.name), chip.bank.exercises.map((x) => x.name), "same loads as the chip answer's bank (exercises)");
+    eq(PA.settledLoads(before, chip.parsed_data).pr_attempts.map((x) => x.exercise), chip.bank.pr_attempts.map((x) => x.exercise), "same loads as the chip answer's bank (declared maxes)");
+  }
+  const app = readFileSync(join(here, "../src/App.jsx"), "utf8");
+  ok(/const bankSettledUnits = async/.test(app), "App.jsx has ONE bank function");
+  ok((app.match(/await bankSettledUnits\(/g) || []).length === 2, "the chip answer and the chat correction call it");
+  ok(/onUnitsSettled=\{bankSettledUnits\}/.test(app) && /onUnitsSettled&&await onUnitsSettled\(settledLoads\(pd, newParsedData\)/.test(app), "the My Log edit sheet reports its settled loads to the same function");
+  ok((app.match(/finalizeWorkout\([^)]*derivedOnly:true/g) || []).length === 1, "derivedOnly finalize has ONE caller");
+}
+
+// 22 ── T68 replay: the kg athlete's "BW+20" and its readers
+console.log("replay t68-bw-added-unit:");
+{
+  const rp = JSON.parse(readFileSync(join(here, "../tests/replay/t68-bw-added-unit.json"), "utf8"));
+  for (const c of rp.cases) {
+    // the parser's guess makes no difference: the answer is decided in code
+    const row = c.stored ? c.parsed.exercises[0] : stampLoadUnits(c.parsed, { displayUnit: c.display_unit, message: c.raw_message, normalizeName: normalizeExName, history: c.history || [], now: c.now ? Date.parse(c.now) : Date.now() }).exercises[0];
+    const { unit_source: _u, ...stored } = row;
+    for (const [k, v] of Object.entries(c.expect_stored)) eq(row[k] ?? null, v, `${c.name}: stored ${k}`);
+    eq(Object.keys(stored).filter((k) => !(k in c.parsed.exercises[0]) && !["added_unit", "added_unit_source"].includes(k)), [], `${c.name}: nothing else added to the row`);
+    const rd = c.expect_readers;
+    if (rd.performed_line_kg) eq(performedLine(row, { displayUnit: "kg" }), rd.performed_line_kg, `${c.name}: Joe's performed line, kg athlete (stated in the unit it was logged in)`);
+    if (rd.performed_line_lbs) eq(performedLine(row, { displayUnit: "lbs" }), rd.performed_line_lbs, `${c.name}: Joe's performed line, lbs athlete (stated in the unit it was logged in)`);
+    eq(Math.round(bestE1RMForExercise(row, rp.athlete_bodyweight_lbs)), rd.e1rm_lbs, `${c.name}: e1RM in lbs`);
+  }
 }
 
 // 15 ── writtenUnit (the stored-row reader shares the chain reading)

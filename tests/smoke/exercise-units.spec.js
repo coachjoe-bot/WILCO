@@ -177,3 +177,64 @@ test("a typed 'kg' answers the unit question too", async ({ page }) => {
   expect(calls.filter((c) => c.body?.feature === "workout_parse").length).toBe(before); // never parsed as a log
   await expect.poll(() => inserts(calls, "prs").filter((r) => /bench/i.test(r.exercise) && r.unit === "kg").length).toBe(1);
 });
+
+// ─── T68 bug 2: a manual Edit that settles the unit banks the lift ────────────
+// The chips answer the question through confirmUnitAnswer; the athlete can also
+// fix the unit in My Log's Edit sheet. That edit cleared the flag but never ran
+// the derived writes, so the estimated max and the actual 1RM for that lift were
+// not banked until some later log. Both paths now call the ONE bank function.
+const openEditSheet = async (page) => {
+  await page.getByRole("button", { name: /MY LOG/ }).click();
+  await page.getByRole("button", { name: /Edit/ }).first().click();
+  await expect(page.getByText("EDIT WORKOUT")).toBeVisible();
+};
+const unitSelect = (page) => page.locator("select").filter({ has: page.locator('option[value="bodyweight"]') }).first();
+const saveEdit = (page) => page.getByRole("button", { name: /^Save/ }).click();
+const workoutUpdates = (calls) => calls.filter((c) => c.url.endsWith("/api/data") && c.body?.op === "update" && c.body?.table === "workouts");
+
+test("T68: editing the flagged lift's unit in My Log banks the same derived writes as the chips", async ({ page }) => {
+  const { calls } = await flagged(page, "Solid pressing today.");
+  await expect(page.getByRole("button", { name: "It was lbs" })).toBeVisible({ timeout: 15000 });
+  await page.waitForTimeout(1000);
+  expect(inserts(calls, "prs").filter((r) => /bench/i.test(r.exercise))).toHaveLength(0); // flagged: nothing derived yet
+  await openEditSheet(page);
+  await unitSelect(page).selectOption("lbs");
+  await saveEdit(page);
+  // The row carries the athlete's unit, flag cleared.
+  await expect.poll(() => workoutUpdates(calls).some((c) => c.body.data?.parsed_data?.exercises?.[0]?.unit === "lbs" &&
+    c.body.data.parsed_data.exercises[0].unit_source === "edit" && !c.body.data.parsed_data.exercises[0].unit_suspect)).toBe(true);
+  // ...and the derived writes ran: an estimated-max row in the settled unit, once.
+  await expect.poll(() => inserts(calls, "prs").filter((r) => /bench/i.test(r.exercise)).length).toBe(1);
+  const pr = inserts(calls, "prs").find((r) => /bench/i.test(r.exercise));
+  expect([pr.unit, Number(pr.weight)]).toEqual(["lbs", 225]);
+  expect(inserts(calls, "workouts")).toHaveLength(1); // still no second workout row
+});
+
+test("T68: an edit that leaves the flagged load unsettled writes nothing derived", async ({ page }) => {
+  const { calls } = await flagged(page, "Solid pressing today.");
+  await expect(page.getByRole("button", { name: "It was lbs" })).toBeVisible({ timeout: 15000 });
+  await openEditSheet(page);
+  await page.locator('input[type="number"]').nth(1).fill("4"); // reps only; the unit is untouched
+  await saveEdit(page);
+  await expect.poll(() => workoutUpdates(calls).some((c) => c.body.data?.parsed_data?.exercises?.[0]?.reps === 4)).toBe(true);
+  const saved = workoutUpdates(calls).find((c) => c.body.data?.parsed_data?.exercises?.[0]?.reps === 4).body.data.parsed_data.exercises[0];
+  expect(saved.unit_suspect).toBe(true); // still asking
+  await page.waitForTimeout(1500);
+  expect(inserts(calls, "prs").filter((r) => /bench/i.test(r.exercise))).toHaveLength(0);
+  expect(inserts(calls, "manual_one_rms").filter((r) => /bench/i.test(r.exercise))).toHaveLength(0);
+});
+
+test("T68: editing a row that was never flagged writes no derived rows (behaves as before)", async ({ page }) => {
+  const athlete = makeAthlete({ weight_unit: "kg" });
+  const parseResult = { ...emptyParse, exercises: [{ name: "Back Squat", sets: 5, reps: 3, weight: 140, unit: null }] };
+  const { calls } = await mockApi(page, { athlete, parseResult, chatReply: "Five triples at 140." });
+  await loginAsAthlete(page, athlete);
+  await typeAndSend(page, "squat 5x3 at 140");
+  await expect.poll(() => inserts(calls, "prs").filter((r) => /squat/i.test(r.exercise)).length).toBe(1);
+  await openEditSheet(page);
+  await page.locator('input[type="number"]').nth(2).fill("145"); // weight
+  await saveEdit(page);
+  await expect.poll(() => workoutUpdates(calls).some((c) => c.body.data?.parsed_data?.exercises?.[0]?.weight === 145)).toBe(true);
+  await page.waitForTimeout(1500);
+  expect(inserts(calls, "prs").filter((r) => /squat/i.test(r.exercise))).toHaveLength(1); // the log's own row, nothing added by the edit
+});
