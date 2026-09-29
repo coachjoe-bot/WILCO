@@ -170,6 +170,10 @@ try {
     inv.noUnitMislabel = slips.length === 0;
     const okAll = Object.values(inv).every(Boolean);
     if (!okAll) failed++;
+    if (!inv.rowSaved) {
+      await page.screenshot({ path: `${OUT.replace(/\.json$/, "")}-${sc.id}-run${run}.png`, fullPage: true }).catch(() => {});
+      fs.writeFileSync(`${OUT.replace(/\.json$/, "")}-${sc.id}-run${run}.txt`, screen);
+    }
     results.push({ run, id: sc.id, name: sc.name, displayUnit: sc.unit, msg, parserEx, slips, saved: exs.map((e) => ({ name: e.name, weight: e.weight, unit: e.unit })), prs, reply: replyText, inv });
     fs.writeFileSync(OUT, JSON.stringify(results, null, 2));
     console.log(`${okAll ? "✓" : "✗"} run ${run} ${sc.name}\n    sent:   ${JSON.stringify(msg.slice(0, 200))}\n    parser: ${JSON.stringify(parserEx)}\n    saved:  ${JSON.stringify(exs.map((e) => `${e.name} ${e.weight} ${e.unit}`))}\n    prs:    ${JSON.stringify(prs.map((p) => `${p.exercise} ${p.weight}${p.unit} x${p.reps} e1rm ${p.estimated_1rm}`))}\n    inv:    ${JSON.stringify(inv)}${slips.length ? `\n    SLIPS:  ${JSON.stringify(slips)}` : ""}\n    reply:  ${JSON.stringify(replyText.slice(0, 260))}`);
