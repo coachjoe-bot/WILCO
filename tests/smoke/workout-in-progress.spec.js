@@ -377,3 +377,46 @@ test("the rec bar comes back when the log sheet closes", async ({ page }) => {
   await expect(recX).toBeVisible();
   await expect(page.getByRole("button", { name: "Take it off the screen", exact: true })).toBeVisible();
 });
+
+// Will 09-29: "leave it until its dealt with by the athlete." A workout started
+// and never finished comes back on any later day, dated to the day it was started.
+test("a workout started two days ago and never finished: the bar is back, dated to the day it was started", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const { calls } = await mockApi(page, { athlete, chatReply: DRAFT_REPLY, token: liveToken() });
+  await startAndEdit(page, athlete);
+  // Two days pass with the app closed.
+  const TWO_DAYS = 2 * 24 * 60 * 60 * 1000;
+  const startedDay = await page.evaluate(({ id, back }) => {
+    const k = `wilco_quicklog_${id}`; const d = JSON.parse(localStorage.getItem(k));
+    d.savedAt -= back; d.dockedAt = (d.dockedAt || Date.now()) - back;
+    localStorage.setItem(k, JSON.stringify(d));
+    for (const key of Object.keys(localStorage)) if (/^wilco_(chat_|today_opener_|opener_choice_|workoutstart)/.test(key)) localStorage.removeItem(key);
+    const s = new Date(d.dockedAt);
+    return `${s.getFullYear()}-${String(s.getMonth() + 1).padStart(2, "0")}-${String(s.getDate()).padStart(2, "0")}`;
+  }, { id: athlete.id, back: TWO_DAYS });
+  await reopen(page);
+  const bar = page.getByText("Day 1 - Push", { exact: true }).first();
+  await expect(bar).toBeVisible({ timeout: 15000 });
+  // The opener is on screen too, but it does not offer to start a workout that is already up.
+  await expect(page.getByRole("button", { name: "Start Workout" })).toHaveCount(0);
+  await bar.click();
+  await expect(page.getByRole("textbox", { name: SHEET })).toHaveValue(EDITED);
+  await expect(page.getByLabel("Logging for date")).toHaveValue(startedDay);
+  // Finish files it on that day.
+  await page.waitForTimeout(600);
+  await page.getByRole("button", { name: "Finish Workout" }).click();
+  await expect.poll(() => (calls.find((c) => c.body?.op === "insert" && c.body?.table === "workouts" && String(c.body?.data?.raw_message || "").includes("Dips 3x12")) || {}).body?.data?.parsed_data?.log_date, { timeout: 15000 }).toBe(startedDay);
+  await expect.poll(() => parkOf(page, athlete)).toBeNull();
+});
+
+test("text left behind by the X does not come back the next day as a bar", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  await mockApi(page, { athlete, chatReply: DRAFT_REPLY, token: liveToken() });
+  await startAndEdit(page, athlete);
+  await page.getByText("Day 1 - Push", { exact: true }).first().click();
+  await page.getByRole("button", { name: "Take it off the screen", exact: true }).click();
+  await page.evaluate(({ id }) => { const k = `wilco_quicklog_${id}`; const d = JSON.parse(localStorage.getItem(k)); d.savedAt -= 26 * 60 * 60 * 1000; localStorage.setItem(k, JSON.stringify(d)); }, { id: athlete.id });
+  await reopen(page);
+  await page.waitForTimeout(1500);
+  await expect(page.getByRole("button", { name: "Take it off the screen", exact: true })).toHaveCount(0);
+});

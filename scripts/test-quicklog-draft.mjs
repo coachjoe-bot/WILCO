@@ -17,7 +17,7 @@ globalThis.localStorage = {
 
 const { qlKey, qlStamp, qlLoad, qlSave, qlClear, qlPositionConflict, QL_RESUME_MS,
         qlStampHead, qlStampMatches, qlPeek, qlEdit, qlSetDock, qlSetSheetDate, qlRestamp,
-        qlResumeDock,
+        qlResumeDock, qlSheetDateOnResume,
         openerLoad, openerSave,
         looksLikeProgramText, findChatProgram, programSaveOfferAllowed, markProgramSaveOffered,
         QL_PROGRAM_OFFER_MAX, markSupersededPrograms, QL_SUPERSEDED,
@@ -493,7 +493,44 @@ check("missing athlete id is never offered", !programSaveOfferAllowed("", D1));
   reset(); store.set(qlKey(ATH), JSON.stringify({...GEN, dock:true, savedAt: new Date().setHours(0,5,0,0), stamp: qlStamp(HIST)}));
   check("a started sheet from early this morning is there all day", qlLoad(ATH, HIST) !== null);
   reset(); store.set(qlKey(ATH), JSON.stringify({...GEN, dock:true, prebuilt:false, savedAt: Date.now()-26*60*60*1000, stamp: qlStamp(HIST)}));
-  check("yesterday's unfinished sheet does not haunt today", qlLoad(ATH, HIST) === null);
+  // Will 09-29: "leave it until its dealt with by the athlete."
+  check("yesterday's unfinished sheet is still there today", qlLoad(ATH, HIST)?.draft === GEN.draft && qlResumeDock(qlLoad(ATH, HIST)) === true);
+  reset(); store.set(qlKey(ATH), JSON.stringify({...GEN, dock:true, prebuilt:false, savedAt: Date.now()-9*24*60*60*1000, dockedAt: Date.now()-9*24*60*60*1000, stamp: qlStamp(HIST)}));
+  check("nine days later it is still there", qlLoad(ATH, HIST) !== null);
+  reset(); store.set(qlKey(ATH), JSON.stringify({...GEN, dock:true, prebuilt:true, savedAt: Date.now()-3*24*60*60*1000, stamp: qlStamp(HIST)}));
+  check("a started sheet nobody typed on is kept too", qlLoad(ATH, HIST) !== null);
+  check("...but a session logged since still drops that untouched one (double-log guard)", qlLoad(ATH, [{id:"later", parsed_data:{exercises:[{name:"Squat", sets:1, reps:1, weight:100}]}}, ...HIST]) === null);
+  reset(); store.set(qlKey(ATH), JSON.stringify({...GEN, prebuilt:false, savedAt: Date.now()-26*60*60*1000, stamp: qlStamp(HIST)}));
+  check("text with NO bar (cancelled with the X) still ages out the next day", qlLoad(ATH, HIST) === null);
+  reset(); store.set(qlKey(ATH), JSON.stringify({...GEN, prebuilt:true, savedAt: Date.now()-(QL_RESUME_MS+60*1000), stamp: qlStamp(HIST)}));
+  check("an untouched, unstarted draft still ages out on the window", qlLoad(ATH, HIST) === null);
+
+  // ── the day the workout was started ──
+  const DAY = 24*60*60*1000, ymd = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; };
+  const noon = new Date(); noon.setHours(12,0,0,0); const NOW = noon.getTime();
+  reset(); qlSave(ATH, HIST, GEN);
+  check("no bar, no start time", qlLoad(ATH, HIST).dockedAt === 0);
+  qlSetDock(ATH, true);
+  const t1 = qlPeek(ATH).dockedAt;
+  check("start stamps the start time", Number.isFinite(t1) && t1 > 0);
+  qlEdit(ATH, HIST, {draft:EDITED});
+  check("an edit keeps the start time", qlPeek(ATH).dockedAt === t1);
+  qlSave(ATH, HIST, {...GEN, dock:true});
+  check("a rewrite of the park with the bar up keeps the start time", qlPeek(ATH).dockedAt === t1);
+  qlSetDock(ATH, false);
+  check("the X clears the start time", qlPeek(ATH).dockedAt === undefined);
+  qlSetDock(ATH, true);
+  check("a new start is a new start time", qlPeek(ATH).dockedAt >= t1);
+  const R = (o) => ({draft:"x", dock:true, sheetDate:"", dockedAt:NOW, ...o});
+  check("resumed the same day: today", qlSheetDateOnResume(R({dockedAt:NOW-3*60*60*1000}), NOW) === "");
+  check("resumed the next day: the day it was started", qlSheetDateOnResume(R({dockedAt:NOW-DAY}), NOW) === ymd(NOW-DAY));
+  check("started 11:40pm, resumed 12:10am: the day it was started", (() => { const late = new Date(NOW); late.setHours(23,40,0,0); const after = new Date(late.getTime()+30*60*1000); return qlSheetDateOnResume(R({dockedAt:late.getTime()}), after.getTime()) === ymd(late.getTime()); })());
+  check("14 days later: still inside the backdate window", qlSheetDateOnResume(R({dockedAt:NOW-14*DAY}), NOW) === ymd(NOW-14*DAY));
+  check("15 days later: past the window, today", qlSheetDateOnResume(R({dockedAt:NOW-15*DAY}), NOW) === "");
+  check("a date the athlete picked always stands", qlSheetDateOnResume(R({dockedAt:NOW-2*DAY, sheetDate:"2026-09-20"}), NOW) === "2026-09-20");
+  check("no bar: today", qlSheetDateOnResume(R({dock:false, dockedAt:NOW-DAY}), NOW) === "");
+  check("no start time on record: today", qlSheetDateOnResume(R({dockedAt:0}), NOW) === "");
+  check("no park: today", qlSheetDateOnResume(null, NOW) === "");
 
   // ── the date on the sheet ──
   reset(); qlSave(ATH, HIST, GEN); qlSetDock(ATH, true);

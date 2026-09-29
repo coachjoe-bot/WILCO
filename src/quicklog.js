@@ -80,7 +80,10 @@ export const qlLoad = (athleteId, workoutHistory, {cardActive=false} = {}) => {
     // same-day grace; only an untouched, unstarted speculative draft is held
     // to the rolling window alone.
     const owned = !d.prebuilt || !!d.dock;
-    if(!cardActive && (owned ? !(withinWindow || sameLocalDay) : !withinWindow)) return null;
+    // A STARTED workout (the bar is up) never expires (Will 09-29: "leave it
+    // until its dealt with by the athlete"). Finish and the X are the only
+    // ways out; the clock below only governs text with no bar on it.
+    if(!cardActive && !d.dock && (owned ? !(withinWindow || sameLocalDay) : !withinWindow)) return null;
     if(!qlStampMatches(d.stamp, workoutHistory)) return null;
     return {
       draft: d.draft,
@@ -89,6 +92,8 @@ export const qlLoad = (athleteId, workoutHistory, {cardActive=false} = {}) => {
       prebuilt: !!d.prebuilt,
       // When the park was last written (a generate, an edit, a start).
       savedAt: d.savedAt||0,
+      // When the bar went up: the day the workout was started.
+      dockedAt: d.dock ? (d.dockedAt || d.savedAt || 0) : 0,
       // dock: the workout bar is up, a session is in progress. Survives a cold
       // boot so the bar comes back with the same text; goes false on Finish
       // (the park is cleared) and on the bar's X.
@@ -125,6 +130,8 @@ export const qlLoad = (athleteId, workoutHistory, {cardActive=false} = {}) => {
 export const qlSave = (athleteId, workoutHistory, {draft, notes, undoStack, prebuilt, prep, targetDate, position, dock, sheetDate}) => {
   try{
     if(!draft||!draft.trim()){ qlClear(athleteId); return; }
+    // The start time rides along with the bar through every rewrite of the park.
+    const was = dock ? qlPeek(athleteId) : null;
     localStorage.setItem(qlKey(athleteId), JSON.stringify({
       draft,
       notes: notes||"",
@@ -133,6 +140,7 @@ export const qlSave = (athleteId, workoutHistory, {draft, notes, undoStack, preb
       stamp: qlStamp(workoutHistory),
       prebuilt: !!prebuilt,
       dock: dock ? true : undefined,
+      dockedAt: dock ? ((was && was.dock && was.dockedAt) || Date.now()) : undefined,
       sheetDate: typeof sheetDate==="string" && sheetDate ? sheetDate : undefined,
       prep: prep && (prep.warmup||prep.cooldown) ? {warmup:!!prep.warmup, cooldown:!!prep.cooldown} : undefined,
       targetDate: typeof targetDate==="string" && targetDate ? targetDate : undefined,
@@ -214,8 +222,8 @@ const qlPatch = (athleteId, patch) => {
 export const qlSetDock = (athleteId, on) => {
   const cur = qlPeek(athleteId);
   if(!cur) return false;
-  if(on) return cur.dock ? true : qlPatch(athleteId, {dock:true, savedAt:Date.now()});
-  return qlPatch(athleteId, {dock:undefined});
+  if(on) return cur.dock ? true : qlPatch(athleteId, {dock:true, savedAt:Date.now(), dockedAt:Date.now()});
+  return qlPatch(athleteId, {dock:undefined, dockedAt:undefined});
 };
 
 export const qlSetSheetDate = (athleteId, sheetDate) =>
@@ -230,6 +238,21 @@ export const qlRestamp = (athleteId, workoutHistory) => {
   const cur = qlPeek(athleteId);
   if(!cur || !cur.dock || cur.prebuilt) return false;
   return qlPatch(athleteId, {stamp: qlStamp(workoutHistory)});
+};
+
+// The date the sheet shows when the bar comes back. A date the athlete picked
+// always stands. With none picked, a workout resumed on a LATER day than it was
+// started shows the day it was started (the usual case is a session that was
+// trained and never finished in the app), as long as that day is still inside
+// the backdate window. The date sits on the sheet's footer, one tap to change.
+// "" means today.
+export const qlSheetDateOnResume = (rec, now) => {
+  if(!rec) return "";
+  if(typeof rec.sheetDate==="string" && rec.sheetDate) return rec.sheetDate;
+  if(!rec.dock || !rec.dockedAt) return "";
+  const today = qlMidnight(now), started = qlMidnight(rec.dockedAt);
+  const days = Math.round((today - started) / 86400000);
+  return days >= 1 && days <= QL_MAX_BACKDATE_DAYS ? qlYmd(started) : "";
 };
 
 // Should the bar come back on this boot? Pure: the caller hands over what

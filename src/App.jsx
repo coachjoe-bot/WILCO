@@ -44,7 +44,7 @@ import WORDMARK from "./assets/wilco-wordmark.png";
 // and pick it back up (expiry window, staleness check, clear-on-send).
 import {
   qlLoad, qlSave, qlClear, qlPositionConflict, splitQuickLogReply, streamQuickLogReply,
-  qlPeek, qlEdit, qlSetDock, qlSetSheetDate, qlRestamp, qlResumeDock,
+  qlPeek, qlEdit, qlSetDock, qlSetSheetDate, qlRestamp, qlResumeDock, qlSheetDateOnResume,
   qlMarkUsed, qlPrebuildEligible, qlMarkPrebuilt, openerLoad, openerSave,
   openerChoiceMadeToday, markOpenerChoice,
   findChatProgram, looksLikeProgramText, programSaveOfferAllowed, markProgramSaveOffered,
@@ -7220,7 +7220,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // The bar is state that outlives the app (Will 09-29): the park
         // records that it is up, so a cold boot raises it again with the same
         // text and the same date, lock-screen card or no card.
-        setSheetDate(rec.sheetDate||"");
+        setSheetDate(qlSheetDateOnResume(rec));
         qlSetDock(athlete.id, true);
         return true;
       }
