@@ -202,6 +202,26 @@ export const validPainMarks = (v) => {
       : x === null || (typeof x === "string" && x.length <= 40 && Number.isFinite(Date.parse(x))))));
 };
 
+// ── Server-only athlete columns ───────────────────────────────────────────────
+// Columns no gateway caller may ever write, whatever their role. ATHLETE_COL_ALLOW
+// already keeps an ATHLETE out of everything it does not list, but coach writes to
+// `athletes` have no column allowlist (a coach sets program_text, program_locked,
+// coach_context and more on their roster), so a coach could have set these too.
+//   comped — Will 09-29: "never ask to charge" a founding account or a 100%-off
+//            holder. Set by the migration, the Stripe webhook and SQL only. Even
+//            master is refused here; master edits it in SQL, not through the app.
+export const SERVER_ONLY_ATHLETE_COLS = new Set(["comped"]);
+export function assertNoServerOnlyCols(table, body) {
+  if (table !== "athletes" || !body || body.op === "delete" || body.op === "read") return;
+  const rows = Array.isArray(body.data) ? body.data : [body.data];
+  for (const r of rows) {
+    if (!r || typeof r !== "object") continue;
+    for (const k of Object.keys(r)) {
+      if (SERVER_ONLY_ATHLETE_COLS.has(k)) throw httpErr(403, `Field not editable: ${k}`);
+    }
+  }
+}
+
 const ATHLETE_COL_ALLOW = {
   // T58 mastermind memory: the model writes these through tool handlers, so pin
   // the vocabulary server-side — content bounded, kind/status enums, expires_at
@@ -471,6 +491,7 @@ export default async function handler(req, res) {
 
     const table = String(body.table || "");
     if (!WRITABLE.has(table)) throw httpErr(400, `Table not writable: ${table}`);
+    assertNoServerOnlyCols(table, body); // comped etc.: no role may write these
 
     // ── Phase 1b: athlete ownership scoping ──────────────────────────────────
     // ownFilter is appended to update/delete queries (stays "" for coach callers,
