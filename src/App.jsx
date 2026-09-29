@@ -16,7 +16,7 @@ import { loadStripe } from "@stripe/stripe-js/pure";
 // Stripe's React bindings live in their own lazy chunk (src/payform.jsx) — the
 // card form is the only consumer and most sessions never reach checkout.
 const StripePayBlock = lazy(()=>import("./payform.jsx"));
-import { ConsentFlow, TERMS_VERSION, PRIVACY_VERSION } from "./legal.jsx";
+import { ConsentFlow, LegalModal, TERMS_VERSION, PRIVACY_VERSION, AI_CONSENT_VERSION } from "./legal.jsx";
 // iOS can't ship the embedded Stripe Elements payment step (App Review 3.1.1) —
 // isNativeIOS() gates the two PaymentStep call sites below to an external
 // handoff instead. Always false on web/PWA, so that path is untouched. Also
@@ -249,15 +249,24 @@ const checkoutFromPath = (pathname, search) => {
   return { token: p.get("t")||"", tier: p.get("tier")||"", billing: p.get("billing")==="annual"?"annual":"monthly" };
 };
 
-// Open the standalone external checkout page in the system browser (iOS only —
-// callers gate on isNativeIOS() first). Dynamically imported so the native-only
-// package never enters the web/PWA bundle. `@capacitor/browser` also ships a
-// working web fallback (window.open), so the catch below is belt-and-suspenders
-// for the rare case the import itself fails, not the expected path.
+// Open the standalone external checkout page in the device's DEFAULT browser
+// (iOS only — callers gate on isNativeIOS() first). Apple's external-purchase-
+// link guideline wants the real Safari app, not an in-app sheet, so this uses
+// @capacitor/app's openUrl (UIApplication.open under the hood), which hands the
+// URL to the OS the same way tapping a link in Messages would — the WILCO app
+// backgrounds and Safari opens on top of it. This used to be `@capacitor/browser`'s
+// Browser.open(), which is SFSafariViewController: a sheet that stays inside
+// WILCO, not the system browser Apple's review guidance is asking for (App Store
+// blocker, 2026-09-29). No associated-domains entitlement claims app.trainwilco.com
+// (checked ios/App/App/App.entitlements), so this can't bounce back into our own
+// WebView. `@capacitor/app` is already a project dependency (used for the badge
+// listener above) — no new package needed. Dynamically imported so the native-only
+// path never enters the web/PWA bundle; the catch is belt-and-suspenders for the
+// rare case the import itself fails, not the expected path.
 const openExternalCheckout = async (url) => {
   try {
-    const { Browser } = await import("@capacitor/browser");
-    await Browser.open({ url });
+    const { App: CapApp } = await import("@capacitor/app");
+    await CapApp.openUrl({ url });
   } catch (_) {
     window.location.href = url;
   }
@@ -334,6 +343,54 @@ let CURRENT_AUTH = null;
 // session to its own fetches (e.g. the now-authenticated send-coach-invite) —
 // CURRENT_AUTH itself is a module-private mutable binding.
 export const getAuth = () => CURRENT_AUTH;
+
+// ─── AI PROCESSING CONSENT (App Store guideline 5.1.2(i), 2026-09-29) ─────────
+// Apple requires explicit, named-provider permission before any personal data
+// reaches a third-party AI — a line inside Terms/Privacy doesn't count. A fresh
+// signup gets this as ConsentFlow's "ai" stage (legal.jsx); this block is the
+// gate for EVERY OTHER path into an AI call: an existing account logging in
+// (including Apple's reviewer, who signs into a seeded demo account and never
+// sees signup), a restored session, biometric login. AI_CONSENT_OK is checked
+// inside askClaude/askClaudeStream themselves (below, near their definitions) —
+// ONE gate for every caller, rather than re-checking at ~30 call sites (chat,
+// quick log draft, program generation, video review, memory edits, coach
+// program parse/checkin/brief...) which is exactly the kind of duplicate-owner
+// bug AI-CONTRACT.md warns about. WilcoRoot additionally holds AthleteView/
+// CoachDashboard from mounting AT ALL until this resolves, so no boot effect
+// (opener, quick-log prefill) gets a chance to even attempt the call.
+let AI_CONSENT_OK = false;
+// Cached per-account-id so a returning, already-consented user never re-reads
+// the row on every boot — only ever written true, one small localStorage blob
+// shared by every account that has signed in on this device.
+const AI_CONSENT_CACHE_KEY = "wilco_ai_consent_v1";
+const aiConsentCached = (id) => { try { return JSON.parse(localStorage.getItem(AI_CONSENT_CACHE_KEY)||"{}")[id]===true; } catch { return false; } };
+const aiConsentCacheSet = (id) => {
+  try {
+    const m = JSON.parse(localStorage.getItem(AI_CONSENT_CACHE_KEY)||"{}");
+    m[id] = true;
+    localStorage.setItem(AI_CONSENT_CACHE_KEY, JSON.stringify(m));
+  } catch {}
+};
+// Flip the gate open — called once consent is confirmed granted (a fresh
+// signup's recordAcceptances, or AiConsentGate's accept handler below).
+function markAiConsentGranted(id){ AI_CONSENT_OK = true; if(id) aiConsentCacheSet(id); }
+// Close the gate on logout / role switch — a signed-out device must not leave
+// it open for whoever signs into a DIFFERENT account next.
+function resetAiConsentGate(){ AI_CONSENT_OK = false; }
+// Athletes have a real legal_acceptances row to check (read-gateway-scoped,
+// api/data.js — legal_acceptances was added to READ_OWN_COL for this).
+// Coaches have no such table (legal_acceptances is athlete-owned only, see
+// ATHLETE_OWN_COL in api/data.js) — there is nowhere server-side to record a
+// coach's acceptance, so coach consent lives in localStorage ONLY via the
+// cache helpers above (AiConsentGate never calls this for role==="coach").
+// Returns true/false when known, or null on a network failure — null must
+// never be treated as "granted".
+async function readAiConsentRow(athleteId){
+  try{
+    const rows = await sbRead("legal_acceptances", `?athlete_id=eq.${encodeURIComponent(athleteId)}&document=eq.ai_processing&select=id&limit=1`);
+    return Array.isArray(rows) ? rows.length>0 : null;
+  }catch{ return null; }
+}
 
 // ─── PERSISTENT SIGN-IN ───────────────────────────────────────────────────────
 // The login lived only in the in-memory CURRENT_AUTH, so whenever iOS evicted the
@@ -1480,6 +1537,9 @@ export const tierIdxForBenchLift = (benchKey, e1rmLbs, {bodyweight, genderKey="m
 // prefix (identical every call) the server marks for Anthropic prompt caching —
 // ~90% off input tokens on cache hits; `dynamic` is the per-call tail.
 export const askClaude = async (system, user, maxTokens=600, images=[], model="claude-sonnet-5", feature="other") => {
+  // AI processing consent gate (App Store 5.1.2(i)) — see the block near
+  // CURRENT_AUTH/getAuth above. One check, every caller, no exceptions.
+  if(!AI_CONSENT_OK) throw new Error("AI permission required");
   const sysCached  = (system && typeof system === "object") ? (system.cached||"")  : "";
   const sysDynamic = (system && typeof system === "object") ? (system.dynamic||"") : system;
   const content = [];
@@ -1565,6 +1625,9 @@ const aiContinue = async ({model,maxTokens,sysDynamic,sysCached,content,partial,
 // forwards `messages` verbatim same as the JSON path, so image content blocks work
 // unmodified; this just builds the same multi-block content array askClaude does.
 export const askClaudeStream = async (system, user, {maxTokens=600, model="claude-sonnet-5", feature="other", onDelta, images=[], toolset, onToolUse}={}) => {
+  // AI processing consent gate (App Store 5.1.2(i)) — see the block near
+  // CURRENT_AUTH/getAuth above. One check, every caller, no exceptions.
+  if(!AI_CONSENT_OK) throw new Error("AI permission required");
   const sysCached  = (system && typeof system === "object") ? (system.cached||"")  : "";
   const sysDynamic = (system && typeof system === "object") ? (system.dynamic||"") : system;
   const content = [];
@@ -4209,6 +4272,70 @@ export default function WilcoApp() {
   return <ErrorBoundary><><UpdateWatcher/><WilcoRoot/></></ErrorBoundary>;
 }
 
+// Blocks AthleteView/CoachDashboard from mounting until AI processing consent
+// (App Store 5.1.2(i)) is confirmed for THIS account — covers every entry path
+// into "athlete"/"coach" view: restored session, biometric login, PIN login.
+// A fresh signup already recorded this via ConsentFlow's "ai" stage before
+// AthleteView ever mounts, so this resolves from cache instantly for them.
+// role="athlete": one gateway read of legal_acceptances (cached after, see
+// readAiConsentRow above), a real row written on accept. role="coach": there is
+// no legal_acceptances-equivalent table scoped to coaches (checked api/data.js —
+// legal_acceptances is athlete-owned only), so a coach's consent lives in
+// localStorage ONLY (aiConsentCached/aiConsentCacheSet above) — a coach who
+// consents on one device is asked again on another device. Flagged in the ship
+// report rather than adding a coach_context write for this without Will's call.
+function AiConsentGate({ role, id, onDecline, children }) {
+  const [state, setState] = useState(() => {
+    if(aiConsentCached(id)){ AI_CONSENT_OK = true; return "ok"; }
+    return "checking";
+  });
+  useEffect(()=>{
+    if(state!=="checking") return;
+    let cancelled = false;
+    (async()=>{
+      if(role==="coach"){
+        // No server row to consult — the cache check in useState already
+        // covered "yes"; anything else here means "ask".
+        if(!cancelled) setState("needed");
+        return;
+      }
+      const has = await readAiConsentRow(id);
+      if(cancelled) return;
+      if(has===true){ markAiConsentGranted(id); setState("ok"); }
+      else setState("needed"); // false OR a network failure (null) both ask — never assume granted
+    })();
+    return ()=>{ cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[id, role]);
+
+  if(state==="ok") return children;
+  if(state==="checking"){
+    return (
+      <div style={{minHeight:"100vh",background:CA.navy,color:CA.text,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,textAlign:"center",fontFamily:"'Inter',system-ui,-apple-system,sans-serif"}}>
+        <div style={{...DISP,fontSize:44,color:CA.accent,letterSpacing:5,lineHeight:1}}>WILCO</div>
+      </div>
+    );
+  }
+  // state === "needed": same full-screen card ConsentFlow uses at signup,
+  // coach-worded when role==="coach" (aiRole below).
+  return (
+    <LegalModal C={CA} aiConsent aiRole={role}
+      kicker="ONE MORE THING"
+      title={role==="coach" ? "AI and your athletes' data" : "AI and your data"}
+      checkboxLabel={role==="coach"
+        ? "I allow WILCO to send my athletes' data to Anthropic to power their coaching."
+        : "I allow WILCO to send this data to Anthropic to power my coaching."}
+      primaryLabel="Continue"
+      onAccept={async ()=>{
+        markAiConsentGranted(id);
+        if(role==="athlete"){ try{ await sbInsert("legal_acceptances", {athlete_id:id, document:"ai_processing", version:AI_CONSENT_VERSION}); }catch{ /* best-effort, same as signup's recordAcceptances — the cache already grants this session */ } }
+        setState("ok");
+      }}
+      onDecline={onDecline}
+    />
+  );
+}
+
 function WilcoRoot() {
   // Event landing pages (/crunch/aloma etc.): resolved ONCE from the boot URL.
   // Active event → dedicated landing view; inactive/unknown → normal home screen
@@ -4327,10 +4454,31 @@ function WilcoRoot() {
     );
   }
 
-  if(view==="athlete"&&athlete) return <AthleteView athlete={athlete} onLogout={()=>{clearAuthSession();setAthlete(null);setView("home");}}/>;
+  // AiConsentGate (App Store 5.1.2(i)) holds AthleteView/CoachDashboard off the
+  // screen — and every boot effect inside them (opener, quick-log prefill) —
+  // until AI processing consent is confirmed for this account. Decline signs
+  // out back to the sign-in screen with a one-line explanation, same pattern as
+  // the native Face ID gate's failure branch above.
+  if(view==="athlete"&&athlete) return (
+    <AiConsentGate role="athlete" id={athlete.id} onDecline={()=>{
+      clearAuthSession(); resetAiConsentGate(); setAthlete(null);
+      setErr("You'll need to allow AI processing to use WILCO. Log in again when you're ready.");
+      setView("login");
+    }}>
+      <AthleteView athlete={athlete} onLogout={()=>{clearAuthSession();resetAiConsentGate();setAthlete(null);setView("home");}}/>
+    </AiConsentGate>
+  );
   // T62: the fallback used to be a bare full-viewport ground — a literal blank
   // screen for as long as the coach chunk took to download.
-  if(view==="coach"&&coach) return <Suspense fallback={<ScreenSkeleton caption="Loading your dashboard…"/>}><CoachDashboard coach={coach} onLogout={()=>{clearAuthSession();setCoach(null);setView("home");}}/></Suspense>;
+  if(view==="coach"&&coach) return (
+    <AiConsentGate role="coach" id={coach.id} onDecline={()=>{
+      clearAuthSession(); resetAiConsentGate(); setCoach(null);
+      setErr("You'll need to allow AI processing to use WILCO Coach. Log in again when you're ready.");
+      setView("coachLogin");
+    }}>
+      <Suspense fallback={<ScreenSkeleton caption="Loading your dashboard…"/>}><CoachDashboard coach={coach} onLogout={()=>{clearAuthSession();resetAiConsentGate();setCoach(null);setView("home");}}/></Suspense>
+    </AiConsentGate>
+  );
 
   // REBRAND 2026-08-07 — athlete and coach entry are now the SAME screen treatment.
   // The old split existed only because athlete entry carried the electric-blue storefront
@@ -4988,12 +5136,18 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
   // THAT document's own version (07-29 fix: Terms and Privacy were last updated
   // on different dates, so a single shared version stamped every row with a
   // Terms version that never existed; parental_consent covers the Terms'
-  // liability waiver, so it rides on TERMS_VERSION too).
+  // liability waiver, so it rides on TERMS_VERSION too). "ai_processing" added
+  // 2026-09-29 for the App Store 5.1.2(i) AI-data-sharing disclosure — its own
+  // stage in ConsentFlow (legal.jsx), its own version constant. On a fresh
+  // signup this row lands here, same turn as terms/privacy; markAiConsentGranted
+  // also flips the in-memory + localStorage cache so this SAME session's first
+  // AI call isn't held up re-reading the row it just wrote.
   const recordAcceptances = async (athleteId, isMinor) => {
-    const docs = ["terms","privacy",...(isMinor?["parental_consent"]:[])];
-    const versionFor = (d) => d==="privacy" ? PRIVACY_VERSION : TERMS_VERSION;
+    const docs = ["terms","ai_processing","privacy",...(isMinor?["parental_consent"]:[])];
+    const versionFor = (d) => d==="privacy" ? PRIVACY_VERSION : d==="ai_processing" ? AI_CONSENT_VERSION : TERMS_VERSION;
     try {
       await sbInsert("legal_acceptances", docs.map(d=>({athlete_id:athleteId, document:d, version:versionFor(d)})));
+      markAiConsentGranted(athleteId);
     } catch{ /* swallow: consent insert is best-effort, must not block signup */ }
   };
 
@@ -5456,6 +5610,9 @@ function SignupScreen({setView,setAthlete,setErr,err,eventCtx}) {
             rows={3}
             style={{...inpA(),resize:"none",lineHeight:1.5}}/>
           <div style={{color:CA.muted,fontSize:11,marginTop:6,lineHeight:1.5}}>Helps Joe give safer recommendations.</div>
+          {/* App Store guideline 1.4.1: this reminder used to live only inside the
+              Terms, which review flagged as not visible enough. */}
+          <div style={{color:CA.muted,fontSize:11,marginTop:4,lineHeight:1.5}}>WILCO gives training guidance only. For pain or injury, check with a doctor before you train through it.</div>
         </div>
         {student&&(
           <div style={{marginBottom:20}}>
@@ -15579,6 +15736,7 @@ function ProfileCompletionModal({athlete, onClose, onSave}) {
 
 // ─── SETTINGS MODAL ───────────────────────────────────────────────────────────
 function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogout, onInstallApp, onReplayTour}) {
+  const [showAiInfo,setShowAiInfo] = useState(false); // "AI and your data" read-only reopen
   const [coachName,setCoachName] = useState(athlete.coach_name||"");
   const [coachEmail,setCoachEmail] = useState(athlete.coach_email||"");
   const [weightUnit,setWeightUnit] = useState(athlete.weight_unit||"lbs");
@@ -16270,6 +16428,26 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
           <span style={{color:CA.border,fontSize:12}}>·</span>
           <a href="mailto:support@trainwilco.com"
             style={{color:CA.muted,fontSize:12,textDecoration:"none"}}>support@trainwilco.com</a>
+        </div>
+        {/* App Store 5.1.2(i): reopens the same AI-disclosure card from signup /
+            the login gate (src/legal.jsx AiConsentBody), read-only — this is
+            "read it again," not a re-ask. */}
+        <div style={{display:"flex",justifyContent:"center",marginBottom:4}}>
+          <button onClick={()=>setShowAiInfo(true)} style={{background:"none",border:"none",color:CA.muted,fontSize:12,textDecoration:"underline",cursor:"pointer",padding:0}}>
+            AI and your data
+          </button>
+        </div>
+        {showAiInfo && (
+          <LegalModal C={CA} aiConsent readOnly
+            kicker="AI AND YOUR DATA"
+            title="AI and your data"
+            primaryLabel="Close"
+            onAccept={()=>setShowAiInfo(false)}
+          />
+        )}
+        {/* Guideline 1.4.1: visible near the legal links, not just inside the Terms. */}
+        <div style={{color:CA.muted,fontSize:11,lineHeight:1.5,textAlign:"center",marginBottom:4}}>
+          WILCO gives training guidance only. For pain or injury, check with a doctor before you train through it.
         </div>
 
         {/* ── Danger zone — permanent account deletion ── */}

@@ -31,6 +31,13 @@ const DISP = LEGAL_DARK
 // waiver (§10.5), so it rides on TERMS_VERSION.
 export const TERMS_VERSION = "2026-06-01";
 export const PRIVACY_VERSION = "2026-07-29";
+// App Store guideline 5.1.2(i): before any personal data goes to a third-party
+// AI, the app must clearly disclose it, name the provider, and get explicit
+// permission — a line inside Terms/Privacy doesn't count on its own. This is
+// that separate, explicit disclosure. Bump the version and re-show AI_TEXT
+// (both the signup stage and the existing-account login gate key off it) any
+// time what WILCO sends to Anthropic, or why, materially changes.
+export const AI_CONSENT_VERSION = "2026-09-29";
 
 export const TERMS_TEXT = `WILCO TRAINING LLC
 Terms of Service and Liability Waiver
@@ -302,6 +309,36 @@ The Platform is operated from the United States and is subject to U.S. export co
 
 Wilco Training LLC  |  TrainWilco.com  |  support@trainwilco.com801 International Pkwy, Suite #5034, Lake Mary, Florida 32746`;
 
+// Short explanatory body for the AI-processing consent gate (no document text —
+// same treatment as ParentalBody above). Read for the exact "what/who/why" the
+// disclosure covers before changing this copy; App Store review checked all four.
+// `role` swaps the athlete-worded body for a coach-worded one (the coach-side
+// gate in App.jsx's AiConsentGate) — same four categories, described as the
+// athletes' data a coach's own AI calls (program parse, check-in, briefs) send.
+function AiConsentBody({ C, role = "athlete" }) {
+  const coach = role === "coach";
+  return (
+    <div style={{ color: C.muted2, fontSize: 14, lineHeight: 1.7 }}>
+      <p style={{ marginBottom: 12 }}>
+        WILCO's coaching runs on AI. To write {coach ? "your athletes'" : "your"}{" "}
+        coaching replies, programs, and log entries, we send data to Anthropic,
+        the company that makes the Claude AI model:
+      </p>
+      <ul style={{ margin: "0 0 12px", paddingLeft: 20 }}>
+        <li style={{ marginBottom: 6 }}>{coach ? "Athlete messages to the coach" : "Your messages to the coach"}</li>
+        <li style={{ marginBottom: 6 }}>{coach ? "Athlete workout logs and programs" : "Your workout logs and program"}</li>
+        <li style={{ marginBottom: 6 }}>{coach ? "Athlete goals" : "Your goals"}</li>
+        <li style={{ marginBottom: 6 }}>{coach ? "Athlete injury and pain notes" : "Your injury and pain notes"}</li>
+        <li>{coach ? "Video frames from any form check an athlete submits" : "Video frames from any form check you submit"}</li>
+      </ul>
+      <p style={{ marginBottom: 12 }}>
+        AI coaching is the core of WILCO, so {coach ? "a coach account can't use WILCO" : "we can't create an account"}{" "}
+        without this. You can delete your account and your data at any time in Settings.
+      </p>
+    </div>
+  );
+}
+
 // Whole years between a birthday (ISO/date string) and now. Mirrors the age math
 // used in SignupScreen.createAthlete so the minor branch stays consistent.
 export const ageFromBirthday = (birthday) => {
@@ -364,15 +401,19 @@ function ParentalBody({ C }) {
 }
 
 // One full-screen consent step: scrollable content + a required checkbox gating
-// the primary button, plus an always-active "Decline & Go Back".
-export function LegalModal({ C, kicker, title, text, parental, checkboxLabel, primaryLabel, onAccept, onDecline, busy }) {
+// the primary button, plus an always-active "Decline & Go Back". `aiConsent`
+// swaps in AiConsentBody the same way `parental` swaps in ParentalBody. `readOnly`
+// drops the checkbox/gate entirely and shows a single "Close" button — used to
+// REOPEN a disclosure someone already accepted (Settings' "AI and your data" row,
+// the login-time AI gate's "read it again" path), never for the original ask.
+export function LegalModal({ C, kicker, title, text, parental, aiConsent, aiRole, checkboxLabel, primaryLabel, onAccept, onDecline, busy, readOnly }) {
   const [checked, setChecked] = useState(false);
   // You cannot agree to something you have not been shown. The box stays disabled
   // until the document has actually been scrolled to the bottom (Will, 08-12).
   // Short documents that fit on screen with nothing to scroll count as read, or the
   // gate would be impossible to satisfy on a tall phone.
   const scrollRef = useRef(null);
-  const [readToEnd, setReadToEnd] = useState(false);
+  const [readToEnd, setReadToEnd] = useState(readOnly);
   const noteScroll = (el) => {
     if (!el || readToEnd) return;
     if (el.scrollHeight - el.clientHeight <= 24 || el.scrollTop + el.clientHeight >= el.scrollHeight - 24) setReadToEnd(true);
@@ -382,12 +423,14 @@ export function LegalModal({ C, kicker, title, text, parental, checkboxLabel, pr
   // pass a document nobody has read — which would quietly make this gate do nothing.
   // Two frames covers layout plus the webfont swap that reflows the text.
   useEffect(() => {
+    if (readOnly) return;
     let raf2 = 0;
     const raf1 = requestAnimationFrame(() => { raf2 = requestAnimationFrame(() => noteScroll(scrollRef.current)); });
     return () => { cancelAnimationFrame(raf1); cancelAnimationFrame(raf2); };
-  }, [text, parental]);
+  }, [text, parental, aiConsent, readOnly]);
   // Unchecking after reading must not re-arm the gate — you have still read it.
-  const canContinue = checked && readToEnd && !busy;
+  const canContinue = readOnly || (checked && readToEnd && !busy);
+  const body = parental ? <ParentalBody C={C} /> : aiConsent ? <AiConsentBody C={C} role={aiRole||"athlete"} /> : <LegalDocBody C={C} text={text} />;
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: C.navy, display: "flex", flexDirection: "column", maxWidth: 600, margin: "0 auto" }}>
       <div style={{ padding: "calc(16px + env(safe-area-inset-top,0px)) 20px 12px", borderBottom: `1px solid ${C.border}` }}>
@@ -397,34 +440,39 @@ export function LegalModal({ C, kicker, title, text, parental, checkboxLabel, pr
       <div ref={scrollRef} onScroll={e => noteScroll(e.currentTarget)}
         style={{ flex: 1, minHeight: 0, overflowY: "auto", WebkitOverflowScrolling: "touch", padding: "16px 20px" }}>
         <div style={{ maxWidth: 720, margin: "0 auto" }}>
-          {parental ? <ParentalBody C={C} /> : <LegalDocBody C={C} text={text} />}
+          {body}
         </div>
       </div>
       <div style={{ borderTop: `1px solid ${C.border}`, padding: "14px 20px calc(14px + env(safe-area-inset-bottom,0px))", background: C.navy2 }}>
-        {!readToEnd && (
+        {!readOnly && !readToEnd && (
           <div style={{ color: C.muted, fontSize: 12, lineHeight: 1.5, marginBottom: 10, textAlign: "center" }}>
             Scroll to the end to continue.
           </div>
         )}
-        <label style={{ display: "flex", alignItems: "flex-start", gap: 10, cursor: readToEnd ? "pointer" : "not-allowed", marginBottom: 12, opacity: readToEnd ? 1 : 0.5 }}>
-          <input type="checkbox" checked={checked} disabled={!readToEnd} onChange={e => setChecked(e.target.checked)} style={{ marginTop: 2, width: 18, height: 18, accentColor: C.gold, flexShrink: 0 }} />
-          <span style={{ color: C.text, fontSize: 13, lineHeight: 1.5 }}>{checkboxLabel}</span>
-        </label>
+        {!readOnly && (
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 10, cursor: readToEnd ? "pointer" : "not-allowed", marginBottom: 12, opacity: readToEnd ? 1 : 0.5 }}>
+            <input type="checkbox" checked={checked} disabled={!readToEnd} onChange={e => setChecked(e.target.checked)} style={{ marginTop: 2, width: 18, height: 18, accentColor: C.gold, flexShrink: 0 }} />
+            <span style={{ color: C.text, fontSize: 13, lineHeight: 1.5 }}>{checkboxLabel}</span>
+          </label>
+        )}
         <button onClick={onAccept} disabled={!canContinue} style={localBtn(canContinue ? C.gold : C.navy3, canContinue ? "#000" : C.muted, { opacity: canContinue ? 1 : 0.7, cursor: canContinue ? "pointer" : "not-allowed" })}>
           {busy ? "Please wait..." : primaryLabel}
         </button>
-        <button onClick={onDecline} disabled={busy} style={{ background: "none", border: "none", color: C.muted, fontSize: 13, cursor: busy ? "not-allowed" : "pointer", width: "100%", padding: "12px 0 2px", marginTop: 6 }}>
-          Decline & Go Back
-        </button>
+        {!readOnly && (
+          <button onClick={onDecline} disabled={busy} style={{ background: "none", border: "none", color: C.muted, fontSize: 13, cursor: busy ? "not-allowed" : "pointer", width: "100%", padding: "12px 0 2px", marginTop: 6 }}>
+            Decline & Go Back
+          </button>
+        )}
       </div>
     </div>
   );
 }
 
 // Orchestrates the consent sequence: parental gate (only for 13–17) → Terms →
-// Privacy. onComplete({ isMinor }) fires when every required box is checked and
-// the final "Create Account" is tapped. onDecline fires from any step.
-// `busy` freezes the final step while the account is being created.
+// AI processing disclosure (5.1.2(i)) → Privacy. onComplete({ isMinor }) fires
+// when every required box is checked and the final "Create Account" is tapped.
+// onDecline fires from any step. `busy` freezes the final step while the
+// account is being created.
 export function ConsentFlow({ C, birthday, busy, onComplete, onDecline }) {
   const minor = isMinorBirthday(birthday);
   const [stage, setStage] = useState(minor ? "parental" : "terms");
@@ -444,9 +492,21 @@ export function ConsentFlow({ C, birthday, busy, onComplete, onDecline }) {
   if (stage === "terms") {
     return (
       <LegalModal key="terms" C={C} text={TERMS_TEXT}
-        kicker="STEP 1 OF 2"
+        kicker="STEP 1 OF 3"
         title="Terms of Service & Liability Waiver"
         checkboxLabel="I have read and agree to the Terms & Conditions."
+        primaryLabel="Continue →"
+        onAccept={() => setStage("ai")}
+        onDecline={onDecline}
+      />
+    );
+  }
+  if (stage === "ai") {
+    return (
+      <LegalModal key="ai" C={C} aiConsent
+        kicker="STEP 2 OF 3"
+        title="AI and your data"
+        checkboxLabel="I allow WILCO to send this data to Anthropic to power my coaching."
         primaryLabel="Continue →"
         onAccept={() => setStage("privacy")}
         onDecline={onDecline}
@@ -455,7 +515,7 @@ export function ConsentFlow({ C, birthday, busy, onComplete, onDecline }) {
   }
   return (
     <LegalModal key="privacy" C={C} text={PRIVACY_TEXT} busy={busy}
-      kicker="STEP 2 OF 2"
+      kicker="STEP 3 OF 3"
       title="Privacy Policy"
       checkboxLabel="I have read and agree to the Privacy Policy."
       primaryLabel="Create Account"

@@ -131,6 +131,12 @@ const READ_OWN_COL = {
   // T58 mastermind memory (athlete reads own; coach reads roster's, same trust
   // as athlete_context — memory is athlete-visible by design).
   athlete_memory: "athlete_id",
+  // App Store 5.1.2(i), 2026-09-29: the athlete-side AI consent gate (AiConsentGate,
+  // src/App.jsx) reads this to check for an existing account's ai_processing row
+  // before their first AI call. Writable already (ATHLETE_OWN_COL below), but
+  // never readable — the exact "DB CHECK vs gateway allowlist" gap AI-CONTRACT.md
+  // warns is a repeat offender; this is the read-side half of it.
+  legal_acceptances: "athlete_id",
 };
 
 // Tables read/written by COACH callers scoped to their OWN coach_id (not their
