@@ -987,11 +987,16 @@ export function feasibilityLine(rows, goalText, timelineText) {
 // One unit per athlete, the one they work in; the comparison itself is done
 // here in lbs and never shown.
 export const showMax = (lbs, unit = "lbs") => unit === "kg" ? `${Math.round((lbs / LBS_PER_KG) * 10) / 10} kg` : `${Math.round(lbs)} lbs`;
+// T68: a lift's facts are stated in the unit THAT LIFT was logged in (athletes
+// mix units by lift: barbell in kg, bench in lbs). A kg athlete who typed
+// "bench 3x5 @ 225" was handed "102.1 kg" and the reply came back reconciling
+// the two aloud ("225 lbs is 102 kg, up around 112.5 on the kg side").
+export const factUnit = (ex, unit = "lbs") => (ex && (ex.unit === "kg" || ex.unit === "lbs") ? ex.unit : (unit === "kg" ? "kg" : "lbs"));
 export function prCheckLines(exercises, best, unit = "lbs") {
-  const show = (lbs) => showMax(lbs, unit);
   const lines = [];
   for (const ex of Array.isArray(exercises) ? exercises : []) {
     if (!ex || !ex.name || ex.unit === "bodyweight" || isUnitPending(ex)) continue;
+    const show = (lbs) => showMax(lbs, factUnit(ex, unit));
     const sets = getExerciseSets(ex).filter((s) => s.weight > 0);
     if (!sets.length && !(ex.weight > 0)) continue;
     const top = sets.reduce((b, s) => (!b || toLbs(s.weight, ex.unit) > toLbs(b.weight, ex.unit)) ? s : b, null) || { weight: ex.weight, reps: ex.reps || 1 };

@@ -97,6 +97,7 @@ const S = [
   { id: "reps_front", cls: "reps", day: "Squat", msg: "Front squat 5x2 @ 100/110/120/120/120kg", exercises: [K("Front Squat", [100, 110, 120, 120, 120], 2)] },
   { id: "reps_press", cls: "reps", day: "Press", msg: "Push press 5x3 @ 60/80/90/100/100kg, bench 4x5 @ 185lbs", exercises: [K("Push Press", [60, 80, 90, 100, 100], 3), L("Bench Press", 4, 5, 185)] },
   { id: "dual_squat", cls: "dual", day: "Squat", msg: "Back squat 5x3 @ 145kg, front squat 3x3 @ 105kg", exercises: [K("Back Squat", [145, 145, 145, 145, 145], 3), K("Front Squat", [105, 105, 105], 3)] },
+  { id: "mixed_bench", cls: "mixed", day: "Press", msg: "Bench press 4x5 @ 195", exercises: [{ ...L("Bench Press", 4, 5, 195), unit_source: "recency" }], said: 195 },
   { id: "swap_today", cls: "swap", day: "Squat", msg: "the squat racks are all taken today, swap my first lift for something I can do with dumbbells", exercises: [], tools: true },
 ];
 
@@ -135,6 +136,8 @@ function buildTurn(T, sc) {
   if (isLogTurn) {
     prLines = grit.prCheckLines(logExercises, byEx, unit);
     if (prLines.length) prCheck = `\n\nPR CHECK — THIS MESSAGE'S LOG (computed by the app from their records; these verdicts are FINAL — never re-derive, re-convert, or re-compare the numbers yourself):\n${tf.prLinesForReply(prLines, logExercises).map((l) => `- ${l}`).join("\n")}\nA line marked NEW PR is confirmed above their previous best: when it is the headline, celebrate it genuinely and specifically, scaled to how central that lift is to their sport (a weightlifter's snatch or clean and jerk PR is a headline day, not a footnote). Never describe a NEW PR weight as under, below, or "right under" anything.`;
+    const lu = typeof tf.logUnitsFact === "function" ? tf.logUnitsFact(logExercises, unit) : "";
+    if (lu) prCheck += `\n\n${lu}`;
     const perf = tf.performedBlock(logExercises, { displayUnit: unit, planText: PROGRAM });
     if (perf) prCheck += `\n\n${perf}`;
   }
@@ -225,6 +228,8 @@ function invariants(sc, turn, reply, calls) {
     const lbsNums = [...turn.prLines.join(" ").matchAll(/(\d+(?:\.\d+)?) lbs/g)].map((m) => m[1]);
     out.noLbsAsKg = !lbsNums.some((n) => new RegExp(`(?<![\\d.])${n.replace(".", "\\.")}\\s*(?:kg|kilo)`, "i").test(reply));
   }
+  // a lift logged in lbs by a kg athlete: said as typed, no kg, no unit talk
+  if (sc.said) { out.saidAsTyped = new RegExp(`(?<![\\d.])${sc.said}(?!\\d)`).test(reply); out.noConversion = !/\bkg\b|kilo|\bconvert/i.test(reply); }
   if (sc.tools) out.noRec = !calls.some((c) => c.name === "propose_program_rec");
   return out;
 }

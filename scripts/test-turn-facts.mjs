@@ -5,7 +5,7 @@
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { performedLine, performedLines, performedBlock, planSchemeFor, logHeadline, logFocusBlock, planDayFor, plannedLifts, isMainLift, sameLift, prLinesForReply, logTurnExercises } from "../src/turnFacts.js";
+import { performedLine, performedLines, performedBlock, planSchemeFor, logHeadline, logFocusBlock, planDayFor, plannedLifts, isMainLift, sameLift, prLinesForReply, logTurnExercises, logUnitsFact } from "../src/turnFacts.js";
 import { prCheckLines, bestE1RMForExercise, resolveLift, effectiveDate } from "../src/grit.js";
 import { toLbs } from "../src/units.js";
 
@@ -21,7 +21,8 @@ const eq = (a, b, n) => ok(a === b, `${n} (got ${JSON.stringify(a)}, want ${JSON
   eq(lines[0], "Behind the Neck Snatch Grip Push Press: 5 sets of 3, 60/80/90/100/100 kg, top set 100 kg x 3 (plan was 5x2)", "Sep 2 push press line");
   eq(lines[1], "Push Press: 5 sets of 3, 60/70/80/90/90 kg, top set 90 kg x 3 (plan was 5x2)", "push press is its own lift, not the BTN variant");
   ok(!/double/i.test(lines.join(" ")), "no 'double' anywhere in the facts");
-  ok(lines[2].startsWith("DB Lateral Raise: 3 sets of 8 at 18"), `lbs lift shown in the athlete's kg (got ${lines[2]})`);
+  // T68: he wrote "40lbs", so the fact says 40 lbs (it used to be converted to 18 kg)
+  ok(lines[2].startsWith("DB Lateral Raise: 3 sets of 8 at 40 lbs"), `a lift logged in lbs is stated in lbs for a kg athlete (got ${lines[2]})`);
   const blk = performedBlock(rp.parsed_exercises, { displayUnit: "kg", planText: rp.starting_state.plan_text });
   ok(blk.includes("FINAL") && blk.includes("never swap in the program's prescription"), "block states finality");
 }
@@ -248,6 +249,27 @@ eq(head({ exercises: [kg("Back Squat", 3, 2, 155)], rows: HIST }).kind, "none", 
   ok(/NEW PR/.test(pr[0]) && !/lbs/.test(pr[0]), `kg athlete's PR line carries kg only (got ${pr[0]})`);
   const hp = logHeadline({ exercises: [{ name: "Snatch", sets: 1, reps: 1, weight: 105, unit: "kg" }], prLines: pr, now, sport: "Olympic Weightlifting", displayUnit: "kg" });
   eq(hp.kind, "pr", "the headline still reads a kg-only PR line");
+}
+
+// ── T68: a lift speaks in the unit it was logged in ───────────────────────────
+{
+  const now = new Date("2026-09-29T17:00:00Z");
+  const bench = { name: "Bench Press", unit: "lbs", unit_source: "recency", sets: 3, reps: 5, weight: 225, set_details: [1, 2, 3].map(() => ({ weight: 225, reps: 5 })) };
+  const snatch = { name: "Snatch", unit: "kg", sets: 3, reps: 1, weight: 90, set_details: [1, 2, 3].map(() => ({ weight: 90, reps: 1 })) };
+  const best = { "bench press": { name: "Bench Press", e1rm: 250 }, snatch: { name: "Snatch", e1rm: toLbs(100, "kg"), actual: true } };
+  const pr = prCheckLines([bench, snatch], best, "kg");
+  ok(/Bench Press: .*225 lbs/.test(pr[0]) && !/kg/.test(pr[0]), `replay (prod pass 09-29): a kg athlete's lbs bench is judged and stated in lbs (got ${pr[0]})`);
+  ok(/Snatch: .*90 kg/.test(pr[1]) && !/lbs/.test(pr[1]), "the same log's kg lift stays in kg");
+  eq(performedLine(bench, { displayUnit: "kg" }), "Bench Press: 3 sets of 5 at 225 lbs", "PERFORMED says what they typed");
+  const last = new Map([[resolveLift("Bench Press").id, { name: "Bench Press", date: new Date(now.getTime() - 7 * 864e5), ex: { name: "Bench Press", unit: "kg", sets: 3, reps: 5, weight: 97.5 } }]]);
+  const h = logHeadline({ exercises: [bench], prLines: [], lastDone: last, displayUnit: "kg", now });
+  ok(/225 lbs x 5 today, up from 215 lbs x 5/.test(h.line), `a comparison is said in TODAY's unit for both numbers (got ${h.line})`);
+  const fact = logUnitsFact([bench, snatch], "kg");
+  ok(/Bench Press was logged in lbs/.test(fact) && !/Snatch/.test(fact) && /no conversion to kg/.test(fact), "LOG UNITS names only the lift logged in the other unit");
+  eq(logUnitsFact([snatch], "kg"), "", "every lift in the athlete's unit: no line");
+  eq(logUnitsFact([{ ...bench, unit_suspect: true }], "kg"), "", "a load the app is still asking about is never named");
+  ok(/Snatch was logged in kg/.test(logUnitsFact([snatch], "lbs")), "works the other way round for a lbs athlete");
+  eq(performedLine({ ...bench, unit: "lbs" }, { displayUnit: "lbs" }), "Bench Press: 3 sets of 5 at 225 lbs", "a lbs athlete's lbs lift: unchanged");
 }
 
 console.log(`\n${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ""}`);

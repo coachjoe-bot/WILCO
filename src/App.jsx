@@ -81,7 +81,7 @@ import { blueprintPct } from "./programBuilder.js";
 import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps, memoryNotesText, checkinNoteFact } from "./memory.js";
 import { activeGoals, goalsToSupersede, sameGoalText } from "./goals.js";
 import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, programWriteOwner, recSummaryFallback, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
-import { performedBlock, logHeadline, logFocusBlock, planDayFor, prLinesForReply, logTurnExercises } from "./turnFacts.js";
+import { performedBlock, logHeadline, logFocusBlock, planDayFor, prLinesForReply, logTurnExercises, logUnitsFact } from "./turnFacts.js";
 import { ledgerTurn, ledgerBlock, normArea, painFollowUpPlan, applyStamps, recStagedLine, withMark, normalizeMarks, flagClearedFor, keepPainRec, painStatus, currentPainAreas, currentPainLines, painNoteGuard, areaLabel } from "./painLedger.js";
 import { buildAgenda, agendaTurnPrompt, parseAgendaTurn, advanceAgenda, initialAgendaState, isEndIntent, painStampsFrom, closingLine, digestNoteFrom } from "./checkinAgenda.js";
 import { programPurpose, purposeLine } from "./programPurpose.js";
@@ -2102,6 +2102,9 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
     try{
       const lines = prCheckLines(logExercises, byEx, athlete.weight_unit);
       prLinesForFocus = lines;
+      // T68: a lift logged in the other unit is said in that unit (turnFacts logUnitsFact)
+      const lu = logUnitsFact(logExercises, athlete.weight_unit);
+      if(lu) prCheckContext += `\n\n${lu}`;
       if(lines.length) prCheckContext = `\n\nPR CHECK — THIS MESSAGE'S LOG (computed by the app from their records; these verdicts are FINAL — never re-derive, re-convert, or re-compare the numbers yourself):\n${prLinesForReply(lines, logExercises).map(l=>`- ${l}`).join("\n")}\nA line marked NEW PR is confirmed above their previous best: when it is the headline, celebrate it genuinely and specifically, scaled to how central that lift is to their sport (a weightlifter's snatch or clean and jerk PR is a headline day, not a footnote). Never describe a NEW PR weight as under, below, or "right under" anything.`;
     }catch(_){ /* verdicts are additive — a failure just means no block */ }
     // T64 S2 (bug 5): what was PERFORMED, from set_details. Joe called a logged
