@@ -76,7 +76,7 @@ export const groupIntoSessions = (workouts) => {
 export { epley1RM };
 
 // T55: conversion comes from the single-source units module.
-import { toLbs, exerciseLoadUnit } from "./units.js";
+import { toLbs, exerciseLoadUnit, isUnitPending } from "./units.js";
 import { normArea, classifyPain, normalizeMarks, flagClearedFor } from "./painLedger.js";
 
 // Working sets of a logged exercise: prefer set_details (excluding warm-ups), else the
@@ -100,7 +100,7 @@ export const buildLiftHistory = (sessions) => {
     const date = effectiveDate(group[0]).toISOString();
     const exercises = group.flatMap((e) => getPD(e).exercises || []);
     for (const ex of exercises) {
-      if (!ex.name || !ex.weight || ex.unit === "bodyweight") continue;
+      if (!ex.name || !ex.weight || ex.unit === "bodyweight" || isUnitPending(ex)) continue;
       const sets = workingSets(ex);
       let e1rm = 0, top = { weight: ex.weight, reps: ex.reps || 1 };
       for (const s of sets) {

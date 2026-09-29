@@ -48,6 +48,13 @@ export const exerciseUnit = (ex) =>
 // (parser convention, see formatSetDetails in App.jsx).
 export const exerciseLoadUnit = (ex) => (exerciseUnit(ex) === "kg" ? "kg" : "lbs");
 
+// A load whose unit the app could not settle (src/prAttempts.js marks it
+// unit_suspect and asks "kg or lbs?"). Until the athlete answers, NOTHING is
+// derived from it: no e1RM, no PR, no tonnage, no benchmark, no load comparison.
+// The row itself is kept (the log is never lost). Every derived reader skips it
+// through here.
+export const isUnitPending = (ex) => ex?.unit_suspect === true;
+
 // A raw stored (weight, unit) pair → number in the display unit. One conversion, ever.
 export const toDisplay = (weight, unit, displayUnit = DISPLAY_UNIT) =>
   displayUnit === "kg" ? toKg(Number(weight) || 0, unit === "kg" ? "kg" : "lbs")

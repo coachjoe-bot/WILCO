@@ -127,9 +127,10 @@ const loadNumbers = (ex) => {
 //                  100 KG clean for a kg athlete)
 //      "set"       (declared maxes only) the same lift's set in this message
 //   4. "history"   the unit this athlete has used for THIS lift (resolveLift
-//                  identity) in the last 180 days: the most recent log where the
-//                  unit was WRITTEN in that row's message wins; with none written,
-//                  the unit stored on the majority of the lift's last 5 logs.
+//                  identity) in the last 180 days, by recency: the last 3 logs
+//                  agree -> that unit; they disagree -> the most recent of them
+//                  written or athlete-confirmed; else the most recent. Unconfirmed
+//                  (unit_suspect) logs are no evidence.
 //                  Athletes mix units by lift (the founder: bars in kg; dumbbells,
 //                  machines and his bench in lbs), so the setting alone misfiles.
 //   5. "display"   the athlete's unit setting
@@ -145,6 +146,9 @@ const loadNumbers = (ex) => {
 // parsed. A load already stamped (it carries `unit_source`) is final. Pure: the
 // history is handed in as data (the client's workoutHistory rows).
 const HISTORY_DAYS = 180;
+// unit_source values that mean the ATHLETE settled the unit (answering the app's
+// "kg or lbs?", editing the row, or correcting it in chat).
+export const CONFIRMED_SOURCES = new Set(["athlete_confirmed", "edit", "correction"]);
 const DAY_MS = 24 * 60 * 60 * 1000;
 const liftIdOf = (name) => resolveLift(name || "").id;
 const rowPD = (row) => {
@@ -206,24 +210,32 @@ const liftHistory = (history, liftIds, now) => {
     const t = rowTime(row);
     if (!Number.isFinite(t) || t > now || now - t > HISTORY_DAYS * DAY_MS) continue;
     const exs = Array.isArray(rowPD(row).exercises) ? rowPD(row).exercises : [];
-    const hits = exs.map((ex, i) => [ex, i]).filter(([ex]) => ex && isUnit(ex.unit) && loadNumbers(ex).length && out.has(liftIdOf(ex.name)));
+    // An unconfirmed (unit_suspect) load is not evidence for anything.
+    const hits = exs.map((ex, i) => [ex, i]).filter(([ex]) => ex && isUnit(ex.unit) && !ex.unit_suspect && loadNumbers(ex).length && out.has(liftIdOf(ex.name)));
     if (!hits.length) continue;
     const { items } = readMessage(exs, [], row?.raw_message || "", liftIdOf);
     for (const [ex, i] of hits) {
       const it = items.find((x) => x.kind === "ex" && x.i === i);
-      out.get(liftIdOf(ex.name)).push({ t, stored: ex.unit, written: it?.written || null, e1: bestE1RMForExercise(ex) || 0 });
+      out.get(liftIdOf(ex.name)).push({ t, stored: ex.unit, written: it?.written || null, confirmed: CONFIRMED_SOURCES.has(ex.unit_source), e1: bestE1RMForExercise(ex) || 0 });
     }
   }
   for (const logs of out.values()) logs.sort((a, b) => b.t - a.t);
   return out;
 };
+// Recency, not the oldest written word (orchestrator 09-29, after the founder's
+// C&J: a months-old "290lbs" must not outrank his recent kg logs). The lift's
+// last 3 logs: all agree -> that unit; they disagree -> the most recent of them
+// whose unit was written in its message or confirmed by the athlete; none of
+// those -> the most recent. A unit switch therefore settles within one written
+// or confirmed log, and stays settled.
+const HISTORY_WINDOW = 3;
 const historyUnit = (logs) => {
   if (!logs || !logs.length) return null;
-  const w = logs.find((l) => l.written);
-  if (w) return w.written;
-  const last5 = logs.slice(0, 5);
-  const kg = last5.filter((l) => l.stored === "kg").length, lb = last5.length - kg;
-  return kg === lb ? last5[0].stored : kg > lb ? "kg" : "lbs";
+  const last = logs.slice(0, HISTORY_WINDOW);
+  if (last.every((l) => l.stored === last[0].stored)) return last[0].stored;
+  const sure = last.find((l) => l.written || l.confirmed);
+  if (sure) return sure.confirmed ? sure.stored : sure.written;
+  return last[0].stored;
 };
 // "Implausible against the lift's own history", in BOTH directions, on grit.js's
 // implausibleJump thresholds (lbs): a jump over the recent best, or a collapse
@@ -238,7 +250,7 @@ const offBest = (best, e1) => {
   return best >= IMPLAUSIBLE_JUMP_FLOOR_LBS && best - e1 >= IMPLAUSIBLE_JUMP_MIN_LBS && best / e1 >= 1 + IMPLAUSIBLE_JUMP_PCT - 1e-9;
 };
 const loadE1 = (it, unit) => (it.kind === "ex"
-  ? bestE1RMForExercise({ ...it.src, unit })
+  ? bestE1RMForExercise({ ...it.src, unit, unit_suspect: undefined })
   : epley1RM(toLbs(Number(it.src.weight) || 0, unit), Number(it.src.reps) || 1)) || 0;
 
 // The lift's best estimated 1RM (lbs) over the same 180-day history the resolver
@@ -388,4 +400,55 @@ export const unitCheckMessage = (checks) => {
   const lines = list.map((c) => `${c.exercise} at ${c.weight} ${lbl(c.unit)} doesn't line up with your recent ${c.exercise} numbers. ${c.weight} ${lbl(flip(c.unit))} would.`);
   const one = list.length === 1;
   return `Quick check before I bank ${one ? "that" : "those"}.\n${lines.join("\n")}\n\n${one ? "Which was it" : "Which were they"}, kg or lbs? I'll file ${one ? "it" : "them"} the way you say.`;
+};
+
+// ─── ONE VOICE ON A FLAGGED TURN (AI contract rule 5) ─────────────────────────
+// The loads the app is asking about, from a stamped parse.
+export const pendingUnitLoads = (parsed) => [
+  ...(Array.isArray(parsed?.exercises) ? parsed.exercises : []).filter((x) => x?.unit_suspect).map((x) => ({ exercise: x.name, weight: x.weight, unit: x.unit })),
+  ...(Array.isArray(parsed?.pr_attempts) ? parsed.pr_attempts : []).filter((x) => x?.unit_suspect).map((x) => ({ exercise: x.exercise, weight: x.weight, unit: x.unit })),
+].filter((x) => x.exercise);
+
+// The computed fact Joe gets in the turn's dynamic context when the app will ask.
+export const unitCheckFact = (parsed) => {
+  const loads = pendingUnitLoads(parsed);
+  if (!loads.length) return "";
+  const names = [...new Set(loads.map((l) => l.exercise))].join(", ");
+  return `UNIT CHECK (computed by the app, FINAL): the app itself is asking the athlete, in its own message right after yours, whether ${names} ${loads.length > 1 ? "were" : "was"} logged in kg or lbs. It will not bank ${loads.length > 1 ? "those lifts" : "that lift"} until they answer. In your reply: do not question that number, do not ask about its unit, do not celebrate it, do not call it a PR, and do not restate its weight in either unit. Talk about the rest of the session as usual, or keep it short if that was the only lift.`;
+};
+
+// Did Joe's reply already ask about a flagged lift's unit or number? Then the app
+// does not ask a second time (the kg/lbs chips still answer it). A question
+// sentence that names kg/lbs/unit, or a flagged load's number.
+export const replyAsksUnit = (reply, loads = []) => {
+  const qs = String(reply || "").split(/(?<=[.!?])\s+|\n+/).filter((x) => /\?\s*$/.test(x.trim()));
+  if (!qs.length) return false;
+  const nums = (Array.isArray(loads) ? loads : []).map((l) => Number(l.weight)).filter((n) => Number.isFinite(n) && n > 0);
+  return qs.some((q) => /\b(kgs?|kilos?|kilograms?|lbs?|pounds?|units?)\b/i.test(q)
+    || nums.some((n) => new RegExp(`(?<![\\d.])${String(n).replace(".", "\\.")}(?![\\d])`).test(q)));
+};
+
+// The athlete answered "kg" or "lbs": settle every pending load in the row.
+// Returns { parsed_data, bank } where bank is the subset to run the normal
+// derived writes on (the confirmed loads, and nothing else). Pure.
+export const confirmPendingUnits = (parsedData, unit) => {
+  if (!isUnit(unit)) return { parsed_data: parsedData, bank: { exercises: [], pr_attempts: [] } };
+  const settle = (x) => {
+    if (!x?.unit_suspect) return x;
+    const { unit_suspect, ...rest } = x;
+    return { ...rest, unit, unit_source: "athlete_confirmed" };
+  };
+  const exs = Array.isArray(parsedData?.exercises) ? parsedData.exercises : [];
+  const prs = Array.isArray(parsedData?.pr_attempts) ? parsedData.pr_attempts : [];
+  const ex2 = exs.map(settle), pr2 = prs.map(settle);
+  return {
+    parsed_data: { ...(parsedData || {}), exercises: ex2, pr_attempts: pr2 },
+    bank: { exercises: ex2.filter((x, i) => x !== exs[i]), pr_attempts: pr2.filter((x, i) => x !== prs[i]) },
+  };
+};
+
+// A typed answer to the app's "kg or lbs?" ("kg", "it was lbs", "kilos").
+export const unitAnswer = (text) => {
+  const m = /^\s*(?:it|that|those|they)?\s*(?:was|were)?\s*(?:in\s+)?(kgs?|kilos?|kilograms?|lbs?|pounds?)\s*[.!]?\s*$/i.exec(String(text || ""));
+  return m ? (/^k/i.test(m[1]) ? "kg" : "lbs") : null;
 };

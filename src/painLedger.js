@@ -14,7 +14,7 @@
 // counts mentions, names dates or describes a pattern beyond what `summary` says.
 
 import { resolveLift, getExerciseSets, isRealSession } from "./grit.js";
-import { toKg, exerciseLoadUnit } from "./units.js";
+import { toKg, exerciseLoadUnit, isUnitPending } from "./units.js";
 
 // ── thresholds (every number the ledger uses, one line of reason each) ──────
 export const DAY_MS = 86400000;
@@ -261,7 +261,7 @@ export const AREA_FAMILIES = {
 };
 
 const topWorkingKg = (ex) => {
-  if (!ex || ex.unit === "bodyweight") return 0;
+  if (!ex || ex.unit === "bodyweight" || isUnitPending(ex)) return 0;
   const sets = getExerciseSets(ex).filter((s) => !s.warmup && s.weight > 0);
   const all = sets.length ? sets : getExerciseSets(ex).filter((s) => s.weight > 0);
   return all.reduce((m, s) => Math.max(m, toKg(Number(s.weight) || 0, exerciseLoadUnit(ex))), 0);

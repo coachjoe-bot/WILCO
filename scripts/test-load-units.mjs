@@ -10,9 +10,10 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { resolveLoadUnits, stampLoadUnits, stampAttemptUnits, loadChains, writtenUnit, liftRecentBestLbs, unitCheckMessage } from "../src/prAttempts.js";
-import { normalizeExName, bestE1RMForExercise, implausibleJump, toLbs } from "../src/grit.js";
-import { exerciseUnit, exerciseLoadUnit } from "../src/units.js";
+import { resolveLoadUnits, stampLoadUnits, stampAttemptUnits, loadChains, writtenUnit, liftRecentBestLbs, unitCheckMessage, unitCheckFact, replyAsksUnit, pendingUnitLoads, confirmPendingUnits, unitAnswer, CONFIRMED_SOURCES } from "../src/prAttempts.js";
+import { normalizeExName, bestE1RMForExercise, implausibleJump, toLbs, sessionTonnage, sessionTopSet, prCheckLines } from "../src/grit.js";
+import { logTurnExercises } from "../src/turnFacts.js";
+import { exerciseUnit, exerciseLoadUnit, isUnitPending } from "../src/units.js";
 import { draftInUnit } from "../src/boot.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -191,8 +192,7 @@ eq(exerciseLoadUnit({ unit: "kg" }), "kg", "load unit kg");
   ok(/stampLoadUnits\(parsed, \{[^}]*history: workoutHistory/.test(app), "finalizeWorkout hands the resolver the athlete's history");
   ok(/stampLoadUnits\(p, \{[^}]*history: workoutHistory/.test(app), "send() hands the resolver the athlete's history");
   const finSrc = app.slice(app.indexOf("const finalizeWorkout = async"), app.indexOf("const finalizeWorkout = async") + 40000);
-  ok(/const suspect = implausibleJump\(knownBestLbs, exE1RM\) \|\| !!ex\.unit_suspect;/.test(finSrc), "a unit-suspect set is held back from PRs and the 1RM promotion");
-  ok(/if\(ex\.unit_suspect\) unitChecks\.push/.test(finSrc) && /if\(attempt\.unit_suspect\)/.test(finSrc) && /unitCheckMessage\(unitChecks\)/.test(finSrc), "finalizeWorkout asks by unit for every unit-suspect load");
+  ok(/if\(ex\.unit_suspect\)\{ unitChecks\.push\(.*?\); continue; \}/.test(finSrc) && /if\(attempt\.unit_suspect\)/.test(finSrc) && /unitCheckMessage\(unitChecks\)/.test(finSrc), "a unit-suspect load skips every derived write and is asked about by unit");
   ok(/"weight":number\|null,"unit":"lbs"\|"kg"\|"bodyweight"\|null/.test(app), "parse schema lets an exercise carry unit:null");
   ok(!/it is "lbs" \(this app's default\)/.test(app), "the lbs-default rule is gone from the rulebook");
   ok(/parsed = stampLoadUnits\(parsed, \{displayUnit: updatedAthlete\?\.weight_unit, message: msg/.test(app), "finalizeWorkout stamps every load before saving");
@@ -225,6 +225,12 @@ console.log("replay exercise-unit-kg-0904:");
       const lb = run(r.parsed.exercises.map((x) => ({ ...x, unit: null })), "lbs");
       eq(lb.exercises.map((x) => x.unit), r.expect_if_lbs_athlete.exercises, `${r.name}: same message from an lbs athlete, exercises`);
       eq(lb.pr_attempts.map((x) => x.unit), r.expect_if_lbs_athlete.pr_attempts, `${r.name}: same message from an lbs athlete, maxes`);
+    }
+    if (r.expect_after_answer) {
+      const stamped = stampLoadUnits(r.parsed, opts(r.display_unit));
+      const c = confirmPendingUnits(stamped, r.expect_after_answer.answer);
+      eq(c.parsed_data.exercises.map((x) => x.unit), r.expect_after_answer.exercises, `${r.name}: after the athlete answers ${r.expect_after_answer.answer}`);
+      ok(c.parsed_data.exercises.every((x) => !x.unit_suspect), `${r.name}: nothing pending after the answer`);
     }
     if (r.expect_implausible_jump != null) {
       const stamped = stampLoadUnits(r.parsed, opts(r.display_unit));
@@ -337,6 +343,109 @@ console.log("lift history (step 4) and the plausibility guard:");
   // a backdated row (parsed_data.log_date) is placed by its log date
   v = V("bench 3x5 at 205", "kg", [ex("Bench Press", 205, null)], [{ created_at: day(1), raw_message: "Bench 3x5 @ 205lbs", parsed_data: { log_date: "2026-01-01", exercises: [ex("Bench Press", 205, "lbs")] } }]);
   eq(v.exercises[0].unitSource, "display", "log_date older than 180 days -> ignored");
+}
+
+// 17 ── step 4 by RECENCY (orchestrator 09-29, change 1)
+console.log("step 4 recency ranking:");
+{
+  const NOW = Date.parse("2026-09-29T12:00:00Z");
+  const day = (n) => new Date(NOW - n * 86400000).toISOString();
+  const row = (n, raw, exercises) => ({ created_at: day(n), raw_message: raw, parsed_data: { exercises } });
+  const V = (message, du, exercises, history) => resolveLoadUnits({ exercises }, { displayUnit: du, message, normalizeName: normalizeExName, history, now: NOW }).exercises[0];
+  const cj = (w, unit, extra = {}) => ({ ...ladder("Clean & Jerk", [70, 90, w], unit), ...extra });
+  // the founder's 09-04 shape: last 3 = kg, kg, lbs (none written) -> most recent -> kg, no flag
+  const founder0904 = [row(7, "Clean and Jerk to heavy single 70/90/100/110/120", [cj(120, "kg")]), row(13, "C&J 3x1 @ 110,120,125", [cj(125, "kg")]),
+    row(20, "Clean and jerk singles at 135/185/225/255/275/290", [ladder("Clean & Jerk", [135, 185, 225, 255, 275, 290], "lbs")])];
+  let v = V("Clean and Jerk singles @ 70/90/100/110/120/130", "kg", [ladder("Clean & Jerk", [70, 90, 100, 110, 120, 130], null)], founder0904);
+  eq([v.unit, v.unitSource, v.suspect], ["kg", "history", false], "founder 09-04: recent kg logs beat an older lbs log -> kg, no flag");
+  // an old WRITTEN lbs row no longer outranks recent logs that agree
+  const writtenOld = [row(3, "cj 120", [cj(120, "kg")]), row(10, "cj 125", [cj(125, "kg")]), row(15, "cj 118", [cj(118, "kg")]), row(60, "Clean & jerk 290lbs", [ladder("Clean & Jerk", [290], "lbs")])];
+  v = V("C&J 130", "kg", [ladder("Clean & Jerk", [130], null)], writtenOld);
+  eq([v.unit, v.suspect], ["kg", false], "last 3 agree (kg) -> kg, a months-old written lbs row does not count");
+  // disagree -> the most recent WRITTEN or CONFIRMED of the last 3
+  const disagree = [row(2, "cj 120", [cj(120, "lbs")]), row(5, "C&J 120kg", [cj(120, "kg")]), row(9, "cj 250", [cj(250, "lbs")])];
+  eq(V("cj 118", "lbs", [ladder("Clean & Jerk", [118], null)], disagree).unit, "kg", "last 3 disagree -> the most recent written (kg) wins over a newer unwritten lbs");
+  const confirmed = [row(2, "cj 120", [cj(120, "lbs")]), row(5, "cj 120", [cj(120, "kg", { unit_source: "athlete_confirmed" })]), row(9, "cj 250 lbs", [cj(250, "lbs")])];
+  eq(V("cj 118", "lbs", [ladder("Clean & Jerk", [118], null)], confirmed).unit, "kg", "an athlete-confirmed log counts as evidence (beats an older written lbs)");
+  const none = [row(2, "cj 120", [cj(120, "kg")]), row(5, "cj 250", [cj(250, "lbs")]), row(9, "cj 118", [cj(118, "kg")])];
+  eq(V("cj 118", "lbs", [ladder("Clean & Jerk", [118], null)], none).unit, "kg", "disagree, nothing written or confirmed -> the most recent log");
+  // an unconfirmed (suspect) log is no evidence
+  const withSuspect = [row(1, "cj 130", [cj(130, "lbs", { unit_suspect: true, unit_source: "history" })]), row(5, "cj 120", [cj(120, "kg")]), row(9, "cj 118", [cj(118, "kg")])];
+  eq(V("cj 125", "lbs", [ladder("Clean & Jerk", [125], null)], withSuspect).unit, "kg", "a unit_suspect log is ignored as evidence");
+  ok(CONFIRMED_SOURCES.has("athlete_confirmed") && CONFIRMED_SOURCES.has("edit") && CONFIRMED_SOURCES.has("correction") && !CONFIRMED_SOURCES.has("history"), "confirmed sources: answer, edit, correction");
+  // first C&J after a switch: all of the lift's history is lbs -> lbs, flagged (asks once)
+  const allLbs = [row(7, "cj 290", [ladder("Clean & Jerk", [135, 225, 290], "lbs")]), row(14, "cj 275", [ladder("Clean & Jerk", [135, 225, 275], "lbs")]), row(21, "cj 285", [ladder("Clean & Jerk", [135, 225, 285], "lbs")])];
+  v = V("C&J 3x1 @ 110,120,125", "kg", [ladder("Clean & Jerk", [110, 120, 125], null)], allLbs);
+  eq([v.unit, v.suspect], ["lbs", true], "first C&J after switching to kg: history is all lbs, 125 lbs collapses, 125 kg fits -> asks");
+  // self-correction: after the athlete confirms kg once, and three logs later
+  const afterAnswer = [row(1, "C&J 3x1 @ 110,120,125", [ladder("Clean & Jerk", [110, 120, 125], "kg", 1)].map((x) => ({ ...x, unit_source: "athlete_confirmed" }))), ...allLbs];
+  eq(V("cj 118", "kg", [ladder("Clean & Jerk", [118], null)], afterAnswer).unit, "kg", "the log right after the answer -> kg (confirmed beats the older lbs pair)");
+  const threeLater = [row(0.5, "cj 120", [cj(120, "kg", { unit_source: "history" })]), row(0.7, "cj 118", [cj(118, "kg", { unit_source: "history" })]), ...afterAnswer];
+  eq(V("cj 121", "kg", [ladder("Clean & Jerk", [121], null)], threeLater).unit, "kg", "three logs later the new unit still wins (last 3 agree)");
+  // the silent case the orchestrator named: a switch where the number fits both units
+  const accLbs = [row(7, "curls 3x10 @ 30", [ex("Dumbbell Curl", 30, "lbs")]), row(14, "curls 3x10 @ 30", [ex("Dumbbell Curl", 30, "lbs")]), row(21, "curls 3x10 @ 30", [ex("Dumbbell Curl", 30, "lbs")])];
+  eq(V("curls 3x10 @ 30", "kg", [ex("Dumbbell Curl", 30, null)], accLbs).suspect, false, "a number that fits both units is not asked about (known limit)");
+  const accSwitched = [row(1, "curls 3x10 @ 14kg", [ex("Dumbbell Curl", 14, "kg")]), ...accLbs];
+  eq(V("curls 3x10 @ 14", "kg", [ex("Dumbbell Curl", 14, null)], accSwitched).unit, "kg", "...and it self-corrects as soon as the athlete writes the unit once");
+  const accLater = [row(0.3, "curls 14", [ex("Dumbbell Curl", 14, "kg")]), row(0.6, "curls 14", [ex("Dumbbell Curl", 14, "kg")]), ...accSwitched];
+  eq(V("curls 3x10 @ 14", "kg", [ex("Dumbbell Curl", 14, null)], accLater).unit, "kg", "...and three logs later the new unit wins on recency alone");
+}
+
+// 18 ── a flagged load derives NOTHING until confirmed (change 3)
+console.log("nothing derived from a pending load:");
+{
+  const pend = { name: "Clean & Jerk", sets: 3, reps: 1, weight: 125, unit: "lbs", unit_source: "history", unit_suspect: true, set_details: [{ weight: 110, reps: 1 }, { weight: 120, reps: 1 }, { weight: 125, reps: 1 }] };
+  ok(isUnitPending(pend) && !isUnitPending({ ...pend, unit_suspect: undefined }), "isUnitPending");
+  eq(bestE1RMForExercise(pend), 0, "no e1RM (benchmarks, progress, prs, goals, Joe's known maxes all read this)");
+  eq(sessionTonnage([pend]), 0, "no tonnage");
+  eq(sessionTopSet([pend]), null, "no top set on the proof card");
+  eq(prCheckLines([pend], {}, "kg").length, 0, "no PR CHECK line");
+  eq(logTurnExercises({ exercises: [pend, ex("Back Squat", 140, "kg")] }, "kg").map((x) => x.name), ["Back Squat"], "log-turn facts leave it out");
+  eq(logTurnExercises({ exercises: [], pr_attempts: [{ exercise: "Snatch", weight: 102, reps: 1, achieved: true, unit: "lbs", unit_suspect: true }] }, "kg"), [], "a pending declared max is not a turn fact either");
+  const srcFiles = ["src/grit.js", "src/proofcore.js", "src/painLedger.js", "src/builder.jsx"];
+  for (const f of srcFiles) ok(/isUnitPending\(/.test(readFileSync(join(here, "..", f), "utf8")), `${f} skips pending loads`);
+  // confirming
+  const rowPd = { exercises: [pend, ex("Back Squat", 140, "kg", { unit_source: "written" })], pr_attempts: [{ exercise: "Clean & Jerk", weight: 125, reps: 1, achieved: true, unit: "lbs", unit_source: "set", unit_suspect: true }], general_notes: "x" };
+  const c = confirmPendingUnits(rowPd, "kg");
+  eq(c.parsed_data.exercises.map((x) => [x.unit, x.unit_source, !!x.unit_suspect]), [["kg", "athlete_confirmed", false], ["kg", "written", false]], "answer settles the pending set, leaves the rest");
+  eq(c.parsed_data.pr_attempts[0].unit, "kg", "and its declared max");
+  eq(c.parsed_data.general_notes, "x", "other fields kept");
+  eq([c.bank.exercises.length, c.bank.pr_attempts.length, c.bank.exercises[0].name], [1, 1, "Clean & Jerk"], "bank = only the confirmed loads (derived writes run once, for them)");
+  eq(bestE1RMForExercise(c.bank.exercises[0]) > 0, true, "after confirmation the load derives normally");
+  eq(confirmPendingUnits(c.parsed_data, "kg").bank.exercises.length, 0, "answering twice banks nothing twice");
+  eq(confirmPendingUnits(rowPd, "stone").bank.exercises.length, 0, "a junk answer settles nothing");
+  eq(stampLoadUnits(c.parsed_data, { displayUnit: "lbs", message: "C&J 125" }), c.parsed_data, "a confirmed row is final under the resolver");
+  // typed answers
+  eq(["kg", "KG", "it was kg", "kilos.", "lbs", "it was lbs", "pounds", "in kg", "they were lbs"].map(unitAnswer), ["kg", "kg", "kg", "kg", "lbs", "lbs", "lbs", "kg", "lbs"], "typed answers");
+  eq(["kg squat 100", "what?", "", "the kg one was wrong"].map(unitAnswer), [null, null, null, null], "anything else is not an answer");
+}
+
+// 19 ── one voice on a flagged turn (change 2)
+console.log("one voice per turn:");
+{
+  const parsed = stampLoadUnits({ exercises: [ladder("Clean & Jerk", [110, 120, 125], null)] }, { displayUnit: "kg", message: "C&J 3x1 @ 110,120,125", normalizeName: normalizeExName,
+    history: [["cj 290", 7], ["cj 275", 14], ["cj 285", 21]].map(([raw, d]) => ({ created_at: new Date(Date.parse("2026-09-29T12:00:00Z") - d * 864e5).toISOString(), raw_message: raw, parsed_data: { exercises: [ladder("Clean & Jerk", [135, 225, Number(raw.split(" ")[1])], "lbs")] } })),
+    now: Date.parse("2026-09-29T12:00:00Z") });
+  eq(parsed.exercises[0].unit_suspect, true, "fixture is flagged");
+  const loads = pendingUnitLoads(parsed);
+  eq(loads, [{ exercise: "Clean & Jerk", weight: 125, unit: "lbs" }], "pendingUnitLoads");
+  const fact = unitCheckFact(parsed);
+  ok(/UNIT CHECK/.test(fact) && /Clean & Jerk/.test(fact) && /do not question that number/.test(fact) && /do not celebrate/.test(fact) && /do not restate its weight in either unit/.test(fact), "Joe gets the computed fact");
+  ok(!/\b125\b/.test(fact), "the fact itself never states the number");
+  eq(unitCheckFact({ exercises: [ex("Back Squat", 140, "kg", { unit_source: "written" })] }), "", "no pending load, no fact");
+  // the app's line is suppressed when Joe already asked
+  eq(replyAsksUnit("Solid session. Was that 125 in kg or lbs?", loads), true, "Joe asked about the unit");
+  eq(replyAsksUnit("Nice work. Is 125 right?", loads), true, "Joe questioned the number");
+  eq(replyAsksUnit("Nice work on the clean and jerk today.", loads), false, "no question");
+  eq(replyAsksUnit("Good day. How did the squat feel?", loads), false, "a question about something else is not a unit ask");
+  // the whole turn: exactly one message asks about the unit
+  const turn = (joe) => { const app = replyAsksUnit(joe, loads) ? "" : unitCheckMessage(loads); return [joe, app].filter(Boolean).filter((m) => replyAsksUnit(m, loads) || /kg or lbs\?/.test(m)).length; };
+  eq(turn("Solid work today. Squat moved well."), 1, "Joe silent on it -> the app asks, one ask");
+  eq(turn("Solid work. Was the C&J in kg or lbs?"), 1, "Joe asked -> the app does not, one ask");
+  const app = readFileSync(join(here, "../src/App.jsx"), "utf8");
+  ok(/unitCheckContext\?`\\n\\n\$\{unitCheckContext\}`:""/.test(app), "the fact rides in Joe's dynamic context");
+  ok(/replyAsksUnit\(reply, unitChecks\) \? "" : unitCheckMessage\(unitChecks\)/.test(app), "finalizeWorkout suppresses its ask when Joe already asked");
+  ok(/if\(ex\.unit_suspect\)\{ unitChecks\.push/.test(app) && /await finalizeWorkout\(bank, pend\.msg, pend\.reply, athlete, false, false, \{derivedOnly:true/.test(app), "pending loads skip the derived writes; the answer runs them once in derivedOnly mode");
 }
 
 // 15 ── writtenUnit (the stored-row reader shares the chain reading)

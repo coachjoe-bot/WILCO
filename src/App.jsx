@@ -71,7 +71,7 @@ import { draftChangeRequest, fileChangeRequest, flagToSource } from "./changeReq
 import { FEATURE_INVENTORY } from "./features.js";
 import { toLbs, fmtWeightIn, displayStat, unitLabel, setDisplayUnit, getDisplayUnit, toDisplay, roundStat, exerciseUnit, exerciseLoadUnit } from "./units.js";
 // Declared maxes (pr_attempts): unit stamping + the actual-1RM write decision.
-import { stampLoadUnits, storedAttemptUnit, isDeclaredMax, declaredMaxWrite, unitCheckMessage } from "./prAttempts.js";
+import { stampLoadUnits, storedAttemptUnit, isDeclaredMax, declaredMaxWrite, unitCheckMessage, unitCheckFact, replyAsksUnit, pendingUnitLoads, confirmPendingUnits, unitAnswer } from "./prAttempts.js";
 import { effectiveTier, trialActive } from "./tiers.js";
 import { CREW_ENABLED, MASTERMIND_ENABLED, CHAT_FIRST_ENABLED } from "./flags.js";
 import { buildMastermindStatic } from "./ai/card.js";
@@ -1357,6 +1357,8 @@ const withSetMods = (ex, base, hasWeight=false, warmupCount=0) => {
   if(ex.to_failure) tags.push("to failure");
   if(ex.superset_group) tags.push(`superset ${ex.superset_group}`);
   if(warmupCount>0) tags.push(`+${warmupCount} warm-up`);
+  // T65: the app is still asking "kg or lbs?" about this load; nothing is derived from it.
+  if(ex.unit_suspect) tags.push("unit unconfirmed");
   if(tags.length) s += ` · ${tags.join(" · ")}`;
   return s;
 };
@@ -2090,6 +2092,9 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
   // already held behind the WORKOUT stamp there, so sequencing is free).
   let prCheckContext = "";
   const pl = opts.parsedLog;
+  // T65 one voice: the app asks "kg or lbs?" about any load it could not settle
+  // (unit_suspect); Joe is told so as a fact and says nothing about that number.
+  const unitCheckContext = pl ? unitCheckFact(pl) : "";
   // T64 S5: a LOG turn (same gate as the PR CHECK block). Its reply gets the
   // LOG REPLY FOCUS block below: code ranks the one thing worth saying.
   // A stated PR the parser files only under pr_attempts ("hit a 102kg snatch
@@ -2178,7 +2183,7 @@ Athlete: ${athlete.name}, Sport: ${athlete.sport}${athlete.level?", Level: "+ath
 GOAL: ${JOEBOT_GOALS[athlete.goal||"strength"] || JOEBOT_GOALS.strength}
 SPORT: ${JOEBOT_SPORTS[athlete.sport]||"Build a general strength base."}
 ACCOUNT FACTS: coach linked: ${athlete.coach_id?"yes":"no"} · program locked: ${athlete.program_locked?"yes":"no"} · display unit: ${athlete.weight_unit==="kg"?"kg":"lbs"}
-${athlete.weight_unit==="kg"?"This athlete works in KG. State every weight you say in kg (logged data below may carry lbs labels — convert exactly, 1 kg = 2.20462 lbs, and round working weights to 2.5 kg).":"This athlete works in LBS. If logged data below carries a kg label, that lift was performed in kg — convert to lbs when you talk about it (1 kg = 2.20462 lbs)."}${prefs&&prefsPromptLines(prefs)?"\n"+prefsPromptLines(prefs):""}${pastContext}${lastDoneContext}${maxContext}${prCheckContext}${programContext}${positionContext}`;
+${athlete.weight_unit==="kg"?"This athlete works in KG. State every weight you say in kg (logged data below may carry lbs labels — convert exactly, 1 kg = 2.20462 lbs, and round working weights to 2.5 kg).":"This athlete works in LBS. If logged data below carries a kg label, that lift was performed in kg — convert to lbs when you talk about it (1 kg = 2.20462 lbs)."}${prefs&&prefsPromptLines(prefs)?"\n"+prefsPromptLines(prefs):""}${pastContext}${lastDoneContext}${maxContext}${prCheckContext}${unitCheckContext?`\n\n${unitCheckContext}`:""}${programContext}${positionContext}`;
 
   let goalsContext = "";
   // T62: only ACTIVE goals reach the prompt (superseded rows and goals >14 days
@@ -6056,6 +6061,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   const [movementPrompt,setMovementPrompt] = useState(false);
   const [movementLabel,setMovementLabel] = useState("");
   const [sessionCheckPending,setSessionCheckPending] = useState(null);
+  // T65: {rowId, msg, reply, athlete, loads} while the app waits on "kg or lbs?"
+  const [unitConfirmPending,setUnitConfirmPending] = useState(null);
   const [programReplacePending,setProgramReplacePending] = useState(null);
   // Joe wrote a session in chat for someone with an empty Program tab → offer to keep
   // it. Rate-limited hard (see offerProgramSave): the value of a structured program is
@@ -7906,19 +7913,25 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     })();
   },[]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const finalizeWorkout = async (parsed, msg, reply, updatedAthlete, isNewSession, addReply) => {
+  // opts.derivedOnly (T65): the athlete just answered "kg or lbs?" for loads saved
+  // unit_suspect. The row already exists (opts.rowId, updated by the caller with
+  // the confirmed unit); this runs ONLY the derived writes (prs, 1RM promotion,
+  // PR stamp, propagation, crew) for `parsed` = the confirmed loads, through the
+  // same code a normal log uses. No insert, no counters, no stamps of the log.
+  const finalizeWorkout = async (parsed, msg, reply, updatedAthlete, isNewSession, addReply, opts = {}) => {
+    const derivedOnly = !!opts.derivedOnly;
     // effectiveTier: trial athletes persist workouts/PRs like Pro; once the
     // trial lapses this silently answers "free" again and new logs stop saving
     // (history already written stays — free = read-only history, 08-19 ruling).
     const tier = effectiveTier(updatedAthlete);
     // Activation event — fired for ALL tiers (free tier logs but isn't persisted, so
     // tracking here, before the tier gate below, keeps the funnel honest).
-    track("workout_logged","workout_log",{ persisted: tier!=="free" });
+    if(!derivedOnly) track("workout_logged","workout_log",{ persisted: tier!=="free" });
     // One-time notifications offer, right after a log lands (the moment the value
     // is obvious). Shown once ever: answering either way stamps PUSH_PROMPT_KEY.
     // NATIVE-ONLY (Will 08-29 web parity ruling): notifications are the one
     // platform difference — the web athlete surface never offers them.
-    try {
+    if(!derivedOnly) try {
       if(isNativeIOS() && pushSupported() && !localStorage.getItem(PUSH_PROMPT_KEY) && notifPermission()!=="denied"){
         getPushSubscription().then(sub=>{ if(!sub) setShowPushPrompt(true); });
       }
@@ -7952,7 +7965,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // returns before the insert below, and their card must still clear). Only a
       // REAL log for TODAY counts: a backdated log is not today's session done.
       let durationSeconds = null;
-      try{
+      if(!derivedOnly) try{
         const isRealLog = (parsedFinal.exercises?.length>0) || parsedFinal.run_data || parsedFinal.practice_data;
         const ld = parsedFinal.log_date;
         const isToday = !ld || !/^\d{4}-\d{2}-\d{2}$/.test(ld) || qlLocalDay(new Date(ld+"T12:00:00")) === qlLocalDay();
@@ -7976,9 +7989,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // Keep the returned row id: the optimistic history row below carries it, so the
       // just-logged workout is immediately targetable by the AI correction flow and
       // the manual Edit modal (which used to error "hasn't finished syncing" on it).
-      const insertedRows = await sbInsert("workouts",{athlete_id:updatedAthlete.id,raw_message:msg,bot_reply:reply,parsed_data:parsedFinal,...(durationSeconds!=null?{duration_seconds:durationSeconds}:{})});
-      const insertedId = Array.isArray(insertedRows) ? insertedRows[0]?.id : insertedRows?.id;
-      haptic(15); // silent save confirm — the old header ✓ badge crowded the top bar and is gone
+      const insertedRows = derivedOnly ? null : await sbInsert("workouts",{athlete_id:updatedAthlete.id,raw_message:msg,bot_reply:reply,parsed_data:parsedFinal,...(durationSeconds!=null?{duration_seconds:durationSeconds}:{})});
+      const insertedId = derivedOnly ? opts.rowId : (Array.isArray(insertedRows) ? insertedRows[0]?.id : insertedRows?.id);
+      if(!derivedOnly) haptic(15); // silent save confirm — the old header ✓ badge crowded the top bar and is gone
 
       // ── Workout counter + milestone callouts + certified badge ────────────
       // Certification and the callouts key off REAL workouts — the SAME time-grouped
@@ -8012,7 +8025,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // Loads the unit resolver could not settle (unit_suspect, src/prAttempts.js):
       // filed as resolved, held back from PRs, and asked about by unit.
       const unitChecks = [];
-      try {
+      if(!derivedOnly) try {
         const prevCount = updatedAthlete.total_sessions_logged||0;
         // Authoritative session count comes from the SQL view (v_athlete_session_counts,
         // a server-side port of groupIntoSessions over the athlete's FULL history). The
@@ -8163,6 +8176,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         const prInsertRows = [];
         for(const ex of (parsed.exercises||[])){
           if(!ex.name||ex.unit==="bodyweight") continue;
+          // Unit not settled (T65): the row keeps the lift, NOTHING is derived from
+          // it until the athlete answers "kg or lbs?" (confirmUnitAnswer runs this
+          // loop again for it, in derivedOnly mode, with the confirmed unit).
+          if(ex.unit_suspect){ unitChecks.push({exercise:ex.name, weight:ex.weight, unit:exerciseUnit(ex)}); continue; }
           const exE1RM = bestE1RMForExercise(ex);
           if(!exE1RM) continue;
           const k = resolveLift(ex.name).id;
@@ -8203,9 +8220,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           // lift's history or the athlete's setting, and in that unit it jumps
           // implausibly while the other unit reads plausibly. Never a silent flip:
           // it goes through the same ask.
-          const suspect = implausibleJump(knownBestLbs, exE1RM) || !!ex.unit_suspect;
-          if(ex.unit_suspect) unitChecks.push({exercise:ex.name, weight:topSet.weight, unit:exerciseUnit(ex)});
-          else if(suspect) suspectJumps.push({exercise:ex.name, weight:topSet.weight, unit:exerciseUnit(ex), reps:topSet.reps||1, e1rm:exE1RM, knownBest:Math.round(knownBestLbs)});
+          const suspect = implausibleJump(knownBestLbs, exE1RM);
+          if(suspect) suspectJumps.push({exercise:ex.name, weight:topSet.weight, unit:exerciseUnit(ex), reps:topSet.reps||1, e1rm:exE1RM, knownBest:Math.round(knownBestLbs)});
 
           if(!suspect && bestSingle && toLbs(bestSingle.weight, ex.unit) > knownBestLbs){
             const unit = exerciseLoadUnit(ex);
@@ -8252,7 +8268,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           const allTargets = (athleteGoals||[]).flatMap(g=>goalTargets(g).map(t=>({...t, goal_text:g.goal_text})));
           for(const g of allTargets){
             if(firedLifts.has(g.lift)) continue; // one moment per lift per log, not one per goal naming it
-            const matchEx = (parsed.exercises||[]).find(ex=>ex.name && resolveLift(ex.name).id===resolveLift(g.lift).id);
+            const matchEx = (parsed.exercises||[]).find(ex=>ex.name && !ex.unit_suspect && resolveLift(ex.name).id===resolveLift(g.lift).id);
             if(!matchEx) continue;
             const newE1 = bestE1RMForExercise(matchEx);
             if(!newE1 || newE1 < g.targetLbs) continue;
@@ -8304,7 +8320,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // a session as its own WORKOUT card and the header count ran one high until a
       // reload. bot_reply feeds the card's Coach Joe quote. (The cert-block fallback
       // row already sets athlete_id — this was its forgotten twin.)
-      setWorkoutHistory(prev=>[{id:insertedId,athlete_id:updatedAthlete.id,raw_message:msg,bot_reply:reply,parsed_data:parsedFinal,created_at:new Date().toISOString(),...(durationSeconds!=null?{duration_seconds:durationSeconds}:{})},...prev]);
+      if(derivedOnly){
+        if(opts.rowParsed) setWorkoutHistory(prev=>prev.map(w=>String(w.id)===String(opts.rowId)?{...w,parsed_data:opts.rowParsed}:w));
+      } else setWorkoutHistory(prev=>[{id:insertedId,athlete_id:updatedAthlete.id,raw_message:msg,bot_reply:reply,parsed_data:parsedFinal,created_at:new Date().toISOString(),...(durationSeconds!=null?{duration_seconds:durationSeconds}:{})},...prev]);
 
       if(newPRs.length>0){
         // Crew "pr" moment — ONLY when the lift changed TIER (a rank-up), not
@@ -8442,9 +8460,17 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           `Hold up before I bank ${one?"that":"those"}.\n${lines}\n\nThat's a bigger jump than one session usually adds, so I want to check ${one?"it":"them"} rather than log a number you didn't lift. ${one?"Is that right":"Are those right"}, or ${one?"was it":"were they"} a typo? Tell me the real number and I'll fix it.`
         }]),900);
       }
-      if(unitChecks.length){
-        const ask = unitCheckMessage(unitChecks);
-        if(ask) setTimeout(()=>setMessages(prev=>[...prev,{role:"assistant",content:ask}]), suspectJumps.length?1800:900);
+      // ── Unit not settled: ONE question, then kg/lbs chips (T65) ────────────
+      // One voice per turn (AI contract rule 5): on the held-reply path Joe was
+      // told the app is asking (unitCheckFact) and says nothing about the number.
+      // If his reply asked anyway (or never saw the fact: the unheld path), the
+      // app does not ask a second time; the chips answer his question.
+      if(unitChecks.length && insertedId && !derivedOnly){
+        const ask = replyAsksUnit(reply, unitChecks) ? "" : unitCheckMessage(unitChecks);
+        setTimeout(()=>{
+          if(ask) setMessages(prev=>[...prev,{role:"assistant",content:ask}]);
+          setUnitConfirmPending({rowId:insertedId, msg, reply, athlete:updatedAthlete, loads:unitChecks});
+        }, suspectJumps.length?1800:900);
       }
 
       // WILCO Crew V1 — write whatever moments this turn detected (pr/week/
@@ -8455,6 +8481,32 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       if(CREW_ENABLED && crewMoments.length) crewWriteMoments(updatedAthlete, crewMoments);
     } catch(e){
       setMessages(prev=>[...prev,{role:"assistant",content:"Hit a snag saving that. Try again."}]);
+    }
+  };
+
+  // ── T65: the athlete answered "kg or lbs?" ──────────────────────────────────
+  // Writes the confirmed unit onto the row (unit_source "athlete_confirmed", which
+  // the resolver counts as evidence for that lift from then on), then runs the
+  // derived writes ONCE, for the confirmed loads only, through finalizeWorkout's
+  // own PR/1RM/propagation code (derivedOnly: no insert, no counters, no stamps).
+  const confirmUnitAnswer = async (unit) => {
+    const pend = unitConfirmPending;
+    if(!pend) return;
+    setUnitConfirmPending(null);
+    try{
+      let pd = workoutHistory.find(w=>String(w.id)===String(pend.rowId))?.parsed_data;
+      if(!pd){ const r = await sbRead("workouts",`?id=eq.${pend.rowId}&select=parsed_data`); pd = Array.isArray(r)&&r[0] ? r[0].parsed_data : null; }
+      if(typeof pd==="string"){ try{ pd = JSON.parse(pd); }catch(_){ pd = null; } }
+      if(!pd) throw new Error("row not found");
+      const {parsed_data, bank} = confirmPendingUnits(pd, unit);
+      if(!bank.exercises.length && !bank.pr_attempts.length) return;
+      await sbUpdate("workouts", pend.rowId, {parsed_data});
+      const names = [...new Set([...bank.exercises.map(e=>e.name), ...bank.pr_attempts.map(p=>p.exercise)])].join(", ");
+      setMessages(prev=>[...prev,{role:"assistant",content:`Got it. ${names} logged in ${unit==="kg"?"kg":"lbs"}.`}]);
+      await finalizeWorkout(bank, pend.msg, pend.reply, athlete, false, false, {derivedOnly:true, rowId:pend.rowId, rowParsed:parsed_data});
+    }catch(_){
+      setUnitConfirmPending(pend);
+      setMessages(prev=>[...prev,{role:"assistant",content:"Couldn't save that. Tap kg or lbs again."}]);
     }
   };
 
@@ -8714,6 +8766,18 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       await sbUpdate("workouts", target.id, {parsed_data:pd});
       const updatedHistory = workoutHistory.map(w=>String(w.id)===String(target.id)?{...w,parsed_data:pd}:w);
       setWorkoutHistory(updatedHistory);
+      // T65: a unit correction on a load the app was still asking about IS the
+      // answer. Bank it now, once, through the same derived-writes path.
+      try{
+        const before = typeof target.parsed_data==="string" ? JSON.parse(target.parsed_data) : (target.parsed_data||{});
+        const wasPending = new Set([...(before.exercises||[]), ...(before.pr_attempts||[])].filter(x=>x?.unit_suspect).map(x=>normalizeExName(x.name||x.exercise||"")));
+        const settled = (x)=>x && !x.unit_suspect && x.unit_source==="correction" && wasPending.has(normalizeExName(x.name||x.exercise||""));
+        const bank = {exercises:(pd.exercises||[]).filter(settled), pr_attempts:(pd.pr_attempts||[]).filter(settled)};
+        if(bank.exercises.length || bank.pr_attempts.length){
+          if(unitConfirmPending && String(unitConfirmPending.rowId)===String(target.id)) setUnitConfirmPending(null);
+          await finalizeWorkout(bank, target.raw_message||"", target.bot_reply||"", athlete, false, false, {derivedOnly:true, rowId:target.id, rowParsed:pd});
+        }
+      }catch(_){ /* banking is additive; the corrected row is already saved */ }
 
       // Max cleanup + (if needed) program scale-back, per corrected lift.
       const cleanupNotes = [];
@@ -9011,6 +9075,18 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       const pendingCheck = sessionCheckPending;
       setSessionCheckPending(null);
       try { await finalizeWorkout(pendingCheck.parsed,pendingCheck.msg,pendingCheck.reply,pendingCheck.updatedAthlete,false,false); } catch(_){}
+    }
+    // T65: a bare "kg" / "it was lbs" answers the app's unit question. Anything
+    // else dismisses the chips (typed-means-dismissed), and the lift stays unbanked.
+    if(unitConfirmPending){
+      const u = unitAnswer(msg);
+      if(u){
+        setInput("");
+        setMessages(prev=>[...prev,{role:"user",content:msg,at:Date.now()}]);
+        await confirmUnitAnswer(u);
+        return;
+      }
+      setUnitConfirmPending(null);
     }
     // Quick Log drafts are pure workout logs. Consume the flag for THIS send so a
     // draft can NEVER be classified as a program and overwrite program_text.
@@ -10765,6 +10841,18 @@ ${VOICE_ATHLETE}`;
           <button onClick={()=>{setInput(retryPending);setRetryPending(null);}}
             style={{background:CA.navy3,border:`1px solid ${CA.border}`,color:CA.muted2,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
             Edit it
+          </button>
+        </div>
+      ):unitConfirmPending?(
+        <div className="no-sb" style={{padding:"0 14px 4px",display:"flex",gap:6,overflowX:"auto",flexShrink:0,alignItems:"center",flexWrap:"nowrap"}}>
+          <span style={{color:CA.muted,fontSize:12,flexShrink:0}}>↑</span>
+          <button onClick={()=>confirmUnitAnswer("kg")} aria-label="It was kg"
+            style={{background:`${CA.accent}20`,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+            kg
+          </button>
+          <button onClick={()=>confirmUnitAnswer("lbs")} aria-label="It was lbs"
+            style={{background:`${CA.accent}20`,border:`1px solid ${CA.accent}`,color:CA.accent,borderRadius:20,padding:"7px 18px",cursor:"pointer",fontSize:13,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+            lbs
           </button>
         </div>
       ):sessionCheckPending?(

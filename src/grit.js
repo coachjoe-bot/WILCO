@@ -116,7 +116,7 @@ export const getExerciseSets = (ex) => {
 
 // Conversion lives in units.js (T55: single source, one constant). Imported for
 // local use and re-exported because grit.js is where most existing code gets it.
-import { toLbs, toKg, LBS_PER_KG, getDisplayUnit, toDisplay, roundStat, exerciseUnit, exerciseLoadUnit } from "./units.js";
+import { toLbs, toKg, LBS_PER_KG, getDisplayUnit, toDisplay, roundStat, exerciseUnit, exerciseLoadUnit, isUnitPending } from "./units.js";
 export { toLbs, toKg, LBS_PER_KG };
 
 // Load-bearing bodyweight movements — dips, pull-ups, chin-ups, muscle-ups — where
@@ -129,7 +129,7 @@ const LOAD_BEARING_BW = /\b(dips?|pull[ -]?ups?|chin[ -]?ups?|muscle[ -]?ups?)\b
 // `bwLbs` (athlete bodyweight) is optional: pass it to score load-bearing bodyweight
 // lifts; omit it and bodyweight lifts return 0.
 export const bestE1RMForExercise = (ex, bwLbs = 0) => {
-  if (!ex) return 0;
+  if (!ex || isUnitPending(ex)) return 0; // unit unconfirmed: nothing derived (T65)
   const isBW = ex.unit === "bodyweight";
   let bwLoad = 0;
   if (isBW) {
@@ -747,7 +747,7 @@ export function computeGritSnapshot(workouts, manualRMs, opts = {}) {
 export function sessionTonnage(exercises) {
   let total = 0;
   for (const ex of exercises || []) {
-    if (!ex || ex.unit === "bodyweight") continue;
+    if (!ex || ex.unit === "bodyweight" || isUnitPending(ex)) continue;
     const all = getExerciseSets(ex);
     const sets = all.some((s) => !s.warmup) ? all.filter((s) => !s.warmup) : all;
     for (const s of sets) {
@@ -765,7 +765,7 @@ export function sessionTonnage(exercises) {
 export function sessionTopSet(exercises) {
   let best = null, bestLbs = 0;
   for (const ex of exercises || []) {
-    if (!ex || ex.unit === "bodyweight" || !ex.name) continue;
+    if (!ex || ex.unit === "bodyweight" || !ex.name || isUnitPending(ex)) continue;
     const all = getExerciseSets(ex);
     const sets = all.some((s) => !s.warmup) ? all.filter((s) => !s.warmup) : all;
     for (const s of sets) {
@@ -987,7 +987,7 @@ export function prCheckLines(exercises, best, unit = "lbs") {
   const show = (lbs) => kg ? `${Math.round((lbs / LBS_PER_KG) * 10) / 10} kg (${Math.round(lbs)} lbs)` : `${Math.round(lbs)} lbs`;
   const lines = [];
   for (const ex of Array.isArray(exercises) ? exercises : []) {
-    if (!ex || !ex.name || ex.unit === "bodyweight") continue;
+    if (!ex || !ex.name || ex.unit === "bodyweight" || isUnitPending(ex)) continue;
     const sets = getExerciseSets(ex).filter((s) => s.weight > 0);
     if (!sets.length && !(ex.weight > 0)) continue;
     const top = sets.reduce((b, s) => (!b || toLbs(s.weight, ex.unit) > toLbs(b.weight, ex.unit)) ? s : b, null) || { weight: ex.weight, reps: ex.reps || 1 };

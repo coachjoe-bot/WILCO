@@ -107,21 +107,73 @@ test("kg athlete who benches in lbs: an unlabelled bench follows the lift's own 
   await expect(page.getByText(/Hold up before I bank|Quick check before I bank/)).toHaveCount(0);
 });
 
-test("a load that only makes sense in the other unit is kept as resolved and ASKED about, never flipped", async ({ page }) => {
+// Orchestrator 09-29 (changes 2 + 3): lbs athlete, bench history in kg, types
+// "bench 3x5 at 225": 225 kg is implausible, 225 lbs fits, so the load is kept as
+// resolved (kg), marked unit_suspect, and asked about ONCE. Nothing is derived
+// until the answer; the answer banks it once.
+const kgBenchHistory = () => ({ workouts: [
+  histRow("h1", 5, "Bench 3x5 @ 100kg", [{ name: "Bench Press", sets: 3, reps: 5, weight: 100, unit: "kg" }]),
+  histRow("h2", 12, "Bench 3x5 @ 97.5kg", [{ name: "Bench Press", sets: 3, reps: 5, weight: 97.5, unit: "kg" }]),
+] });
+const unitAsks = async (page) => (await page.getByText(/kg or lbs\?/).count());
+const flagged = async (page, chatReply) => {
   const athlete = makeAthlete({ weight_unit: "lbs" });
   const parseResult = { ...emptyParse, exercises: [{ name: "Bench Press", sets: 3, reps: 5, weight: 225, unit: null }] };
-  const { calls } = await mockApi(page, { athlete, parseResult, chatReply: "Logged.", dataReads: { workouts: [
-    histRow("h1", 5, "Bench 3x5 @ 100kg", [{ name: "Bench Press", sets: 3, reps: 5, weight: 100, unit: "kg" }]),
-    histRow("h2", 12, "Bench 3x5 @ 97.5kg", [{ name: "Bench Press", sets: 3, reps: 5, weight: 97.5, unit: "kg" }]),
-  ] } });
+  const api = await mockApi(page, { athlete, parseResult, chatReply, dataReads: kgBenchHistory() });
   await loginAsAthlete(page, athlete);
   await typeAndSend(page, "bench 3x5 at 225");
+  await expect.poll(() => inserts(api.calls, "workouts").some((r) => r.parsed_data?.exercises?.[0]?.name === "Bench Press")).toBe(true);
+  return api;
+};
 
-  await expect.poll(() => inserts(calls, "workouts").some((r) => r.parsed_data?.exercises?.[0]?.name === "Bench Press")).toBe(true);
+test("flagged load: saved as resolved + suspect, ONE unit question, nothing derived", async ({ page }) => {
+  const { calls } = await flagged(page, "Solid pressing today. Keep the bar path tight.");
   const ex = inserts(calls, "workouts").find((r) => r.parsed_data?.exercises?.[0]?.name === "Bench Press").parsed_data.exercises[0];
   expect([ex.unit, ex.unit_source, ex.unit_suspect]).toEqual(["kg", "history", true]);
-  // The unit ask, by unit, never a silent flip and never the generic jump copy.
+  // Joe was told, as a computed fact, that the app is asking.
+  const chatCall = calls.find((c) => c.url.endsWith("/api/claude") && /chat/.test(c.body?.feature || ""));
+  expect(JSON.stringify(chatCall?.body || {})).toContain("UNIT CHECK");
   await expect(page.getByText(/Quick check before I bank that/)).toBeVisible({ timeout: 15000 });
-  await expect(page.getByText(/Bench Press at 225 kg doesn't line up/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "It was kg" })).toBeVisible();
+  expect(await unitAsks(page)).toBe(1);
   await expect(page.getByText(/Hold up before I bank/)).toHaveCount(0);
+  // Nothing derived: no estimated max, no actual 1RM.
+  await page.waitForTimeout(1500);
+  expect(inserts(calls, "prs").filter((r) => /bench/i.test(r.exercise))).toHaveLength(0);
+  expect(inserts(calls, "manual_one_rms").filter((r) => /bench/i.test(r.exercise))).toHaveLength(0);
+});
+
+test("flagged load: when Joe already asked, the app does not ask again (chips still answer)", async ({ page }) => {
+  await flagged(page, "Solid pressing. Was that 225 in lbs or kg?");
+  await expect(page.getByRole("button", { name: "It was lbs" })).toBeVisible({ timeout: 15000 });
+  await expect(page.getByText(/Quick check before I bank/)).toHaveCount(0);
+  expect(await unitAsks(page)).toBe(0); // Joe's question uses "lbs or kg?"; the app adds none
+  await expect(page.getByText(/Was that 225 in lbs or kg\?/)).toHaveCount(1);
+});
+
+test("answering the unit question writes the confirmed unit and banks the lift once", async ({ page }) => {
+  const { calls } = await flagged(page, "Solid pressing today.");
+  await page.getByRole("button", { name: "It was lbs" }).click({ timeout: 15000 });
+  await expect(page.getByText(/Got it\. Bench Press logged in lbs\./)).toBeVisible();
+  // The row is updated with the athlete's answer.
+  await expect.poll(() => calls.some((c) => c.url.endsWith("/api/data") && c.body?.op === "update" && c.body?.table === "workouts" &&
+    c.body?.data?.parsed_data?.exercises?.[0]?.unit === "lbs" && c.body?.data?.parsed_data?.exercises?.[0]?.unit_source === "athlete_confirmed" &&
+    !c.body?.data?.parsed_data?.exercises?.[0]?.unit_suspect)).toBe(true);
+  // Derived writes run now, once, in the confirmed unit.
+  await expect.poll(() => inserts(calls, "prs").filter((r) => /bench/i.test(r.exercise)).length).toBe(1);
+  const pr = inserts(calls, "prs").find((r) => /bench/i.test(r.exercise));
+  expect([pr.unit, Number(pr.weight)]).toEqual(["lbs", 225]);
+  expect(inserts(calls, "workouts")).toHaveLength(1); // no second workout row
+  await expect(page.getByRole("button", { name: "It was kg" })).toHaveCount(0);
+});
+
+test("a typed 'kg' answers the unit question too", async ({ page }) => {
+  const { calls } = await flagged(page, "Solid pressing today.");
+  await expect(page.getByRole("button", { name: "It was kg" })).toBeVisible({ timeout: 15000 });
+  const before = calls.filter((c) => c.body?.feature === "workout_parse").length;
+  await page.getByPlaceholder(/Tell Coach Joe about your workout/).fill("it was kg");
+  await page.getByRole("button", { name: "→", exact: true }).click();
+  await expect(page.getByText(/Got it\. Bench Press logged in kg\./)).toBeVisible();
+  expect(calls.filter((c) => c.body?.feature === "workout_parse").length).toBe(before); // never parsed as a log
+  await expect.poll(() => inserts(calls, "prs").filter((r) => /bench/i.test(r.exercise) && r.unit === "kg").length).toBe(1);
 });

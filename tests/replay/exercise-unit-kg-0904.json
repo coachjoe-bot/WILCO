@@ -1,9 +1,206 @@
 {
-  "bug": "T65: logged sets carried the parser's unit, and the parser's rulebook said an unlabelled load is lbs (this app's default). A kg athlete's 'squat 5x3 at 140' could be saved as a 140 LB squat, and in practice the parser sometimes carried kg across lifts and sometimes did not. These are the founder's real rows (read-only copies, 2026-09-29) run through the T65 resolver. T65 v2 (orchestrator 09-29): step 4 reads the unit this athlete has used for the same lift, so the two founder rows the first order would have misfiled stay lbs.",
+  "bug": "T65: logged sets carried the parser's unit, and the parser's rulebook said an unlabelled load is lbs (this app's default). A kg athlete's 'squat 5x3 at 140' could be saved as a 140 LB squat, and in practice the parser sometimes carried kg across lifts and sometimes did not. These are the founder's real rows (read-only copies, 2026-09-29) run through the T65 resolver. T65 v2 (orchestrator 09-29): step 4 reads the unit this athlete has used for the same lift, so the two founder rows the first order would have misfiled stay lbs. v3 (orchestrator 09-29): step 4 ranks by recency; C&J rows added with his real C&J history.",
   "source": "Founder account 0704b840-45db-4bff-81eb-064154092e7f (weight_unit kg, writes kg since 2026-08-17). Copied read-only; nothing was repaired.",
   "rows": [
     {
-      "name": "09-04 C&J + back squat: parser carried kg onto unlabelled ladders",
+      "name": "08-22 C&J: his FIRST C&J after switching to kg (all C&J history lbs)",
+      "row_id": "b51f25f5-2267-40ee-8de7-9805285eaa9d",
+      "created_at": "2026-08-22T04:20:32Z",
+      "display_unit": "kg",
+      "raw_message": "Day 5 – Clean & Jerk/Back Squat\n\nClean and Jerk work up to 110, then 3x1 @ 110,120,125 warm up sets: 20,70,90,100\nBack Squat 3x4 120,140, 140 kg",
+      "parsed": {
+        "exercises": [
+          {
+            "name": "Clean & Jerk",
+            "sets": 3,
+            "reps": 1,
+            "weight": 125,
+            "unit": "kg",
+            "set_details": [
+              {
+                "reps": 1,
+                "weight": 20,
+                "warmup": true
+              },
+              {
+                "reps": 1,
+                "weight": 70,
+                "warmup": true
+              },
+              {
+                "reps": 1,
+                "weight": 90,
+                "warmup": true
+              },
+              {
+                "reps": 1,
+                "weight": 100,
+                "warmup": true
+              },
+              {
+                "reps": 1,
+                "weight": 110
+              },
+              {
+                "reps": 1,
+                "weight": 120
+              },
+              {
+                "reps": 1,
+                "weight": 125
+              }
+            ]
+          },
+          {
+            "name": "Back Squat",
+            "sets": 3,
+            "reps": 4,
+            "weight": 140,
+            "unit": "kg",
+            "set_details": [
+              {
+                "reps": 4,
+                "weight": 120
+              },
+              {
+                "reps": 4,
+                "weight": 140
+              },
+              {
+                "reps": 4,
+                "weight": 140
+              }
+            ]
+          }
+        ],
+        "pr_attempts": []
+      },
+      "history": [
+        {
+          "created_at": "2026-08-15T16:10:52Z",
+          "raw_message": "Day 6 – Saturday Oly + Legs\n\nClean & Jerk 3×1 warm-up climb, then MAX ATTEMPT\nBack Squat MAX ATTEMPT\n\nClean and jerk singles at 135/185/225/255/275/290\nBack squat singles at 135/225/275/315/365/385 then I failed 405",
+          "parsed_data": {
+            "exercises": [
+              {
+                "name": "Clean & Jerk",
+                "sets": 6,
+                "reps": 1,
+                "weight": 290,
+                "unit": "lbs",
+                "set_details": [
+                  {
+                    "reps": 1,
+                    "weight": 135,
+                    "warmup": true
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 185,
+                    "warmup": true
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 225,
+                    "warmup": true
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 255
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 275
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 290
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "created_at": "2026-08-09T22:39:08Z",
+          "raw_message": "Day 6 – Saturday Oly + Legs\n\nSnatch 3x1 @ 205/225/245 I tried and failed 265 twice. Hoping to get it next week\nClean & Jerk 2x1 @ 225/255 I didn’t go as heavy on this because snatch took it out of me\nBack Squat 3x1 @ 315/365/385 this felt solid, it was a tough top set. Hoping for 405 next week",
+          "parsed_data": {
+            "exercises": [
+              {
+                "name": "Clean & Jerk",
+                "sets": 2,
+                "reps": 1,
+                "weight": 255,
+                "unit": "lbs",
+                "set_details": [
+                  {
+                    "reps": 1,
+                    "weight": 225
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 255
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "created_at": "2026-08-05T12:41:10Z",
+          "raw_message": "Snatch 3x1 @ 185/205/225\nClean & Jerk 3x1 @ 225/245/265\nBack Squat 2x2 @ 335/355\nWeighted sit ups 3x12 @ 35lbs\n\nBoth 225 snatch and 265 clean and jerk felt solid. Pull strength has definitely improved this block",
+          "parsed_data": {
+            "exercises": [
+              {
+                "name": "Clean & Jerk",
+                "sets": 3,
+                "reps": 1,
+                "weight": 265,
+                "unit": "lbs",
+                "set_details": [
+                  {
+                    "reps": 1,
+                    "weight": 225
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 245
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 265
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "exercises": [
+          "lbs",
+          "kg"
+        ],
+        "pr_attempts": [],
+        "unit_source": [
+          "history",
+          "written"
+        ],
+        "suspect": [
+          true,
+          false
+        ]
+      },
+      "expect_after_answer": {
+        "answer": "kg",
+        "exercises": [
+          "kg",
+          "kg"
+        ]
+      },
+      "note": "Stored kg. The only C&J evidence is his lbs era (last 3 agree: lbs), so the resolver files it lbs and the guard asks: 125 lbs collapses below his 290 lb best, 125 kg fits. He answers kg once; that confirmed row then makes his next C&J kg (09-04 resolves kg either way)."
+    },
+    {
+      "name": "09-04 C&J + back squat, with his real C&J history (recency: kg)",
       "row_id": "365d5b58-84b8-4efb-93b1-8d771d253a87",
       "created_at": "2026-09-04T19:54:11Z",
       "display_unit": "kg",
@@ -111,23 +308,161 @@
           "kg"
         ],
         "unit_source": [
-          "display",
+          "history",
           "same-lift"
+        ],
+        "suspect": [
+          false,
+          false
         ]
       },
       "expect_if_lbs_athlete": {
         "exercises": [
-          "lbs",
-          "kg"
-        ],
-        "pr_attempts": [
-          "lbs",
           "kg",
           "kg"
         ],
-        "why": "an lbs athlete: 180kg is written on the squat only, so the squat ladder is kg (same lift) and the C&J ladder follows the athlete (T46: a unit never carries to the next lift)"
+        "pr_attempts": [
+          "kg",
+          "kg",
+          "kg"
+        ],
+        "why": "the C&J's own last 3 logs (kg, kg, lbs, none written) resolve to the most recent: kg, whatever the setting; the squat is kg by the 180kg written on the same lift"
       },
-      "history": []
+      "history": [
+        {
+          "created_at": "2026-08-28T19:14:09Z",
+          "raw_message": "Day 5 – Clean & Jerk/Back Squat\n\nSnatch to heavy single singles @ 20kg/50/70/80/90/100/110/115/118\nClean and Jerk to heavy single 70/90/100/110/120 \nFor 125kg I hit the clean but misses the jerk",
+          "parsed_data": {
+            "exercises": [
+              {
+                "name": "Clean & Jerk",
+                "sets": 5,
+                "reps": 1,
+                "weight": 120,
+                "unit": "kg",
+                "set_details": [
+                  {
+                    "reps": 1,
+                    "weight": 70,
+                    "warmup": true
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 90,
+                    "warmup": true
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 100,
+                    "warmup": true
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 110
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 120
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "created_at": "2026-08-22T04:20:32Z",
+          "raw_message": "Day 5 – Clean & Jerk/Back Squat\n\nClean and Jerk work up to 110, then 3x1 @ 110,120,125 warm up sets: 20,70,90,100\nBack Squat 3x4 120,140, 140 kg",
+          "parsed_data": {
+            "exercises": [
+              {
+                "name": "Clean & Jerk",
+                "sets": 3,
+                "reps": 1,
+                "weight": 125,
+                "unit": "kg",
+                "set_details": [
+                  {
+                    "reps": 1,
+                    "weight": 20,
+                    "warmup": true
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 70,
+                    "warmup": true
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 90,
+                    "warmup": true
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 100,
+                    "warmup": true
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 110
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 120
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 125
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "created_at": "2026-08-15T16:10:52Z",
+          "raw_message": "Day 6 – Saturday Oly + Legs\n\nClean & Jerk 3×1 warm-up climb, then MAX ATTEMPT\nBack Squat MAX ATTEMPT\n\nClean and jerk singles at 135/185/225/255/275/290\nBack squat singles at 135/225/275/315/365/385 then I failed 405",
+          "parsed_data": {
+            "exercises": [
+              {
+                "name": "Clean & Jerk",
+                "sets": 6,
+                "reps": 1,
+                "weight": 290,
+                "unit": "lbs",
+                "set_details": [
+                  {
+                    "reps": 1,
+                    "weight": 135,
+                    "warmup": true
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 185,
+                    "warmup": true
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 225,
+                    "warmup": true
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 255
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 275
+                  },
+                  {
+                    "reps": 1,
+                    "weight": 290
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
     },
     {
       "name": "08-18 bench ladder, no unit written, stored lbs",

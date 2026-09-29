@@ -375,11 +375,13 @@ export function prLinesForReply(lines, exercises = []) {
 // today, new PR" parses with exercises empty) is still performed work: as a
 // single it feeds the log-turn facts. Unit: the attempt's own, else the
 // athlete's display unit (the athlete wrote the number in their unit).
+// T65: a load whose unit the app is still asking about (unit_suspect) is left out
+// of every log-turn fact: Joe does not see a number he must not comment on.
 export function logTurnExercises(parsed, displayUnit = "lbs") {
   if (!parsed) return [];
-  if (Array.isArray(parsed.exercises) && parsed.exercises.length) return parsed.exercises;
+  if (Array.isArray(parsed.exercises) && parsed.exercises.length) return parsed.exercises.filter((x) => !x?.unit_suspect);
   return (Array.isArray(parsed.pr_attempts) ? parsed.pr_attempts : [])
-    .filter((p) => p && p.achieved && p.exercise && p.weight > 0)
+    .filter((p) => p && p.achieved && p.exercise && p.weight > 0 && !p.unit_suspect)
     .map((p) => ({ name: p.exercise, sets: 1, reps: p.reps > 0 ? p.reps : 1, weight: p.weight, unit: p.unit === "kg" || p.unit === "lbs" ? p.unit : (displayUnit === "kg" ? "kg" : "lbs") }));
 }
 

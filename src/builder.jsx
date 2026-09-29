@@ -21,6 +21,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { CA, CA_BTN, DISP, IS_DARK, PAPER_GRID, Skeleton, askClaude, sbDelete, sbInsert, sbRead, sbUpdateWhere, sbUpsert, track } from "./App.jsx";
 import { epley1RM, normalizeExName, toLbs, computeGritSnapshot, ratioLimitersLine, feasibilityLine } from "./grit.js";
+import { isUnitPending } from "./units.js";
 import { storedAttemptUnit } from "./prAttempts.js";
 import { normalizePrefs, prefsPromptLines, validatePref, describePref, nextSignalState, clearedSignal } from "./trainingPrefs.js";
 import { campaignLine, parseBlockInfo } from "./programContract.js";
@@ -148,7 +149,7 @@ function liftDeltaLine(rows, sinceIso) {
   const byLift = {}; // canonical name -> {first e1RM logged this block, best since}
   for (const w of inBlock) {
     for (const e of w?.parsed_data?.exercises || []) {
-      if (!e?.name || !e.weight || !e.reps) continue;
+      if (!e?.name || !e.weight || !e.reps || isUnitPending(e)) continue;
       const est = epley1RM(toLbs(Number(e.weight), e.unit), Number(e.reps));
       if (!est || !Number.isFinite(est)) continue;
       const k = normalizeExName(e.name);
