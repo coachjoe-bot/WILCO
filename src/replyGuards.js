@@ -71,11 +71,23 @@ const CLAIM_RES = [
   { ctx: false, re: /\bi'?ll (?:swap|pull|replace|remove|change|update|adjust|put|move|drop|sub|switch)\b[^.!?]*\b(?:program|rotation|block|in its place)\b/i },
   // "I'm staging a change", "I'm drafting a rec" with no rec staged this turn
   // bare past tense: "I staged a rec for that." (integration, 09-28)
-  { ctx: false, re: /\bi\s+(?:just\s+)?(?:staged|drafted|queued|built|wrote|put together)\s+(?:a|an|the|you a)\s+(?:protective\s+|small\s+|quick\s+)?(?:change|rec|recommendation|swap|adjustment|tweak|program change)\b/i },
+  { ctx: false, re: /\bi\s+(?:just\s+)?(?:staged|drafted|queued|built|wrote|put together|set up|lined up|made)\s+(?:a|an|the|you a)\s+(?:protective\s+|small\s+|quick\s+)?(?:change|rec|recommendation|swap|adjustment|tweak|program change)\b/i },
   // no subject at all: "Front squat's out for now." / "Dips are out of the rotation."
   { ctx: false, re: /\b[a-z][\w' -]{2,40}?(?:'s| is| are)\s+out\s+(?:for now|for (?:the|this) (?:week|block)|of (?:the|your) (?:program|rotation|block|plan))\b/i },
-  { ctx: false, re: /\b(?:i'?m|i am|i'?ve|i have)\s+(?:just\s+)?(?:staging|staged|drafting|drafted|putting together|put together|building|built|writing|written|queuing|queued)\s+(?:a|an|the|you a)?\s*(?:protective\s+|small\s+|quick\s+)?(?:change|changes|rec|recommendation|swap|adjustment|tweak|program change)\b/i },
+  { ctx: false, re: /\b(?:i'?m|i am|i'?ve|i have)\s+(?:just\s+)?(?:staging|staged|drafting|drafted|putting together|put together|building|built|writing|written|queuing|queued|setting up|set up|lining up|lined up|making|made|putting in|working in|working up)\s+(?:a|an|the|you a)?\s*(?:protective\s+|small\s+|quick\s+|temporary\s+)?(?:change|changes|rec|recommendation|swap|adjustment|adjustments|modification|tweak|program change)\b/i },
 ];
+
+// The clause around a match: from the previous clause break to the next one.
+const CLAUSE_BREAK = /,|;|:|\bso\b|\bbut\b|\bbecause\b|\bsince\b|\bthat way\b/gi;
+function claimClause(sentence, index, length) {
+  let start = 0, end = sentence.length, m;
+  CLAUSE_BREAK.lastIndex = 0;
+  while ((m = CLAUSE_BREAK.exec(sentence))) {
+    if (m.index + m[0].length <= index) start = m.index + m[0].length;
+    else if (m.index >= index + length) { end = m.index; break; }
+  }
+  return sentence.slice(start, end);
+}
 
 export function findClaims(text) {
   const out = [];
@@ -85,8 +97,16 @@ export function findClaims(text) {
     sents.forEach((s, si) => {
       const clean = s.replace(/[’]/g, "'");
       // a question is an offer, never a claim
-      if (NEGATED.test(clean) || OFF_TOPIC.test(clean) || DESCRIPTIVE.test(clean) || /\?\s*$/.test(clean)) return;
-      const hit = CLAIM_RES.some(({ re, ctx }) => re.test(clean) && (!ctx || PROGRAMISH.test(clean) || SWAP_FOR.test(clean)));
+      if (OFF_TOPIC.test(clean) || DESCRIPTIVE.test(clean) || /\?\s*$/.test(clean)) return;
+      // Negation and hedging are judged on the CLAUSE that holds the claim, not
+      // the whole sentence: "I'm setting up an adjustment so we're not stacking
+      // more onto it" is a claim, and its "not" belongs to the reason after it.
+      const hit = CLAIM_RES.some(({ re, ctx }) => {
+        const m = re.exec(clean);
+        if (!m) return false;
+        if (ctx && !(PROGRAMISH.test(clean) || SWAP_FOR.test(clean))) return false;
+        return !NEGATED.test(claimClause(clean, m.index, m[0].length));
+      });
       if (hit) out.push({ para: pi, sent: si, text: s });
     });
   });
