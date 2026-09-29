@@ -284,3 +284,96 @@ test("Joe's prefill on an UNTOUCHED sheet still rebuilds it", async ({ page }) =
   await expect.poll(() => calls.filter((c) => c.body?.feature === "quick_log_draft").length, { timeout: 15000 }).toBeGreaterThan(draftsBefore);
   await expect.poll(async () => (await parkOf(page, athlete))?.dock).toBe(true);
 });
+
+// ─── BOARD BUG (09-01, unverified until 09-29): "the log sheet may stay open
+// after Finish". Seen once on a polluted fixture. Two states that fixture
+// could have been in, each pinned here: a pending program rec on screen, and
+// Joe still writing a reply when Finish is tapped.
+const REC_ROW = (athleteId) => ({
+  id: "rec-row-1", athlete_id: athleteId, owner_type: "athlete", title: "Row swap", status: "rec",
+  draft_text: "", transcript: [], updated_at: new Date().toISOString(),
+  blueprint: { rec: { v: 1, title: "Row swap", origin: "ask", duration: "1w", parked: false, why: "Asked.",
+    swaps: [{ week: null, day: "Day 2 - Pull", find: "Barbell Row 3x8 @ 155", replace: "Dumbbell Row 3x8 @ 60" }] } },
+});
+
+test("Finish with a program rec bar on screen: the log sends and the sheet closes", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const { calls } = await mockApi(page, { athlete, chatReply: DRAFT_REPLY, token: liveToken(),
+    dataReads: { program_drafts: (body) => String(body.params || "").includes('status=in.("rec"') ? [REC_ROW(athlete.id)] : [] } });
+  await startAndEdit(page, athlete);
+  // The button itself takes the tap: nothing is lying over it.
+  await page.waitForTimeout(600);   // the sheet's slide has finished
+  const hit = await page.evaluate(() => { const b = [...document.querySelectorAll("button")].find((x) => /Finish Workout/i.test(x.textContent)); const r = b.getBoundingClientRect(); const e = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return e === b || b.contains(e); });
+  expect(hit).toBe(true);
+  await page.getByRole("button", { name: "Finish Workout" }).click();
+  await expect(page.getByRole("button", { name: "Finish Workout" })).toHaveCount(0);
+  await expect.poll(() => calls.some((c) => c.body?.op === "insert" && c.body?.table === "workouts" && String(c.body?.data?.raw_message || "").includes("Dips 3x12")), { timeout: 15000 }).toBe(true);
+  await expect.poll(() => parkOf(page, athlete)).toBeNull();
+});
+
+test("Finish while Joe is still replying: the workout is not lost", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const { calls } = await mockApi(page, { athlete, chatReply: DRAFT_REPLY, token: liveToken() });
+  await startAndEdit(page, athlete);
+  await page.getByText("Day 1 - Push", { exact: true }).first().click();   // sheet down, composer is chat
+  // A slow reply: the chat turn hangs for 4 seconds.
+  await page.route("**/api/claude", async (route) => {
+    const body = route.request().postDataJSON() || {};
+    if (body.feature !== "mastermind_chat") return route.fallback();
+    await new Promise((r) => setTimeout(r, 4000));
+    route.fulfill({ contentType: "application/json", body: JSON.stringify({ content: [{ type: "text", text: "Keep the bar close." }], usage: {} }) });
+  });
+  await page.getByPlaceholder(/Tell Coach Joe about your workout/).fill("any cue for bench today");
+  await page.getByRole("button", { name: "→", exact: true }).click();
+  // Joe is mid-reply. Open the sheet and finish.
+  await page.getByText("Day 1 - Push", { exact: true }).first().click();
+  await page.getByRole("button", { name: "Finish Workout" }).click();
+  // The sheet comes down at once, and while the send waits the workout is
+  // still parked (an app close here must not lose it).
+  await expect(page.getByRole("button", { name: "Finish Workout" })).toHaveCount(0);
+  expect((await parkOf(page, athlete))?.draft).toBe(EDITED);
+  // The reply settles, the queued log goes out by itself, the park is spent.
+  await expect.poll(() => calls.some((c) => c.body?.op === "insert" && c.body?.table === "workouts" && String(c.body?.data?.raw_message || "").includes("Dips 3x12")), { timeout: 20000 }).toBe(true);
+  await expect.poll(() => parkOf(page, athlete)).toBeNull();
+  await expect(page.getByText("Dips 3x12").first()).toBeVisible();
+  // Once, not twice.
+  expect(calls.filter((c) => c.body?.op === "insert" && c.body?.table === "workouts" && String(c.body?.data?.raw_message || "").includes("Dips 3x12")).length).toBe(1);
+});
+
+test("Finish while Joe is replying, then the app closes before the send: the bar brings the workout back", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const { calls } = await mockApi(page, { athlete, chatReply: DRAFT_REPLY, token: liveToken() });
+  await startAndEdit(page, athlete);
+  await page.getByText("Day 1 - Push", { exact: true }).first().click();
+  await page.route("**/api/claude", async (route) => {
+    const body = route.request().postDataJSON() || {};
+    if (body.feature !== "mastermind_chat") return route.fallback();
+    await new Promise((r) => setTimeout(r, 6000));
+    route.fulfill({ contentType: "application/json", body: JSON.stringify({ content: [{ type: "text", text: "Keep the bar close." }], usage: {} }) }).catch(() => {});
+  });
+  await page.getByPlaceholder(/Tell Coach Joe about your workout/).fill("any cue for bench today");
+  await page.getByRole("button", { name: "→", exact: true }).click();
+  await page.getByText("Day 1 - Push", { exact: true }).first().click();
+  await page.getByRole("button", { name: "Finish Workout" }).click();
+  await expect(page.getByRole("button", { name: "Finish Workout" })).toHaveCount(0);
+  await reopen(page);   // closed before Joe finished
+  const bar = page.getByText("Day 1 - Push", { exact: true }).first();
+  await expect(bar).toBeVisible({ timeout: 15000 });
+  await bar.click();
+  await expect(page.getByRole("textbox", { name: SHEET })).toHaveValue(EDITED);
+  expect(calls.some((c) => c.body?.op === "insert" && c.body?.table === "workouts" && String(c.body?.data?.raw_message || "").includes("Dips 3x12"))).toBe(false);
+});
+
+test("the rec bar comes back when the log sheet closes", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  await mockApi(page, { athlete, chatReply: DRAFT_REPLY, token: liveToken(),
+    dataReads: { program_drafts: (body) => String(body.params || "").includes('status=in.("rec"') ? [REC_ROW(athlete.id)] : [] } });
+  await startAndEdit(page, athlete);                       // sheet is open
+  const recX = page.getByRole("button", { name: "Close the program rec", exact: true });
+  await expect(recX).toHaveCount(0);
+  await page.waitForTimeout(600);                          // the slide up has finished
+  await page.getByRole("button", { name: "Day 1 - Push", exact: true }).click();   // the sheet's header: sheet down
+  await expect(page.getByRole("textbox", { name: SHEET })).toBeHidden();
+  await expect(recX).toBeVisible();
+  await expect(page.getByRole("button", { name: "Take it off the screen", exact: true })).toBeVisible();
+});

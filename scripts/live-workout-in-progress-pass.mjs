@@ -15,6 +15,8 @@
 //            first build sent through the edit call and lost a lift on
 //   cancel   the X, reload: no bar
 //   finish   Finish Workout: the log lands, the park is empty, reload: no bar
+//   duplicate  the 09-01 report: the same session sent twice, does the sheet stay
+//            open after the second Finish? (not in the default run: SCEN=duplicate)
 // Writes ONLY QA rows; restores the QA athlete's fields. Hold the fixture lock
 // and reseed after.
 //   node --env-file=.env --env-file=.env.qa scripts/live-workout-in-progress-pass.mjs
@@ -186,7 +188,8 @@ for (const name of order) {
         inv.textUntouched = !!after && after.draft === edited;
         inv.noModelTouchedTheSheet = !features.includes("quick_log_edit") && !features.includes("quick_log_draft");
         inv.joeToldTheSheetIsTheirs = sheetFact;
-        inv.joeDidNotClaimARebuild = !/\b(rebuilt|reset|re-?built|prefilled|updated (?:your|the) (?:sheet|log)|(?:sheet|log) is updated|swapped (?:it )?on (?:your|the) sheet)\b/i.test(reply);
+        // A claim about the SHEET only ("reset between reps" is coaching, and tripped the first version of this check).
+        inv.joeDidNotClaimARebuild = !/\b(?:rebuilt|re-?built|reset|prefilled|updated|refreshed|swapped|changed)\b[^.!?\n]{0,25}\b(?:your|the)\s+(?:log\s+)?(?:sheet|log)\b|\b(?:sheet|log)\b[^.!?\n]{0,20}\b(?:is|has been|now)\s+(?:rebuilt|reset|updated|prefilled|refreshed)\b/i.test(reply);
         note(name, run, inv, { tools, features, reply, changed: !!after && after.draft !== edited, firstEditedLine, draftAfter: after && after.draft });
       }
 
@@ -201,6 +204,35 @@ for (const name of order) {
           dockFlagOff: !!p1 && !p1.dock,
           textStillParked: !!p1 && p1.draft === edited,
         });
+      }
+
+      if (name === "duplicate") {
+        await openSheet();
+        await finishBtn().click();
+        await settle();
+        await page.waitForTimeout(5000);
+        const first = await rest(`workouts?athlete_id=eq.${QA}&created_at=gte.${encodeURIComponent(SESSION_START)}&select=id,raw_message,parsed_data&order=created_at.desc&limit=5`);
+        const row = (first || []).find((r) => String(r.raw_message || "").includes(MARK));
+        // The same session again: their sheet, parked against the history as it now stands.
+        await page.evaluate(({ id, draft, head }) => localStorage.setItem(`wilco_quicklog_${id}`, JSON.stringify({ draft, notes: "", undoStack: [], savedAt: Date.now(), stamp: `1:${head}`, prebuilt: false, dock: true })), { id: QA, draft: edited, head: row && row.id });
+        await reopen();
+        const barBack = await barX().isVisible().catch(() => false);
+        if (barBack) await openSheet();
+        const sameText = barBack ? (await sheet().inputValue()) === edited : false;
+        if (barBack) await finishBtn().click();
+        await settle();
+        await page.waitForTimeout(5000);
+        const body = await page.evaluate(() => document.body.innerText);
+        const rows = await rest(`workouts?athlete_id=eq.${QA}&created_at=gte.${encodeURIComponent(SESSION_START)}&select=id,raw_message&order=created_at.desc&limit=10`);
+        if (SHOTS) await page.screenshot({ path: `${SHOTS}/duplicate-after-second-finish.png` });
+        note(name, run, {
+          firstLogLanded: !!row,
+          barBackForSecond: barBack, sameText,
+          sheetClosedAfterSecondFinish: !(await sheet().isVisible().catch(() => false)),
+          finishButtonGone: !(await finishBtn().isVisible().catch(() => false)),
+          barGone: !(await barX().isVisible().catch(() => false)),
+          parkEmpty: (await park()) === null,
+        }, { rowsWithTheLog: (rows || []).filter((r) => String(r.raw_message || "").includes(MARK)).length, tail: body.slice(-600) });
       }
 
       if (name === "finish") {

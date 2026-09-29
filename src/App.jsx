@@ -7332,6 +7332,17 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     if(sheetDate) quickLogDate.current = {text:draft, date:sheetDate};
     setSheetDate("");
     try{ clearSessionCard(athlete.id); }catch(_){}
+    // Joe is mid-reply (or history is still loading): send() refuses new
+    // messages, so a Finish tapped now used to clear the park and then drop
+    // the workout on the floor. Queue it on the same ref the old sheet used
+    // (A12 fires it the moment the reply settles) and LEAVE THE PARK: if the
+    // app dies first, the bar brings the workout back. The park is cleared
+    // when the log lands (finalizeWorkout).
+    if(loading || videoLoading || !historyLoaded){
+      try{ qlEdit(athlete.id, workoutHistory, {draft, notes:sheetState.notes, dock:true, sheetDate}); }catch(_){}
+      pendingQuickLogSend.current = draft;
+      return;
+    }
     try{ qlMarkUsed(athlete.id); qlClear(athlete.id); }catch(_){}
     send(draft);
   };
@@ -11120,7 +11131,13 @@ ${VOICE_ATHLETE}`;
           bottom bar / modal footer below. */}
       {/* ── PROGRAM REC bar (outlined variant — never fights the navy workout
           bar when they stack; stacks ABOVE the program bar) ─────────────────── */}
-      {CHAT_FIRST_ON && recPending && !recOpen && (
+      {/* Hidden while the log sheet or the program sheet is open: the bar sits in
+          the flow above the composer, which is exactly where those sheets keep
+          their footer, so it covered FINISH WORKOUT and the tap never reached
+          the button (the 09-01 "sheet stays open after Finish" report, found
+          09-29). Same rule the workout bar follows. It returns when the sheet
+          closes. */}
+      {CHAT_FIRST_ON && recPending && !recOpen && !sheetOpen && !pgOpen && (
         <div style={{padding:"0 8px 6px",flexShrink:0}}>
           <div onClick={()=>{setSheetOpen(false); setPgOpen(false); setRecOpen(true);}} role="button" tabIndex={0}
             onKeyDown={e=>{ if(e.key==="Enter"){ setSheetOpen(false); setPgOpen(false); setRecOpen(true); } }}
