@@ -115,6 +115,16 @@ async function athleteLogin(req, res, body) {
   const pin = pin4(body.pin);
   const key = `athlete-login:${clientIp(req)}:${name.toLowerCase()}`;
   await rateLimit(key, { max: 5, windowMin: 15 });
+  // App Store review flagged this: PINs are 4 digits (10,000 possibilities), and
+  // the limiter above is keyed by IP+name, so an attacker rotating IPs is
+  // unthrottled against one target name. This second counter is keyed on the
+  // name ALONE (no IP), so rotating IPs doesn't reset it — same authThrottle
+  // failure-only contract as api/data.js's brute-force guard: pre-checked before
+  // the bcrypt sweep, recorded only when this specific attempt turns out wrong,
+  // cleared on a successful login. A normal user mistyping their PIN a couple
+  // times never gets near 15, so this changes nothing for them.
+  const targetKey = `athlete-login-target:${name.toLowerCase()}`;
+  const recordTargetFail = await authThrottle(targetKey, { max: 15, windowMin: 15 });
 
   // PINs are bcrypt-hashed, so we can't filter by them — match the identifier,
   // then compare. escapeLike: user input headed into an ilike pattern (_supa.js).
@@ -136,16 +146,22 @@ async function athleteLogin(req, res, body) {
   const hit = compared.indexOf(true);
   // Two accounts can now share a name, so a shared PIN could make the match
   // ambiguous. NEVER pick the first — that is exactly how one athlete would land
-  // in another's account. Ask for the email, which tells them apart.
+  // in another's account. Ask for the email, which tells them apart. The PIN
+  // WAS right for two rows, so this isn't a guess — don't record a target failure.
   if (compared.filter(Boolean).length > 1) {
     return res.status(200).json({ athlete: null, reason: "ambiguous" });
   }
   if (hit !== -1) {
     const a = byName[hit];
     await rateLimitReset(key);
+    await rateLimitReset(targetKey);
     // token: signed session credential so subsequent gateway calls skip bcrypt.
     return res.status(200).json({ athlete: await withCrewAllowed(stripPin(a)), token: mintSessionToken("athlete", a.id) }); // never send the hash to the browser
   }
+  // Only a WRONG PIN against a real name is a guess worth counting — a typo'd
+  // name that matches nobody isn't an attack on any account and would just
+  // let someone accidentally lock out a name that happens to be a real athlete's.
+  if (byName.length) await recordTargetFail();
   return res.status(200).json({ athlete: null, reason: byName.length ? "wrong_pin" : "not_found" });
 }
 

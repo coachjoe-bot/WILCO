@@ -133,5 +133,31 @@ console.log("create-athlete rate-limit contract:");
   check("rateLimit supports a per-limiter message", /message \|\| "Too many attempts/.test(supa), true);
 }
 
+// ── per-target login throttle (App Store review, 2026-09-29) ────────────────
+// PINs are 4 digits, and the existing athlete-login limiter is keyed by
+// IP+name, so an attacker rotating IPs was unthrottled against one target
+// name. Source-contract checks only — exercising the real throttle needs a
+// live rate_limits table (see NEEDS_CREDENTIALS suites), so this pins the
+// SHAPE of the fix: an IP-independent key, a real max, reset on success,
+// and recorded only on an actual wrong-PIN guess (never on a typo'd name
+// that matches nobody, and never on the "ambiguous, PIN was right for two
+// rows" branch).
+console.log("\nper-target athlete-login throttle (source contract):");
+{
+  const { readFileSync } = await import("node:fs");
+  const identity = readFileSync(new URL("../api/identity.js", import.meta.url), "utf8");
+  const fn = identity.slice(identity.indexOf("async function athleteLogin"), identity.indexOf("async function coachLogin"));
+  check("the target key has no IP in it (rotating IPs can't reset it)",
+    /athlete-login-target:\$\{name\.toLowerCase\(\)\}/.test(fn), true);
+  check("authThrottle (failure-only) guards the target key, not the plain rateLimit",
+    /authThrottle\(targetKey, \{ max: 15, windowMin: 15 \}\)/.test(fn), true);
+  check("a successful login clears the target counter too",
+    /rateLimitReset\(targetKey\)/.test(fn), true);
+  check("a failure is recorded only when the name matched a real athlete",
+    /if \(byName\.length\) await recordTargetFail\(\);/.test(fn), true);
+  check("the ambiguous branch (PIN WAS right, for two rows) returns before any target-fail record",
+    /reason: "ambiguous" \}\);\s*\}/.test(fn) && fn.indexOf('reason: "ambiguous"') < fn.indexOf("recordTargetFail()"), true);
+}
+
 console.log(`\n${fail === 0 ? "All" : ""} ${pass} auth-logic checks pass${fail ? `, ${fail} FAILED` : "."}`);
 process.exit(fail === 0 ? 0 : 1);
