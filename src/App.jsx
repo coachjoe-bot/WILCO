@@ -100,7 +100,7 @@ import { validatePref, normalizePrefs, describePref, prefsPromptLines, nextSigna
 import { parseBlockInfo, stripBlockInfo } from "./programContract.js";
 import { lineDiff, findPlacement, mergeGuard, mergeSystemPrompt } from "./programDiff.js";
 import { snapshotProgramHistory, startNextBlock, closeCurrentBlock, setBlockEnd, blockPromptState, parseTimeline, dateToIso, refreshOpenBlockRecap, recapShortFallback, buildBlockSpanAnswer, blockSpanConflict, blockSpanNeedsAsk, wrapCardEligible, statesBlockEnd, resolveStatedSpan } from "./programHistory.js";
-import { decideTempWrite, tempTurnBefore, tempProgramFact, tempConfirmLine, planSlice, countPlanDays } from "./changeScope.js";
+import { decideTempWrite, tempTurnBefore, tempProgramFact, tempConfirmLine, planSlice, looksLikePlanText } from "./changeScope.js";
 // First-run app tour (spotlight coach-marks + scripted Quick Log demo). Pure
 // display: fixtures never touch real data — see tour.jsx header.
 import { TourOffer, TourSpotlight, athleteTourSteps, tourWelcome, tourInteractiveAt, TOUR_QL_FIXTURE, TOUR_SCRIPT } from "./tour.jsx";
@@ -9202,8 +9202,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // Empty or echoed extraction: a plan with day headers falls back to the
         // deterministic cut (a model timeout never loses the plan); the legacy
         // no-headers path writes nothing, as before.
-        if(!t || !t.trim() || t.trim()===String(source).trim()) t = legacy ? null : planSlice(source);
-        if(!t || !t.trim()) return null;
+        if(!t || !t.trim() || t.trim()===String(source).trim() || !looksLikePlanText(t)) t = legacy ? null : planSlice(source);
+        if(!t || !t.trim() || !looksLikePlanText(t)) return null;
         await sbUpdate("athletes",athlete.id,{temp_program_text:t});
         updatedAthlete.temp_program_text = t;
         setAthlete(prev=>({...prev, temp_program_text: t}));

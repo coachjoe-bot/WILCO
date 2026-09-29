@@ -576,6 +576,20 @@ export function tempProgramFact({ athlete = {}, recentPlanFound = null, savingNo
   return `${head} NO temporary program is saved, and you have not laid out a day-by-day plan in this conversation. Never say one is built or saved; if they want one, lay out the days first, one header per day.`;
 }
 
+// Is an extractor's output actually a program? Live S6 pass, 09-28: on a turn
+// where Joe only ASKED about equipment, the legacy flagged path extracted his
+// reply and the extractor answered in prose ("I don't have a program to
+// extract..."), which was saved as the temp program with a confirmation line.
+// Two or more exercise-shaped lines (sets x reps or an @ load), and no
+// refusal/apology opener, or it is not saved.
+const EXERCISE_SHAPE = /\d+\s*[x×]\s*\d+|@\s*\d|\b\d+\s*sets?\b/i;
+const REFUSAL_OPENER = /^\s*(?:i\b|i'm\b|sorry|there(?:'s| is) no|no (?:program|training|plan)|unable|this message|the message|none\b)/i;
+export function looksLikePlanText(text) {
+  const lines = String(text || "").split("\n").map((l) => l.trim()).filter(Boolean);
+  if (!lines.length || REFUSAL_OPENER.test(lines[0])) return false;
+  return lines.filter((l) => EXERCISE_SHAPE.test(l)).length >= 2;
+}
+
 // The app's one confirmation line after a temp program write (unchanged copy,
 // moved here so the coach-locked wording is tested).
 export const tempConfirmLine = ({ locked = false } = {}) => locked

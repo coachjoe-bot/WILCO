@@ -7,7 +7,7 @@
 import fs from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { changeScope, conversationWindow, conversationScope, countPlanDays, planSlice, isProgramEcho, findRecentPlan, tempTurnBefore, decideTempWrite, tempProgramFact, tempConfirmLine } from "../src/changeScope.js";
+import { changeScope, conversationWindow, conversationScope, countPlanDays, planSlice, isProgramEcho, findRecentPlan, tempTurnBefore, decideTempWrite, tempProgramFact, tempConfirmLine, looksLikePlanText } from "../src/changeScope.js";
 import { asksTempProgram } from "../src/chatRouting.js";
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -421,6 +421,15 @@ const ATH = rp.athlete;
   // asksTempProgram: the spec's phrasings, and things that are not the ask.
   for (const t of ["set me up with that temporary program", "make that my temp program", "save that as my travel plan", "lock that in for the week", "yes set me up with that temporary program for the week", "can you set me up with a travel program?", "switch me to the dumbbell version", "use that plan"]) ok(asksTempProgram(t), `explicit ask: "${t}"`);
   for (const t of ["make the program harder", "use this program: Day 1 Squat 5x5", "set up a bench session for me", "make me a program", "use dumbbells today", "that program you wrote was great", "I want to lock in my squat form", "set me up with the new program"]) ok(!asksTempProgram(t), `not an ask: "${t}"`);
+}
+
+{
+  // Live S6 find: an extractor answering in prose must never be saved as a program.
+  ok(!looksLikePlanText("I don't have a program to extract from this message. It only asks about equipment."), "extractor prose/refusal is not a plan");
+  ok(!looksLikePlanText("What's in the garage?"), "a question is not a plan");
+  ok(looksLikePlanText(planSlice(rp.turns[1].joe)), "Joe's real plan cut is a plan");
+  ok(looksLikePlanText("Day 1 - Full Body\nDB Squat 4x8\nDay 2 - Full Body\nDB Row 4x8"), "a clean extraction is a plan");
+  ok(!looksLikePlanText("Day 1 - Push\nDB Bench Press"), "one exercise line with no sets is not enough");
 }
 
 console.log(`\n${fail === 0 ? "✓" : "✗"} change-scope: ${fail === 0 ? "all checks" : fail + " checks"} ${fail === 0 ? "passed" : "failed"}.`);
