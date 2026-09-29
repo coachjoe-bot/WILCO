@@ -16,6 +16,8 @@
 // so per-message cost scales with the budget, never with what an athlete
 // accumulates (target: athlete AI cost averaging <= $2/mo). MEMORY_MAX_LEN
 // stays only as an abuse bound; the DB CHECK and the gateway pin match it.
+import { statesBlockEnd } from "./programHistory.js";
+
 export const MEMORY_MAX_LEN = 2000;
 export const MEMORY_TOKEN_BUDGET = 1750; // hard ceiling on the injected block
 export const MEMORY_ROW_CAP = 60;        // absolute active-row ceiling per athlete (hygiene)
@@ -44,6 +46,16 @@ const PAIN_AREA_WORDS = /\b(pain|hurt\w*|ache\w*|sore\w*|flar\w*|flag\w*|tweak\w
 const TALLY_RE = /\b(twice|once again|three times|four times|five times|\d+ times|(two|three|four|five|six|several|multiple|repeated)\b[^.!?]{0,24}\b(times|sessions|weeks|flags|flare[- ]?ups|mentions|reports)|(second|third|fourth|fifth) (time|week|session|flag)|keeps? (flaring|flagging|coming back)|again and again|a pattern|pattern of|flagged \w+ (times|sessions))\b/i;
 const PROGRAM_CLAIM_RE = /\b(pulled|removed|swapped|replaced|dropped|cut|taken out|took out|subbed|switched|benched)\b[^.!?]{0,60}\b(program|rotation|block|plan|schedule)\b|\b(program|plan|block|schedule)\b[^.!?]{0,40}\b(changed|updated|modified|adjusted|rewritten|reworked)\b|\bplan (is )?(in effect|in place|active|running)\b|\b(train[- ]around|deload|protective|modified) (plan|week|block)\b[^.!?]{0,30}\b(in effect|in place|active|started|running)\b/i;
 export const LEDGER_OWNS_PAIN = "Not saved: pain counts and patterns live in the app's pain ledger, which already tracks every mention with its date and degree. Program changes exist only when a rec is staged.";
+// A block's end date or length belongs to the block row (AI contract, one home
+// per fact): it goes through the program_block_span branch with its conflict
+// check, never into memory where it would outlive the block it described.
+export const BLOCK_OWNS_DATES = "Not saved: when a program ends is stored on the program block itself, and the app asks the athlete to confirm it there.";
+export function blockEndRejects(text, now = new Date()) {
+  const t = String(text || "");
+  if (/^Watching:/.test(t)) return null;
+  try { return statesBlockEnd(t, now) ? "block_end_date" : null; } catch (_) { return null; }
+}
+
 export function ledgerRejects(text) {
   const t = String(text || "");
   if (/^Watching:/.test(t)) return null;
@@ -60,6 +72,8 @@ export function validateFact({ content, kind, expires_at } = {}) {
   if (BEHAVIOR_RE.test(text)) return { ok: false, reason: "behavior_instruction" };
   const ledger = ledgerRejects(text);
   if (ledger) return { ok: false, reason: ledger, toolResult: LEDGER_OWNS_PAIN };
+  const blockEnd = blockEndRejects(text);
+  if (blockEnd) return { ok: false, reason: blockEnd, toolResult: BLOCK_OWNS_DATES };
   if (kind === "situational") {
     const t = Date.parse(expires_at || "");
     if (!Number.isFinite(t)) return { ok: false, reason: "situational_needs_expiry" };
