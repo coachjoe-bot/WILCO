@@ -11206,7 +11206,11 @@ ${VOICE_ATHLETE}`;
           <div onClick={()=>setRecOpen(false)} role="button" tabIndex={0}
             onKeyDown={e=>{ if(e.key==="Enter") setRecOpen(false); }}
             style={{background:CA.navy3,color:CA.accent,borderBottom:`1px solid ${CA.border}`,padding:"12px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer",flexShrink:0}}>
-            <span style={{...DISP,fontSize:13,letterSpacing:0.6}}>PROGRAM REC — {recPending.rec.title}</span>
+            <span style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+              <button onClick={e=>{e.stopPropagation();setRecExitAsk(true);}} aria-label="Close the program rec" data-sheet-x onKeyDown={e=>e.stopPropagation()}
+                style={{background:"none",border:"none",color:"inherit",opacity:.7,fontSize:13,cursor:"pointer",padding:"0 2px",flexShrink:0,minWidth:32,height:32,margin:"-8px 0 -8px -8px"}}>✕</button>
+              <span style={{...DISP,fontSize:13,letterSpacing:0.6}}>PROGRAM REC — {recPending.rec.title}</span>
+            </span>
             <span aria-hidden style={{fontSize:12,opacity:.85}}>▼</span>
           </div>
           <div style={{flex:1,overflowY:"auto",padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
@@ -11305,7 +11309,11 @@ ${VOICE_ATHLETE}`;
           <div onClick={()=>setPgOpen(false)} role="button" tabIndex={0}
             onKeyDown={e=>{ if(e.key==="Enter") setPgOpen(false); }}
             style={{background:CA.navy3,color:CA.accent,borderBottom:`1px solid ${CA.border}`,padding:"12px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer",flexShrink:0}}>
-            <span style={{...DISP,fontSize:13,letterSpacing:0.6}}>{dockProgram.title} – Draft</span>
+            <span style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+              <button onClick={e=>{e.stopPropagation();dismissPg();}} aria-label="Take the program off the screen" data-sheet-x onKeyDown={e=>e.stopPropagation()}
+                style={{background:"none",border:"none",color:"inherit",opacity:.7,fontSize:13,cursor:"pointer",padding:"0 2px",flexShrink:0,minWidth:32,height:32,margin:"-8px 0 -8px -8px"}}>✕</button>
+              <span style={{...DISP,fontSize:13,letterSpacing:0.6}}>{dockProgram.title} – Draft</span>
+            </span>
             <span aria-hidden style={{fontSize:12,opacity:.85}}>▼</span>
           </div>
           <div style={{flex:1,overflowY:"auto",padding:"12px 14px"}}>
@@ -11354,7 +11362,11 @@ ${VOICE_ATHLETE}`;
           <div onClick={()=>setSheetOpen(false)} role="button" tabIndex={0}
             onKeyDown={e=>{ if(e.key==="Enter") setSheetOpen(false); }}
             style={{background:CA_BTN,color:CA.onAccent,padding:"12px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer",flexShrink:0}}>
-            <span style={{...DISP,fontSize:13,letterSpacing:0.6}}>{dockWorkout.title}</span>
+            <span style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+              <button onClick={e=>{e.stopPropagation();dismissDock();}} aria-label="Take it off the screen" data-sheet-x onKeyDown={e=>e.stopPropagation()}
+                style={{background:"none",border:"none",color:"inherit",opacity:.7,fontSize:13,cursor:"pointer",padding:"0 2px",flexShrink:0,minWidth:32,height:32,margin:"-8px 0 -8px -8px"}}>✕</button>
+              <span style={{...DISP,fontSize:13,letterSpacing:0.6}}>{dockWorkout.title}</span>
+            </span>
             <span aria-hidden style={{fontSize:12,opacity:.85}}>▼</span>
           </div>
           <div style={{flex:1,overflowY:"auto",padding:"12px 14px"}}>
