@@ -14,7 +14,10 @@
 //   entitlement_missing  — live sub WITH card, athlete not on a paid tier.
 //                          Someone paid and isn't getting the product. ERROR.
 //   entitlement_orphaned — paid-tier athlete with no live sub. We're giving Pro
-//                          away (or a cancel never synced). ERROR.
+//                          away (or a cancel never synced). ERROR. NEVER for a
+//                          comped athlete (Will 09-29): their free access is the
+//                          decision, not a leak. 38 of them made this alarm cry
+//                          wolf every night for 30 days.
 //   unlinked_sub         — live sub matching no athlete row. ERROR.
 //   abandoned_checkout   — live sub, NO card, older than 1h: someone reached the
 //                          card form and left. Expected only from stale pre-T37
@@ -30,6 +33,11 @@ export const maxDuration = 60;
 
 const LIVE = new Set(["trialing", "active", "past_due"]);
 const PAID_TIERS = new Set(["pro", "elite"]); // school = invoice-billed, never Stripe
+
+// A paid tier with no live sub is an orphan unless the account is comped.
+// The ONE test, shared by the per-pair classifier and the athlete-side pass.
+export const isOrphanedEntitlement = (athlete) =>
+  !!athlete && PAID_TIERS.has(athlete.tier) && athlete.comped !== true;
 
 // Pure classifier — covered by scripts/test-checkout-lifecycle.mjs.
 // sub: Stripe subscription (or null) · athlete: matching row (or null) ·
@@ -47,8 +55,9 @@ export function classifyPair({ sub, athlete, nowMs = Date.now() }) {
     const ageMs = nowMs - (sub.created || 0) * 1000;
     return ageMs > 60 * 60 * 1000 ? "abandoned_checkout" : "in_flight";
   }
-  // No live sub: a paid-tier athlete shouldn't exist (schools/free are fine).
-  if (athlete && PAID_TIERS.has(athlete.tier)) return "entitlement_orphaned";
+  // No live sub: a paid-tier athlete shouldn't exist (schools/free are fine),
+  // unless they are comped: free on purpose, never an orphan.
+  if (isOrphanedEntitlement(athlete)) return "entitlement_orphaned";
   return "ok";
 }
 
@@ -72,7 +81,7 @@ export default async function handler(req, res) {
     // Every athlete that has ever touched Stripe, plus anyone on a paid tier.
     const athletes = await sbAthletesWhere(
       "or=(stripe_subscription_id.not.is.null,tier.in.(pro,elite))" +
-      "&select=id,name,tier,subscription_status,stripe_subscription_id,stripe_customer_id"
+      "&select=id,name,tier,comped,subscription_status,stripe_subscription_id,stripe_customer_id"
     );
     const byId = new Map(athletes.map((a) => [String(a.id), a]));
     const liveSubIds = new Set(liveSubs.map((s) => s.id));
@@ -89,7 +98,7 @@ export default async function handler(req, res) {
     }
     for (const a of athletes) {
       // Athlete-side pass: paid tier whose sub is not in the live set.
-      if (PAID_TIERS.has(a.tier) && !(a.stripe_subscription_id && liveSubIds.has(a.stripe_subscription_id))) {
+      if (isOrphanedEntitlement(a) && !(a.stripe_subscription_id && liveSubIds.has(a.stripe_subscription_id))) {
         findings.entitlement_orphaned.push({ sub: a.stripe_subscription_id ?? null, athlete: a.id, tier: a.tier });
       }
     }

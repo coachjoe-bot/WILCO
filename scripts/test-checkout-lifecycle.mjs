@@ -20,7 +20,7 @@ process.env.SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "test-sig
 process.env.SUPABASE_URL = process.env.SUPABASE_URL || "https://test.invalid";
 
 const { subEntitlesPaidTier, tierForPrice } = await import("../api/_stripe.js");
-const { classifyPair } = await import("../api/reconcile-billing.js");
+const { classifyPair, isOrphanedEntitlement } = await import("../api/reconcile-billing.js");
 
 let pass = 0, fail = 0;
 const check = (name, got, want) => {
@@ -69,6 +69,34 @@ check("no sub + free athlete → ok",
   classifyPair({ sub: null, athlete: { tier: "free" }, nowMs: NOW }), "ok");
 check("canceled sub + free athlete → ok (normal churn)",
   classifyPair({ sub: sub({ status: "canceled" }), athlete: { tier: "free" }, nowMs: NOW }), "ok");
+
+console.log("classifyPair — comped accounts are never orphans (Will 09-29):");
+check("no sub + comped pro → ok (free on purpose, not a leak)",
+  classifyPair({ sub: null, athlete: { tier: "pro", comped: true }, nowMs: NOW }), "ok");
+check("no sub + comped elite → ok",
+  classifyPair({ sub: null, athlete: { tier: "elite", comped: true }, nowMs: NOW }), "ok");
+check("canceled sub + comped pro → ok (a lapsed sub never demotes or alarms a comped account)",
+  classifyPair({ sub: sub({ status: "canceled" }), athlete: { tier: "pro", comped: true }, nowMs: NOW }), "ok");
+check("no sub + pro with comped false → still entitlement_orphaned",
+  classifyPair({ sub: null, athlete: { tier: "pro", comped: false }, nowMs: NOW }), "entitlement_orphaned");
+check("no sub + pro with comped missing → still entitlement_orphaned",
+  classifyPair({ sub: null, athlete: { tier: "pro" }, nowMs: NOW }), "entitlement_orphaned");
+check("comped must be exactly true (a truthy string is not comped)",
+  classifyPair({ sub: null, athlete: { tier: "pro", comped: "true" }, nowMs: NOW }), "entitlement_orphaned");
+console.log("classifyPair — every other class is unchanged for a comped athlete:");
+check("live + card + comped FREE athlete → entitlement_missing (a real sync gap, still reported)",
+  classifyPair({ sub: sub(), athlete: { tier: "free", comped: true }, nowMs: NOW }), "entitlement_missing");
+check("live + card + comped pro → ok",
+  classifyPair({ sub: sub(), athlete: { tier: "pro", comped: true }, nowMs: NOW }), "ok");
+check("live sub + no athlete → unlinked_sub",
+  classifyPair({ sub: sub(), athlete: null, nowMs: NOW }), "unlinked_sub");
+check("live cardless 2h + comped free → abandoned_checkout",
+  classifyPair({ sub: sub({ default_payment_method: null }), athlete: { tier: "free", comped: true }, nowMs: NOW }), "abandoned_checkout");
+check("live cardless 10min + comped free → in_flight",
+  classifyPair({ sub: sub({ default_payment_method: null, created: NOW / 1000 - 600 }), athlete: { tier: "free", comped: true }, nowMs: NOW }), "in_flight");
+check("isOrphanedEntitlement: the athlete-side pass shares the rule",
+  [isOrphanedEntitlement({ tier: "pro" }), isOrphanedEntitlement({ tier: "pro", comped: true }), isOrphanedEntitlement({ tier: "free" }), isOrphanedEntitlement({ tier: "school" }), isOrphanedEntitlement(null)],
+  [true, false, false, false, false]);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -142,6 +142,19 @@ export const TESTER_COUPONS = {
   [process.env.STRIPE_TESTER_ELITE_COUPON_ID || "WILCO_TESTER_ELITE_FOREVER"]: "elite",
 };
 
+// Comped coupons (Will 09-29: "never ask to charge anyone I give a 100% discount
+// to"). A subscription carrying one of these makes its athlete `comped`: the app
+// never asks them to pay again, the nightly reconcile never calls them an orphan.
+// Deliberately the SAME sets as above, not a new list: every tester coupon plus
+// the founding FREE coupon. Not the 3-month grip-test prize and not the 1-month
+// friend gift: those are 100% off for a while, then they pay. A comped coupon must
+// be 100% off FOREVER on the coupon itself (couponTerms.freeForever), so a coupon
+// that is one of these ids but somehow is not free forever grants nothing.
+export const COMPED_COUPON_IDS = new Set([
+  ...Object.keys(TESTER_COUPONS),
+  process.env.STRIPE_FOUNDING_FREE_COUPON_ID || "WILCO_FOUNDING_FREE_FOREVER",
+]);
+
 // ── In-person event signups (tabling at gyms) ────────────────────────────────
 // Server-side source of truth for event offers. A signup that arrives with a
 // valid, ENABLED eventSource gets that event's longer trial instead of the
@@ -435,6 +448,61 @@ export function couponTerms(coupon) {
     repeating,
     forever: coupon.duration === "forever",
   };
+}
+
+// Does this coupon comp its holder? (100% off forever AND on the comped list.)
+export const couponComps = (coupon) =>
+  !!coupon && COMPED_COUPON_IDS.has(coupon.id) && couponTerms(coupon).freeForever;
+
+// Does this Stripe subscription carry a comping coupon? Pure over the payload it
+// is given. Discounts arrive as objects (coupon under `coupon` on older API
+// versions, under `source.coupon` on newer ones) or as bare ids when the event was
+// not expanded. Returns { comped, unresolved }: unresolved means "an id or a bare
+// coupon id on the comped list is in there and I could not read its terms", which
+// subCompsAsync settles with one Stripe read.
+export function subCompingCoupon(sub) {
+  const entries = [];
+  if (sub?.discount) entries.push(sub.discount);
+  if (Array.isArray(sub?.discounts)) entries.push(...sub.discounts);
+  let unresolved = false;
+  for (const d of entries) {
+    if (!d) continue;
+    if (typeof d === "string") { unresolved = true; continue; }
+    const c = d.coupon || d.source?.coupon;
+    if (!c) continue;
+    if (typeof c === "string") {
+      if (COMPED_COUPON_IDS.has(c)) unresolved = true; // on the list, terms unread
+      continue;
+    }
+    if (couponComps(c)) return { comped: true, unresolved: false };
+  }
+  return { comped: false, unresolved };
+}
+
+// Async twin for webhook events: expand bare discount ids, then read a listed
+// coupon's terms. Never throws: a Stripe hiccup answers false and the next
+// subscription event tries again. Read-only against Stripe.
+export async function subCompsAsync(stripe, sub) {
+  try {
+    let r = subCompingCoupon(sub);
+    if (r.comped) return true;
+    if (!r.unresolved) return false;
+    let full = sub;
+    if ((sub.discounts || []).some((d) => typeof d === "string")) {
+      full = await stripe.subscriptions.retrieve(sub.id, { expand: ["discounts"] });
+      r = subCompingCoupon(full);
+      if (r.comped) return true;
+      if (!r.unresolved) return false;
+    }
+    for (const d of [full.discount, ...(full.discounts || [])]) {
+      const c = d && typeof d === "object" ? (d.coupon || d.source?.coupon) : null;
+      if (typeof c === "string" && COMPED_COUPON_IDS.has(c) && couponComps(await stripe.coupons.retrieve(c))) return true;
+    }
+    return false;
+  } catch (e) {
+    console.error("[stripe] comped-coupon check failed:", e.message);
+    return false;
+  }
 }
 
 // Human terms for a coupon, shown at the Apply-code step ("First 3 months of Pro

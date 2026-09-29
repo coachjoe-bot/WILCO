@@ -21,6 +21,7 @@ import {
   priceFor,
   resolvePromotionCode,
   codeIsAnnualSafe,
+  couponComps,
   markGiftRedeemed,
   sbAthletePatch,
   epochToISO,
@@ -151,7 +152,7 @@ export default async function handler(req, res) {
     //    the card-first and legacy branches below — one copy of the guard set.
     const code = await resolveCheckoutCode({ stripe, athlete, tier, interval, giftCode, heldPromoIds });
     if (code.error) return res.status(code.status).json({ error: code.error });
-    const { promotionCodeId, giftApplied, testerApplied, capExhausted } = code;
+    const { promotionCodeId, giftApplied, testerApplied, capExhausted, comps } = code;
 
     // ── CARD-FIRST PATH (T37 checkout re-order) ──────────────────────────────
     // The current client collects the card via checkout-intent's SetupIntent and
@@ -239,6 +240,9 @@ export default async function handler(req, res) {
         stripe_price_id: priceId,
         subscription_status: subscription.status,
         ...(subEntitlesPaidTier(subscription) ? { tier } : {}),
+        // 100%-off FOREVER code (tester / founding free): comped for good. One-way,
+        // never written false. The webhook does the same for codes applied elsewhere.
+        ...(comps ? { comped: true } : {}),
         billing: interval,
         trial_end: epochToISO(subscription.trial_end),
         current_period_end: epochToISO(subPeriodEnd(subscription)),
@@ -368,6 +372,7 @@ export default async function handler(req, res) {
       stripe_price_id: priceId,
       subscription_status: subscription.status,
       ...(subEntitlesPaidTier(subscription) ? { tier } : {}),
+      ...(comps ? { comped: true } : {}), // see the card-first patch above
       billing: interval,
       trial_end: epochToISO(subscription.trial_end),
       current_period_end: epochToISO(subPeriodEnd(subscription)),
@@ -422,10 +427,10 @@ export default async function handler(req, res) {
 // and exempt from the gift guards; gift codes are Pro-only, never self-redeemed,
 // one per athlete (retrying your OWN in-flight code is allowed), and annual-gated.
 // Returns { error, status } to refuse, or { promotionCodeId, giftApplied,
-// testerApplied, capExhausted } to proceed ({ promotionCodeId:null } when no code).
+// testerApplied, capExhausted, comps } to proceed ({ promotionCodeId:null } when no code).
 async function resolveCheckoutCode({ stripe, athlete, tier, interval, giftCode, heldPromoIds }) {
   if (!giftCode || !giftCode.trim()) {
-    return { promotionCodeId: null, giftApplied: false, testerApplied: false, capExhausted: false };
+    return { promotionCodeId: null, giftApplied: false, testerApplied: false, capExhausted: false, comps: false };
   }
   const resolved = await resolvePromotionCode(stripe, giftCode, { heldPromoIds });
   if (!resolved.valid) return { error: resolved.error, status: 400 };
@@ -438,7 +443,7 @@ async function resolveCheckoutCode({ stripe, athlete, tier, interval, giftCode, 
       const tierLabel = resolved.tier === "elite" ? "Elite" : "Pro";
       return { error: `This tester code is for the ${tierLabel} plan.`, status: 400 };
     }
-    return { promotionCodeId: resolved.promotionCodeId, giftApplied: false, testerApplied: true, capExhausted };
+    return { promotionCodeId: resolved.promotionCodeId, giftApplied: false, testerApplied: true, capExhausted, comps: couponComps(resolved.coupon) };
   }
 
   // Gift code path: Pro-only + self-redeem + one-per-athlete guards.
@@ -455,5 +460,5 @@ async function resolveCheckoutCode({ stripe, athlete, tier, interval, giftCode, 
   if (interval === "annual" && !codeIsAnnualSafe(resolved.coupon)) {
     return { error: "This code applies to the monthly plan.", status: 400 };
   }
-  return { promotionCodeId: resolved.promotionCodeId, giftApplied: true, testerApplied: false, capExhausted };
+  return { promotionCodeId: resolved.promotionCodeId, giftApplied: true, testerApplied: false, capExhausted, comps: couponComps(resolved.coupon) };
 }

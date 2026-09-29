@@ -16,6 +16,7 @@ import {
   epochToISO,
   subPeriodEnd,
   subEntitlesPaidTier,
+  subCompsAsync,
   GIFT_COUPON_ID,
   randomGiftCode,
 } from "./_stripe.js";
@@ -57,7 +58,7 @@ export default async function handler(req, res) {
       case "customer.subscription.created":
       case "customer.subscription.updated":
       case "customer.subscription.deleted":
-        await syncSubscription(event.data.object);
+        await syncSubscription(stripe, event.data.object);
         break;
       case "invoice.paid":
         // Only invoice.paid (NOT invoice.payment_succeeded — both fire for one
@@ -87,7 +88,7 @@ async function findAthlete(customerId, metadataAthleteId) {
   return null;
 }
 
-async function syncSubscription(sub) {
+async function syncSubscription(stripe, sub) {
   const athlete = await findAthlete(sub.customer, sub.metadata?.athlete_id);
   if (!athlete) {
     console.warn("[stripe-webhook] no athlete for customer", sub.customer);
@@ -108,7 +109,18 @@ async function syncSubscription(sub) {
   // live sub). A cardless trial, an abandoned incomplete, or a canceled/lapsed sub
   // must NOT hold Pro — otherwise anyone could start checkout, bail before paying,
   // and keep it. When the plan is known but not entitled, drop to free.
-  if (tier) patch.tier = subEntitlesPaidTier(sub) ? tier : "free";
+  if (tier) {
+    const next = subEntitlesPaidTier(sub) ? tier : "free";
+    // Comped accounts keep the tier they have (Will 09-29: "keep everyone at the
+    // tier they are at"). A lapsed or canceled Stripe subscription can raise a
+    // comped athlete, never lower one; only a person edits a comped tier down.
+    const wouldLower = next === "free" && athlete.tier && athlete.tier !== "free";
+    if (!(athlete.comped === true && wouldLower)) patch.tier = next;
+  }
+  // A 100%-off FOREVER coupon (tester or founding free) comps its holder for good.
+  // One-way: nothing here ever sets comped back to false. Skipped once true so a
+  // comped athlete's later events cost no extra Stripe read.
+  if (athlete.comped !== true && (await subCompsAsync(stripe, sub))) patch.comped = true;
   await sbAthletePatch(athlete.id, patch);
 }
 
