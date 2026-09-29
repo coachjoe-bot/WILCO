@@ -29,7 +29,7 @@ const sb = async (path) => {
 };
 
 // Free-weight barbell lifts (the loads that feed maxes, benchmarks and program %).
-const NOT_BARBELL = /dumbbell|\bdb\b|cable|machine|kettlebell|\bkb\b|abduct|adduct|extension|curl|raise|pull-?up|chin|dip|sit-?up|band|lat |pushdown|sled|plank|smith/i;
+const NOT_BARBELL = /dumbbell|\bdb\b|cable|machine|kettlebell|\bkb\b|abduct|adduct|extension|curl|raise|pull-?up|chin|dip|sit-?up|band|lat |pushdown|sled|plank|smith|arnold|chest-supported/i;
 const BARBELL = /squat|clean|jerk|snatch|deadlift|\brdl\b|bench|press|row|pull|thrust|complex|good morning/i;
 const isBarbell = (name) => BARBELL.test(name || "") && !NOT_BARBELL.test(name || "");
 
@@ -56,14 +56,18 @@ for (const a of athletes) {
   }
 }
 
+if (process.argv.includes("--all")) out.filter((x) => x.barbell && x.stored === "lbs").forEach((x) => console.error(`lbs-barbell: ${x.date} ${x.lift} ${x.set_details} written:${x.written}`));
 const candidates = out.filter((x) => x.barbell && x.stored === "lbs" && !x.written);
 const carriedKg = out.filter((x) => x.barbell && x.stored === "kg" && !x.written);
 const disagree = out.filter((x) => x.stored !== x.t65);
 if (process.argv.includes("--json")) {
-  console.log(JSON.stringify({ since, exercises: out.length, candidates, carriedKg, disagree }, null, 2));
+  console.log(JSON.stringify({ since, exercises: out.length, barbell: out.filter((x) => x.barbell).length, candidates, carriedKg, disagree }, null, 2));
 } else {
   const line = (x) => `  ${x.date} ${x.lift} ${x.set_details} stored:${x.stored} t65:${x.t65} (${x.t65_source}) written:${x.written ?? "none"}  "${x.raw}"`;
   console.log(`kg athletes: ${athletes.length} · weighted exercises since ${since}: ${out.length}`);
+  const bb = out.filter((x) => x.barbell);
+  const cell = (u, w) => bb.filter((x) => x.stored === u && (w ? !!x.written : !x.written)).length;
+  console.log(`barbell lifts: ${bb.length} · stored kg: ${cell("kg", true)} written + ${cell("kg", false)} unwritten · stored lbs: ${cell("lbs", true)} written + ${cell("lbs", false)} unwritten`);
   console.log(`\nBarbell lift stored LBS, no unit written on its numbers: ${candidates.length}`);
   candidates.forEach((x) => console.log(line(x)));
   console.log(`\nBarbell lift stored KG, no unit written on its numbers (parser carried kg): ${carriedKg.length}`);
