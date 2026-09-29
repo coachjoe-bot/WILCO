@@ -78,7 +78,7 @@ import { effectiveTier, trialActive } from "./tiers.js";
 import { CREW_ENABLED, MASTERMIND_ENABLED, CHAT_FIRST_ENABLED } from "./flags.js";
 import { buildMastermindStatic } from "./ai/card.js";
 import { blueprintPct } from "./programBuilder.js";
-import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps } from "./memory.js";
+import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps, memoryNotesText, checkinNoteFact } from "./memory.js";
 import { activeGoals, goalsToSupersede, sameGoalText } from "./goals.js";
 import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, programWriteOwner, recSummaryFallback, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
 import { performedBlock, logHeadline, logFocusBlock, planDayFor, prLinesForReply, logTurnExercises } from "./turnFacts.js";
@@ -1812,29 +1812,22 @@ Rules:
   return JSON.parse(text.replace(/```json|```/g,"").trim());
 };
 
-// athlete_context is a SINGLE upserted row per athlete (UNIQUE(athlete_id)). To give
-// the AI a short ROLLING memory instead of one overwriting snapshot, we accumulate
-// dated notes inside that row's `content`, bounded to the most recent
-// MAX_CONTEXT_NOTES lines so the coaching prompt stays small. Notes are stored as
-// DATA, never as instructions — the extractor (parseWorkout context_request) records
-// only facts about the athlete and refuses behavior-change requests. Returns the new
-// bounded content (for in-session state refresh), or null if nothing was written.
-const MAX_CONTEXT_NOTES = 12;
-const appendAthleteContext = async (athleteId, line, {longTerm=false}={}) => {
-  const clean = String(line||"").replace(/\s+/g," ").trim().slice(0,220);
-  if(!clean) return null;
-  let prior=""; let priorLong=false;
+// T68 (09-29): ONE memory store (AI contract rule 2). The athlete_context blob
+// (a single upserted row of rolling dated notes) is retired: nothing reads or
+// writes it. Every note the app keeps about an athlete is a row in
+// athlete_memory, validated the same way a fact Joe saves is (src/memory.js
+// validateFact refuses behavior instructions, pain tallies, program-change
+// claims and block dates). Returns the saved row, the row it duplicates, or null.
+const saveMemoryFact = async (athleteId, fact, rows=[]) => {
+  const v = validateFact(fact||{});
+  if(!v.ok) return null;
+  const dup = findDuplicate(rows, v.content);
+  if(dup) return dup;
   try{
-    const rows = await sbRead("athlete_context",`?athlete_id=eq.${athleteId}&limit=1`);
-    if(Array.isArray(rows)&&rows[0]){ prior=rows[0].content||""; priorLong=!!rows[0].is_long_term; }
-  }catch(_){}
-  const lines = prior ? prior.split("\n").filter(Boolean) : [];
-  lines.push(clean);
-  const bounded = lines.slice(-MAX_CONTEXT_NOTES).join("\n");
-  try{
-    await sbUpsert("athlete_context",{athlete_id:athleteId,content:bounded,is_long_term:priorLong||longTerm,updated_at:new Date().toISOString()},"athlete_id");
+    const ins = await sbInsert("athlete_memory",{athlete_id:athleteId, content:v.content, kind:fact.kind, expires_at:fact.expires_at||null, source:fact.source||"inferred"});
+    const row = Array.isArray(ins)?ins[0]:ins;
+    return (row && row.id) ? row : null;
   }catch(_){ return null; }
-  return bounded;
 };
 
 // ── Joe-bot system prompt, split for prompt caching ──────────────────────────
@@ -2214,14 +2207,14 @@ ${athlete.weight_unit==="kg"?"This athlete works in KG. State every weight you s
   // Athlete context from monthly recaps
   let contextMemory = "";
   if(athleteContext){
-    contextMemory = `\n\nATHLETE CONTEXT (from monthly recap history: preferences, injuries, goals stated over time):\n${athleteContext}\nUse this as background, do not repeat it back, just let it inform your responses.`;
+    contextMemory = `\n\nATHLETE CONTEXT (what the app has kept about them: preferences, plans, check-in notes):\n${athleteContext}\nUse this as background, do not repeat it back, just let it inform your responses.`;
   }
 
   // T58 mastermind: the unified card replaces the legacy persona block, the fact
   // store replaces the raw context blob (which rides inside the block until its
   // content migrates), and the server-registered toolset arms Joe's hands.
   if(opts.mastermind){
-    const memBlock = buildMemoryBlock(opts.memoryRows||[], athleteContext||"");
+    const memBlock = buildMemoryBlock(opts.memoryRows||[]);
     // A send from the log sheet is a FINISHED workout, not a message asking for
     // one. Without this line Joe compared the sent text to his own earlier draft
     // in the transcript, narrated it like an interrogation ("let's log what you
@@ -3638,7 +3631,7 @@ function reportsActivePain(text){
   return PAIN_WORDS.test(t) && BODY_AREAS.test(t);
 }
 
-function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead, onPainMarks, workoutHistory, kbInset=0}) {
+function ProofChatModal({athlete, digest, onClose, onMemorySaved, onDigestRead, onPainMarks, workoutHistory, kbInset=0}) {
   const alreadyDone = !!(digest?.content_json?.checkin_done);
   const [phase, setPhase] = useState(alreadyDone ? "done" : "report"); // report | dialogue | coach-offer | acting | done
   const [messages, setMessages] = useState([]);
@@ -3989,12 +3982,12 @@ Rules: facts are about the ATHLETE (schedule, availability, equipment, preferenc
     const injuryMentioned = !!ex.injury_note || finalAnswers.some(a=>/injur|sore|pain|hurt|tweak|limitation/i.test(a.a));
     const soft = ex.soft_notes || finalAnswers.map(a=>`${a.q}: ${a.a}`).join("; ");
     const dateTag = new Date().toLocaleDateString("en-US",{month:"short",day:"numeric"});
-    // Accumulate into the rolling context buffer (shared with in-chat "remember"
-    // notes) so a check-in no longer overwrites everything the athlete told Coach Joe.
+    // The check-in's summary is a fact with a shelf life in the one memory store
+    // (T68; src/memory.js checkinNoteFact: 12 weeks, the blob's rolling 12 notes).
     const note = `${isMonthly?"Monthly":"Weekly"} check-in ${dateTag}: ${soft}${ex.injury_note?` | injury: ${ex.injury_note}`:""}${newProgram?" | program updated":""}`;
     try{
-      const updated = await appendAthleteContext(athlete.id, note, {longTerm:injuryMentioned});
-      if(onContextSaved && updated!==null) onContextSaved(updated);
+      const row = await saveMemoryFact(athlete.id, checkinNoteFact(note));
+      if(onMemorySaved && row) onMemorySaved(row);
     }catch(_){}
     // Mark the digest read AND lock the check-in so it can't be re-run (once per
     // progress report). checkin_done is stored in content_json (no migration needed).
@@ -6470,7 +6463,12 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // Seeded from the warm-reopen snapshot (see `snapshot` above) so the Proof tab
   // and Joe's context aren't empty for the first second of a reopen.
   const [athleteGoals,setAthleteGoals] = useState(()=>snapshot?.goals||[]);
-  const [athleteContext,setAthleteContext] = useState(()=>snapshot?.context||null);
+  // T68: the notes every prompt is handed are the athlete's memory facts
+  // (memoryRows, athlete_memory), never a second store. The snapshot's context
+  // string covers the first second of a warm reopen, until the rows load.
+  const [memoryRows,setMemoryRows] = useState([]);
+  const [memoryLoaded,setMemoryLoaded] = useState(false);
+  const athleteContext = useMemo(()=> memoryLoaded ? (memoryNotesText(memoryRows)||null) : (snapshot?.context||null), [memoryRows,memoryLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
   const [proofDigest,setProofDigest] = useState(()=>snapshot?.digest||null);
   const [showProofChat,setShowProofChat] = useState(false);
   const [chatDigest,setChatDigest] = useState(null); // A5: a PAST edition opened from the archive (null = latest)
@@ -7044,7 +7042,6 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // memoryRows = this athlete's active facts (athlete_memory), injected into
   // every mastermind turn and mutated by the remember/forget tools. Loaded
   // lazily post-boot; the flag off = zero reads, zero behavior change.
-  const [memoryRows,setMemoryRows] = useState([]);
   useEffect(()=>{
     // T61: no MASTERMIND_ON gate — the Memory tab's Athlete Context view ships
     // on web too (Will 08-29), so the rows load for everyone. Web without the
@@ -7053,7 +7050,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     if(!historyLoaded) return;
     let dead = false;
     sbRead("athlete_memory",`?athlete_id=eq.${athlete.id}&status=eq.active&order=updated_at.desc&limit=60`)
-      .then(rows=>{ if(!dead && Array.isArray(rows)) setMemoryRows(activeFacts(rows)); })
+      .then(rows=>{ if(!dead && Array.isArray(rows)){ setMemoryRows(activeFacts(rows)); setMemoryLoaded(true); } })
       .catch(()=>{});
     return ()=>{ dead = true; };
   },[historyLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -7830,7 +7827,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           // coach set it after this athlete logged in.
           idApi("get-athlete",{athleteId:athlete.id,pin:athlete.pin}).catch(()=>null),
           sbRead("athlete_goals",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=10`).catch(()=>[]),
-          sbRead("athlete_context",`?athlete_id=eq.${athlete.id}&order=updated_at.desc&limit=5`).catch(()=>[]),
+          sbRead("athlete_memory",`?athlete_id=eq.${athlete.id}&status=eq.active&order=updated_at.desc&limit=60`).catch(()=>null),
           sbRead("proof_digests",`?athlete_id=eq.${athlete.id}&digest_type=in.(weekly,monthly)&order=generated_at.desc&limit=1`).catch(()=>[]),
           // Free tier: no session memory — skip loading workout history
           tier!=="free" ? sbRead("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=100&select=*`).catch(()=>[]) : Promise.resolve([]),
@@ -7866,7 +7863,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           setAthlete({...fa, tier, pin:athlete.pin});
         }
         if(Array.isArray(goals)&&goals.length>0) setAthleteGoals(goals);
-        if(Array.isArray(ctxRows)&&ctxRows.length>0) setAthleteContext(ctxRows.map(r=>r.content).join("\n\n"));
+        if(Array.isArray(ctxRows)){ setMemoryRows(activeFacts(ctxRows)); setMemoryLoaded(true); }
         if(Array.isArray(digestRows)&&digestRows.length>0) setProofDigest(digestRows[0]);
 
         // WEB PARITY (Will 08-29): athlete notifications are native-only now,
@@ -7929,7 +7926,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
               workoutHistory: histForDraft,
               messages: [],
               goals: (Array.isArray(goals)&&goals.length>0) ? goals : athleteGoals,
-              contextNotes: (Array.isArray(ctxRows)&&ctxRows.length>0) ? ctxRows.map(r=>r.content).join("\n\n") : athleteContext,
+              contextNotes: Array.isArray(ctxRows) ? (memoryNotesText(activeFacts(ctxRows))||null) : athleteContext,
             });
             // Fold in only if the athlete hasn't started typing in the meantime — a
             // conversation already underway must never be clobbered by the opener.
@@ -10254,9 +10251,14 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // T64 S6: a block-end statement already has its one home (the block,
         // above); it is never also saved here as an unscoped free-text note.
         if(cr.note && cr.note.trim().length>2 && !blockEndStated){
-          const dateTag = new Date().toLocaleDateString("en-US",{month:"short",day:"numeric"});
-          const updated = await appendAthleteContext(athlete.id,`${dateTag}: ${cr.note.trim()}`,{longTerm:!!cr.is_injury});
-          if(updated!==null){ setAthleteContext(updated); saved.push("note"); }
+          // T68: one owner (AI contract rule 3). When Joe saved a fact with his
+          // own tool this turn, that IS the note; the parser's copy stands down.
+          if(MASTERMIND_ON && masterToolCalls.some(tc=>tc.name==="remember_fact")){
+            saved.push("note");
+          } else {
+            const row = await saveMemoryFact(athlete.id, {content: cr.note.trim(), kind:"contextual", expires_at:null, source:"athlete_said"}, memoryRows);
+            if(row){ setMemoryRows(rows=>rows.some(r=>r.id===row.id)?rows:[row,...rows]); saved.push("note"); }
+          }
         }
         if(saved.length) followUp("✓ Got it, I'll remember that.");
       }
@@ -11587,7 +11589,7 @@ ${VOICE_ATHLETE}`;
                 )}
                 {CHAT_FIRST_ON&&memTab==="context"&&(
                   <AthleteContextPane athlete={athlete} goals={athleteGoals}
-                    rows={memoryRows} setRows={setMemoryRows} legacyContext={athleteContext}/>
+                    rows={memoryRows} setRows={setMemoryRows}/>
                 )}
               </div>
             )}
@@ -11890,7 +11892,7 @@ ${VOICE_ATHLETE}`;
           digest={chatDigest||proofDigest}
           workoutHistory={workoutHistory}
           onClose={()=>{setShowProofChat(false);setChatDigest(null);}}
-          onContextSaved={(ctx)=>setAthleteContext(ctx)}
+          onMemorySaved={(row)=>setMemoryRows(rows=>rows.some(r=>r.id===row.id)?rows:[row,...rows])}
           onDigestRead={(d)=>{ if(!chatDigest) setProofDigest(d); }}
           onPainMarks={(m)=>setAthlete(prev=>({...prev,pain_marks:m}))}
         />
@@ -14646,7 +14648,7 @@ export async function applyMemoryActions(athleteId, actions, rows){
   return next;
 }
 
-export function AthleteContextPane({athlete, goals=[], rows=[], setRows, legacyContext=""}){
+export function AthleteContextPane({athlete, goals=[], rows=[], setRows}){
   const [ask,setAsk] = useState("");
   const [busy,setBusy] = useState(false);
   const [denied,setDenied] = useState(null);   // flag toast text (also reddens the box)
@@ -14661,7 +14663,6 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, legacyC
   const pinned = act.filter(r=>r.kind==="pinned");
   const rest = act.filter(r=>r.kind!=="pinned")
     .sort((a,b)=>Date.parse(b.updated_at||b.created_at||0)-Date.parse(a.updated_at||a.created_at||0));
-  const legacyLines = String(legacyContext||"").split("\n").map(l=>l.trim()).filter(Boolean);
   // Only ACTIVE goals render as "Goal" — superseded / stale-by-date rows belong
   // to history, not to what Joe is currently coaching toward (T62).
   const goalLines = activeGoals(goals||[]).map(g=>g&&g.goal_text).filter(Boolean).slice(0,3);
@@ -14682,7 +14683,7 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, legacyC
         return `- [${r.kind}] ${r.content}${exp}`;
       });
       const selectedBlock = target ? `\n\nSELECTED FACT (the athlete highlighted this one, the request is about it):\n- [${target.kind}] ${target.content}` : "";
-      const user = `TODAY: ${new Date().toISOString().slice(0,10)}\n\nCURRENT FACTS (${act.length} active):\n${factLines.join("\n")||"(none yet)"}\n\nOLDER NOTES (read-only history, for context):\n${legacyLines.join("\n")||"(none)"}${selectedBlock}\n\nATHLETE REQUEST:\n${req}`;
+      const user = `TODAY: ${new Date().toISOString().slice(0,10)}\n\nCURRENT FACTS (${act.length} active):\n${factLines.join("\n")||"(none yet)"}${selectedBlock}\n\nATHLETE REQUEST:\n${req}`;
       const raw = await askClaude(MEMORY_EDIT_SYS, user, 700, [], "claude-sonnet-5", "memory_edit");
       const plan = planMemoryOps(raw, rows, new Date(), {targetId: target?.id ?? null});
       if(plan.decision==="deny"){
@@ -14732,10 +14733,6 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, legacyC
               {r.expires_at&&<span style={{color:CA.muted}}> (until {String(r.expires_at).slice(0,10)})</span>}
             </div>
           );})}
-          {legacyLines.length>0&&(<>
-            <div style={secttl}>Older notes</div>
-            <div style={{...mono,color:CA.muted,fontSize:11}}>{legacyLines.join("\n")}</div>
-          </>)}
         </div>
         {joeReply&&(
           <div style={{display:"flex",gap:8,alignItems:"flex-start",marginTop:12}}>
