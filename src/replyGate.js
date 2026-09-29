@@ -14,6 +14,8 @@
 //      unit the app is asking about is removed and a rep word the logged sets do
 //      not say becomes "set"; a sentence naming a planned lift the log left
 //      out (planRest) is removed unless the athlete asked something
+//   6. comped accounts (ctx.comped): a sentence that pitches paying is removed
+//      (moneyAskGuard, Will 09-29 "never ask a comped account to pay")
 // Returns {text, changed, removed, words}. MEASURE, never enforce: `words` is
 // reported, nothing is ever truncated for length.
 //
@@ -24,7 +26,7 @@
 // they are stored).
 
 import { stripToolNameNoise } from "./chatRouting.js";
-import { claimGuard, painCountGuard, unitRestateGuard, repWordGuard, planRestGuard } from "./replyGuards.js";
+import { claimGuard, painCountGuard, unitRestateGuard, repWordGuard, planRestGuard, moneyAskGuard } from "./replyGuards.js";
 
 // Sentinel marking where a sentence-opening interjection was cut, so the next
 // word can be capitalized ("Damn, sorry you got hit" -> "Sorry you got hit").
@@ -177,6 +179,12 @@ export function replyGate(surface, text, ctx = {}) {
   if (Array.isArray(ctx.toolCalls)) {
     const g = claimGuard(out, { toolCalls: ctx.toolCalls, appWrites: ctx.appWrites || {} });
     if (g.changed) { out = g.text; removed.push(...g.removed.map((s) => `claim: ${s}`)); }
+  }
+  // Comped account (Will 09-29): no sentence of Joe's may pitch paying. ctx.comped
+  // is set only by the athlete-facing chat call sites, from src/tiers.js isComped.
+  if (ctx.comped === true) {
+    const m = moneyAskGuard(out);
+    if (m.changed) { out = m.text; removed.push(...m.removed.map((x) => `money_ask: ${x}`)); }
   }
   const turn = ctx.turn && typeof ctx.turn === "object" ? ctx.turn : null;
   if (turn || surface === "chat" || surface === "checkin") {

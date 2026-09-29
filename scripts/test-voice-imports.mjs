@@ -47,8 +47,8 @@ for (const [f, re, what] of CHECK) ok(re.test(read(f)), `imports the voice: ${wh
 
 // 3. every model-text surface passes the gate
 const GATED = [
-  ["src/App.jsx", /reply = gateText\("chat", reply\)/, "chat settle"],
-  ["src/App.jsx", /replyGate\("chat", reply, \{toolCalls:/, "chat claim guard after tool backstop"],
+  ["src/App.jsx", /reply = gateText\("chat", reply(?:, \{comped:[^}]*\})?\)/, "chat settle"],
+  ["src/App.jsx", /replyGate\("chat", reply, \{(?:comped:[^,]*, )?toolCalls:/, "chat claim guard after tool backstop"],
   ["src/App.jsx", /<StreamText text=\{renderGate\(m\.content\)\}\/>/, "chat renderer (stream + history)"],
   ["src/App.jsx", /renderGate\(\[\.\.\.session\.entries\]/, "My Log last reply"],
   ["src/App.jsx", /gateText\("checkin", step\.reply/, "check-in reply"],

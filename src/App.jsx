@@ -74,7 +74,7 @@ import { FEATURE_INVENTORY } from "./features.js";
 import { toLbs, fmtWeightIn, displayStat, unitLabel, setDisplayUnit, getDisplayUnit, toDisplay, roundStat, exerciseUnit, exerciseLoadUnit } from "./units.js";
 // Declared maxes (pr_attempts): unit stamping + the actual-1RM write decision.
 import { stampLoadUnits, storedAttemptUnit, isDeclaredMax, declaredMaxWrite, unitCheckMessage, unitCheckFact, replyAsksUnit, pendingUnitLoads, confirmPendingUnits, unitAnswer } from "./prAttempts.js";
-import { effectiveTier, trialActive } from "./tiers.js";
+import { effectiveTier, trialActive, isComped, accountFactLine } from "./tiers.js";
 import { CREW_ENABLED, MASTERMIND_ENABLED, CHAT_FIRST_ENABLED } from "./flags.js";
 import { buildMastermindStatic } from "./ai/card.js";
 import { blueprintPct } from "./programBuilder.js";
@@ -2228,13 +2228,13 @@ ${athlete.weight_unit==="kg"?"This athlete works in KG. State every weight you s
     // actually did") and re-called prefill_log_sheet on a session that had just
     // ended (Will's phone, 08-28).
     const pureLogBlock = opts.pureLog ? `\n\nTHIS MESSAGE IS A FINISHED WORKOUT LOG the athlete just sent from the log sheet. The app is already parsing and saving it; the text IS what they did. ${logFocus ? "React to completed work as the LOG REPLY FOCUS block below says." : "React to completed work: acknowledge it and coach what stands out."} Where it differs from the program or from the sheet you drafted, that is an audible they chose${logFocus ? ", never an error" : " — worth a coaching observation, never an error"}, never a reason to sound like you doubt the log. Do not call prefill_log_sheet or pin_session_card; the session is over and the sheet already came down. If one detail that matters is genuinely missing (a weight, sets), ask ONE specific question that names the exercise, right here in chat.` : "";
-    const sysObjM = {cached:buildMastermindStatic(), dynamic:sys+goalsContext+memBlock+pureLogBlock+logFocus+(opts.sheetFact||"")};
+    const sysObjM = {cached:buildMastermindStatic(), dynamic:sys+goalsContext+memBlock+pureLogBlock+logFocus+(opts.sheetFact||"")+accountFactLine(athlete)};
     const userMsgM = `${hist}\n\n${athlete.name}: ${message}`;
     if(onDelta) return askClaudeStream(sysObjM, userMsgM, {maxTokens:900, model:"claude-sonnet-5", feature:"mastermind_chat", onDelta, toolset:"mastermind_athlete", onToolUse:opts.onToolUse});
     return askClaude(sysObjM, userMsgM, 900, [], "claude-sonnet-5", "mastermind_chat");
   }
 
-  const sysObj = {cached:JOEBOT_STATIC_SYS, dynamic:sys+goalsContext+contextMemory+logFocus};
+  const sysObj = {cached:JOEBOT_STATIC_SYS, dynamic:sys+goalsContext+contextMemory+logFocus+accountFactLine(athlete)};
   const userMsg = `${hist}\n\n${athlete.name}: ${message}`;
   // Stream when the caller wants live rendering; otherwise the classic one-shot call.
   // 800 tokens (was 450): technical/programming answers were getting guillotined
@@ -7028,6 +7028,9 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // the restored transcript already carries the line.
   const trialNoticeShownRef = useRef(false);
   const withTrialNotice = (msgs) => {
+    // Comped accounts (Will 09-29) are never told a trial ended: the line ends in
+    // "Pro is one tap away", which is an ask. The tabs still revert by tier.
+    if(isComped(athlete)) return msgs;
     if((athlete.tier||"free")!=="free" || !athlete.trial_ends_at) return msgs;
     const ends = Date.parse(athlete.trial_ends_at);
     if(!Number.isFinite(ends) || ends > Date.now()) return msgs;
@@ -9276,7 +9279,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // Free = no log access (Will 08-24, supersedes the 08-19 read-only ruling):
       // the modal is a Pro surface; history stays safe and returns on upgrade.
       if(effectiveTier(athlete)==="free"){
-        setMessages(prev=>[...prev,{role:"user",content:msg},{role:"assistant",content:(athlete.total_sessions_logged||0)>0||workoutHistory.length>0
+        // Comped (Will 09-29): the log stays locked, the ask goes. A plain fact, no call to action.
+        setMessages(prev=>[...prev,{role:"user",content:msg},{role:"assistant",content:isComped(athlete)
+          ? `Your log isn't part of your current plan, ${athlete.name}. Everything you logged is saved.`
+          : (athlete.total_sessions_logged||0)>0||workoutHistory.length>0
           ? `Your log is a Pro feature, ${athlete.name}. Everything you logged is saved and waiting, upgrade in Settings and it's all back.`
           : `Your workout log is a Pro feature, ${athlete.name}. Upgrade to Pro to save your history between sessions and view your full log.`}]);
       } else {
@@ -9470,7 +9476,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // history), but the settle is where NEW pollution is stopped at the source.
       // T64 S4: the one output gate (tool names, banned words, dashes). The
       // claim guard runs below, once the turn's final tool calls are known.
-      reply = gateText("chat", reply);
+      reply = gateText("chat", reply, {comped:isComped(updatedAthlete)});
       if(reply && reply.trim()){
         // Settle on the stream's full text — guarantees the tail chunk that was
         // still buffered when the stream closed is never dropped.
@@ -9479,7 +9485,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // A28: the stream died but a substantial partial is already on screen.
         // Keep it — regenerating replaced visibly-rendered text with differently-
         // worded copy and billed the tokens twice. Only regenerate empty bubbles.
-        reply = gateText("chat", streamedText);
+        reply = gateText("chat", streamedText, {comped:isComped(updatedAthlete)});
         setMessages(prev=>{ const u=[...prev]; const last=u[u.length-1]; if(last && last.role==="assistant") u[u.length-1]={role:"assistant",content:reply}; return u; });
       } else {
         // One-shot fallback: mastermind persona/memory ride along, tools don't
@@ -9488,7 +9494,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // T67: the same turn facts the streamed call got (sheet fact, pain turn,
         // change scope, temp fact); only the tool callback is left off.
         const oneShotOpts = {...masterOpts, onToolUse: undefined};
-        reply = gateText("chat", await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext,null,oneShotOpts));
+        reply = gateText("chat", await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext,null,oneShotOpts), {comped:isComped(updatedAthlete)});
         if(oneShotOpts.headline) masterOpts.headline = oneShotOpts.headline;
         setMessages(prev=>{ const u=[...prev]; const last=u[u.length-1]; if(last && last.role==="assistant") u[u.length-1]={role:"assistant",content:reply}; return u; });
       }
@@ -9593,7 +9599,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // T67: the turn's computed facts, so the gate holds Joe to them (pain count,
         // a load whose unit the app is asking about, rep words the log does not say)
         const gateTurn = (()=>{ try{ return {painAreas: painTurn?.turn?.areas||[], unitPending: parsedForReply ? pendingUnitLoads(parsedForReply) : [], performed: parsedForReply ? logTurnExercises(parsedForReply, updatedAthlete.weight_unit) : [], planRest: masterOpts.headline?.planRest||[], asked: /\?/.test(msg)}; }catch(_){ return null; } })();
-        const cg = replyGate("chat", reply, {toolCalls: MASTERMIND_ON ? masterToolCalls : [], appWrites:{program: programWrite, rec: painRec}, ...(gateTurn?{turn:gateTurn}:{})});
+        const cg = replyGate("chat", reply, {comped:isComped(updatedAthlete), toolCalls: MASTERMIND_ON ? masterToolCalls : [], appWrites:{program: programWrite, rec: painRec}, ...(gateTurn?{turn:gateTurn}:{})});
         if(cg.text !== reply){
           const was = reply;
           reply = cg.text;
@@ -15745,6 +15751,9 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
   };
 
   const currentTier = athlete.tier||"free";
+  // Comped (Will 09-29): the drawer stays reachable, but it never pitches. No plan
+  // picker, no prices, no trial countdown, no "first charge" line.
+  const comped = isComped(athlete);
   const currentBilling = athlete.billing||"monthly";
   const tierOrder = {free:0,pro:1,elite:2};
   const planChanged = selectedTier !== currentTier || selectedBilling !== currentBilling;
@@ -15904,7 +15913,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
         <div className="setgrp" style={{marginBottom:6}}>MY COACH</div>
         <div style={{color:CA.muted2,fontSize:12,marginBottom:16,lineHeight:1.5}}>
           {effectiveTier(athlete)==="free"
-            ? "Your coach will receive a welcome email. Upgrade to Pro for weekly progress reports."
+            ? (isComped(athlete) ? "Your coach will receive a welcome email." : "Your coach will receive a welcome email. Upgrade to Pro for weekly progress reports.")
             : "Your coach receives weekly progress reports every Monday."}
         </div>
 
@@ -15983,7 +15992,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
             style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:CA.navy3,border:`1px solid ${showPlan?`${CA.accent}66`:CA.border}`,borderRadius:10,padding:"11px 14px",cursor:"pointer",transition:"border-color 0.15s"}}>
             <span style={{display:"flex",flexDirection:"column",alignItems:"flex-start",gap:2}}>
               <span style={{color:CA.muted,fontSize:11,letterSpacing:1,fontWeight:700}}>YOUR PLAN</span>
-              <span style={{color:CA.muted2,fontSize:10.5}}>Billing, upgrade &amp; gift codes</span>
+              <span style={{color:CA.muted2,fontSize:10.5}}>{comped?"Complimentary account":"Billing, upgrade & gift codes"}</span>
             </span>
             <span style={{display:"flex",alignItems:"center",gap:8}}>
               {/* Tier in its "cool box" — gold for Pro, blue for Elite/School — same
@@ -16018,9 +16027,11 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
                 <div style={{color:CA.muted,fontSize:11,marginTop:4,lineHeight:1.5}}>
                   {cancelAtPeriodEnd
                     ? `You'll keep access until ${fmtDate(renewalDate)}.`
-                    : isTrialing
-                      ? `Free trial ends ${fmtDate(renewalDate)}, first charge then.`
-                      : `Renews ${fmtDate(renewalDate)}.`}
+                    : comped
+                      ? "Your account is complimentary. Nothing is owed."
+                      : isTrialing
+                        ? `Free trial ends ${fmtDate(renewalDate)}, first charge then.`
+                        : `Renews ${fmtDate(renewalDate)}.`}
                 </div>
               )}
             </div>
@@ -16029,7 +16040,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
           {/* Card-less free-pick trial (W18-3). The plan drawer is the one
               billing surface that states the trial plainly — a single quiet
               card, no countdown anywhere else in the app (silent revert). */}
-          {!hasStripeSub&&trialActive(athlete)&&(
+          {!comped&&!hasStripeSub&&trialActive(athlete)&&(
             <div style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:10,padding:"10px 14px",marginBottom:10}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <span style={{color:CA.text,fontWeight:700,fontSize:13}}>PRO FEATURES</span>
@@ -16041,8 +16052,15 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
             </div>
           )}
 
+          {comped&&(
+            <div style={{background:CA.navy3,border:`1px solid ${CA.border}`,borderRadius:10,padding:"12px 14px"}}>
+              <div style={{color:CA.text,fontWeight:700,fontSize:13,marginBottom:4}}>COMPLIMENTARY</div>
+              <div style={{color:CA.muted2,fontSize:12,lineHeight:1.5}}>Your account is on the house. Nothing is owed, now or later.</div>
+            </div>
+          )}
+
           {/* Billing toggle */}
-          {currentTier!=="free"&&(
+          {!comped&&currentTier!=="free"&&(
             <div style={{display:"flex",gap:0,background:CA.navy3,borderRadius:10,padding:4,border:`1px solid ${CA.border}`,marginBottom:10}}>
               {["monthly","annual"].map(b=>(
                 <button key={b} onClick={()=>setSelectedBilling(b)}
@@ -16055,7 +16073,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
             </div>
           )}
 
-          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {!comped&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
             {Object.entries(TIERS).map(([key,t])=>{
               const isCurrent = currentTier===key;
               const isSelected = selectedTier===key;
@@ -16085,7 +16103,7 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
                 </div>
               );
             })}
-          </div>
+          </div>}
           {upgradeMsg&&(
             <div style={{color:upgradeMsg.includes("set")||upgradeMsg.includes("updated")||upgradeMsg.includes("active")?CA.green:CA.red,fontSize:12,textAlign:"center",marginTop:8,fontWeight:600}}>
               {upgradeMsg}
@@ -16157,7 +16175,10 @@ function SettingsModal({athlete, onClose, onCoachUpdate, onProofRefresh, onLogou
           const allCodes = Array.isArray(athlete.gift_codes)?athlete.gift_codes:[];
           const testerCodes = allCodes.filter(g=>g.tester);
           const codes = allCodes.filter(g=>!g.tester);
-          const showGift = currentTier==="pro"||currentTier==="elite";
+          // A comped account never pays, so its gift codes (generated on a first real
+          // payment) never come: no heading over an empty box, no "unlock after your
+          // first payment" line. A comped founder who HOLDS codes still sees them.
+          const showGift = (currentTier==="pro"||currentTier==="elite") && !(comped && codes.length===0);
           if(!showGift && testerCodes.length===0) return null;
           const hasFounder = codes.some(g=>g.unlimited);
           const copyCode = (code)=>{

@@ -40,3 +40,29 @@ export function effectiveTier(a) {
 export function trialActive(a) {
   return ((a && a.tier) || "free") === "free" && !!(a && a.trial_ends_at) && effectiveTier(a) === "pro";
 }
+
+// ─── COMPED ACCOUNTS (Will 09-29) ────────────────────────────────────────────
+// "Every account up till now should be free. Never ask to charge them or anyone
+// I give a 100% discount to." `athletes.comped` is a server-only flag (see
+// api/data.js SERVER_ONLY_ATHLETE_COLS): set by the 09-29 migration and by the
+// Stripe webhook when a 100%-off FOREVER coupon lands. It changes NOTHING about
+// tier or features: effectiveTier is untouched, a comped athlete keeps exactly
+// the surface they have today, and comped is never treated as Pro.
+//
+// What it changes is the ASK. Every surface that would nudge an athlete toward
+// paying (upgrade lines, trial-ended notices, plan pickers, "add a card",
+// anything Joe might say) reads isComped and goes quiet. A locked feature stays
+// locked and is stated as a plain fact with no call to action.
+export function isComped(a) {
+  return !!a && a.comped === true;
+}
+
+// One fact line for the AI's dynamic block (AI contract rule 1: a fact computed
+// in code and handed to Joe, not a new persona rule). Empty for everyone else, so
+// non-comped prompts stay byte-identical. The reply gate's moneyAskGuard
+// (src/replyGuards.js) is the code backstop if he reaches for it anyway.
+export function accountFactLine(a) {
+  return isComped(a)
+    ? "\n\nACCOUNT: this athlete's account is complimentary. Nothing is owed and nothing is for sale to them: there is no plan to buy, no trial to end, no card to add. Do not bring up upgrading, prices, Pro or Elite as something to get, or billing. If they ask, tell them it is covered and move on."
+    : "";
+}

@@ -244,3 +244,17 @@ export function planRestGuard(text, planRest = [], { performed = [], asked = fal
   }).filter(Boolean);
   return dropSentences(src, (sent) => !/\?\s*$/.test(sent.trim()) && res.some((re) => re.test(sent)));
 }
+
+// ── Money asks (Will 09-29: never ask a comped account to pay) ───────────────
+// The reply gate's backstop for a comped athlete (ctx.comped, from src/tiers.js
+// isComped). Joe is handed the fact that the account is complimentary
+// (accountFactLine); if he still writes a sentence that pitches paying, that
+// sentence is removed. Narrow on purpose: it names the vocabulary of an ask
+// (upgrade, subscribe, pricing, a dollar figure, "go Pro", an end-of-trial line,
+// add a card), not the words "pay" or "billing", so a reassurance like "nothing
+// is owed" survives. Never empties a reply (dropSentences keeps it whole).
+const MONEY_ASK = /\b(?:upgrad\w*|subscribe|subscribing|subscription|paywall|pricing|go\s+(?:pro|elite)|get\s+(?:pro|elite)|switch\s+to\s+(?:pro|elite)|(?:pro|elite)\s+(?:plan|tier|membership|subscription)|free\s+trial|trial\s+(?:has\s+)?(?:end\w*|expire\w*|wrapped)|add\s+(?:a|your)\s+card|(?:credit|debit|payment)\s+(?:card|method|details|info))\b|\$\s?\d|\d\s?\/\s?(?:mo|yr)\b/i;
+export const asksForMoney = (sentence) => MONEY_ASK.test(String(sentence || ""));
+export function moneyAskGuard(text) {
+  return dropSentences(text, asksForMoney);
+}
