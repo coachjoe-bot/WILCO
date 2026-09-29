@@ -29,6 +29,11 @@ export const writtenUnit = (message, weight) => {
   return m ? (/^k/i.test(m[1]) ? "kg" : "lbs") : null;
 };
 
+// Does the athlete's message name this unit anywhere ("whole session in kilos",
+// "20kg/50/70/118")? Used to decide whether the parser's unit is a reading or a guess.
+const UNIT_WORD = { kg: /(\d\s?|\b)(kgs?|kilos?|kilograms?)\b/i, lbs: /(\d\s?|\b)(lbs?|pounds?)\b/i };
+export const mentionsUnit = (message, unit) => !!(UNIT_WORD[unit] && UNIT_WORD[unit].test(String(message || "")));
+
 // The same lift logged as a set in the same message/row: same bar, same unit.
 const twinUnit = (attempt, exercises, normalizeName) => {
   const name = normalizeName(attempt?.exercise);
@@ -39,22 +44,31 @@ const twinUnit = (attempt, exercises, normalizeName) => {
 
 // Stamp the resolved unit onto every attempt BEFORE the row is saved, so stored
 // parsed_data is self-describing and survives the athlete flipping their display
-// unit later. Order: the parser's unit, the unit written on that number, a kg twin
-// set, then the athlete's display unit. A twin set that says "lbs" is NOT evidence
-// here: lbs is the parser's default for an unlabelled load, so it cannot outvote a
-// kg athlete's own setting. Idempotent; same object back when nothing needs a stamp.
+// unit later. Order:
+//   1. the unit written on that number in the athlete's own words
+//   2. the parser's unit, IF the message names that unit somewhere
+//   3. a kg twin set
+//   4. the athlete's display unit
+// Why the parser's unit is not simply trusted: told to return null when nothing is
+// written, the real model still fills one in (live pass 09-28: "102 snatch" came
+// back kg, "165 press" came back lbs). A guessed "lbs" on a kg athlete is the
+// original bug, so a unit the message never names is treated as no unit. Same for
+// a twin set that says "lbs": that is the parser's default for an unlabelled load.
+// With no message to check against, the parser's unit stands. Same inputs always
+// give the same stamp; same object back when nothing changes.
 export const stampAttemptUnits = (parsed, { displayUnit, message = "", normalizeName = lower } = {}) => {
   const list = parsed?.pr_attempts;
   if (!Array.isArray(list) || !list.length) return parsed;
-  if (list.every((p) => !p || isUnit(p.unit))) return parsed;
   const resolve = (p) => {
-    if (isUnit(p.unit)) return p.unit;
     const w = writtenUnit(message, p.weight);
     if (w) return w;
+    if (isUnit(p.unit) && (!message || mentionsUnit(message, p.unit))) return p.unit;
     if (twinUnit(p, parsed.exercises, normalizeName) === "kg") return "kg";
-    return attemptUnit(p, displayUnit);
+    return attemptUnit({ ...p, unit: null }, displayUnit);
   };
-  return { ...parsed, pr_attempts: list.map((p) => (p ? { ...p, unit: resolve(p) } : p)) };
+  const units = list.map((p) => (p ? resolve(p) : null));
+  if (list.every((p, i) => !p || p.unit === units[i])) return parsed;
+  return { ...parsed, pr_attempts: list.map((p, i) => (p ? { ...p, unit: units[i] } : p)) };
 };
 
 // The unit of an attempt read back out of a saved workouts row. Stamped rows answer

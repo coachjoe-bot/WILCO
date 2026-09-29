@@ -48,6 +48,8 @@ const SCENARIOS = [
     msg: "Hit a 102kg snatch today, new PR", want: { weight: 102, unit: "kg" } },
   { name: "kg athlete, NO unit written", unit: "kg", lift: "snatch",
     msg: "Hit a 102 snatch single today, new PR", want: { weight: 102, unit: "kg" } },
+  { name: "kg athlete, NO unit written, a number the parser reads as lbs", unit: "kg", lift: "squat",
+    msg: "Hit a 140 back squat single today, new PR", want: { weight: 140, unit: "kg" } },
   { name: "lbs athlete, NO unit written (must not change)", unit: "lbs", lift: "overhead press",
     msg: "New overhead press max today, hit 165 for a single", want: { weight: 165, unit: "lbs" } },
   { name: "lbs athlete who wrote kg", unit: "lbs", lift: "snatch",

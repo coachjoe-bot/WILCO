@@ -10,7 +10,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { attemptUnit, setDisplayUnit, toLbs, LBS_PER_KG } from "../src/units.js";
-import { stampAttemptUnits, storedAttemptUnit, writtenUnit, isDeclaredMax, declaredMaxWrite } from "../src/prAttempts.js";
+import { stampAttemptUnits, storedAttemptUnit, writtenUnit, mentionsUnit, isDeclaredMax, declaredMaxWrite } from "../src/prAttempts.js";
 import { normalizeExName } from "../src/grit.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -72,7 +72,37 @@ console.log("stampAttemptUnits:");
   eq(st("Snatch singles 80/90/102, whole session in kilos", "lbs", [{ name: "Snatch", weight: 102, unit: "kg" }]), "kg", "kg twin set beats an lbs display unit");
   eq(st("Snatch singles 80/90/102", "kg", [{ name: "Snatch", weight: 102, unit: "lbs" }]), "kg", "an lbs twin (parser default) does NOT outvote a kg athlete's setting");
   eq(st("Snatch singles 80/90/102", "kg", [{ name: "Back Squat", weight: 140, unit: "lbs" }]), "kg", "another lift's set is not a twin");
+
+  // The real parser GUESSES a unit when none is written (live pass 09-28). A unit
+  // the athlete's message never names is a guess, and the athlete's setting wins.
+  const guess = (unit, message, displayUnit) => stampAttemptUnits(
+    { exercises: [], pr_attempts: [{ exercise: "Back Squat", weight: 140, unit, reps: 1, achieved: true }] },
+    { displayUnit, message, normalizeName: normalizeExName }).pr_attempts[0].unit;
+  eq(guess("lbs", "Hit a 140 back squat single today, new PR", "kg"), "kg", "parser guessed lbs, nothing written, KG athlete -> kg (the bug, one layer down)");
+  eq(guess("kg", "Hit a 140 back squat single today, new PR", "lbs"), "lbs", "parser guessed kg, nothing written, LBS athlete -> lbs");
+  eq(guess("lbs", "New back squat max today, hit 140 for a single", "lbs"), "lbs", "parser said lbs, nothing written, LBS athlete -> lbs (unchanged for 53 of 54 athletes)");
+  eq(guess("kg", "Squat singles 100/120/140, all in kilos today", "lbs"), "kg", "parser said kg and the message names kilos -> kg");
+  eq(guess("kg", "Squats @ 60kg/100/120/140", "lbs"), "kg", "a kg ladder: the unit sits on another number, parser's kg is backed");
+  eq(guess("lbs", "Hit a 140kg back squat", "lbs"), "kg", "the unit written on the number beats the parser's unit");
+  eq(guess("lbs", "", "kg"), "lbs", "no message to check against -> the parser's unit stands");
+  const same = { exercises: [], pr_attempts: [{ exercise: "Back Squat", weight: 140, unit: "kg", reps: 1, achieved: true }] };
+  eq(stampAttemptUnits(same, { displayUnit: "kg", message: "Hit a 140 back squat single" }), same, "nothing to change -> same object");
+  const once = stampAttemptUnits({ exercises: [], pr_attempts: [{ exercise: "Back Squat", weight: 140, unit: "lbs", reps: 1, achieved: true }] }, { displayUnit: "kg", message: "140 squat single" });
+  eq(stampAttemptUnits(once, { displayUnit: "kg", message: "140 squat single" }), once, "stamping twice with the same inputs changes nothing");
 }
+
+console.log("mentionsUnit:");
+ok(mentionsUnit("hit 102kg", "kg"), "102kg");
+ok(mentionsUnit("all in kilos today", "kg"), "kilos as a word");
+ok(mentionsUnit("hit 225 lbs", "lbs"), "225 lbs");
+ok(mentionsUnit("225lb bench", "lbs"), "225lb");
+ok(!mentionsUnit("felt like a pound cake", "kg"), "lbs word is not kg");
+ok(!mentionsUnit("hit 102 snatch", "kg"), "no unit");
+ok(!mentionsUnit("hit 102 snatch", "lbs"), "no unit (lbs)");
+ok(!mentionsUnit("skg workout", "kg"), "needs a boundary or a digit in front");
+ok(!mentionsUnit("bulbs", "lbs"), "'bulbs' is not lbs");
+ok(!mentionsUnit(null, "kg"), "null message");
+ok(!mentionsUnit("102kg", "stone"), "unknown unit");
 
 // 2b ── the unit written on a number
 console.log("writtenUnit:");
