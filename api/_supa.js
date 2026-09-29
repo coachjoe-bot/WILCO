@@ -259,6 +259,58 @@ export async function sbWrite({ method, table, query = "", body, prefer = "retur
   return json;
 }
 
+// ── AI permission (App Store 5.1.2(i)) ───────────────────────────────────────
+// An athlete's data may only reach the AI provider after they tapped the
+// permission: a legal_acceptances row with document 'ai_processing' (written at
+// signup by recordAcceptances, or by the one-time card for existing accounts).
+// The client gate blocks the app; this is the server half.
+//
+// POSITIVE results only are cached (warm function instances skip the read). A
+// negative is never cached: an athlete who taps Allow must not wait out a TTL,
+// and a "no" answer costs one indexed read. The row is never withdrawn short of
+// account deletion, so a positive can only go stale for an account that no
+// longer exists; the TTL and size bound are housekeeping, not correctness.
+// A failed read THROWS (fail closed): callers must not treat "could not check"
+// as "allowed".
+const AI_CONSENT_TTL_MS = 6 * 3600_000;
+const aiConsentYes = new Map(); // athleteId -> expires-at ms
+const aiConsentFresh = (id) => { const t = aiConsentYes.get(id); return t !== undefined && t > Date.now(); };
+const aiConsentRemember = (id) => {
+  if (aiConsentYes.size > 5000) aiConsentYes.clear();
+  aiConsentYes.set(id, Date.now() + AI_CONSENT_TTL_MS);
+};
+
+export async function hasAiConsent(athleteId) {
+  const id = String(athleteId || "");
+  if (!id) return false;
+  if (aiConsentFresh(id)) return true;
+  const rows = await sbSelect(
+    "legal_acceptances",
+    `?athlete_id=eq.${encodeURIComponent(id)}&document=eq.ai_processing&select=id&limit=1`
+  );
+  if (rows.length) { aiConsentRemember(id); return true; }
+  return false;
+}
+
+// Batched form for the schedulers: returns the Set of ids that HAVE the row.
+// The id list goes into the URL, so it is chunked (max 100 ids per request).
+export async function aiConsentSet(athleteIds, { chunk = 100 } = {}) {
+  const ids = [...new Set((athleteIds || []).map(String).filter(Boolean))];
+  const yes = new Set();
+  const need = [];
+  for (const id of ids) (aiConsentFresh(id) ? yes.add(id) : need.push(id));
+  for (let i = 0; i < need.length; i += chunk) {
+    const part = need.slice(i, i + chunk);
+    const list = part.map((id) => `"${id.replace(/"/g, "")}"`).join(",");
+    const rows = await sbSelect(
+      "legal_acceptances",
+      `?athlete_id=in.(${encodeURIComponent(list)})&document=eq.ai_processing&select=athlete_id&limit=1000`
+    );
+    for (const r of rows) { yes.add(r.athlete_id); aiConsentRemember(r.athlete_id); }
+  }
+  return yes;
+}
+
 // ── Server-side Claude call (background jobs) ────────────────────────────────
 // For trusted server-to-server work (the Proof Feed engine) that runs with NO
 // browser in the loop, so it can't use the same-origin client proxy api/claude.js.
@@ -281,6 +333,14 @@ export async function askClaudeServer({
   attribution = {},
 }) {
   const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY || process.env.ANTHROPIC_API_KEY;
+
+  // Last line of defence, whoever the caller is: work done FOR an athlete never
+  // leaves for the AI provider without that athlete's ai_processing row. The
+  // schedulers filter earlier (api/trigger-proof-feed.js) so this normally passes
+  // from cache; it exists so a future caller cannot forget. No env flag, on purpose.
+  if (attribution.athlete_id && !(await hasAiConsent(attribution.athlete_id))) {
+    throw httpErr(403, "AI permission required");
+  }
 
   // Inference params chosen per model + feature, matching api/claude.js
   // modelParams() (keep the two in sync — every rule has a twin): extraction

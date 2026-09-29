@@ -36,7 +36,7 @@ const main = async () => {
 
   for (const [t, col] of [["workouts", "athlete_id"], ["prs", "athlete_id"], ["crew_edges", "athlete_a"],
                           ["crew_edges", "athlete_b"], ["crew_moments", "athlete_id"],
-                          ["athlete_training_prefs", "athlete_id"], ["athlete_context", "athlete_id"]]) {
+                          ["athlete_training_prefs", "athlete_id"], ["athlete_context", "athlete_id"], ["legal_acceptances", "athlete_id"]]) {
     await del(t, col).catch((e) => console.warn(`(skip) ${e.message}`));
   }
   await del("athletes", "id");
@@ -54,6 +54,8 @@ const main = async () => {
   const ex = (name, sets, reps, weight) => ({ name, sets, reps, weight, unit: "lbs", added_weight: null,
     assist_weight: null, resistance: null, load_basis: null, rpe: null, rir: null, percent_1rm: null,
     tempo: null, technique: null, to_failure: null, superset_group: null, feel: null, notes: null, set_details: null });
+  // Same reason as seed-qa-athlete.mjs: the server skips AI work without this row.
+  await ins("legal_acceptances", [{ athlete_id: QA_CREW_ID, document: "ai_processing", version: "2026-09-29" }]);
   await ins("workouts", [w(2, [ex("Bench Press", 3, 5, 205)]), w(1, [ex("Back Squat", 3, 5, 275), ex("Deadlift", 3, 5, 315)])]);
 
   // Accepted edge, BOTH compare flags on (compare is mutual-opt-in by design —

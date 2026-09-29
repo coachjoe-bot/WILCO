@@ -15,7 +15,7 @@
 // POST { auth:{role,id,pin}, model?, max_tokens?, system?, messages:[...] }
 
 import { waitUntil } from "@vercel/functions";
-import { applyCors, httpErr, authCaller, tryTokenAuth, rateLimit, sbSelect, sbInsert, logError, authThrottle, clientIp } from "./_supa.js";
+import { applyCors, httpErr, authCaller, tryTokenAuth, rateLimit, sbSelect, sbInsert, logError, authThrottle, clientIp, hasAiConsent } from "./_supa.js";
 import { toolsetFor } from "./_tools.js";
 
 const enc = encodeURIComponent;
@@ -210,6 +210,20 @@ export default async function handler(req, res) {
         if (e.status === 401) await recordAuthFail();
         throw e;
       }
+    }
+
+    // 1b) AI permission (App Store 5.1.2(i), server half). The client gate
+    //     (App.jsx AiConsentGate) keeps the app closed until an athlete taps Allow;
+    //     this refuses the call itself when the athlete has no ai_processing row.
+    //     OFF unless AI_CONSENT_ENFORCE=on: client bundles cached before the
+    //     permission card existed would simply break, so the flag is flipped on
+    //     only once the new client is live. Scheduled server jobs do NOT use this
+    //     flag: they always skip athletes without the row (api/trigger-proof-feed.js).
+    //     Coaches are not checked here: a coach's permission is stored on the
+    //     device only (there is no server row to consult), so the client gate is
+    //     the whole check for that role. A failed read fails closed (502).
+    if (caller.role === "athlete" && String(process.env.AI_CONSENT_ENFORCE || "").toLowerCase() === "on") {
+      if (!(await hasAiConsent(caller.id))) throw httpErr(403, "AI permission required");
     }
 
     // 2) Per-user rate limit — a compromised account can't burn the bill unbounded.

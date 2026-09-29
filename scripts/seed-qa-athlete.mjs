@@ -84,7 +84,7 @@ const main = async () => {
   // ── wipe (this athlete's rows only) ──
   for (const t of ["workouts", "prs", "manual_one_rms", "athlete_goals", "athlete_context",
                    "athlete_training_prefs", "program_history", "program_drafts", "proof_digests",
-                   "program_modifications", "crew_moments", "push_subscriptions"]) {
+                   "program_modifications", "crew_moments", "push_subscriptions", "legal_acceptances"]) {
     await del(t).catch((e) => console.warn(`(skip) ${e.message}`));
   }
   await del("athletes", "id").catch(() => {});
@@ -123,6 +123,10 @@ const main = async () => {
   // a made single + a missed attempt (pr_attempts shapes)
   rows.push(workout(2, [ex("Bench Press", 1, 1, 225, "lbs", { set_details: [{ weight: 185, reps: 3, warmup: true }, { weight: 225, reps: 1 }] })],
     { pr_attempts: [{ exercise: "Bench Press", weight: 225, reps: 1, achieved: true, unit: "lbs" }, { exercise: "Bench Press", weight: 235, reps: 1, achieved: false, unit: "lbs" }] }));
+  // The server refuses AI work for an athlete with no ai_processing row (api/_supa.js
+  // hasAiConsent: scheduled jobs always, api/claude.js once AI_CONSENT_ENFORCE=on), so
+  // the standing QA account carries the one a real athlete gets from the permission card.
+  await ins("legal_acceptances", [{ athlete_id: QA_ATHLETE_ID, document: "ai_processing", version: "2026-09-29" }]);
   await ins("workouts", rows);
 
   await ins("manual_one_rms", [{ athlete_id: QA_ATHLETE_ID, exercise: "Bench Press", normalized_exercise: "bench press", weight: 225, unit: "lbs", source: "workout" }]);

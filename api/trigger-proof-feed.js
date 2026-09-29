@@ -48,7 +48,7 @@
 // Env: ANTHROPIC_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY, RESEND_API_KEY,
 //      FROM_EMAIL, APP_URL (defaults below), CRON_SECRET, VAPID_*.
 
-import { sbSelect, sbInsert, sbWrite, sbDelete, authCaller, httpErr, askClaudeServer } from "./_supa.js";
+import { sbSelect, sbInsert, sbWrite, sbDelete, authCaller, httpErr, askClaudeServer, hasAiConsent, aiConsentSet } from "./_supa.js";
 import {
   groupIntoSessions, aggregateInjuries, buildOneRMs, buildBrief,
   parseProgramIfNeeded, compareProgramVsActual, computeRankMovement, painTrend,
@@ -100,6 +100,19 @@ const enc = encodeURIComponent;
 // covers the weekly cadence plus a missed week, so a normal athlete taking a light
 // week never drops out; only genuinely silent accounts do.
 const PROOF_ACTIVITY_DAYS = 14;
+
+// AI permission (App Store 5.1.2(i)). Every digest sends the athlete's training
+// data to the AI provider, so an athlete with no ai_processing row (the row the
+// signup Privacy step or the one-time permission card writes) is skipped by EVERY
+// path in this file: the hourly dispatcher, run-now, the single-athlete child,
+// the dry-run sampler, and the coach edition's roster. No env flag: unlike the
+// client proxy, nothing here can be a cached old bundle, so there is nothing to
+// wait for. The check is also repeated inside askClaudeServer (api/_supa.js).
+// A skipped athlete's slot is pushed out one day (not the 14-day activity-gate
+// gap) because the reason can clear the moment they tap Allow, and the recheck is
+// one batched read.
+const AI_CONSENT_RECHECK_DAYS = 1;
+const NO_CONSENT = "no-ai-permission";
 
 // Edition history depth (per athlete / per coach). The cron used to DELETE every
 // prior digest before inserting — so nobody could ever re-read last week's letter
@@ -647,6 +660,9 @@ export default async function handler(req, res) {
       if (athlete.last_proof_run_date === todayStr()) {
         return res.status(200).json({ ok: false, reason: "You've already generated today's Proof Feed. Come back tomorrow." });
       }
+      if (!(await hasAiConsent(athlete.id))) {
+        return res.status(200).json({ ok: false, reason: "Allow AI in the app first, then try again." });
+      }
       const batch = await fetchBatch([athlete.id]);
       results.athletes.push(await runAthlete(athlete, batch));
       return res.status(200).json({ ok: true, ...results });
@@ -655,9 +671,11 @@ export default async function handler(req, res) {
     // ── Dry-run sample pull: specific athlete ids, full pipeline, zero writes ──
     if (dryRun && Array.isArray(body.sample_athlete_ids) && body.sample_athlete_ids.length) {
       const ids = body.sample_athlete_ids.map(String);
-      const rows = await sbSelect("athletes", `?id=in.(${ids.map((id) => `"${id}"`).join(",")})&select=*`);
+      const found = await sbSelect("athletes", `?id=in.(${ids.map((id) => `"${id}"`).join(",")})&select=*`);
+      const allowed = await aiConsentSet(found.map((a) => a.id));
+      const rows = found.filter((a) => allowed.has(a.id));
       const batch = await fetchBatch(rows.map((a) => a.id));
-      const samples = [];
+      const samples = found.filter((a) => !allowed.has(a.id)).map((a) => ({ athlete: a.name, athlete_id: a.id, skipped: true, reason: NO_CONSENT }));
       for (const athlete of rows) {
         try { samples.push(await runAthlete(athlete, batch, { dryRun: true })); }
         catch (e) { samples.push({ athlete: athlete.name, athlete_id: athlete.id, error: e.message }); }
@@ -674,11 +692,18 @@ export default async function handler(req, res) {
       if (!dryRun && (athlete.proof_enabled === false || athlete.last_proof_run_date === todayStr())) {
         return res.status(200).json({ ok: false, skipped: true });
       }
+      if (!(await hasAiConsent(athlete.id))) {
+        return res.status(200).json({ ok: false, skipped: true, reason: NO_CONSENT });
+      }
       const batch = await fetchBatch([athlete.id]);
       return res.status(200).json({ ok: true, dry_run: dryRun, athlete: await runAthlete(athlete, batch, { dryRun }) });
     }
     if (body.coach_id) {
-      const roster = await sbSelect("athletes", `?coach_id=eq.${encodeURIComponent(body.coach_id)}&select=*`);
+      // The edition is written from the roster's data, so only athletes who allowed AI
+      // are in it. (The coach's own permission lives on their device only.)
+      const fullRoster = await sbSelect("athletes", `?coach_id=eq.${encodeURIComponent(body.coach_id)}&select=*`);
+      const rosterOk = await aiConsentSet(fullRoster.map((a) => a.id));
+      const roster = fullRoster.filter((a) => rosterOk.has(a.id));
       const rosterBatch = await fetchBatch(roster.map((a) => a.id));
       const coaches = await sbSelect("coaches", `?id=eq.${encodeURIComponent(body.coach_id)}&select=id,name,email,school_id,notification_prefs`);
       // skip_email: generate + persist the edition WITHOUT emailing (safe demo/support
@@ -712,6 +737,34 @@ export default async function handler(req, res) {
 
     let allDue = [...due, ...bootstrap.filter((a) => !due.find((d) => d.id === a.id))]
       .filter((a) => a.proof_enabled !== false && a.last_proof_run_date !== todayStr());
+
+    // ── AI PERMISSION GATE (App Store 5.1.2(i)) ──────────────────────────────
+    // One batched read (chunked, max 100 ids per request) for everyone due. Anyone
+    // without an ai_processing row is dropped before any data is gathered and gets
+    // their next slot pushed out, like the activity gate below, so the dispatcher
+    // does not reconsider them every hour. If the read itself fails we send NOBODY
+    // and change nothing (fail closed), rather than treating "unknown" as "allowed".
+    if (allDue.length) {
+      let allowed = null;
+      try { allowed = await aiConsentSet(allDue.map((a) => a.id)); }
+      catch (e) { console.error("[proof-feed] AI permission read failed, dispatching nobody:", e.message); }
+      if (!allowed) {
+        results.skipped.push(...allDue.map((a) => ({ athlete_id: a.id, error: "ai-permission-check-failed" })));
+        allDue = [];
+      } else {
+        const noPermission = allDue.filter((a) => !allowed.has(a.id));
+        if (noPermission.length) {
+          if (!dryRun) {
+            const nextSlot = new Date(Date.now() + AI_CONSENT_RECHECK_DAYS * 864e5).toISOString();
+            await Promise.all(noPermission.map((a) =>
+              sbWrite({ method: "PATCH", table: "athletes", query: `?id=eq.${enc(a.id)}`, prefer: "return=minimal",
+                        body: { next_proof_due_at: nextSlot } }).catch(() => {})));
+          }
+          results.skipped.push(...noPermission.map((a) => ({ athlete_id: a.id, reason: NO_CONSENT })));
+        }
+        allDue = allDue.filter((a) => allowed.has(a.id));
+      }
+    }
 
     // ── ACTIVITY GATE (Will, 08-12) ──────────────────────────────────────────
     // A digest is a report on training that happened. An athlete who has logged
@@ -749,7 +802,7 @@ export default async function handler(req, res) {
       (a) => selfInvoke(dryRun ? { athlete_id: a.id, dry_run: true } : { athlete_id: a.id }));
     for (const o of athleteOutcomes) {
       if (o.ok && (o.athlete || o.dry_run)) results.athletes.push(o.athlete || { athlete_id: o.athlete_id });
-      else if (o.skipped) results.skipped.push({ athlete_id: o.athlete_id, reason: "off/already-ran" });
+      else if (o.skipped) results.skipped.push({ athlete_id: o.athlete_id, reason: o.reason || "off/already-ran" });
       else results.skipped.push({ athlete_id: o.athlete_id, error: o.error || `status ${o.status}` });
     }
 
