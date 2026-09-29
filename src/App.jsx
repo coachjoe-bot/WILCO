@@ -80,7 +80,7 @@ import { buildMastermindStatic } from "./ai/card.js";
 import { blueprintPct } from "./programBuilder.js";
 import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps } from "./memory.js";
 import { activeGoals, goalsToSupersede, sameGoalText } from "./goals.js";
-import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, recSummaryFallback, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
+import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, programWriteOwner, recSummaryFallback, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
 import { performedBlock, logHeadline, logFocusBlock, planDayFor, prLinesForReply, logTurnExercises } from "./turnFacts.js";
 import { ledgerTurn, ledgerBlock, normArea, painFollowUpPlan, applyStamps, recStagedLine, withMark, normalizeMarks, flagClearedFor, keepPainRec, painStatus, currentPainAreas, currentPainLines, painNoteGuard, areaLabel } from "./painLedger.js";
 import { buildAgenda, agendaTurnPrompt, parseAgendaTurn, advanceAgenda, initialAgendaState, isEndIntent, painStampsFrom, closingLine, digestNoteFrom } from "./checkinAgenda.js";
@@ -9514,6 +9514,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // brain's deliberate call beats a second brain's inference. The rest
       // (memory, session card, log sheet) execute fire-and-forget: additive,
       // reversible, and already spoken for in Joe's streamed reply.
+      // T68: set when Joe's staged rec owns this turn's program change (recs.js programWriteOwner)
+      let recOwnsProgram = false;
       if(MASTERMIND_ON && masterToolCalls.length){
         for(const tc of masterToolCalls){
           if(tc.name==="set_position" && tc.input && (tc.input.week!=null || tc.input.day!=null)){
@@ -9543,6 +9545,22 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         if(tempPre?.scope && masterToolCalls.some(tc=>tc.name==="propose_program_rec") && !keepRecOnScope(tempPre.scope, msg)){
           reportError("ai", new Error("propose_program_rec dropped: change is for today only"), {severity:"info", error_type:"rec_dropped_today_only", component:"changeScope", meta:{signal:tempPre.scope.signal}});
           for(let i=masterToolCalls.length-1;i>=0;i--) if(masterToolCalls[i].name==="propose_program_rec") masterToolCalls.splice(i,1);
+        }
+        // T68 (AI contract rule 3): one owner per program change. The parser's
+        // flags and Joe's rec can both fire on one message ("add curls to my
+        // plan" staged a rec AND appended). A rec that is real wins and the
+        // parser's write stands down; a rec that cannot stage is dropped and
+        // the parser's write runs alone.
+        if(!fromQuickLog){
+          const own = programWriteOwner({toolCalls: masterToolCalls, parserWants: !!(parsed.is_program_update || parsed.program_append || asksProgramEdit(msg)), programText: updatedAthlete.program_text||"", locked: !!updatedAthlete.program_locked});
+          if(own.owner==="tool"){
+            recOwnsProgram = true;
+            parsed.is_program_update = false; parsed.program_append = false;
+            reportError("ai", new Error("parser program write stood down: rec staged this turn"), {severity:"info", error_type:"program_write_tool_wins", component:"programWriteOwner"});
+          } else if(own.owner==="parser"){
+            reportError("ai", new Error("propose_program_rec dropped: rec could not stage, parser write runs"), {severity:"info", error_type:"program_write_parser_wins", component:"programWriteOwner"});
+            for(let i=masterToolCalls.length-1;i>=0;i--) if(masterToolCalls[i].name==="propose_program_rec") masterToolCalls.splice(i,1);
+          }
         }
         let rest = masterToolCalls.filter(tc=>tc.name!=="set_position" && tc.name!=="propose_preference"
           && !(fromQuickLog && (tc.name==="prefill_log_sheet" || tc.name==="pin_session_card" || tc.name==="show_start_buttons")));
@@ -9684,12 +9702,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // stamp). The explicit ask is deterministic, so it forces the flag; and
       // ANY program-intent message has its exercises scrubbed before the log
       // path — a prescription is never a performed session.
-      if(asksProgramEdit(msg) && !fromQuickLog
+      if(asksProgramEdit(msg) && !fromQuickLog && !recOwnsProgram
          && !parsed.is_program_update && !parsed.program_append && !parsed.program_create_request){
         parsed.program_append = true;
       }
       const wantsProgramWrite = parsed.is_program_update || parsed.program_append || parsed.program_create_request;
-      if(wantsProgramWrite && ((parsed.exercises?.length||0) > 0 || parsed.run_data || (parsed.pr_attempts?.length||0) > 0)){
+      // recOwnsProgram: the message was still a program ask, so its lifts are a prescription
+      if((wantsProgramWrite || recOwnsProgram) && ((parsed.exercises?.length||0) > 0 || parsed.run_data || (parsed.pr_attempts?.length||0) > 0)){
         parsed.exercises = []; parsed.run_data = null; parsed.pr_attempts = [];
       }
       // Snapshot to detect "a program landed on this message" below — the ask about

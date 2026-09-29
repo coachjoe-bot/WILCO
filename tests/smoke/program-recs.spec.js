@@ -322,3 +322,48 @@ test("T67: a swap they say should outlive today still stages its rec", async ({ 
   expect(systemSeen).not.toMatch(/CHANGE SCOPE/);
   expect(staged).toBe(1);
 });
+
+// ─── T68: one owner per program change (AI contract rule 3) ──────────────────
+// "add curls 3x12 to my plan" used to stage Joe's rec AND append to the program
+// through the parser's flag. A rec that is real wins; one that cannot stage is
+// dropped and the parser's append runs alone.
+const addTurn = async (page, calls, swap) => {
+  await page.route("**/api/claude", (route) => {
+    const body = route.request().postDataJSON() || {};
+    if (body.feature !== "mastermind_chat") return route.fallback();
+    if (!body.stream) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ content: [{ type: "text", text: "Curls are in." }], usage: {} }) });
+    route.fulfill({ contentType: "text/event-stream", body:
+      `data: ${JSON.stringify({ text: "Check the program rec I made for the curls." })}\n\n` +
+      `data: ${JSON.stringify({ tool_use: { id: "t1", name: "propose_program_rec", input: { title: "Add curls", summary: "Curls added to Day 2.", why: "Asked.", duration: "block", swaps: [swap] } } })}\n\n` +
+      `data: ${JSON.stringify({ stop_reason: "end_turn" })}\n\n` });
+  });
+  await page.getByPlaceholder(/Tell Coach Joe/).fill("add barbell curls 3x12 to my program on day 2");
+  await page.getByRole("button", { name: "→", exact: true }).click();
+  await expect(page.getByText("Check the program rec I made for the curls.", { exact: true })).toBeVisible({ timeout: 15000 });
+  await page.waitForTimeout(3000); // tools and the parser branch run after the reply settles
+  return {
+    recs: calls.filter((c) => c.body?.op === "insert" && c.body?.table === "program_drafts").length,
+    programWrites: calls.filter((c) => c.body?.table === "athletes" && /update/.test(c.body?.op || "") && "program_text" in (c.body?.data || c.body?.values || c.body?.row || {})).length,
+  };
+};
+
+test("T68: Joe's rec wins, the parser's append stands down", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const { calls } = await mockApi(page, { athlete, chatReply: DRAFT_REPLY });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  const r = await addTurn(page, calls, { find: "Barbell Row 3x8 @ 155", replace: "Barbell Row 3x8 @ 155\nBarbell Curls 3x12", day: "Day 2 - Pull" });
+  expect(r.recs).toBe(1);
+  expect(r.programWrites).toBe(0);
+  await expect(page.getByText(/Added that to your Program tab/)).toHaveCount(0);
+  await expect(page.getByText(/PROGRAM REC/).first()).toBeVisible();
+});
+
+test("T68: a rec that cannot stage is dropped, the parser's append runs alone", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const { calls } = await mockApi(page, { athlete, chatReply: DRAFT_REPLY });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  const r = await addTurn(page, calls, { find: "Barbell Row 4x10 @ 999", replace: "Barbell Curls 3x12", day: "Day 2 - Pull" });
+  expect(r.recs).toBe(0);
+  expect(r.programWrites).toBe(1);
+  await expect(page.getByText(/Couldn't line that program change up/)).toHaveCount(0);
+});
