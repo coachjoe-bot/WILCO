@@ -202,6 +202,26 @@ ok(isBodyweightFact("Athlete's current bodyweight is 170 lbs.") && isBodyweightF
 ok(!isBodyweightFact("Cutting to the 77 kg class for the December meet, plans weekly weigh-ins and wants loads adjusted as the cut bites into recovery and strength") && !isBodyweightFact("Trains at 6am") && !isBodyweightFact("Wants to gain weight this winter"), "a plan or a preference about weight is still a fact");
 ok(asksToRemember("update my memory: I weigh 170 now") && asksToRemember("update my notes: garage gym") && !asksToRemember("I weigh 170 now"), "\"update my memory\" passes the explicit-ask gate; a passing remark still does not");
 
+console.log("replay: the 10-01 chat measurement (tests/replay/t69-memory-from-chat-1001.json)");
+{
+  const c = JSON.parse(readFileSync(new URL("../tests/replay/t69-memory-from-chat-1001.json", import.meta.url), "utf8"));
+  const mem = c.memoryBefore, T = c.turns, at = new Date("2026-10-01T16:00:00Z");
+  const v2 = TOOLSETS.mastermind_athlete_v2.map((t) => t.name);
+  // replace: one write on the same row instead of a delete plus an insert
+  const rep = planToolUpdate(mem, T.replace.newCall.input.match, T.replace.newCall.input.content, at);
+  ok(rep.ok && rep.actions.length === 1 && rep.actions[0].type === "update" && rep.actions[0].id === "f-time" && rep.actions[0].data.content === "Trains at 7am on weekdays", "replace: update_fact rewrites the 6am fact in place");
+  // goal: main had no hand for it
+  ok(v2.includes(T.goal.newCall.name) && validateGoalText(T.goal.newCall.input.goal_text).ok && memoryOutcomeLine({ ...newMemoryOutcome(), goal: true }) === "✓ Goal updated.", "goal: Joe has a hand for it and the app confirms it");
+  // injury notes: the forget that matched nothing is exactly what main did
+  ok(v2.includes(T.injury.newCall.name) && validateInjuryText(T.injury.newCall.input.text).ok && validateInjuryText(T.injury.newCall.input.text).text.includes("Healed"), "injury notes: Joe has a hand for the field itself");
+  ok(memoryOutcomeLine({ ...newMemoryOutcome(), refused: [toolRefusal("no_match")], injury: true }) === "✓ Injury notes updated.", "injury notes: one truthful line, written from the write");
+  // weight: the profile is the home; Joe's memory copy is dropped
+  ok(asksToRemember(T.weight.message) && T.weight.parserWeightLbs > 50 && isBodyweightFact(T.weight.onMain.tools[0].input.content), "weight: the ask passes the gate, the profile gets the number, and the memory copy is recognised and dropped");
+  // refuse: code backstop
+  const r = validateFact(T.refuse.ifJoeEverCalled.input);
+  ok(!r.ok && r.reason === "behavior_instruction" && /^Not saved\./.test(memoryOutcomeLine({ ...newMemoryOutcome(), refused: [toolRefusal(r.reason)] })), "refuse: if Joe ever called the tool with it, code refuses and the app says Not saved");
+}
+
 console.log("twins");
 {
   const v1 = TOOLSETS.mastermind_athlete.map((t) => t.name), v2 = TOOLSETS.mastermind_athlete_v2.map((t) => t.name);
