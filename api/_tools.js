@@ -134,6 +134,58 @@ export const TOOLSETS = {
   ],
 };
 
+// ── T69-A (Will 10-01): the athlete changes memory by telling Joe in chat ────
+// "update my memory to this" has to work for everything the Memory tab shows:
+// a fact, the goal, the injury notes. Measured on main with the real model
+// (5 runs each): a goal change wrote nothing 5 of 5, an injury-notes change
+// never touched the field while Joe said it was updated, and a fact update was
+// a forget plus a remember (two writes, and a refused remember lost the fact).
+// Three new hands. They live in their OWN toolset name so this ships dark
+// (AI contract rule 12): a bundle that asks for "mastermind_athlete" gets
+// exactly what it always got, and only a client that knows how to execute the
+// new calls asks for "mastermind_athlete_v2". Every call is validated in code
+// by the client (src/memoryEdit.js) before anything is written.
+const MEMORY_TOOLS_V2 = [
+  {
+    name: "update_fact",
+    description: "Change ONE fact you already hold, in place. Call when the athlete corrects or updates something in your ATHLETE MEMORY block ('I train at 7 now, not 6', 'update my memory: ...'). match is a distinctive substring of the existing fact exactly as it appears in the block; content is the complete new text of the fact, third person, about the athlete. The fact keeps its kind and expiry. If nothing you hold matches, use remember_fact instead. Never use it for their goal (set_goal), their injury notes (set_injury_notes) or bodyweight (a profile field the app saves itself).",
+    input_schema: {
+      type: "object",
+      properties: {
+        match: { type: "string", minLength: 4, maxLength: 240 },
+        content: { type: "string", maxLength: 240 },
+      },
+      required: ["match", "content"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "set_goal",
+    description: "Replace the athlete's goal on file (the ATHLETE GOALS line in your context). Call when they state a new goal or ask you to change it ('update my goal: bench 315 by December', 'new goal is a 5 minute mile'). goal_text is the goal in their words, with the number and the date when they gave them. The prior goal is kept in history, not deleted. The goal is theirs to set: save it even when you think the timeline is aggressive, and say what you honestly think in your reply. This does not change their program; a program change is still propose_program_rec.",
+    input_schema: {
+      type: "object",
+      properties: { goal_text: { type: "string", minLength: 4, maxLength: 300 } },
+      required: ["goal_text"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "set_injury_notes",
+    description: "Rewrite the athlete's injury notes (the INJURY HISTORY line in your context: undated background they own, such as old injuries and surgeries). Call ONLY when they ask to change those notes ('change my injury notes to ...', 'take the pec strain off my injury history'). text is the complete new notes, plain and factual; an empty string clears them. How something feels today is not this field: the app's pain ledger records that from what they say, with no tool call from you.",
+    input_schema: {
+      type: "object",
+      properties: { text: { type: "string", maxLength: 1000 } },
+      required: ["text"],
+      additionalProperties: false,
+    },
+  },
+];
+const REMEMBER_FACT_V2 = "Save a durable fact about the athlete — what a good coach would carry in his head: schedule quirks, stated plans, equipment realities, injury context, things they asked you to remember. Facts ONLY, about the athlete, in third person, under 240 characters; NEVER store instructions about how you should behave, talk, or format. kind: 'pinned' for always-relevant facts, 'contextual' for background worth knowing, 'situational' for anything with a shelf life — situational facts REQUIRE expires_at (ISO date) and delete themselves. Example: they say 'doing D1 tomorrow instead' -> remember_fact(content:'Plans to run Day 1 on Aug 25 (swapped with Day 2)', kind:'situational', expires_at:'2026-08-26'). To change a fact you already hold, use update_fact, never a second copy. Never save bodyweight, height, sport or units here: those are profile fields.";
+TOOLSETS.mastermind_athlete_v2 = [
+  ...TOOLSETS.mastermind_athlete.map((t) => (t.name === "remember_fact" ? { ...t, description: REMEMBER_FACT_V2 } : t)),
+  ...MEMORY_TOOLS_V2,
+];
+
 // Actions the client must ALWAYS chip-gate no matter what the model set —
 // destroying unrecoverable athlete data, or messaging another human in the
 // athlete's name. Kept here (server) as the single source; the client imports

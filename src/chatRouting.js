@@ -84,7 +84,10 @@ export const stripFailedAttempts = (parsed, normalizeName = (s) => String(s || "
 // it may only be written when the athlete ASKED for it in as many words. The
 // parser's own is_explicit flag is necessary but not sufficient — this pattern is
 // the second, deterministic gate.
-export const EXPLICIT_MEMORY_RE = /\b(remember|note that|make a note|keep in mind|don'?t forget|from now on|for future reference|going forward|just so you know|for the record|update my (info|profile|weight))\b/i;
+// T69-A: "update my memory: ..." is the phrasing Will asked for by name, and on
+// main it missed this gate, so a stated bodyweight in it never reached the
+// profile (5 of 5 runs).
+export const EXPLICIT_MEMORY_RE = /\b(remember|note that|make a note|keep in mind|don'?t forget|from now on|for future reference|going forward|just so you know|for the record|update my (info|profile|weight|body ?weight|memory|notes|context))\b/i;
 export const asksToRemember = (message) => EXPLICIT_MEMORY_RE.test(String(message || ""));
 
 // ── Is this row a workout log? ───────────────────────────────────────────────
@@ -199,6 +202,7 @@ export const asksTempProgram = (message) => TEMP_PROGRAM_ASK_RE.test(String(mess
 // server tool that isn't added here fails the suite, not the athlete.
 export const KNOWN_TOOL_NAMES = [
   "set_position", "remember_fact", "forget_fact",
+  "update_fact", "set_goal", "set_injury_notes",
   "pin_session_card", "clear_session_card", "prefill_log_sheet",
   "propose_program_rec", "propose_preference", "show_start_buttons",
   "replace_program", "delete_log_entry", "send_coach_request",

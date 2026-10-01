@@ -215,7 +215,10 @@ const ATHLETE_COL_ALLOW = {
       // pin must move together — the recs-wave trap).
       content: (v) => typeof v === "string" && v.trim().length > 0 && v.length <= 2000,
       kind: (v) => ["pinned", "contextual", "situational"].includes(v),
-      source: (v) => ["athlete_said", "inferred"].includes(v),
+      // T69-A: athlete_typed = text the athlete typed on the Memory tab with
+      // their own hands. DB CHECK twin: migration
+      // 20261001_athlete_memory_source_typed (both gates must list it).
+      source: (v) => ["athlete_said", "inferred", "athlete_typed"].includes(v),
       status: (v) => ["active", "deleted"].includes(v),
       expires_at: (v) => v == null || Number.isFinite(Date.parse(v)),
     },
