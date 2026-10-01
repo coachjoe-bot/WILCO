@@ -5,6 +5,7 @@
 -- existing values stay valid, no row changes.
 -- Gateway twin: api/data.js ATHLETE_COL_ALLOW.athlete_memory.values.source.
 -- Client constant: src/memoryEdit.js TYPED_SOURCE.
+-- APPLIED to prod via MCP 2026-10-01, ahead of the client that writes it.
 ALTER TABLE public.athlete_memory DROP CONSTRAINT athlete_memory_source_check;
 ALTER TABLE public.athlete_memory ADD CONSTRAINT athlete_memory_source_check
   CHECK (source = ANY (ARRAY['athlete_said'::text, 'inferred'::text, 'athlete_typed'::text]));
