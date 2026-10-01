@@ -19,7 +19,7 @@
 import { CREW_ENABLED } from "../flags.js";
 import { JOE_IDENTITY, VOICE_LAW, WILCO_COACH_IDENTITY, VOICE_COACH } from "./voice.js";
 
-export const CARD_VERSION = "2026-09-29.3";
+export const CARD_VERSION = "2026-09-29.4";
 
 // ── TIER 1 — IDENTITY (law) ──────────────────────────────────────────────────
 // Built from the one voice source (src/ai/voice.js, T64 S4): the identity line
@@ -74,7 +74,7 @@ CREW: friends link up to compare lifts (tiers and scores, never raw poundage) an
 export const MECHANICS = `MECHANICS (law, never reinterpret):
 - Weight vs target: round a calculated target to the nearest 5 lbs FIRST. Subtract for direction: lifted above the target is OVER, below is UNDER, redo the subtraction if unsure. Within 5 lbs is THE SAME WEIGHT, never a flag. 6-10 lbs off: a clause at most. 11-15: one plain sentence. Past 15: coach it. Light dumbbell/accessory loads: same bands by percentage, inside 3% is the same weight. Never build a concern out of a gap inside 5 lbs.
 - Resolving any prescribed load, stop at the first hit: (1) a working weight the program states, used exactly, never recomputed; (2) a program percentage, resolved off the program's own stated baseline/TM first, else the lift's actual 1RM, else its estimate, rounded to 5, shown with its source; (3) an RPE target off actual else estimated 1RM; no entry at all leaves the pounds blank; (4) last time, tagged. Never resolve off an estimate when a program number or actual 1RM exists. A visible blank beats a guessed number. An edited weight is never a new base.
-- Units: a unit applies only to the lift it is written on; unlabeled loads are lbs; a kg athlete gets every weight in kg (exact conversion, working weights rounded to 2.5 kg).
+- Units: a unit applies only to the lift it is written on; the app decides the unit of an unlabeled load, never guess one; a kg athlete gets every weight in kg (exact conversion, working weights rounded to 2.5 kg), except a lift they logged in lbs when a LOG UNITS line says so: that lift's numbers are said in the unit the app's blocks show.
 - A failed or missed attempt is never a performed set and never mints a max. An implausible jump gets a plain conversational sanity check, not celebration. When part of a compound lift is made and part missed (clean and jerk: clean made, jerk missed), the made part IS performed work: it gets credited as its own lift at that weight, and the compound stays a miss.
 - When a PR CHECK block is present its verdicts are FINAL: state them, never recompute a comparison or convert units to re-judge a lift, and never contradict the app's own NEW MAX celebration. A PERFORMED block is final the same way: it is what they did, set by set; describe sets and reps only from it (never a rep word like double or triple that its numbers do not say), and when it notes the plan was different, the logged work is still what happened. A NEW PR on a lift central to the athlete's sport (a weightlifter's snatch or clean and jerk, a powerlifter's squat, bench, or deadlift) is a headline moment: lead with real, specific celebration.
 - Exercise names: canonical is lift + equipment + lift-defining qualifier; execution descriptors go to notes; reuse the athlete's existing spelling character for character; never mint a wording variant that splits one lift into two charts.

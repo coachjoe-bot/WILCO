@@ -10,8 +10,8 @@
 //   60/80/90/100/100 kg, top set 100 kg x 3 (plan was 5x2)", ...]
 // Pure. Reads set_details first (the per-set truth), the flat fields second.
 
-import { resolveLift, getExerciseSets, liftTier, toLbs } from "./grit.js";
-import { toDisplay, roundStat } from "./units.js";
+import { resolveLift, getExerciseSets, liftTier, toLbs, factUnit } from "./grit.js";
+import { toDisplay, roundStat, addedLoadUnit, addedLoadIn } from "./units.js";
 import { parseProgramShape, extractDaySessionText } from "./programPosition.js";
 
 const fmtNum = (n) => (Number.isInteger(n) ? String(n) : String(Math.round(n * 10) / 10));
@@ -60,20 +60,25 @@ export function performedLine(ex, { displayUnit, planText } = {}) {
   const scheme = ex.rep_scheme && /\+/.test(ex.rep_scheme) ? ex.rep_scheme : null;
   const repsList = sets.map((s) => s.reps);
   const sameReps = repsList.every((r) => r === repsList[0]);
-  const du = displayUnit === "kg" || displayUnit === "lbs" ? displayUnit : (bodyweight ? "lbs" : ex.unit);
+  // T68: the unit the lift was logged in (grit.js factUnit), else the athlete's
+  const du = bodyweight ? (displayUnit === "kg" || displayUnit === "lbs" ? displayUnit : "lbs") : factUnit(ex, displayUnit);
   const w = (v) => (ex.unit === du || bodyweight ? fmtNum(v) : fmtNum(roundStat(toDisplay(v, ex.unit, du), du)));
   const U = unitLabel(bodyweight ? "lbs" : du);
+  // A bodyweight row's added/assist/per-set load is in ITS OWN unit (T68 added_unit,
+  // no stamp = lbs for the value); it is stated in the unit it was logged in.
+  const bu = factUnit(ex, displayUnit); // the unit the added load was logged in, else the reader's
+  const bw$ = (v) => `${fmtNum(roundStat(addedLoadIn(ex, v, bu), bu))} ${unitLabel(bu)}`;
   const each = ex.load_basis === "each" ? " each" : "";
   const n = sets.length;
   let body;
 
   if (bodyweight) {
-    const added = ex.added_weight > 0 ? ` plus ${fmtNum(ex.added_weight)} lbs` : ex.assist_weight > 0 ? `, ${fmtNum(ex.assist_weight)} lbs assisted` : "";
+    const added = ex.added_weight > 0 ? ` plus ${bw$(ex.added_weight)}` : ex.assist_weight > 0 ? `, ${bw$(ex.assist_weight)} assisted` : "";
     const perSetLoad = sets.some((s) => s.weight > 0);
     const statedReps = ex.reps > 0 || (Array.isArray(ex.set_details) && ex.set_details.some((s) => s && s.reps > 0));
     if (!statedReps) return null; // no reps, no time: nothing true to state
     if (perSetLoad) {
-      body = `${n} set${n === 1 ? "" : "s"}: ${sets.map((s) => (s.weight > 0 ? `+${fmtNum(s.weight)} lbs x ${s.reps}` : `bodyweight x ${s.reps}`)).join(", ")}`;
+      body = `${n} set${n === 1 ? "" : "s"}: ${sets.map((s) => (s.weight > 0 ? `+${bw$(s.weight)} x ${s.reps}` : `bodyweight x ${s.reps}`)).join(", ")}`;
     } else if (sameReps) {
       body = `${n} set${n === 1 ? "" : "s"} of ${scheme || repsList[0]}, bodyweight${added}`;
     } else {
@@ -223,12 +228,17 @@ const topSet = (ex) => {
     return !b || l > b.load || (l === b.load && s.reps > b.reps) ? { load: l, reps: s.reps } : b;
   }, null);
 };
-const lbsOf = (ex, load) => (ex.unit === "bodyweight" ? load : toLbs(load, ex.unit));
+const lbsOf = (ex, load) => (ex.unit === "bodyweight" ? toLbs(load, addedLoadUnit(ex)) : toLbs(load, ex.unit));
 
-function setText(ex, top, displayUnit) {
+// unit: the unit to say it in. A lift speaks in the unit it was logged in; a
+// comparison (today vs last time) is said in TODAY's unit for both numbers.
+function setText(ex, top, unit) {
   if (!top) return "";
-  if (ex.unit === "bodyweight") return top.load > 0 ? `bodyweight plus ${fmtNum(top.load)} lbs x ${top.reps}` : `bodyweight x ${top.reps}`;
-  const du = displayUnit === "kg" || displayUnit === "lbs" ? displayUnit : ex.unit;
+  if (ex.unit === "bodyweight") {
+    const bu = unit === "kg" || unit === "lbs" ? unit : addedLoadUnit(ex);
+    return top.load > 0 ? `bodyweight plus ${fmtNum(roundStat(addedLoadIn(ex, top.load, bu), bu))} ${unitLabel(bu)} x ${top.reps}` : `bodyweight x ${top.reps}`;
+  }
+  const du = unit === "kg" || unit === "lbs" ? unit : ex.unit;
   const w = ex.unit === du ? fmtNum(top.load) : fmtNum(roundStat(toDisplay(top.load, ex.unit, du), du));
   return `${w} ${unitLabel(du)}${ex.load_basis === "each" ? " each" : ""} x ${top.reps}`;
 }
@@ -329,7 +339,7 @@ function logHeadlineCore({ exercises = [], prLines = [], lastDone = null, painTu
   const mainPrs = prs.filter((x) => x.main);
   const prLine = (x) => x.v.single
     ? `${x.ex.name}: new PR, a single at ${x.v.newText}; previous best ${x.v.prevText}.`
-    : `${x.ex.name}: new estimated PR from a top set of ${setText(x.ex, topSet(x.ex), displayUnit)} (estimate ${x.v.estText}, previous best ${x.v.prevText}). Say the set; the estimate numbers are for you.`;
+    : `${x.ex.name}: new estimated PR from a top set of ${setText(x.ex, topSet(x.ex), factUnit(x.ex, displayUnit))} (estimate ${x.v.estText}, previous best ${x.v.prevText}). Say the set; the estimate numbers are for you.`;
   if (mainPrs.length) {
     const x = pick(mainPrs, (y) => y.v.jump);
     return { kind: "pr", line: prLine(x), alsoAsk };
@@ -362,12 +372,12 @@ function logHeadlineCore({ exercises = [], prLines = [], lastDone = null, painTu
     }
   }
   const mainSteps = steps.filter((x) => x.main);
-  const stepLine = (x) => `${x.ex.name}: ${setText(x.ex, x.cur, displayUnit)} today, up from ${setText(x.last.ex, x.prev, displayUnit)} on ${fmtDay(x.last.date)}.`;
+  const stepLine = (x) => `${x.ex.name}: ${setText(x.ex, x.cur, factUnit(x.ex, displayUnit))} today, up from ${setText(x.last.ex, x.prev, factUnit(x.ex, displayUnit))} on ${fmtDay(x.last.date)}.`;
   if (mainSteps.length) return { kind: "progress", line: stepLine(pick(mainSteps, (y) => y.gain)), alsoAsk };
   const mainFirsts = firsts.filter((x) => x.main);
   if (mainFirsts.length) {
     const x = pick(mainFirsts, (y) => lbsOf(y.ex, y.cur.load));
-    return { kind: "first", line: `${x.ex.name}: top set ${setText(x.ex, x.cur, displayUnit)}, the heaviest work in this log.`, alsoAsk };
+    return { kind: "first", line: `${x.ex.name}: top set ${setText(x.ex, x.cur, factUnit(x.ex, displayUnit))}, the heaviest work in this log.`, alsoAsk };
   }
 
   // e as the headline, when nothing above applied
@@ -422,4 +432,16 @@ export function logFocusBlock(h) {
     ? `\nAlso on today's plan and not in this log: ${h.planRest.join(", ")}. They log those when they do them; the app asks nothing about them on this log, so the reply does not mention them.`
     : "";
   return `LOG REPLY FOCUS (computed by the app for this log):\n${head}${h.alsoAsk ? `\nQuestion: ${h.alsoAsk}` : ""}${rest}\nEverything above this block is for your own understanding: the numbers are there so you get it right, not to be read back. ${reply} Leave out every other lift, estimate, plan difference and history note. If they asked a question or asked for detail in this same message, answer it as fully as they asked; this block never limits an answer they asked for.`;
+}
+
+// T68: which of this log's lifts were logged in the OTHER unit than the athlete
+// works in. One line in the turn's context, so Joe says those lifts' numbers in
+// the unit the blocks show (the unit the athlete used), and nothing else moves.
+export function logUnitsFact(exercises, displayUnit = "lbs") {
+  const mine = displayUnit === "kg" ? "kg" : "lbs";
+  const off = (Array.isArray(exercises) ? exercises : []).filter((e) => e && e.name && (e.unit === "kg" || e.unit === "lbs") && e.unit !== mine && !e.unit_suspect);
+  if (!off.length) return "";
+  const names = [...new Set(off.map((e) => e.name))];
+  const other = mine === "kg" ? "lbs" : "kg";
+  return `LOG UNITS (app fact, this log): ${names.join(", ")} ${names.length > 1 ? "were" : "was"} logged in ${other}. The blocks below give ${names.length > 1 ? "their" : "its"} numbers in ${other}: say them in ${other}, exactly as shown, with no conversion to ${mine} and no mention of the unit difference. Every other weight stays in ${mine}.`;
 }

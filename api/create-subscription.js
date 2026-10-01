@@ -1,14 +1,16 @@
 // Vercel serverless function — creates a Stripe subscription for an athlete.
 //
-// TWO MODES (T37, 2026-08-07):
-//   card-first (paymentMethodId in body) — the current client collected the card
-//     via api/checkout-intent's SetupIntent first; the subscription is created
-//     with default_payment_method already attached and the tier granted in the
-//     same request. THE invariant: no subscription ever exists without a card.
-//   legacy (no paymentMethodId) — the pre-T37 eager-create flow, kept ONLY for
-//     stale cached bundles (service worker/OTA). Creates the sub before the card
-//     and returns a client secret for in-app confirmation. Delete once the
-//     bundle fleet has rolled past 2026-08.
+// CARD-FIRST ONLY (T37, 2026-08-07; legacy branch deleted T68, 2026-09-29).
+// The client collects the card through api/checkout-intent's SetupIntent, then
+// calls here with the saved `paymentMethodId`; the subscription is created with
+// default_payment_method already attached and the tier granted in the same
+// request. THE invariant: no subscription ever exists without a card.
+//
+// A request WITHOUT paymentMethodId is the pre-T37 eager-create client (a stale
+// cached bundle). That flow minted a live subscription before any card existed,
+// which is what produced the orphaned trials, so it is refused with a 400 BEFORE
+// anything is created in Stripe or Supabase. The message is shown inline by the
+// current client's error path, so an old bundle tells the athlete to refresh.
 //
 // Standard path either way: 7-day trial, card charged after trial.
 // Gift-code path (Pro only): promo code applied, NO trial → usually a $0 first
@@ -53,6 +55,12 @@ export default async function handler(req, res) {
     // Token-first (see verifyAthlete): the checkout render re-runs on every plan
     // and code change, and each of those used to cost a bcrypt compare.
     athlete = await verifyAthlete({ athleteId, pin, auth: req.body?.auth });
+
+    // Card-first only. Refuse the retired eager-create request shape before any
+    // Stripe or DB write (ensureStripeCustomer below would create a customer).
+    if (!paymentMethodId) {
+      return res.status(400).json({ error: "This version of the app is out of date. Please refresh the app and try again." });
+    }
 
     if (tier !== "pro" && tier !== "elite") {
       return res.status(400).json({ error: "Choose a Pro or Elite plan to continue." });
@@ -148,139 +156,29 @@ export default async function handler(req, res) {
     //    checkout-intent, which usually already ran this at checkout mount.)
     const customerId = await ensureStripeCustomer(stripe, athlete, adMeta);
 
-    // 2. Code path (gift OR tester) vs trial path (mutually exclusive). Shared by
-    //    the card-first and legacy branches below — one copy of the guard set.
+    // 2. Code path (gift OR tester) vs trial path (mutually exclusive). One copy
+    //    of the guard set (resolveCheckoutCode below).
     const code = await resolveCheckoutCode({ stripe, athlete, tier, interval, giftCode, heldPromoIds });
     if (code.error) return res.status(code.status).json({ error: code.error });
     const { promotionCodeId, giftApplied, testerApplied, capExhausted, comps } = code;
 
-    // ── CARD-FIRST PATH (T37 checkout re-order) ──────────────────────────────
-    // The current client collects the card via checkout-intent's SetupIntent and
-    // only then calls here, passing the saved payment method. The subscription is
-    // created with the card already attached, so the T37 invariant holds: no
-    // subscription ever exists without a payment method. (The legacy eager-create
-    // branch below stays for stale cached bundles only — delete it once the
-    // service-worker fleet has rolled past 2026-08.)
-    if (paymentMethodId) {
-      // The PM must belong to THIS athlete's customer. confirmSetup attached it
-      // there; anything else is a forged/copied id acting across accounts.
-      let pm = null;
-      try { pm = await stripe.paymentMethods.retrieve(String(paymentMethodId)); } catch (_) {}
-      if (!pm || pm.customer !== customerId) {
-        return res.status(400).json({ error: "That card isn't attached to your account. Refresh and try again." });
-      }
-
-      // Reuse-or-create. A compatible live sub (same price, same promo set —
-      // typically an orphan a stale bundle minted, or this athlete's own promo-
-      // bearing attempt whose redemption slot Stripe already burned) gets the
-      // card ATTACHED rather than cancel+recreate, preserving burned promo slots.
-      let subscription = null;
-      let reused = false;
-      if (prevSub && ["incomplete", "trialing", "active"].includes(prevSub.status)) {
-        const samePrice = prevSub.items?.data?.[0]?.price?.id === priceId;
-        const samePromos = promotionCodeId
-          ? heldPromoIds.size === 1 && heldPromoIds.has(promotionCodeId)
-          : heldPromoIds.size === 0;
-        if (samePrice && samePromos) {
-          subscription = await stripe.subscriptions.update(prevSub.id, {
-            default_payment_method: pm.id,
-            expand: ["latest_invoice.payment_intent"],
-          });
-          reused = true;
-        }
-      }
-      if (!reused) {
-        // Retire any incompatible stale attempt (never orphan a subscription)…
-        if (prevSub && prevSub.status !== "canceled" && prevSub.status !== "incomplete_expired") {
-          await stripe.subscriptions.cancel(prevSub.id).catch(() => {});
-        }
-        // …and refuse a fully-redeemed code whose only slots died with it.
-        if (promotionCodeId && capExhausted) {
-          return res.status(400).json({ error: "That code has already been used." });
-        }
-        const params = {
-          customer: customerId,
-          items: [{ price: priceId }],
-          default_payment_method: pm.id,
-          payment_behavior: "default_incomplete",
-          payment_settings: { save_default_payment_method: "on_subscription" },
-          expand: ["latest_invoice.payment_intent"],
-          metadata: {
-            athlete_id: String(athlete.id),
-            tier,
-            billing: interval,
-            ...(athlete.signup_source ? { signup_source: String(athlete.signup_source) } : {}),
-            ...(testerApplied ? { tester_code: "true", purpose: "friend_tester" } : {}),
-            ...adMeta,
-          },
-        };
-        if (giftApplied || testerApplied) {
-          params.discounts = [{ promotion_code: promotionCodeId }]; // discount replaces the trial
-        } else {
-          params.trial_period_days = event ? event.trialDays : 7;
-          // Kept although the card now always exists at creation: if the athlete
-          // later REMOVES the card, the trial still dies instead of dangling.
-          params.trial_settings = { end_behavior: { missing_payment_method: "cancel" } };
-        }
-        subscription = await stripe.subscriptions.create(params);
-      }
-
-      // A trial or $0 first invoice needs nothing more (status trialing/active).
-      // A REAL first charge (e.g. discounted annual) arrives as an unconfirmed
-      // PaymentIntent — hand its secret back for one confirmCardPayment (3DS-safe).
-      const pi = subscription.latest_invoice?.payment_intent;
-      const needsAction = !!(pi && !["succeeded", "processing", "canceled"].includes(pi.status));
-
-      // Persist. With the card on file, subEntitlesPaidTier is true for a live sub
-      // — the tier grant happens HERE, in-request, not seconds later via webhook.
-      // (needsAction subs sit at "incomplete", stay un-entitled until confirmed,
-      // and the webhook grants after the charge lands — unchanged authority.)
-      await sbAthletePatch(athlete.id, {
-        stripe_subscription_id: subscription.id,
-        stripe_price_id: priceId,
-        subscription_status: subscription.status,
-        ...(subEntitlesPaidTier(subscription) ? { tier } : {}),
-        // 100%-off FOREVER code (tester / founding free): comped for good. One-way,
-        // never written false. The webhook does the same for codes applied elsewhere.
-        ...(comps ? { comped: true } : {}),
-        billing: interval,
-        trial_end: epochToISO(subscription.trial_end),
-        current_period_end: epochToISO(subPeriodEnd(subscription)),
-        cancel_at_period_end: !!subscription.cancel_at_period_end,
-      });
-
-      if (!reused && giftApplied && promotionCodeId) {
-        try {
-          await markGiftRedeemed(stripe, promotionCodeId, athlete);
-          await sbAthletePatch(athlete.id, { redeemed_gift_code: giftCode.trim().toUpperCase() });
-        } catch (e) {
-          console.error("[create-subscription] gift redeem bookkeeping failed:", e.message);
-        }
-      }
-
-      return res.status(200).json({
-        status: subscription.status,
-        subscriptionId: subscription.id,
-        customerId,
-        needsAction,
-        clientSecret: needsAction ? pi.client_secret : null,
-        trialEnd: epochToISO(subscription.trial_end),
-        currentPeriodEnd: epochToISO(subPeriodEnd(subscription)),
-        giftApplied,
-        testerApplied,
-      });
+    // ── Card-first subscribe (T37, 2026-08-07) ───────────────────────────────
+    // The client collected the card via checkout-intent's SetupIntent and passes the
+    // saved payment method here. The subscription is created with the card already
+    // attached, so the T37 invariant holds: no subscription ever exists without a
+    // payment method.
+    // The PM must belong to THIS athlete's customer. confirmSetup attached it
+    // there; anything else is a forged/copied id acting across accounts.
+    let pm = null;
+    try { pm = await stripe.paymentMethods.retrieve(String(paymentMethodId)); } catch (_) {}
+    if (!pm || pm.customer !== customerId) {
+      return res.status(400).json({ error: "That card isn't attached to your account. Refresh and try again." });
     }
-    // ── END CARD-FIRST PATH — everything below is the legacy eager-create flow ─
 
-    // 2b. Reuse the athlete's own in-flight attempt when it matches this request.
-    //     This endpoint re-runs freely (refresh, back-and-forth, Stripe.js retry),
-    //     and recreating a code-bearing subscription burns a promo redemption that
-    //     Stripe never refunds — on a capped code, the athlete's own retry could
-    //     exhaust the cap and lock out the other legitimate holders. Same price +
-    //     same promo set + still confirmable → hand back the existing client secret.
-    //     (A $0-first-invoice sub sits at status "active" with no card — that's the
-    //     normal pre-confirm state for 100%-off codes, so "active" is reusable here;
-    //     the completed guard above already screened out real card-on-file subs.)
+    // Reuse-or-create. A compatible live sub (same price, same promo set —
+    // typically an orphan a stale bundle minted, or this athlete's own promo-
+    // bearing attempt whose redemption slot Stripe already burned) gets the
+    // card ATTACHED rather than cancel+recreate, preserving burned promo slots.
     let subscription = null;
     let reused = false;
     if (prevSub && ["incomplete", "trialing", "active"].includes(prevSub.status)) {
@@ -288,100 +186,74 @@ export default async function handler(req, res) {
       const samePromos = promotionCodeId
         ? heldPromoIds.size === 1 && heldPromoIds.has(promotionCodeId)
         : heldPromoIds.size === 0;
-      const confirmable = !!(
-        prevSub.pending_setup_intent?.client_secret ||
-        prevSub.latest_invoice?.payment_intent?.client_secret
-      );
-      if (samePrice && samePromos && confirmable) {
-        subscription = prevSub;
+      if (samePrice && samePromos) {
+        subscription = await stripe.subscriptions.update(prevSub.id, {
+          default_payment_method: pm.id,
+          expand: ["latest_invoice.payment_intent"],
+        });
         reused = true;
       }
     }
-
-    if (!reused && promotionCodeId && capExhausted) {
-      // The only redemption(s) left on this code belong to the athlete's own prior
-      // attempt, but that attempt can't be reused (price changed, or it expired).
-      // Creating a new sub would be hard-rejected by Stripe ("used up"), so refuse
-      // with the plain truth instead of a 500.
-      return res.status(400).json({ error: "That code has already been used." });
-    }
-
     if (!reused) {
-      // The stale attempt can't serve this request — retire it, then recreate with
-      // the current selection (never orphaning a subscription).
+      // Retire any incompatible stale attempt (never orphan a subscription)…
       if (prevSub && prevSub.status !== "canceled" && prevSub.status !== "incomplete_expired") {
         await stripe.subscriptions.cancel(prevSub.id).catch(() => {});
       }
-
-      // 3. Create the subscription as incomplete so the client confirms the card.
+      // …and refuse a fully-redeemed code whose only slots died with it.
+      if (promotionCodeId && capExhausted) {
+        return res.status(400).json({ error: "That code has already been used." });
+      }
       const params = {
         customer: customerId,
         items: [{ price: priceId }],
+        default_payment_method: pm.id,
         payment_behavior: "default_incomplete",
         payment_settings: { save_default_payment_method: "on_subscription" },
-        expand: ["latest_invoice.payment_intent", "pending_setup_intent"],
+        expand: ["latest_invoice.payment_intent"],
         metadata: {
           athlete_id: String(athlete.id),
           tier,
           billing: interval,
           ...(athlete.signup_source ? { signup_source: String(athlete.signup_source) } : {}),
-          // Tester marker end-to-end: mirrors the coupon's own metadata convention so
-          // finance can exclude these subs from revenue metrics off the subscription
-          // alone (no need to expand discounts). tier is already stamped above.
           ...(testerApplied ? { tester_code: "true", purpose: "friend_tester" } : {}),
-          // Carried onto the subscription so the invoice.paid webhook can fire a
-          // server-side Meta Purchase keyed to the ad click.
           ...adMeta,
         },
       };
       if (giftApplied || testerApplied) {
         params.discounts = [{ promotion_code: promotionCodeId }]; // discount replaces the trial
       } else {
-        // Event signups get the event's longer trial (e.g. 30 days at a gym table);
-        // everyone else keeps the standard 7. Card is saved either way and auto-charges
-        // at trial end; no card by then → the subscription cancels itself.
         params.trial_period_days = event ? event.trialDays : 7;
+        // Kept although the card now always exists at creation: if the athlete
+        // later REMOVES the card, the trial still dies instead of dangling.
         params.trial_settings = { end_behavior: { missing_payment_method: "cancel" } };
       }
-
       subscription = await stripe.subscriptions.create(params);
     }
 
-    // 4. What must the client confirm?
-    //    Trial / $0 first invoice → SetupIntent. Real first charge → PaymentIntent.
-    const setupSecret = subscription.pending_setup_intent?.client_secret;
-    const paymentSecret = subscription.latest_invoice?.payment_intent?.client_secret;
-    const mode = setupSecret ? "setup" : "payment";
-    const clientSecret = setupSecret || paymentSecret || null;
+    // A trial or $0 first invoice needs nothing more (status trialing/active).
+    // A REAL first charge (e.g. discounted annual) arrives as an unconfirmed
+    // PaymentIntent — hand its secret back for one confirmCardPayment (3DS-safe).
+    const pi = subscription.latest_invoice?.payment_intent;
+    const needsAction = !!(pi && !["succeeded", "processing", "canceled"].includes(pi.status));
 
-    if (!clientSecret) {
-      // Nothing to confirm (e.g. fully-covered $0 with no setup intent) — rare, but
-      // surface it rather than handing the client a dead form.
-      console.warn("[create-subscription] no client secret on subscription", subscription.id);
-    }
-
-    // 5. Optimistic persist; the webhook re-syncs authoritatively. Deliberately do
-    //    NOT grant the paid `tier` here unless a card is already on file: the card is
-    //    confirmed client-side via the SetupIntent AFTER this call, so a fresh sub has
-    //    no default_payment_method yet. Granting pro now would hand Pro to anyone who
-    //    reaches checkout and leaves before paying. The webhook flips tier to pro the
-    //    moment the card is attached (syncSubscription). The only time we grant here
-    //    is a re-subscribe that already carries a saved payment method.
+    // Persist. With the card on file, subEntitlesPaidTier is true for a live sub
+    // — the tier grant happens HERE, in-request, not seconds later via webhook.
+    // (needsAction subs sit at "incomplete", stay un-entitled until confirmed,
+    // and the webhook grants after the charge lands — unchanged authority.)
     await sbAthletePatch(athlete.id, {
       stripe_subscription_id: subscription.id,
       stripe_price_id: priceId,
       subscription_status: subscription.status,
       ...(subEntitlesPaidTier(subscription) ? { tier } : {}),
-      ...(comps ? { comped: true } : {}), // see the card-first patch above
+      // 100%-off FOREVER code (tester / founding free): comped for good. One-way,
+      // never written false. The webhook does the same for codes applied elsewhere.
+      ...(comps ? { comped: true } : {}),
       billing: interval,
       trial_end: epochToISO(subscription.trial_end),
       current_period_end: epochToISO(subPeriodEnd(subscription)),
       cancel_at_period_end: !!subscription.cancel_at_period_end,
     });
 
-    // 6. Mark the gifter's code redeemed (best-effort) and record on the redeemer.
-    //    Skipped on reuse — the original creation already ran this, and re-running
-    //    would double-count the tally on unlimited founder codes.
     if (!reused && giftApplied && promotionCodeId) {
       try {
         await markGiftRedeemed(stripe, promotionCodeId, athlete);
@@ -392,11 +264,11 @@ export default async function handler(req, res) {
     }
 
     return res.status(200).json({
-      clientSecret,
-      mode,
+      status: subscription.status,
       subscriptionId: subscription.id,
       customerId,
-      status: subscription.status,
+      needsAction,
+      clientSecret: needsAction ? pi.client_secret : null,
       trialEnd: epochToISO(subscription.trial_end),
       currentPeriodEnd: epochToISO(subPeriodEnd(subscription)),
       giftApplied,
@@ -422,7 +294,7 @@ export default async function handler(req, res) {
   }
 }
 
-// ── Gift / tester code resolution (shared by the card-first and legacy paths) ─
+// ── Gift / tester code resolution (used by the card-first subscribe) ─
 // Exactly the guard set that used to live inline: tester codes are product-scoped
 // and exempt from the gift guards; gift codes are Pro-only, never self-redeemed,
 // one per athlete (retrying your OWN in-flight code is allowed), and annual-gated.

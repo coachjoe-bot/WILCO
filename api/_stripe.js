@@ -267,7 +267,7 @@ export async function sbAthletePatch(id, patch) {
 
 // Find-or-create the athlete's Stripe customer, persisting the id immediately so
 // a retried call never creates a duplicate. Extracted from create-subscription so
-// checkout-intent (SetupIntent-first flow) and the legacy eager-create path share
+// checkout-intent (SetupIntent-first flow) and the card-first subscribe share
 // ONE copy — the metadata mirror (signup_source + ad identity) must never drift
 // between them.
 export async function ensureStripeCustomer(stripe, athlete, extraMeta = {}) {

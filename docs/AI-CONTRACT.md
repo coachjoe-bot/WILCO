@@ -13,7 +13,7 @@ Written 2026-09-28 from Will's rulings (08-10, 08-24, 08-28, 09-01, 09-28; rule 
 ## The rules
 
 1. **Facts come from code, final.** Anything with a right answer is computed once, in one pure module, and injected into the turn. Joe quotes it. When Joe gets a fact wrong, the fix is a computed fact, never another prompt rule.
-2. **One home per fact.** Dates live on the block they describe. Position comes from the resolver, keyed to the current program. Pain state lives in the pain ledger. Durable athlete facts live in `athlete_memory`. No second copy, no cache that can outlive what it describes.
+2. **One home per fact.** Dates live on the block they describe. Position comes from the resolver, keyed to the current program. Pain state lives in the pain ledger. Durable athlete facts live in `athlete_memory`, and only there (check-in notes and remember-this notes included). No second copy, no cache that can outlive what it describes.
 3. **One owner per action.** Joe acts through tools; code validates each call and may drop or correct it. Where an action still runs on the parser-flag pipeline (logging and program writes, until v2), Joe's tool call in the same turn wins over the flag.
 4. **Whoever decides second reads what was decided first.** Two mechanisms never decide the same visible thing independently. The later one consults the earlier one's output in code.
 5. **One voice per turn.** Joe speaks. The app adds a line only to confirm an action that completed, at most one per turn, and never on a topic Joe already addressed.
@@ -46,6 +46,6 @@ Written 2026-09-28 from Will's rulings (08-10, 08-24, 08-28, 09-01, 09-28; rule 
 | Output filter covered about half the model-text surfaces | T64 S4 |
 | Voice existed as three drifted copies (card, legacy chat prompt, proof letter) | T64 S4 |
 | An area marked resolved was ignored forever, even on a flare; no shared naming for body areas | T64 S2 |
-| Two memory stores (`athlete_context`, `athlete_memory`) with no reconciliation | Open. Follow-up after T64 |
-| `is_program_update` / `program_append` can act on the same message as `propose_program_rec` | Open. Follow-up after T64 |
+| Two memory stores (`athlete_context`, `athlete_memory`) with no reconciliation | Closed, T68 (09-29). `athlete_memory` is the one store; nothing reads or writes `athlete_context`; its lines were moved by `scripts/migrate-context-to-memory.mjs` |
+| `is_program_update` / `program_append` can act on the same message as `propose_program_rec` | Closed, T68 (09-29). `programWriteOwner` (`src/recs.js`): a rec that validates and locates wins and the parser's write stands down; a rec that cannot stage is dropped and the parser's write runs alone |
 | Coach-side AI was never moved onto its card (`buildCoachStatic` has no call sites) | Open. T64 gives the coach side the shared voice and the pain ledger; the coach tool loop is its own wave |

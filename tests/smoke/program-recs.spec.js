@@ -322,3 +322,150 @@ test("T67: a swap they say should outlive today still stages its rec", async ({ 
   expect(systemSeen).not.toMatch(/CHANGE SCOPE/);
   expect(staged).toBe(1);
 });
+
+// ─── T68: one owner per program change (AI contract rule 3) ──────────────────
+// "add curls 3x12 to my plan" used to stage Joe's rec AND append to the program
+// through the parser's flag. A rec that is real wins; one that cannot stage is
+// dropped and the parser's append runs alone.
+const addTurn = async (page, calls, swap) => {
+  await page.route("**/api/claude", (route) => {
+    const body = route.request().postDataJSON() || {};
+    if (body.feature !== "mastermind_chat") return route.fallback();
+    if (!body.stream) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ content: [{ type: "text", text: "Curls are in." }], usage: {} }) });
+    route.fulfill({ contentType: "text/event-stream", body:
+      `data: ${JSON.stringify({ text: "Check the program rec I made for the curls." })}\n\n` +
+      `data: ${JSON.stringify({ tool_use: { id: "t1", name: "propose_program_rec", input: { title: "Add curls", summary: "Curls added to Day 2.", why: "Asked.", duration: "block", swaps: [swap] } } })}\n\n` +
+      `data: ${JSON.stringify({ stop_reason: "end_turn" })}\n\n` });
+  });
+  await page.getByPlaceholder(/Tell Coach Joe/).fill("add barbell curls 3x12 to my program on day 2");
+  await page.getByRole("button", { name: "→", exact: true }).click();
+  await expect(page.getByText("Check the program rec I made for the curls.", { exact: true })).toBeVisible({ timeout: 15000 });
+  await page.waitForTimeout(3000); // tools and the parser branch run after the reply settles
+  return {
+    recs: calls.filter((c) => c.body?.op === "insert" && c.body?.table === "program_drafts").length,
+    programWrites: calls.filter((c) => c.body?.table === "athletes" && /update/.test(c.body?.op || "") && "program_text" in (c.body?.data || c.body?.values || c.body?.row || {})).length,
+  };
+};
+
+test("T68: Joe's rec wins, the parser's append stands down", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const { calls } = await mockApi(page, { athlete, chatReply: DRAFT_REPLY });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  const r = await addTurn(page, calls, { find: "Barbell Row 3x8 @ 155", replace: "Barbell Row 3x8 @ 155\nBarbell Curls 3x12", day: "Day 2 - Pull" });
+  expect(r.recs).toBe(1);
+  expect(r.programWrites).toBe(0);
+  await expect(page.getByText(/Added that to your Program tab/)).toHaveCount(0);
+  await expect(page.getByText(/PROGRAM REC/).first()).toBeVisible();
+});
+
+test("T68: a rec that cannot stage is dropped, the parser's append runs alone", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const { calls } = await mockApi(page, { athlete, chatReply: DRAFT_REPLY });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  const r = await addTurn(page, calls, { find: "Barbell Row 4x10 @ 999", replace: "Barbell Curls 3x12", day: "Day 2 - Pull" });
+  expect(r.recs).toBe(0);
+  expect(r.programWrites).toBe(1);
+  await expect(page.getByText(/Couldn't line that program change up/)).toHaveCount(0);
+});
+
+// ─── T68: the open rec sheet has the bar's ✕, and the bar cannot move the opener's buttons ───
+const recReads = (athlete) => ({ program_drafts: (body) => String(body.params || "").includes('status=in.("rec"') ? [REC_ROW(athlete.id)] : [] });
+
+const openSheetThenX = async (page, athlete) => {
+  const { calls } = await mockApi(page, { athlete, chatReply: DRAFT_REPLY, dataReads: recReads(athlete) });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  await page.getByText("PROGRAM REC — Pec swap").first().click();
+  await expect(page.getByText("What changed")).toBeVisible();
+  await page.waitForTimeout(500);                          // slide finished
+  await page.getByRole("button", { name: "Close the program rec", exact: true }).click();
+  const dlg = page.getByRole("dialog", { name: "Close this program rec" });
+  await expect(dlg).toBeVisible();
+  // the dialog sits ABOVE the open sheet: its Delete button takes the hit
+  const hit = await page.evaluate(() => { const b = [...document.querySelectorAll("button")].find((x) => x.textContent.trim() === "Delete"); const r = b.getBoundingClientRect(); const e = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return e === b || b.contains(e); });
+  expect(hit).toBe(true);
+  return { calls, dlg };
+};
+
+test("rec sheet's own ✕: dialog over the open sheet, Delete removes the row and closes the sheet", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const { calls, dlg } = await openSheetThenX(page, athlete);
+  await dlg.getByRole("button", { name: "Delete" }).click();
+  await expect(page.getByText("What changed")).toBeHidden();
+  await expect(page.getByText("PROGRAM REC — Pec swap")).toHaveCount(0);
+  await expect.poll(() => calls.some((c) => c.body?.op === "delete" && c.body?.table === "program_drafts")).toBe(true);
+});
+
+test("rec sheet's own ✕: Save to Drafts parks it and closes the sheet", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const { calls, dlg } = await openSheetThenX(page, athlete);
+  await dlg.getByRole("button", { name: "Save to Drafts" }).click();
+  await expect(page.getByText("What changed")).toBeHidden();
+  await expect(page.getByText("PROGRAM REC — Pec swap")).toHaveCount(0);
+  await expect.poll(() => calls.some((c) => c.body?.op === "update" && c.body?.table === "program_drafts" && c.body?.data?.blueprint?.rec?.parked === true)).toBe(true);
+});
+
+// The boot restore of a pending rec is async and its bar mounts above the
+// composer, AFTER the opener bubble. An automated first tap on Start Workout
+// missed 2 of 6 on prod. Invariant: from the moment Start Workout is visible,
+// it does not move for 3 seconds. The delayed variant is the race (slow read).
+for (const delay of [0, 1500]) {
+  test(`pending rec (read delayed ${delay}ms): Start Workout never moves once visible, and its tap lands`, async ({ page }) => {
+    const athlete = makeAthlete({ program_text: PROGRAM });
+    await mockApi(page, { athlete, chatReply: DRAFT_REPLY, dataReads: recReads(athlete) });
+    if (delay) {
+      await page.route("**/api/data", async (route) => {
+        let b = {}; try { b = JSON.parse(route.request().postData() || "{}"); } catch (_) {}
+        if (b.op === "read" && b.table === "program_drafts") await new Promise((r) => setTimeout(r, delay));
+        await route.fallback();
+      });
+    }
+    await page.setViewportSize({ width: 390, height: 480 });   // short phone: the opener bubble overflows the list, so the bar's mount is felt
+    await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+    const start = page.getByRole("button", { name: "Start Workout" });
+    await expect(start).toBeVisible({ timeout: 15000 });
+    // The bubble's own 3px fade-up entrance is not the bug: let it finish, then measure.
+    await page.waitForFunction(() => document.getAnimations().filter((a) => a.animationName === "fadeUp" && a.playState === "running").length === 0);
+    const first = await start.boundingBox();
+    const t0 = Date.now();
+    while (Date.now() - t0 < 3000) {
+      const b = await start.boundingBox();
+      expect(b, "Start Workout stayed on screen").not.toBeNull();
+      expect(Math.abs(b.y - first.y)).toBeLessThanOrEqual(2);
+      expect(Math.abs(b.x - first.x)).toBeLessThanOrEqual(2);
+      await page.waitForTimeout(40);
+    }
+    // the rec bar did restore (it is why this spec exists)
+    await expect(page.getByText("PROGRAM REC — Pec swap").first()).toBeVisible();
+    // ...and it did not push the last opener button under itself: the last button
+    // is still inside the visible chat list (the bar shrinks the list from below).
+    const clipped = await page.evaluate(() => {
+      const list = document.querySelector("[data-tour=chat]").getBoundingClientRect();
+      return ["Different Workout"].map((t) => {
+        const b = [...document.querySelectorAll("button")].find((x) => x.textContent.trim() === t).getBoundingClientRect();
+        return b.bottom > list.bottom + 1 || b.top < list.top - 1 ? t : null;
+      }).filter(Boolean);
+    });
+    expect(clipped, "opener buttons hidden by the bar").toEqual([]);
+    await start.click();
+    await expect(page.getByText("Day 1 - Push", { exact: true }).first()).toBeVisible({ timeout: 15000 });
+  });
+}
+
+// T68: the opener's buttons wait for the rec restore, never forever. With the
+// rec read hanging, Start Workout still arms (5 s fallback) and starts the workout.
+test("T68: a rec read that never answers cannot hide Start Workout", async ({ page }) => {
+  test.setTimeout(60000);
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  await mockApi(page, { athlete, chatReply: DRAFT_REPLY });
+  await page.route("**/api/data", (route) => {
+    const b = route.request().postDataJSON() || {};
+    if (b.op === "read" && b.table === "program_drafts" && /rec/.test(String(b.params || ""))) return; // never answered
+    return route.fallback();
+  });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  const start = page.getByRole("button", { name: "Start Workout" });
+  await expect(start).toBeVisible({ timeout: 20000 });
+  await page.waitForTimeout(600); // the bubble's entrance
+  await start.click();
+  await expect(page.getByText("Day 1 - Push", { exact: true }).first()).toBeVisible({ timeout: 15000 });
+});

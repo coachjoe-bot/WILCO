@@ -4,7 +4,7 @@
 // reads, changed ONLY by asking Joe in the box at the bottom. Out-of-scope
 // asks turn the box stoplight-red with a flag toast and write nothing.
 import { test, expect } from "@playwright/test";
-import { mockApi, makeAthlete, loginAsAthlete } from "./mocks.js";
+import { mockApi, makeAthlete, loginAsAthlete, emptyParse } from "./mocks.js";
 
 const PROGRAM = "Day 1 - Push\nBench Press 3x5 @ 185";
 
@@ -47,6 +47,7 @@ test("memory tab: three subtabs — history, drafts, and the context document", 
     athlete_memory: MEMORY_ROWS(athlete.id),
     program_history: BLOCK_ROWS(athlete.id),
     program_drafts: DRAFT_ROWS(athlete.id),
+    // T68: the blob is retired. A row in it is never read and never shown.
     athlete_context: [{ athlete_id: athlete.id, content: "07-14: wants a push-pull meet in December" }],
   } });
   await loginAsAthlete(page, athlete);
@@ -61,14 +62,15 @@ test("memory tab: three subtabs — history, drafts, and the context document", 
   await page.getByRole("button", { name: "Drafts", exact: true }).click();
   await expect(page.getByText("Off-season Power Block")).toBeVisible();
 
-  // Athlete Context: profile from real columns, facts (watch note included),
-  // legacy notes, and the ask-Joe box.
+  // Athlete Context: profile from real columns, facts (watch note included)
+  // and the ask-Joe box. One store: athlete_memory (T68).
   await page.getByRole("button", { name: "Athlete Context", exact: true }).click();
   await expect(page.getByText("What Joe's keeping in mind")).toBeVisible();
   await expect(page.getByText("Prefers kg on the barbell lifts", { exact: false })).toBeVisible();
   await expect(page.getByText("Watching: knee squats", { exact: false })).toBeVisible();
   await expect(page.getByText("Left shoulder history", { exact: false })).toBeVisible();
-  await expect(page.getByText("push-pull meet in December", { exact: false })).toBeVisible();
+  await expect(page.getByText("push-pull meet in December", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Older notes")).toHaveCount(0);
   await expect(page.getByPlaceholder("Ask Joe to remember or change something...")).toBeVisible();
 });
 
@@ -143,3 +145,73 @@ test("athlete context: tapping a fact scopes the ask to that one note (T62 targe
   await page.getByRole("button", { name: "Clear selected fact" }).click();
   await expect(page.getByText("EDITING:")).toHaveCount(0);
 });
+
+// ─── T68: one memory store (AI contract rule 2) ──────────────────────────────
+// "remember that ..." in chat used to append a dated line to the athlete_context
+// blob while Joe's remember_fact wrote athlete_memory: two stores, no
+// reconciliation. Every note is a fact in athlete_memory now.
+const REMEMBER = "remember that I train at a garage gym on weekends, no cable stack";
+const rememberParse = { ...emptyParse, context_request: { is_explicit: true, note: "Trains at a garage gym on weekends, no cable stack", is_injury: false, weight_lbs: null } };
+const memoryWrites = (calls) => calls.filter((c) => c.body?.op === "insert" && c.body?.table === "athlete_memory");
+const blobTouches = (calls) => calls.filter((c) => c.body?.table === "athlete_context");
+
+test("T68: a remember-this note is saved as a memory fact, and nothing touches the blob", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const { calls } = await mockApi(page, { athlete, chatReply: "Got it.", parseResult: rememberParse, dataReads: { athlete_memory: MEMORY_ROWS(athlete.id) } });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  await page.getByPlaceholder(/Tell Coach Joe/).fill(REMEMBER);
+  await page.getByRole("button", { name: "→", exact: true }).click();
+  await expect(page.getByText("✓ Got it, I'll remember that.")).toBeVisible({ timeout: 15000 });
+  await expect.poll(() => memoryWrites(calls).length).toBe(1);
+  expect(memoryWrites(calls)[0].body.data).toMatchObject({ content: "Trains at a garage gym on weekends, no cable stack", kind: "contextual", source: "athlete_said" });
+  expect(blobTouches(calls).length).toBe(0);
+});
+
+test("T68: when Joe saves the fact with his own tool, the parser's copy stands down", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const { calls } = await mockApi(page, { athlete, chatReply: "Got it.", parseResult: rememberParse, dataReads: { athlete_memory: MEMORY_ROWS(athlete.id) } });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  await page.route("**/api/claude", (route) => {
+    const body = route.request().postDataJSON() || {};
+    if (body.feature !== "mastermind_chat") return route.fallback();
+    if (!body.stream) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ content: [{ type: "text", text: "Noted." }], usage: {} }) });
+    route.fulfill({ contentType: "text/event-stream", body:
+      `data: ${JSON.stringify({ text: "Noted, garage gym on weekends." })}\n\n` +
+      `data: ${JSON.stringify({ tool_use: { id: "t1", name: "remember_fact", input: { content: "Weekend sessions are at a garage gym with no cable stack", kind: "pinned" } } })}\n\n` +
+      `data: ${JSON.stringify({ stop_reason: "end_turn" })}\n\n` });
+  });
+  await page.getByPlaceholder(/Tell Coach Joe/).fill(REMEMBER);
+  await page.getByRole("button", { name: "→", exact: true }).click();
+  await expect(page.getByText("Noted, garage gym on weekends.", { exact: true })).toBeVisible({ timeout: 15000 });
+  await page.waitForTimeout(3000);
+  expect(memoryWrites(calls).length).toBe(1);
+  expect(memoryWrites(calls)[0].body.data.content).toBe("Weekend sessions are at a garage gym with no cable stack");
+  expect(blobTouches(calls).length).toBe(0);
+});
+
+// T68: every open sheet has the same ✕ its bar has. The program sheet's ✕ (a
+// draft reopened from Drafts) takes the sheet AND the bar off the screen and
+// parks the draft, exactly as the bar's own ✕ does.
+for (const theme of ["light", "dark"]) {
+  test(`T68: the open program sheet's ✕ takes it off the screen (${theme})`, async ({ page }) => {
+    const athlete = makeAthlete({ program_text: PROGRAM });
+    await mockApi(page, { athlete, dataReads: { athlete_memory: MEMORY_ROWS(athlete.id), program_history: BLOCK_ROWS(athlete.id), program_drafts: DRAFT_ROWS(athlete.id) } });
+    if (theme === "dark") await page.addInitScript(() => { try { localStorage.setItem("wilco_theme", "dark"); } catch (_) {} });
+    await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+    // dark's tab label carries an icon, so match it loosely
+    await page.getByRole("button", { name: /^\W*program$/i }).first().click();
+    await page.getByRole("button", { name: "MEMORY" }).click();
+    await page.getByRole("button", { name: "Drafts", exact: true }).click();
+    await page.getByRole("button", { name: "Open & edit" }).first().click();
+    const x = page.locator('[data-sheet-x][aria-label="Take the program off the screen"]');
+    await expect(x).toBeVisible({ timeout: 15000 });
+    if (process.env.SHOTS) await page.screenshot({ path: `${process.env.SHOTS}/program-sheet-${theme}.png` });
+    const box = await x.boundingBox();
+    expect(box.width).toBeGreaterThanOrEqual(32);
+    expect(box.height).toBeGreaterThanOrEqual(32);
+    await x.click();
+    await expect(x).toBeHidden({ timeout: 10000 });
+    await expect(page.getByRole("button", { name: "Take the program off the screen" })).toHaveCount(0);
+    await expect(page.getByPlaceholder(/Tell Coach Joe/)).toBeVisible();
+  });
+}
