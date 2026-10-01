@@ -232,7 +232,9 @@ console.log("4. a 100%-off forever coupon comps its holder:");
 
   // create-subscription: source contract (the Stripe calls are the manual runbook's).
   const cs = read("../api/create-subscription.js");
-  ok((cs.match(/\.\.\.\(comps \? \{ comped: true \} : \{\}\)/g) || []).length === 2, "create-subscription writes comped:true in BOTH the card-first and the legacy patch");
+  // T68 (main d1da92d) deleted the legacy eager-create branch, so the card-first
+  // patch is the ONLY place create-subscription grants a tier. Exactly one write.
+  ok((cs.match(/\.\.\.\(comps \? \{ comped: true \} : \{\}\)/g) || []).length === 1, "create-subscription writes comped:true in its one tier-granting patch");
   ok(!/comped:\s*false/.test(cs) && !/comped:\s*false/.test(read("../api/stripe-webhook.js")) && !/patch\.comped\s*=\s*false|\{\s*comped:\s*false\s*\}\s*\)/.test(read("../api/_stripe.js")),
     "no server path ever writes comped:false (one-way)");
   ok(/comps: couponComps\(resolved\.coupon\)/.test(cs), "tester and gift code resolution both derive comps from the coupon terms");
