@@ -9,6 +9,7 @@
 //   5. The pattern gate: first mention = watched note; a Rec needs a repeat on
 //      a different day, severity, or an explicit ask.
 // Run: node scripts/test-recs.mjs
+import { programWriteOwner } from "../src/recs.js";
 import {
   parseProgramLines, locateSwap, locateSwaps, applySwaps, revertSwaps,
   REC_DURATIONS, durationLabel, recExpiry, recExpired,
@@ -211,6 +212,23 @@ const PROG2 = [
   eq(recSummaryFallback(null), "", "null rec never throws");
   const manyNames = recSummaryFallback({ swaps: ["Overhead Press", "Deadlift", "Barbell Row", "Bicep Curl"].map((name) => ({ find: `${name} 3x5 at 100`, replace: "x" })) });
   ok(manyNames.startsWith("Changed Overhead Press, Deadlift, Barbell Row") && manyNames.endsWith("and more."), "more than 3 exercises: names the first 3, says 'and more'");
+}
+
+// ── T68: one owner per program change (AI contract rule 3) ───────────────────
+{
+  const PROGRAM = "Day 1 - Push\nBench Press 3x5 @ 185\nOverhead Press 3x8 @ 95\n\nDay 2 - Pull\nDeadlift 3x5 @ 275\nBarbell Row 3x8 @ 155";
+  const rec = (find, replace) => ({ name: "propose_program_rec", input: { title: "Add curls", summary: "Curls added to Day 2.", duration: "block", swaps: [{ find, replace, day: "Day 2 - Pull" }] } });
+  const real = rec("Barbell Row 3x8 @ 155", "Barbell Row 3x8 @ 155\nBarbell Curls 3x12");
+  const lost = rec("Barbell Row 4x10 @ 200", "Barbell Curls 3x12");
+  eq(programWriteOwner({ toolCalls: [real], parserWants: true, programText: PROGRAM }).owner, "tool", "replay (live suite, 'add curls 3x12 to my plan'): a rec that locates wins, the parser stands down");
+  eq(programWriteOwner({ toolCalls: [lost], parserWants: true, programText: PROGRAM }).owner, "parser", "a rec whose find is not in the program loses: the parser's write runs alone");
+  eq(programWriteOwner({ toolCalls: [{ name: "propose_program_rec", input: { swaps: [] } }], parserWants: true, programText: PROGRAM }).owner, "parser", "an invalid payload loses");
+  eq(programWriteOwner({ toolCalls: [lost, real], parserWants: true, programText: PROGRAM }).owner, "tool", "any real rec in the turn is enough");
+  eq(programWriteOwner({ toolCalls: [real], parserWants: false, programText: PROGRAM }).owner, null, "no parser flag: nothing to arbitrate, the rec proceeds as always");
+  eq(programWriteOwner({ toolCalls: [{ name: "remember_fact", input: {} }], parserWants: true, programText: PROGRAM }).owner, null, "no rec call: the parser proceeds as always");
+  eq(programWriteOwner({ toolCalls: [real], parserWants: true, programText: PROGRAM, locked: true }).owner, null, "a coach-locked program is the lock branch's call");
+  eq(programWriteOwner({ toolCalls: [real], parserWants: true, programText: "" }).owner, "parser", "no saved program: nothing to swap in, the parser's save runs");
+  eq(programWriteOwner().owner, null, "no input never throws");
 }
 
 console.log(`\n${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ""}`);

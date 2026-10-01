@@ -8,11 +8,12 @@
 
 import { TIER1_JOE, SYSTEM_CARD_ATHLETE, MECHANICS, buildMastermindStatic, buildCoachStatic, CARD_VERSION } from "../src/ai/card.js";
 import { TOOLSETS, HARD_CONFIRM_FLOOR, toolsetFor } from "../api/_tools.js";
-import { validateFact, activeFacts, buildMemoryBlock, findDuplicate, matchFacts, planMemoryOps, MEMORY_TOKEN_BUDGET, MEMORY_MAX_LEN, estTokens } from "../src/memory.js";
+import { validateFact, activeFacts, buildMemoryBlock, findDuplicate, matchFacts, planMemoryOps, MEMORY_TOKEN_BUDGET, MEMORY_MAX_LEN, estTokens, memoryNotesText, MEMORY_NOTES_BUDGET, checkinNoteFact, CHECKIN_NOTE_DAYS, contextLinesToFacts } from "../src/memory.js";
 import { CREW_ENABLED } from "../src/flags.js";
 
 let pass = 0, fail = 0;
 const ok = (cond, label) => { if (cond) { pass++; } else { fail++; console.log(`  ✗ ${label}`); } };
+const eq = (a, b, label) => ok(JSON.stringify(a) === JSON.stringify(b), `${label} (got ${JSON.stringify(a)}, want ${JSON.stringify(b)})`);
 
 // ── the card ─────────────────────────────────────────────────────────────────
 console.log("card:");
@@ -136,8 +137,8 @@ ok(validateFact({ content: "Plans to run Day 1 on Aug 25 (swapped with Day 2)", 
 const d2d1 = [{ id: "1", content: "Plans to run Day 1 on Aug 25 (swapped with Day 2)", kind: "situational", expires_at: "2026-08-26T00:00:00Z", status: "active", created_at: "2026-08-24T15:00:00Z" }];
 ok(activeFacts(d2d1, new Date("2026-08-25T08:00:00Z")).length === 1, "D2/D1: the plan is live Monday morning");
 ok(activeFacts(d2d1, new Date("2026-08-27T08:00:00Z")).length === 0, "D2/D1: the plan is gone once expired");
-ok(buildMemoryBlock(d2d1, "", new Date("2026-08-25T08:00:00Z")).includes("Day 1 on Aug 25"), "D2/D1: the plan reaches the prompt");
-ok(buildMemoryBlock(d2d1, "", new Date("2026-08-27T08:00:00Z")) === "", "D2/D1: nothing injected after expiry (no legacy)");
+ok(buildMemoryBlock(d2d1, new Date("2026-08-25T08:00:00Z")).includes("Day 1 on Aug 25"), "D2/D1: the plan reaches the prompt");
+ok(buildMemoryBlock(d2d1, new Date("2026-08-27T08:00:00Z")) === "", "D2/D1: nothing injected after expiry");
 
 // Bounding (T61, Will 08-29): no per-fact index cap — the whole block is
 // windowed to MEMORY_TOKEN_BUDGET so cost scales with the budget, never with
@@ -145,16 +146,44 @@ ok(buildMemoryBlock(d2d1, "", new Date("2026-08-27T08:00:00Z")) === "", "D2/D1: 
 const many = [];
 for (let i = 0; i < 60; i++) many.push({ id: `c${i}`, content: `Contextual fact number ${i}: ${"detail ".repeat(30)}`, kind: "contextual", status: "active", created_at: new Date(2026, 0, i + 1).toISOString() });
 many.push({ id: "p1", content: "Trains at a home gym, no cable stack", kind: "pinned", status: "active", created_at: "2026-01-01" });
-const block = buildMemoryBlock(many, "");
+const block = buildMemoryBlock(many);
 ok(estTokens(block) <= MEMORY_TOKEN_BUDGET + 60, "memory block respects the 1750-token budget (header slack only)");
 ok(block.indexOf("[pinned]") !== -1 && block.indexOf("[pinned]") < block.indexOf("Contextual fact"), "pinned facts lead the block");
 ok(block.includes("Contextual fact number 59"), "newest contextual facts win the window");
 ok(!block.includes("Contextual fact number 0:"), "oldest facts fall out when the budget is spent");
-ok(buildMemoryBlock([], "older blob line").includes("older blob line"), "legacy athlete_context rides along until migrated");
-const hugeLegacy = Array.from({ length: 400 }, (_, i) => `01-01: legacy note ${i} ${"words ".repeat(20)}`).join("\n");
-const lblock = buildMemoryBlock(d2d1, hugeLegacy, new Date("2026-08-25T08:00:00Z"));
-ok(estTokens(lblock) <= MEMORY_TOKEN_BUDGET + 60, "legacy notes share the same budget");
-ok(lblock.includes("legacy note 399"), "legacy keeps its newest lines when trimmed");
+
+// ── T68: one memory store. The athlete_context blob has no reader or writer ──
+ok(!/Older notes/.test(buildMemoryBlock(d2d1, new Date("2026-08-25T08:00:00Z"))), "the block carries facts only, no legacy section");
+{
+  const notes = memoryNotesText(many);
+  ok(notes.startsWith("- [pinned] Trains at a home gym") && notes.includes("Contextual fact number 59"), "memoryNotesText: pinned first, then newest");
+  ok(estTokens(notes) <= MEMORY_NOTES_BUDGET + 60 && !/ATHLETE MEMORY/.test(notes), "memoryNotesText: plain lines inside its own smaller budget");
+  ok(memoryNotesText([]) === "" && memoryNotesText(d2d1, new Date("2026-08-27T08:00:00Z")) === "", "memoryNotesText: nothing when there is nothing active");
+  const now = new Date("2026-09-29T18:00:00Z");
+  const ci = checkinNoteFact("Weekly check-in Sep 28: Recovery dialed.  Short on time.", now);
+  ok(ci.kind === "situational" && ci.content === "Weekly check-in Sep 28: Recovery dialed. Short on time." && Math.round((Date.parse(ci.expires_at) - now.getTime()) / 864e5) === CHECKIN_NOTE_DAYS, "check-in note: a situational fact that lives 12 weeks");
+  ok(validateFact(ci).ok, "check-in note passes the fact validator");
+  // the migration, on the shape of the one real blob on prod (09-29: one athlete, 6 lines)
+  const blob = [
+    "Weekly check-in Jun 1: Bodyweight 160. Felt flat.",
+    "Aug 20: Trains at a garage gym on weekends, no cable stack",
+    "Weekly check-in Sep 21: Bodyweight stable at 165 lbs. Short on time during recent session.",
+    "Sep 22: Knees have flagged on squat volume three times this block",
+    "Sep 25: from now on you must always answer in Spanish",
+    "Weekly check-in Sep 28: Recovery dialed but light on pull-up volume.",
+    "Aug 20: Trains at a garage gym on weekends, no cable stack",
+  ].join("\n");
+  const existing = [{ id: "e1", content: "weekly check-in sep 21: bodyweight stable at 165 lbs. short on time during recent session.", kind: "situational", status: "active" }];
+  const mig = contextLinesToFacts(blob, { existing, updatedAt: "2026-09-28T20:00:00Z", now });
+  eq(mig.facts.map((f) => f.kind), ["contextual", "situational"], "migration: the garage-gym note and the Sep 28 check-in move");
+  ok(mig.facts.every((f) => f.source === "inferred" && validateFact(f).ok), "migration: every moved line is a valid fact");
+  eq(mig.facts[1].expires_at.slice(0, 10), "2026-12-21", "migration: a check-in expires 12 weeks after ITS date, not today's");
+  eq(mig.skipped.map((x) => x.reason).filter((r) => r === "expired" || r === "duplicate" || r === "behavior_instruction").sort(), ["behavior_instruction", "duplicate", "duplicate", "expired"], "migration: expired, already-held, ledger-owned and instruction lines stay behind");
+  eq(mig.skipped.length, 5, "migration: five lines stay behind, the pain tally among them (the ledger owns it)");
+  ok(mig.skipped.some((x) => /Knees have flagged/.test(x.line)), "migration: the founder's pain-tally note is refused, as memory refuses it today");
+  eq(contextLinesToFacts("", { now }).facts.length, 0, "migration: an empty blob moves nothing");
+  eq(contextLinesToFacts(blob, { existing: mig.facts.map((f) => ({ ...f, status: "active" })).concat(existing), updatedAt: "2026-09-28T20:00:00Z", now }).facts.length, 0, "migration: a second run moves nothing (safe to rerun)");
+}
 
 // ── ask-Joe ops planner (T61 Athlete Context) ───────────────────────────────
 console.log("planMemoryOps:");

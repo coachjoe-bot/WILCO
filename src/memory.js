@@ -219,13 +219,11 @@ export function matchFacts(rows, match, now = new Date()) {
   return { ok: true, rows: hits };
 }
 
-// The prompt block. Pinned facts in full first, then the newest contextual/
-// situational facts, windowed to MEMORY_TOKEN_BUDGET (pinned always land, even
-// if a huge pinned set overshoots -- the athlete chose them; the newest-first
-// tail is what gets cut). The legacy athlete_context blob (dated notes) rides
-// along inside the same budget until its content has migrated -- same data,
-// same trust level, oldest lines dropped first when it doesn't fit.
-export function buildMemoryBlock(rows, legacyContext = "", now = new Date()) {
+// The facts in prompt order: pinned in full first (the athlete chose them, they
+// always land), then the newest contextual/situational facts, windowed to the
+// token budget (newest-first: a line that does not fit is skipped and smaller
+// later lines are still tried).
+function budgetedFactLines(rows, now = new Date(), budget = MEMORY_TOKEN_BUDGET) {
   const act = activeFacts(rows, now);
   const pinned = act.filter((r) => r.kind === "pinned");
   const rest = act.filter((r) => r.kind !== "pinned")
@@ -240,24 +238,76 @@ export function buildMemoryBlock(rows, legacyContext = "", now = new Date()) {
     const exp = r.expires_at ? ` (until ${String(r.expires_at).slice(0, 10)})` : "";
     const line = `- ${r.content}${exp}`;
     const cost = estTokens(line);
-    if (spent + cost > MEMORY_TOKEN_BUDGET) continue; // newest-first: try smaller later lines
+    if (spent + cost > budget) continue;
     lines.push(line); spent += cost;
   }
-  // Legacy notes fill whatever budget remains, newest lines kept first (the
-  // blob is chronological, so walk it bottom-up and restore order after).
-  const legacyLines = [];
-  const legacySrc = String(legacyContext || "").trim();
-  if (legacySrc) {
-    const src = legacySrc.split("\n").map((l) => l.trim()).filter(Boolean);
-    for (let i = src.length - 1; i >= 0; i--) {
-      const cost = estTokens(src[i]);
-      if (spent + cost > MEMORY_TOKEN_BUDGET) break;
-      legacyLines.unshift(src[i]); spent += cost;
+  return lines;
+}
+
+// The prompt block for a mastermind turn. T68 (09-29): athlete_memory is the
+// ONE store (AI contract rule 2). The legacy athlete_context blob used to ride
+// along here as "Older notes"; its lines were moved into facts
+// (scripts/migrate-context-to-memory.mjs) and nothing reads or writes it now.
+export function buildMemoryBlock(rows, now = new Date()) {
+  const lines = budgetedFactLines(rows, now);
+  if (!lines.length) return "";
+  return "\n\nATHLETE MEMORY (facts you chose to keep about this athlete — draw on what's relevant, never recite the list; prune with forget_fact when something is wrong or done):\n" + lines.join("\n");
+}
+
+// The same facts as plain notes, for every other prompt that used to be handed
+// the athlete_context blob (log sheet draft, opener, Builder, rec drafting, the
+// legacy chat prompt). Smaller budget: these prompts carry the notes as
+// background beside their own job. "" when there is nothing.
+export const MEMORY_NOTES_BUDGET = 600;
+export function memoryNotesText(rows, now = new Date()) {
+  return budgetedFactLines(rows, now, MEMORY_NOTES_BUDGET).join("\n");
+}
+
+// A weekly or monthly check-in's summary note is a fact with a shelf life: the
+// blob kept a rolling 12 notes, a fact keeps 12 weeks.
+export const CHECKIN_NOTE_DAYS = 84;
+export function checkinNoteFact(note, now = new Date()) {
+  const content = String(note || "").replace(/\s+/g, " ").trim().slice(0, MEMORY_MAX_LEN);
+  const expires_at = new Date(new Date(now).getTime() + CHECKIN_NOTE_DAYS * 864e5).toISOString();
+  return { content, kind: "situational", expires_at };
+}
+
+// ── the one-time move out of the blob (scripts/migrate-context-to-memory.mjs) ─
+// A blob is dated lines, oldest first: "Weekly check-in Sep 21: ..." or
+// "Sep 3: note". Check-in lines become situational facts that expire 12 weeks
+// after their own date; everything else is a contextual fact. Every line goes
+// through validateFact (memory refuses pain tallies, program-change claims,
+// block dates and behavior instructions, same as a fact Joe saves today), and a
+// line memory already holds is skipped. Pure: returns what to insert and why
+// the rest was left behind.
+const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+function lineDate(line, ref) {
+  const m = String(line).match(/^(?:(?:Weekly|Monthly) check-in\s+)?([A-Z][a-z]{2})[a-z]*\.?\s+(\d{1,2})\s*:/);
+  if (!m || !(m[1].toLowerCase() in MONTHS)) return null;
+  const r = new Date(ref);
+  let d = new Date(Date.UTC(r.getUTCFullYear(), MONTHS[m[1].toLowerCase()], +m[2], 12));
+  if (d.getTime() > r.getTime() + 864e5) d = new Date(Date.UTC(r.getUTCFullYear() - 1, MONTHS[m[1].toLowerCase()], +m[2], 12));
+  return d;
+}
+export function contextLinesToFacts(content, { existing = [], updatedAt = null, now = new Date() } = {}) {
+  const ref = updatedAt ? new Date(updatedAt) : new Date(now);
+  const facts = [], skipped = [];
+  const seen = [...(existing || [])];
+  for (const raw of String(content || "").split("\n")) {
+    const line = raw.replace(/\s+/g, " ").trim();
+    if (!line) continue;
+    const checkin = /^(Weekly|Monthly) check-in\b/.test(line);
+    let fact = { content: line, kind: "contextual", expires_at: null };
+    if (checkin) {
+      const d = lineDate(line, ref) || ref;
+      fact = { content: line, kind: "situational", expires_at: new Date(d.getTime() + CHECKIN_NOTE_DAYS * 864e5).toISOString() };
+      if (Date.parse(fact.expires_at) <= new Date(now).getTime()) { skipped.push({ line, reason: "expired" }); continue; }
     }
+    const v = validateFact(fact);
+    if (!v.ok) { skipped.push({ line, reason: v.reason }); continue; }
+    if (findDuplicate(seen, v.content)) { skipped.push({ line, reason: "duplicate" }); continue; }
+    const row = { ...fact, content: v.content, source: "inferred" };
+    facts.push(row); seen.push({ ...row, status: "active" });
   }
-  if (!lines.length && !legacyLines.length) return "";
-  let block = "\n\nATHLETE MEMORY (facts you chose to keep about this athlete — draw on what's relevant, never recite the list; prune with forget_fact when something is wrong or done):";
-  if (lines.length) block += "\n" + lines.join("\n");
-  if (legacyLines.length) block += `\nOlder notes:\n${legacyLines.join("\n")}`;
-  return block;
+  return { facts, skipped };
 }

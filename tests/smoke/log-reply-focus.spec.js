@@ -44,3 +44,44 @@ test("chat turn: no LOG REPLY FOCUS block", async ({ page }) => {
   await expect.poll(() => chatBodies(calls).length, { timeout: 10000 }).toBeGreaterThan(0);
   expect(chatBodies(calls).map(sysOf).join("\n")).not.toContain("LOG REPLY FOCUS");
 });
+
+// T67 (prod pass 09-29): on a partial log the deployed app still got "rows and
+// pull-ups whenever you get to them" 4 of 5. The turn's planRest is handed to
+// Joe AND enforced at the output gate: the settled bubble and the stored reply
+// carry the acknowledgment and the headline, nothing about the lifts left out.
+test("T67 partial log: a sentence about the planned lifts left out never settles", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: "Day 1 - Pull\nDeadlift 3x5 @ 275\nBarbell Row 3x8 @ 155\nPull-ups 3x8\n\nDay 2 - Press\nBench Press 3x5 @ 185" });
+  const SLIP = "275 for 3x5, clean work. Barbell rows and pull-ups whenever you get to them.";
+  const { calls } = await mockApi(page, { athlete, chatReply: SLIP, parseResult: { ...emptyParse, exercises: [LB("Deadlift", 3, 5, 275)] } });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  await page.getByPlaceholder(/Tell Coach Joe about your workout/).fill("Deadlift 3x5 @ 275, moved well");
+  await page.getByRole("button", { name: "→" }).click();
+  // exact: the mock's opener bubble carries the same text inside a longer line
+  await expect(page.getByText("275 for 3x5, clean work.", { exact: true })).toBeVisible({ timeout: 15000 });
+  await expect.poll(() => chatBodies(calls).length, { timeout: 10000 }).toBeGreaterThan(0);
+  expect(sysOf(chatBodies(calls).at(-1))).toContain("Also on today's plan and not in this log: Barbell Row, Pull-ups.");
+  await expect(page.getByText(SLIP, { exact: true })).toHaveCount(0, { timeout: 10000 });
+  await expect.poll(() => calls.filter((c) => c.body?.table === "workouts" && /insert|update/.test(c.body?.op || "") && /whenever you get to them/.test(JSON.stringify(c.body))).length).toBe(0);
+  expect(calls.some((c) => c.body?.table === "workouts" && /275 for 3x5, clean work\./.test(JSON.stringify(c.body)))).toBe(true);
+});
+
+// T68 (prod pass 09-29): a kg athlete logs a lift they keep in lbs. Joe is
+// handed that lift's facts in lbs AND the LOG UNITS line. The line was being
+// overwritten by the PR CHECK block's assignment on the deployed app.
+test("T68 mixed units: the LOG UNITS fact and lbs facts reach Joe for a kg athlete's lbs lift", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM, weight_unit: "kg" });
+  const benchRow = { id: "h-b", athlete_id: "x", created_at: new Date(Date.now() - 4 * 86400000).toISOString(), raw_message: "Bench 4x5 @ 190lbs",
+    parsed_data: { exercises: [{ name: "Bench Press", sets: 4, reps: 5, weight: 190, unit: "lbs", unit_source: "written" }], pain_flags: [] } };
+  const { calls } = await mockApi(page, { athlete, chatReply: "195 for 4x5, solid work.",
+    parseResult: { ...emptyParse, exercises: [{ name: "Bench Press", sets: 4, reps: 5, weight: 195, unit: null, set_details: null }] },
+    dataReads: { workouts: [benchRow] } });
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  await page.getByPlaceholder(/Tell Coach Joe about your workout/).fill("Bench press 4x5 @ 195");
+  await page.getByRole("button", { name: "→" }).click();
+  await expect(page.getByText("195 for 4x5, solid work.", { exact: true })).toBeVisible({ timeout: 15000 });
+  const sys = sysOf(chatBodies(calls).at(-1));
+  expect(sys).toContain("PR CHECK");
+  expect(sys).toContain("LOG UNITS (app fact, this log): Bench Press was logged in lbs.");
+  expect(sys).toMatch(/Bench Press: 4 sets of 5 at 195 lbs/);
+  expect(sys).not.toMatch(/Bench Press: [^\n]*88\.5 kg/);
+});

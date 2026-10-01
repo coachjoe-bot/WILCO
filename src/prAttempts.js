@@ -19,7 +19,7 @@
 //     the athlete may have switched units since (the founder logged in lbs until
 //     late August, kg after). Today's display unit says nothing about a June row,
 //     so the row's own evidence is read first.
-import { toLbs, attemptUnit } from "./units.js";
+import { toLbs, attemptUnit, addedLoadUnit } from "./units.js";
 import { implausibleJump, resolveLift, effectiveDate, bestE1RMForExercise, epley1RM, IMPLAUSIBLE_JUMP_FLOOR_LBS, IMPLAUSIBLE_JUMP_MIN_LBS, IMPLAUSIBLE_JUMP_PCT } from "./grit.js";
 
 const isUnit = (u) => u === "kg" || u === "lbs";
@@ -108,6 +108,7 @@ const loadNumbers = (ex) => {
   const add = (v) => { const n = Number(v); if (v != null && v !== "" && Number.isFinite(n) && n > 0) out.push(n); };
   add(ex?.weight);
   add(ex?.added_weight);
+  add(ex?.assist_weight);
   if (Array.isArray(ex?.set_details)) ex.set_details.forEach((s) => add(s?.weight));
   return out;
 };
@@ -203,13 +204,23 @@ const readMessage = (exercises, attempts, message, liftOf) => {
 
 // The athlete's recent logs of each lift in `liftIds`, newest first:
 // [{ t, stored, written, e1 }] (weighted kg/lbs sets only, within 180 days of now).
-const liftHistory = (history, liftIds, now) => {
+const liftHistory = (history, liftIds, now, added = false) => {
   const out = new Map([...liftIds].map((id) => [id, []]));
   if (!Array.isArray(history) || !out.size) return out;
   for (const row of history) {
     const t = rowTime(row);
     if (!Number.isFinite(t) || t > now || now - t > HISTORY_DAYS * DAY_MS) continue;
     const exs = Array.isArray(rowPD(row).exercises) ? rowPD(row).exercises : [];
+    if (added) {
+      // T68: the same log of an ADDED load, read off its own stamp. A row without
+      // `added_unit` predates the stamp and is no evidence (its unit was never
+      // decided by anyone, every reader just assumed lbs).
+      for (const ex of exs) {
+        if (!ex || ex.unit !== "bodyweight" || !isUnit(ex.added_unit) || !loadNumbers(ex).length || !out.has(liftIdOf(ex.name))) continue;
+        out.get(liftIdOf(ex.name)).push({ t, stored: ex.added_unit, written: ex.added_unit_source === "written" ? ex.added_unit : null, confirmed: CONFIRMED_SOURCES.has(ex.added_unit_source), e1: 0 });
+      }
+      continue;
+    }
     // An unconfirmed (unit_suspect) load is not evidence for anything.
     const hits = exs.map((ex, i) => [ex, i]).filter(([ex]) => ex && isUnit(ex.unit) && !ex.unit_suspect && loadNumbers(ex).length && out.has(liftIdOf(ex.name)));
     if (!hits.length) continue;
@@ -310,16 +321,38 @@ export const resolveLoadUnits = (parsed, { displayUnit, message = "", normalizeN
       }
     }
   }
+  // T68: the unit of an ADDED load on a bodyweight lift ("BW+20", assist, per-set
+  // weights). The row's own unit is "bodyweight", so this is a second answer beside
+  // it, decided by the same order: written on the number (it.written), the same
+  // lift elsewhere in the message, that lift's last 3 logs of an added load, the
+  // athlete's setting. No step for the parser's unit: a bodyweight row's `unit`
+  // says "bodyweight", so the parser has no unit to offer for the load. No plausibility
+  // guard either: bodyweight is not a stored 1RM and nothing derived is written from it.
+  const addedItems = items.filter((it) => it.kind === "ex" && it.bw && it.nums.length);
+  if (addedItems.length) {
+    const ids = new Set(addedItems.map((it) => liftIdOf(it.src.name)).filter(Boolean));
+    const hist = liftHistory(history, ids, Number(now) || Date.now(), true);
+    for (const it of addedItems) {
+      if (it.src.added_unit_source && isUnit(it.src.added_unit)) { [it.addedUnit, it.addedSource] = [it.src.added_unit, it.src.added_unit_source]; continue; }
+      if (it.written) { [it.addedUnit, it.addedSource] = [it.written, "written"]; continue; }
+      const twin = [...new Set(items.filter((o) => o !== it && o.lift && o.lift === it.lift && o.written).map((o) => o.written))];
+      if (twin.length === 1) { [it.addedUnit, it.addedSource] = [twin[0], "same-lift"]; continue; }
+      const hu = historyUnit(hist.get(liftIdOf(it.src.name)) || []);
+      [it.addedUnit, it.addedSource] = hu ? [hu, "history"] : [du, "display"];
+    }
+  }
   const verdict = (kind, i) => {
     const it = items.find((x) => x.kind === kind && x.i === i);
-    return it ? { unit: it.unit, unitSource: it.source, source: it.source, written: it.written, suspect: !!it.suspect } : null;
+    return it ? { unit: it.unit, unitSource: it.source, source: it.source, written: it.written, suspect: !!it.suspect, addedUnit: it.addedUnit || null, addedSource: it.addedSource || null } : null;
   };
   return { exercises: exercises.map((_, i) => verdict("ex", i)), pr_attempts: attempts.map((_, i) => verdict("pr", i)) };
 };
 
 // Stamp the resolved units onto the parse (see resolveLoadUnits for the order):
 // `unit`, `unit_source` (which step decided), and `unit_suspect: true` when the
-// guard fired. A stamped load is final, so a second stamp returns the same object.
+// guard fired. A bodyweight lift's added/assist load gets `added_unit` +
+// `added_unit_source` the same way (T68). A stamped load is final, so a second
+// stamp returns the same object.
 export const stampLoadUnits = (parsed, opts = {}) => {
   const exercises = Array.isArray(parsed?.exercises) ? parsed.exercises : [];
   const attempts = Array.isArray(parsed?.pr_attempts) ? parsed.pr_attempts : [];
@@ -327,7 +360,12 @@ export const stampLoadUnits = (parsed, opts = {}) => {
   const v = resolveLoadUnits(parsed, opts);
   const apply = (x, r) => {
     if (!x || !r) return x;
-    if (r.unitSource === "bodyweight") return x; // bodyweight work is left exactly as parsed
+    if (r.unitSource === "bodyweight") {
+      // Bodyweight work is left exactly as parsed, except that an added/assist/per-set
+      // load gets its own unit beside the number (T68). Nothing else on the row moves.
+      if (!r.addedUnit || (x.added_unit === r.addedUnit && x.added_unit_source === r.addedSource)) return x;
+      return { ...x, added_unit: r.addedUnit, added_unit_source: r.addedSource };
+    }
     if (x.unit === r.unit && x.unit_source === r.unitSource && !!x.unit_suspect === r.suspect) return x;
     const { unit_suspect, ...rest } = x;
     return { ...rest, unit: r.unit, unit_source: r.unitSource, ...(r.suspect ? { unit_suspect: true } : {}) };
@@ -414,7 +452,14 @@ export const unitCheckFact = (parsed) => {
   const loads = pendingUnitLoads(parsed);
   if (!loads.length) return "";
   const names = [...new Set(loads.map((l) => l.exercise))].join(", ");
-  return `UNIT CHECK (computed by the app, FINAL): the app itself is asking the athlete, in its own message right after yours, whether ${names} ${loads.length > 1 ? "were" : "was"} logged in kg or lbs. It will not bank ${loads.length > 1 ? "those lifts" : "that lift"} until they answer. In your reply: do not question that number, do not ask about its unit, do not celebrate it, do not call it a PR, and do not restate its weight in either unit. Talk about the rest of the session as usual, or keep it short if that was the only lift.`;
+  // T67 (09-29): "talk about the rest of the session" with nothing else in the
+  // log made Joe describe the day's planned lifts as logged, 5 of 5 on main.
+  // The app states what else this log holds.
+  const others = [...new Set((Array.isArray(parsed?.exercises) ? parsed.exercises : []).filter((x) => x?.name && !x.unit_suspect).map((x) => x.name))];
+  const rest = others.length
+    ? `The rest of this log (${others.join(", ")}) gets your usual reply.`
+    : "Nothing else is in this log: the reply is one short line that it is noted, and it names no other lift as done.";
+  return `UNIT CHECK (computed by the app, FINAL): the app itself is asking the athlete, in its own message right after yours, whether ${names} ${loads.length > 1 ? "were" : "was"} logged in kg or lbs. It will not bank ${loads.length > 1 ? "those lifts" : "that lift"} until they answer. In your reply: do not question that number, do not ask about its unit, do not celebrate it, do not call it a PR, and do not restate its weight in either unit. ${rest}`;
 };
 
 // Did Joe's reply already ask about a flagged lift's unit or number? Then the app
@@ -445,6 +490,22 @@ export const confirmPendingUnits = (parsedData, unit) => {
     parsed_data: { ...(parsedData || {}), exercises: ex2, pr_attempts: pr2 },
     bank: { exercises: ex2.filter((x, i) => x !== exs[i]), pr_attempts: pr2.filter((x, i) => x !== prs[i]) },
   };
+};
+
+// The loads a manual EDIT settled (T68). The My Log edit sheet clears `unit_suspect`
+// when the athlete picks a unit by hand, which is the same answer the chips give, so
+// it banks the same way. Given the row's parsed_data before and after the edit,
+// returns { exercises, pr_attempts }: the AFTER version of every load that was
+// pending before and no longer is (matched by lift; a removed lift is not settled).
+// Nothing pending before, or still pending after, returns nothing to bank. Pure.
+export const settledLoads = (before, after) => {
+  const key = (x) => liftIdOf(x?.name || x?.exercise || "") || lower(x?.name || x?.exercise);
+  const pending = (pd, list) => new Set((Array.isArray(pd?.[list]) ? pd[list] : []).filter((x) => x?.unit_suspect).map(key));
+  const settled = (list) => {
+    const was = pending(before, list);
+    return (Array.isArray(after?.[list]) ? after[list] : []).filter((x) => x && !x.unit_suspect && was.has(key(x)));
+  };
+  return { exercises: settled("exercises"), pr_attempts: settled("pr_attempts") };
 };
 
 // A typed answer to the app's "kg or lbs?" ("kg", "it was lbs", "kilos").

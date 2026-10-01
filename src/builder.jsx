@@ -27,6 +27,7 @@ import { normalizePrefs, prefsPromptLines, validatePref, describePref, nextSigna
 import { campaignLine, parseBlockInfo } from "./programContract.js";
 import { diffStats, lineDiff, mergeGuard } from "./programDiff.js";
 import { parseTimeline } from "./programHistory.js";
+import { memoryNotesText } from "./memory.js";
 import {
   cellsFor, blueprintPct, filledCount, precharge, pickTopic,
   extractorSystem, parseExtraction, interviewerSystem, parseInterviewerReply,
@@ -215,8 +216,8 @@ export function ProgramBuilderPane({ athlete, viewer = "athlete", coachId = null
   const scrollRef = useRef(null);
   const cells = cellsFor(viewer, scope);
   const pct = blueprint ? blueprintPct(blueprint, cells) : 0;
-  // T53 #1/#2: the resolved-max context (manual_one_rms + prs) and the rolling
-  // athlete_context notes that chat and the coach side already read — the Builder
+  // T53 #1/#2: the resolved-max context (manual_one_rms + prs) and the athlete's
+  // memory facts that chat already reads — the Builder
   // was the one feature blind to both.
   const [liftContext, setLiftContext] = useState({ manual: [], prs: [], notes: "", prefs: null, prefsRow: null });
   useEffect(() => {
@@ -225,14 +226,14 @@ export function ProgramBuilderPane({ athlete, viewer = "athlete", coachId = null
       const [m, p, ctx, pf] = await Promise.all([
         sbRead("manual_one_rms", `?athlete_id=eq.${athlete.id}`).catch(() => []),
         sbRead("prs", `?athlete_id=eq.${athlete.id}&select=exercise,estimated_1rm,weight,reps,unit`).catch(() => []),
-        sbRead("athlete_context", `?athlete_id=eq.${athlete.id}&select=content&limit=1`).catch(() => []),
+        sbRead("athlete_memory", `?athlete_id=eq.${athlete.id}&status=eq.active&order=updated_at.desc&limit=60`).catch(() => []),
         sbRead("athlete_training_prefs", `?athlete_id=eq.${athlete.id}&limit=1`).catch(() => []),
       ]);
       if (!on) return;
       setLiftContext({
         manual: Array.isArray(m) ? m : [],
         prs: Array.isArray(p) ? p : [],
-        notes: (Array.isArray(ctx) && ctx[0]?.content) ? String(ctx[0].content).slice(0, 1200) : "",
+        notes: Array.isArray(ctx) ? memoryNotesText(ctx) : "", // T68: the one memory store (src/memory.js)
         prefs: (Array.isArray(pf) && pf[0]) ? normalizePrefs(pf[0]) : null,
         prefsRow: (Array.isArray(pf) && pf[0]) || null,
       });
@@ -271,7 +272,7 @@ export function ProgramBuilderPane({ athlete, viewer = "athlete", coachId = null
         bp?.timeline?.value || "");
     } catch (_) { return ""; }
   };
-  // T53 #2: the rolling athlete_context notes ride with the numbers block into the
+  // T53 #2: the athlete's memory facts ride with the numbers block into the
   // interviewer and the drafter — data, not instructions (same contract as chat).
   const withNotes = (n) => {
     let out = n;

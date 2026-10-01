@@ -14,8 +14,9 @@ returns `needsAction` + a PaymentIntent secret for one `confirmCardPayment`
 (3DS-safe). Side effects: plan/gift changes no longer touch Stripe (duplicate-sub
 bug gone), and a compatible prior attempt gets the card ATTACHED rather than
 cancel+recreate (capped promo slots preserved). The legacy eager-create branch in
-`create-subscription` (no `paymentMethodId` in the body) remains for stale cached
-bundles — delete it once the service-worker fleet has rolled past 2026-08.
+`create-subscription` was DELETED (T68, 2026-09-29): a request with no
+`paymentMethodId` now gets a 400 ("...refresh the app and try again") and creates
+nothing in Stripe or Supabase; `scripts/test-checkout-lifecycle.mjs` pins it.
 Nightly `api/reconcile-billing` cron (07:15 UTC) diffs Stripe against Supabase
 into `error_events`; pure logic pinned by `scripts/test-checkout-lifecycle.mjs`.
 

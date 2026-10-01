@@ -19,6 +19,8 @@ const parkOf = (page, athlete) => page.evaluate((id) => JSON.parse(localStorage.
 // Boot, tap Start Workout, open the sheet, type the edit.
 const startAndEdit = async (page, athlete) => {
   await loginAsAthlete(page, athlete);
+  await page.getByRole("button", { name: "Start Workout" }).waitFor();
+  await page.waitForFunction(() => document.getAnimations().filter((a) => a.animationName === "fadeUp" && a.playState === "running").length === 0);
   await page.getByRole("button", { name: "Start Workout" }).click();
   const bar = page.getByText("Day 1 - Push", { exact: true }).first();
   await expect(bar).toBeVisible({ timeout: 15000 });
@@ -372,7 +374,7 @@ test("the rec bar comes back when the log sheet closes", async ({ page }) => {
   const recX = page.getByRole("button", { name: "Close the program rec", exact: true });
   await expect(recX).toHaveCount(0);
   await page.waitForTimeout(600);                          // the slide up has finished
-  await page.getByRole("button", { name: "Day 1 - Push", exact: true }).click();   // the sheet's header: sheet down
+  await page.getByRole("button", { name: /Day 1 - Push/ }).click();   // the sheet's header: sheet down
   await expect(page.getByRole("textbox", { name: SHEET })).toBeHidden();
   await expect(recX).toBeVisible();
   await expect(page.getByRole("button", { name: "Take it off the screen", exact: true })).toBeVisible();
@@ -419,4 +421,26 @@ test("text left behind by the X does not come back the next day as a bar", async
   await reopen(page);
   await page.waitForTimeout(1500);
   await expect(page.getByRole("button", { name: "Take it off the screen", exact: true })).toHaveCount(0);
+});
+
+// T68 (Will 09-29): every open sheet has the same X its bar has. The workout's
+// keeps the text parked exactly as the bar's does.
+test("the log sheet's own X takes the workout off the screen, text stays parked", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const { calls } = await mockApi(page, { athlete, chatReply: DRAFT_REPLY, token: liveToken() });
+  await startAndEdit(page, athlete);                       // sheet is open, no collapsing first
+  await page.waitForTimeout(600);
+  const x = page.getByRole("button", { name: "Take it off the screen", exact: true });
+  await expect(x).toHaveCount(1);
+  const box = await x.boundingBox();
+  expect(box.width).toBeGreaterThanOrEqual(32);
+  expect(box.height).toBeGreaterThanOrEqual(32);
+  await x.click();
+  await expect(page.getByRole("textbox", { name: SHEET })).toBeHidden();
+  await expect(page.getByRole("button", { name: "Finish Workout" })).toHaveCount(0);
+  await expect(page.getByText("Day 1 - Push", { exact: true })).toHaveCount(0);   // bar gone too
+  const park = await parkOf(page, athlete);
+  expect(park.draft).toBe(EDITED);
+  expect(park.dock).toBeFalsy();
+  expect(calls.some((c) => c.body?.op === "insert" && c.body?.table === "workouts")).toBe(false);
 });

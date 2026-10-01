@@ -44,9 +44,25 @@ export const attemptUnit = (attempt, displayUnit = DISPLAY_UNIT) =>
 // Every exercise reader resolves through here; do not hand-copy the ternary.
 export const exerciseUnit = (ex) =>
   ex?.unit === "kg" || ex?.unit === "lbs" || ex?.unit === "bodyweight" ? ex.unit : "lbs";
-// The unit to do weight math in: a bodyweight set's added/assist load is lbs
-// (parser convention, see formatSetDetails in App.jsx).
+// The unit to do weight math in for a set's WEIGHT. A bodyweight row has no weight
+// of its own (its added/assist/per-set loads read through addedLoadUnit below, T68),
+// so this stays "lbs" for it, which is also the unit a bodyweight lift's derived
+// e1RM is labelled in.
 export const exerciseLoadUnit = (ex) => (exerciseUnit(ex) === "kg" ? "kg" : "lbs");
+
+// The unit of a bodyweight row's ADDED load ("BW+20": added_weight, assist_weight,
+// and per-set weights on a unit:"bodyweight" exercise). The exercise's own `unit`
+// is "bodyweight" there, so it cannot carry the load's unit; T68 stamps that on the
+// row as `added_unit` ("kg" | "lbs", beside `added_unit_source`) through the same
+// resolver as every other load (src/prAttempts.js stampLoadUnits). A row with no
+// `added_unit` predates T68: every reader assumed lbs for it, and it keeps that
+// meaning, so nothing already stored changes value. Every reader of an added load
+// resolves through here; do not hand-write "lbs" next to added_weight again.
+export const addedLoadUnit = (ex) => (ex?.added_unit === "kg" || ex?.added_unit === "lbs" ? ex.added_unit : "lbs");
+
+// A load on a bodyweight row (added, assist or per-set weight) -> number in `to`
+// (default: the display unit). One conversion from the raw pair, never rounded.
+export const addedLoadIn = (ex, value, to = DISPLAY_UNIT) => toDisplay(value, addedLoadUnit(ex), to);
 
 // A load whose unit the app could not settle (src/prAttempts.js marks it
 // unit_suspect and asks "kg or lbs?"). Until the athlete answers, NOTHING is

@@ -116,7 +116,7 @@ export const getExerciseSets = (ex) => {
 
 // Conversion lives in units.js (T55: single source, one constant). Imported for
 // local use and re-exported because grit.js is where most existing code gets it.
-import { toLbs, toKg, LBS_PER_KG, getDisplayUnit, toDisplay, roundStat, exerciseUnit, exerciseLoadUnit, isUnitPending } from "./units.js";
+import { toLbs, toKg, LBS_PER_KG, getDisplayUnit, toDisplay, roundStat, exerciseUnit, exerciseLoadUnit, isUnitPending, addedLoadUnit } from "./units.js";
 export { toLbs, toKg, LBS_PER_KG };
 
 // Load-bearing bodyweight movements — dips, pull-ups, chin-ups, muscle-ups — where
@@ -134,7 +134,9 @@ export const bestE1RMForExercise = (ex, bwLbs = 0) => {
   let bwLoad = 0;
   if (isBW) {
     if (!bwLbs || !LOAD_BEARING_BW.test((ex.name || "").toLowerCase())) return 0;
-    bwLoad = bwLbs + (ex.added_weight || 0) - (ex.assist_weight || 0);
+    // The added/assist load carries its own unit (T68 added_unit; no stamp = lbs).
+    const au = addedLoadUnit(ex);
+    bwLoad = bwLbs + toLbs(ex.added_weight || 0, au) - toLbs(ex.assist_weight || 0, au);
     if (bwLoad <= 0) return 0;
   }
   const all = getExerciseSets(ex);
@@ -982,12 +984,26 @@ export function feasibilityLine(rows, goalText, timelineText) {
 // Mirrors finalizeWorkout's celebration rules: a made single above the best on
 // file is an actual PR; an e1RM rise only counts while no actual 1RM exists;
 // an implausible jump gets a sanity-check verdict, not a celebration.
+// T67 (09-29): a kg athlete's lines carry kg ONLY. They used to read
+// "154.2 kg (340 lbs)", and the real model once read that back as "340 kg".
+// One unit per athlete, the one they work in; the comparison itself is done
+// here in lbs and never shown.
+export const showMax = (lbs, unit = "lbs") => unit === "kg" ? `${Math.round((lbs / LBS_PER_KG) * 10) / 10} kg` : `${Math.round(lbs)} lbs`;
+// T68: a lift's facts are stated in the unit THAT LIFT was logged in (athletes
+// mix units by lift: barbell in kg, bench in lbs). A kg athlete who typed
+// "bench 3x5 @ 225" was handed "102.1 kg" and the reply came back reconciling
+// the two aloud ("225 lbs is 102 kg, up around 112.5 on the kg side").
+// A bodyweight lift's added load speaks in the unit IT was logged in (units.js addedLoadUnit).
+export const factUnit = (ex, unit = "lbs") => {
+  if (ex && (ex.unit === "kg" || ex.unit === "lbs")) return ex.unit;
+  if (ex && ex.unit === "bodyweight" && (ex.added_unit === "kg" || ex.added_unit === "lbs")) return addedLoadUnit(ex);
+  return unit === "kg" ? "kg" : "lbs";
+};
 export function prCheckLines(exercises, best, unit = "lbs") {
-  const kg = unit === "kg";
-  const show = (lbs) => kg ? `${Math.round((lbs / LBS_PER_KG) * 10) / 10} kg (${Math.round(lbs)} lbs)` : `${Math.round(lbs)} lbs`;
   const lines = [];
   for (const ex of Array.isArray(exercises) ? exercises : []) {
     if (!ex || !ex.name || ex.unit === "bodyweight" || isUnitPending(ex)) continue;
+    const show = (lbs) => showMax(lbs, factUnit(ex, unit));
     const sets = getExerciseSets(ex).filter((s) => s.weight > 0);
     if (!sets.length && !(ex.weight > 0)) continue;
     const top = sets.reduce((b, s) => (!b || toLbs(s.weight, ex.unit) > toLbs(b.weight, ex.unit)) ? s : b, null) || { weight: ex.weight, reps: ex.reps || 1 };
@@ -1014,4 +1030,11 @@ export function prCheckLines(exercises, best, unit = "lbs") {
     }
   }
   return lines;
+}
+
+// The chat's KNOWN 1RMs lines (T67): rows are {name, e1rm (lbs), actual?}, the
+// same map prCheckLines reads. A kg athlete reads kg, never a bare lbs number
+// the model has to convert (the same misread as the PR CHECK lines).
+export function knownMaxLines(rows, unit = "lbs") {
+  return (Array.isArray(rows) ? rows : []).map((r) => `${r.name}: ${r.actual ? "" : "~"}${showMax(r.e1rm, unit)} (${r.actual ? "actual 1RM" : "est."})`);
 }

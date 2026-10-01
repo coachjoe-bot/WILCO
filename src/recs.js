@@ -287,3 +287,24 @@ export function validateRecPayload(rec) {
   if (!title || !swaps.length) return { ok: false, reason: !title ? "no_title" : "no_swaps" };
   return { ok: true, rec: { v: 1, title, summary, why, origin: String(rec.origin || "ask").slice(0, 20), duration, swaps, parked: !!rec.parked } };
 }
+
+// ─── WHO WRITES THE PROGRAM THIS TURN (T68, AI contract rules 3 and 4) ───────
+// Two mechanisms could act on one message: the parser's program flags
+// (is_program_update / program_append, plus the forced append on an explicit
+// "add ... to my program") and Joe's propose_program_rec. Live, "add curls 3x12
+// to my plan" staged a rec AND appended to the program. One owner per action:
+// Joe's tool wins when its rec is real (the payload validates and at least one
+// swap locates in the saved program). A rec that cannot be staged loses to the
+// parser's write, and is dropped so the athlete never gets "couldn't line that
+// up" beside a write that did happen. A coach-locked program is not decided
+// here: that branch drafts a coach request and neither writer runs.
+//   -> {owner: "tool" | "parser" | null}
+export function programWriteOwner({ toolCalls = [], parserWants = false, programText = "", locked = false } = {}) {
+  const recs = (Array.isArray(toolCalls) ? toolCalls : []).filter((tc) => tc && tc.name === "propose_program_rec");
+  if (!recs.length || !parserWants || locked) return { owner: null };
+  const real = recs.some((tc) => {
+    const v = validateRecPayload({ ...(tc.input || {}), origin: "ask" });
+    return v.ok && locateSwaps(programText || "", v.rec.swaps).located.length > 0;
+  });
+  return { owner: real ? "tool" : "parser" };
+}

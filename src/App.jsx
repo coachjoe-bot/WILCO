@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, Component, lazy, Suspense } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, Component, lazy, Suspense } from "react";
 // Coach dashboard lives in its own lazily-loaded chunk (src/coach.jsx) so the
 // athlete-facing bundle — what 95% of users download — stays smaller.
 const CoachDashboard = lazy(()=>import("./coach.jsx"));
@@ -71,17 +71,17 @@ import { currentPosition, positionBlock, parseBlockSpan, programTextIdentity } f
 // governing when Joe offers to loop the human coach in (see file header).
 import { draftChangeRequest, fileChangeRequest, flagToSource } from "./changeRequest.js";
 import { FEATURE_INVENTORY } from "./features.js";
-import { toLbs, fmtWeightIn, displayStat, unitLabel, setDisplayUnit, getDisplayUnit, toDisplay, roundStat, exerciseUnit, exerciseLoadUnit } from "./units.js";
+import { toLbs, fmtWeightIn, displayStat, unitLabel, setDisplayUnit, getDisplayUnit, toDisplay, roundStat, exerciseUnit, exerciseLoadUnit, addedLoadUnit, addedLoadIn } from "./units.js";
 // Declared maxes (pr_attempts): unit stamping + the actual-1RM write decision.
-import { stampLoadUnits, storedAttemptUnit, isDeclaredMax, declaredMaxWrite, unitCheckMessage, unitCheckFact, replyAsksUnit, pendingUnitLoads, confirmPendingUnits, unitAnswer } from "./prAttempts.js";
+import { stampLoadUnits, storedAttemptUnit, isDeclaredMax, declaredMaxWrite, unitCheckMessage, unitCheckFact, replyAsksUnit, pendingUnitLoads, confirmPendingUnits, unitAnswer, settledLoads } from "./prAttempts.js";
 import { effectiveTier, trialActive } from "./tiers.js";
 import { CREW_ENABLED, MASTERMIND_ENABLED, CHAT_FIRST_ENABLED } from "./flags.js";
 import { buildMastermindStatic } from "./ai/card.js";
 import { blueprintPct } from "./programBuilder.js";
-import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps } from "./memory.js";
+import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps, memoryNotesText, checkinNoteFact } from "./memory.js";
 import { activeGoals, goalsToSupersede, sameGoalText } from "./goals.js";
-import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, recSummaryFallback, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
-import { performedBlock, logHeadline, logFocusBlock, planDayFor, prLinesForReply, logTurnExercises } from "./turnFacts.js";
+import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, programWriteOwner, recSummaryFallback, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
+import { performedBlock, logHeadline, logFocusBlock, planDayFor, prLinesForReply, logTurnExercises, logUnitsFact } from "./turnFacts.js";
 import { ledgerTurn, ledgerBlock, normArea, painFollowUpPlan, applyStamps, recStagedLine, withMark, normalizeMarks, flagClearedFor, keepPainRec, painStatus, currentPainAreas, currentPainLines, painNoteGuard, areaLabel } from "./painLedger.js";
 import { buildAgenda, agendaTurnPrompt, parseAgendaTurn, advanceAgenda, initialAgendaState, isEndIntent, painStampsFrom, closingLine, digestNoteFrom } from "./checkinAgenda.js";
 import { programPurpose, purposeLine } from "./programPurpose.js";
@@ -104,7 +104,7 @@ import { validatePref, normalizePrefs, describePref, prefsPromptLines, nextSigna
 import { parseBlockInfo, stripBlockInfo } from "./programContract.js";
 import { lineDiff, findPlacement, mergeGuard, mergeSystemPrompt } from "./programDiff.js";
 import { snapshotProgramHistory, startNextBlock, closeCurrentBlock, setBlockEnd, blockPromptState, parseTimeline, dateToIso, refreshOpenBlockRecap, recapShortFallback, buildBlockSpanAnswer, blockSpanConflict, blockSpanNeedsAsk, wrapCardEligible, statesBlockEnd, resolveStatedSpan } from "./programHistory.js";
-import { decideTempWrite, tempTurnBefore, tempProgramFact, tempConfirmLine, planSlice, looksLikePlanText } from "./changeScope.js";
+import { decideTempWrite, tempTurnBefore, tempProgramFact, tempConfirmLine, planSlice, looksLikePlanText, keepRecOnScope, changeScopeFact } from "./changeScope.js";
 // First-run app tour (spotlight coach-marks + scripted Quick Log demo). Pure
 // display: fixtures never touch real data — see tour.jsx header.
 import { TourOffer, TourSpotlight, athleteTourSteps, tourWelcome, tourInteractiveAt, TOUR_QL_FIXTURE, TOUR_SCRIPT } from "./tour.jsx";
@@ -146,7 +146,7 @@ import {
   TIER_NAMES, TIER_COLORS, TIER_POINTS, TIER_DESC,
   BENCH_THRESHOLDS, tierForRatio, bwTierFactor, ageTierFactor, scaledThresholds, getBenchKey,
   sessionTonnage, sessionTopSet, goalTargets, liftSeriesPoints,
-  implausibleJump, prCheckLines,
+  implausibleJump, prCheckLines, knownMaxLines,
 } from "./grit.js";
 export {
   epley1RM, getExerciseSets, bestE1RMForExercise, effectiveDate, parseDbDate,
@@ -1390,9 +1390,10 @@ const TECHNIQUE_LABEL = { drop:"drop set", rest_pause:"rest-pause", cluster:"clu
 const withSetMods = (ex, base, hasWeight=false, warmupCount=0) => {
   let s = base;
   // Added / assisted bodyweight load (weighted pull-ups, assisted dips).
-  // Raw added/assist weights are ALWAYS lbs (parser convention); the display
-  // path converts them and stamps __wu with the display unit (T57).
-  const wu = ex.__wu || "lbs";
+  // The added/assist load carries its own unit (T68 added_unit; a row without one
+  // predates it and is lbs); the display path converts it and stamps __wu with
+  // the display unit (T57).
+  const wu = ex.__wu || addedLoadUnit(ex);
   if(ex.added_weight) s += ` +${ex.added_weight}${wu}`;
   else if(ex.assist_weight) s += ` −${ex.assist_weight}${wu} (assisted)`;
   // Bands / chains (resistance not on the bar).
@@ -1432,23 +1433,25 @@ export const formatSetDetails = (ex, {display=false} = {}) => {
     const du = getDisplayUnit();
     if(exerciseLoadUnit(ex)!==du){
       const cv = (w)=> (w||w===0) ? roundStat(toDisplay(w, ex.unit, du), du) : w;
-      // Added/assist weights are stored in lbs regardless of the row's unit
-      // (parser convention), so they convert FROM lbs, not from ex.unit.
-      const cvAdd = (w)=> (w||w===0) ? roundStat(toDisplay(w, "lbs", du), du) : w;
+      // Added/assist weights carry their own unit (addedLoadUnit), not the row's.
+      const cvAdd = (w)=> (w||w===0) ? roundStat(addedLoadIn(ex, w, du), du) : w;
       ex = {...ex, unit:du, __wu:du, weight:cv(ex.weight),
         added_weight: ex.added_weight!=null?cvAdd(ex.added_weight):ex.added_weight,
         assist_weight: ex.assist_weight!=null?cvAdd(ex.assist_weight):ex.assist_weight,
         set_details: Array.isArray(ex.set_details)?ex.set_details.map(x=>({...x,weight:x.weight!=null?cv(x.weight):x.weight})):ex.set_details};
     }
-  } else if(display && ex.unit==="bodyweight" && (ex.added_weight!=null||ex.assist_weight!=null)){
+  } else if(display && ex.unit==="bodyweight" && (ex.added_weight!=null||ex.assist_weight!=null||(Array.isArray(ex.set_details)&&ex.set_details.some(s=>s?.weight>0)))){
     // Weighted/assisted bodyweight rows never entered the block above, so a kg
-    // athlete saw "+45lbs" on an otherwise all-kg screen (T57).
+    // athlete saw "+45lbs" on an otherwise all-kg screen (T57). The load is read
+    // in ITS unit (T68: a kg athlete's "BW+20" is 20 kg, an lbs athlete's stays
+    // lbs) and shown in the display unit, per-set weights included.
     const du = getDisplayUnit();
-    if(du==="kg"){
-      const cvAdd = (w)=> (w||w===0) ? roundStat(toDisplay(w, "lbs", du), du) : w;
+    if(addedLoadUnit(ex)!==du){
+      const cvAdd = (w)=> (w||w===0) ? roundStat(addedLoadIn(ex, w, du), du) : w;
       ex = {...ex, __wu:du,
         added_weight: ex.added_weight!=null?cvAdd(ex.added_weight):ex.added_weight,
-        assist_weight: ex.assist_weight!=null?cvAdd(ex.assist_weight):ex.assist_weight};
+        assist_weight: ex.assist_weight!=null?cvAdd(ex.assist_weight):ex.assist_weight,
+        set_details: Array.isArray(ex.set_details)?ex.set_details.map(x=>({...x,weight:x.weight!=null?cvAdd(x.weight):x.weight})):ex.set_details};
     }
   }
   const allSets = getExerciseSets(ex);
@@ -1463,7 +1466,8 @@ export const formatSetDetails = (ex, {display=false} = {}) => {
   const working = allSets.filter(s=>!s.warmup);
   const sets = working.length ? working : allSets;
   const warmupCount = allSets.length - sets.length;
-  const u = exerciseUnit(ex)==="bodyweight" ? "" : exerciseLoadUnit(ex);
+  // A bodyweight row's per-set weights are added loads: label them with their unit (T68).
+  const u = exerciseUnit(ex)==="bodyweight" ? (sets.some(s=>s.weight>0) ? (ex.__wu||addedLoadUnit(ex)) : "") : exerciseLoadUnit(ex);
   const hasWeight = sets.some(s=>s.weight && s.weight>0);
   let base;
   // Olympic complex / rest-pause: one uniform rep scheme (e.g. "1+1", "8+3+2")
@@ -1748,8 +1752,8 @@ Rules:
 - RPE / RIR (effort): "RPE 8" or "@8" after a set = Rate of Perceived Exertion (scale 1–10, allow halves like 7.5) → set "rpe". "RIR 2", "2 in the tank", "2 reps in reserve", "left 2" → set "rir". If only one is stated, fill only that one — do NOT convert between them. "squat 5x3 225 RPE 8" → rpe:8.
 - PERCENT OF 1RM: "@ 80%", "80% of max", "at 82%" → set "percent_1rm":80 (number only). This is an intensity, NOT a weight — never put a percent in "weight". If both a percent and an absolute weight are given, record both.
 - TEMPO: a cadence like "tempo 30X1", "3-1-1-0", "3s eccentric", "2 count down" → set "tempo" to that cadence string. Do NOT put tempo in the name or notes.
-- WEIGHTED BODYWEIGHT (added load): a bodyweight movement done with EXTRA weight — "weighted pull-ups +45", "dips +90", "pull-ups w/ 25lb vest", "chin-ups holding a 35". Set "unit":"bodyweight", "weight":null, and "added_weight" to the extra pounds. "weighted pull-ups 3x5 +45" → {"name":"Weighted Pull-Up","sets":3,"reps":5,"unit":"bodyweight","added_weight":45}.
-- ASSISTED BODYWEIGHT (reduced load): band/machine assistance — "assisted pull-ups -40", "assisted dips with 50lb assist", "band-assisted pull-ups". Set "unit":"bodyweight", "weight":null, and "assist_weight" to the assistance pounds. "assisted dips 3x8 -40" → {"name":"Dip","sets":3,"reps":8,"unit":"bodyweight","assist_weight":40}.
+- WEIGHTED BODYWEIGHT (added load): a bodyweight movement done with EXTRA weight — "weighted pull-ups +45", "dips +90", "pull-ups w/ 25lb vest", "chin-ups holding a 35". Set "unit":"bodyweight", "weight":null, and "added_weight" to the extra weight as a number, exactly as written (never convert it between kg and lbs; the app works out the unit). "weighted pull-ups 3x5 +45" → {"name":"Weighted Pull-Up","sets":3,"reps":5,"unit":"bodyweight","added_weight":45}.
+- ASSISTED BODYWEIGHT (reduced load): band/machine assistance — "assisted pull-ups -40", "assisted dips with 50lb assist", "band-assisted pull-ups". Set "unit":"bodyweight", "weight":null, and "assist_weight" to the assistance as a number, exactly as written (never convert it). "assisted dips 3x8 -40" → {"name":"Dip","sets":3,"reps":8,"unit":"bodyweight","assist_weight":40}.
 - BANDS / CHAINS (accommodating resistance NOT on the bar): "squat 225 + red band", "bench with chains", "banded deadlift". Keep the bar weight in "weight" and put the description in "resistance" ("red band", "chains", "monster minis"). Do NOT add band/chain tension into the bar weight.
 - DUMBBELL / PER-HAND LOAD: when a dumbbell/kettlebell weight is stated per hand — "DB press 3x10 @ 50s", "50lb dumbbells each hand", "2x24kg" — set "load_basis":"each" and put the per-hand weight in "weight". A single/total load ("goblet squat 1x53") → "load_basis":"total" or null.
 - PLUS-SIGN "+" — decide what it means from context, in THIS priority order:
@@ -1868,29 +1872,22 @@ Rules:
   return JSON.parse(text.replace(/```json|```/g,"").trim());
 };
 
-// athlete_context is a SINGLE upserted row per athlete (UNIQUE(athlete_id)). To give
-// the AI a short ROLLING memory instead of one overwriting snapshot, we accumulate
-// dated notes inside that row's `content`, bounded to the most recent
-// MAX_CONTEXT_NOTES lines so the coaching prompt stays small. Notes are stored as
-// DATA, never as instructions — the extractor (parseWorkout context_request) records
-// only facts about the athlete and refuses behavior-change requests. Returns the new
-// bounded content (for in-session state refresh), or null if nothing was written.
-const MAX_CONTEXT_NOTES = 12;
-const appendAthleteContext = async (athleteId, line, {longTerm=false}={}) => {
-  const clean = String(line||"").replace(/\s+/g," ").trim().slice(0,220);
-  if(!clean) return null;
-  let prior=""; let priorLong=false;
+// T68 (09-29): ONE memory store (AI contract rule 2). The athlete_context blob
+// (a single upserted row of rolling dated notes) is retired: nothing reads or
+// writes it. Every note the app keeps about an athlete is a row in
+// athlete_memory, validated the same way a fact Joe saves is (src/memory.js
+// validateFact refuses behavior instructions, pain tallies, program-change
+// claims and block dates). Returns the saved row, the row it duplicates, or null.
+const saveMemoryFact = async (athleteId, fact, rows=[]) => {
+  const v = validateFact(fact||{});
+  if(!v.ok) return null;
+  const dup = findDuplicate(rows, v.content);
+  if(dup) return dup;
   try{
-    const rows = await sbRead("athlete_context",`?athlete_id=eq.${athleteId}&limit=1`);
-    if(Array.isArray(rows)&&rows[0]){ prior=rows[0].content||""; priorLong=!!rows[0].is_long_term; }
-  }catch(_){}
-  const lines = prior ? prior.split("\n").filter(Boolean) : [];
-  lines.push(clean);
-  const bounded = lines.slice(-MAX_CONTEXT_NOTES).join("\n");
-  try{
-    await sbUpsert("athlete_context",{athlete_id:athleteId,content:bounded,is_long_term:priorLong||longTerm,updated_at:new Date().toISOString()},"athlete_id");
+    const ins = await sbInsert("athlete_memory",{athlete_id:athleteId, content:v.content, kind:fact.kind, expires_at:fact.expires_at||null, source:fact.source||"inferred"});
+    const row = Array.isArray(ins)?ins[0]:ins;
+    return (row && row.id) ? row : null;
   }catch(_){ return null; }
-  return bounded;
 };
 
 // ── Joe-bot system prompt, split for prompt caching ──────────────────────────
@@ -2136,8 +2133,9 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
       const k = resolveLift(m.normalized_exercise||m.exercise).id;
       byEx[k] = {name:m.exercise, e1rm:toLbs(m.weight,m.unit), actual:true};
     });
-    const rmLines = Object.values(byEx).sort((a,b)=>b.e1rm-a.e1rm).slice(0,15)
-      .map(r=>`${r.name}: ${r.actual?`${Math.round(r.e1rm)} lbs (actual 1RM)`:`~${Math.round(r.e1rm)} lbs (est.)`}`).join("\n");
+    // T67: in the athlete's own unit (grit.js knownMaxLines); a kg athlete used
+    // to read bare lbs numbers here and the model once said one back as kg.
+    const rmLines = knownMaxLines(Object.values(byEx).sort((a,b)=>b.e1rm-a.e1rm).slice(0,15), athlete.weight_unit).join("\n");
     if(rmLines) maxContext = `\n\nKNOWN 1RMs (an "actual 1RM" is the athlete's real recorded max and ALWAYS outranks an "est." entry; use ONLY to turn a program percentage or RPE target into a weight):\n${rmLines}`;
   }
 
@@ -2165,6 +2163,11 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
       const lines = prCheckLines(logExercises, byEx, athlete.weight_unit);
       prLinesForFocus = lines;
       if(lines.length) prCheckContext = `\n\nPR CHECK — THIS MESSAGE'S LOG (computed by the app from their records; these verdicts are FINAL — never re-derive, re-convert, or re-compare the numbers yourself):\n${prLinesForReply(lines, logExercises).map(l=>`- ${l}`).join("\n")}\nA line marked NEW PR is confirmed above their previous best: when it is the headline, celebrate it genuinely and specifically, scaled to how central that lift is to their sport (a weightlifter's snatch or clean and jerk PR is a headline day, not a footnote). Never describe a NEW PR weight as under, below, or "right under" anything.`;
+      // T68: a lift logged in the other unit is said in that unit (turnFacts
+      // logUnitsFact). Appended AFTER the PR CHECK block is assigned: placed
+      // before it, the assignment dropped the line (found on the prod pass).
+      const lu = logUnitsFact(logExercises, athlete.weight_unit);
+      if(lu) prCheckContext += `\n\n${lu}`;
     }catch(_){ /* verdicts are additive — a failure just means no block */ }
     // T64 S2 (bug 5): what was PERFORMED, from set_details. Joe called a logged
     // 5x3 "a clean double" because only the plan's 5x2 was in front of him.
@@ -2205,6 +2208,8 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
     positionContext = `\n\nWHERE THE ATHLETE IS IN THEIR PROGRAM: could not be resolved. Do NOT state a week or day as fact. If they ask for today's session, ask ONE plain question ("Which day of the week are you on?") and work from their answer.`;
   }
   if(opts.tempProgramFact) positionContext += `\n\n${opts.tempProgramFact}`; // T64 S6: temp program saved or not (src/changeScope.js tempProgramFact)
+  // T67: a change asked for today only is never a program rec (src/changeScope.js)
+  try{ const f = opts.changeScope ? changeScopeFact({scope: opts.changeScope, message, isLogTurn}) : ""; if(f) positionContext += `\n\n${f}`; }catch(_){ /* additive */ }
 
   let programContext = "";
   if(athlete.temp_program_text){
@@ -2226,8 +2231,10 @@ const getJoeBotReply = async (message, athlete, history, workoutHistory=[], athl
     try{
       const planText = athlete.temp_program_text || athlete.program_text || "";
       const planDay = planDayFor({programText: planText, loggedNames: logExercises.map(e=>e?.name).filter(Boolean), resolverLabel: posNow?.label||null, week: posNow?.weekKnown ? posNow.week : null});
-      const headline = logHeadline({exercises: logExercises, prLines: prLinesForFocus, lastDone: byLift, painTurn: painLt?.turn||null, planDay, sport: athlete.sport||"", displayUnit: athlete.weight_unit, now: new Date()});
+      // T67: today's session text (the resolver's) names the planned lifts this log leaves out (planRest)
+      const headline = logHeadline({exercises: logExercises, prLines: prLinesForFocus, lastDone: byLift, painTurn: painLt?.turn||null, planDay, sport: athlete.sport||"", displayUnit: athlete.weight_unit, now: new Date(), todayPlanText: posNow && !posNow.isRestDay ? (posNow.sessionText||"") : ""});
       logFocus = `\n\n${logFocusBlock(headline)}`;
+      if(opts && typeof opts==="object") opts.headline = headline; // T67: send() hands planRest to the output gate
     }catch(_){ /* additive: a failure means no block, never a crash */ }
   }
 
@@ -2265,14 +2272,14 @@ ${athlete.weight_unit==="kg"?"This athlete works in KG. State every weight you s
   // Athlete context from monthly recaps
   let contextMemory = "";
   if(athleteContext){
-    contextMemory = `\n\nATHLETE CONTEXT (from monthly recap history: preferences, injuries, goals stated over time):\n${athleteContext}\nUse this as background, do not repeat it back, just let it inform your responses.`;
+    contextMemory = `\n\nATHLETE CONTEXT (what the app has kept about them: preferences, plans, check-in notes):\n${athleteContext}\nUse this as background, do not repeat it back, just let it inform your responses.`;
   }
 
   // T58 mastermind: the unified card replaces the legacy persona block, the fact
   // store replaces the raw context blob (which rides inside the block until its
   // content migrates), and the server-registered toolset arms Joe's hands.
   if(opts.mastermind){
-    const memBlock = buildMemoryBlock(opts.memoryRows||[], athleteContext||"");
+    const memBlock = buildMemoryBlock(opts.memoryRows||[]);
     // A send from the log sheet is a FINISHED workout, not a message asking for
     // one. Without this line Joe compared the sent text to his own earlier draft
     // in the transcript, narrated it like an interrogation ("let's log what you
@@ -3689,7 +3696,7 @@ function reportsActivePain(text){
   return PAIN_WORDS.test(t) && BODY_AREAS.test(t);
 }
 
-function ProofChatModal({athlete, digest, onClose, onContextSaved, onDigestRead, onPainMarks, workoutHistory, kbInset=0}) {
+function ProofChatModal({athlete, digest, onClose, onMemorySaved, onDigestRead, onPainMarks, workoutHistory, kbInset=0}) {
   const alreadyDone = !!(digest?.content_json?.checkin_done);
   const [phase, setPhase] = useState(alreadyDone ? "done" : "report"); // report | dialogue | coach-offer | acting | done
   const [messages, setMessages] = useState([]);
@@ -4040,12 +4047,12 @@ Rules: facts are about the ATHLETE (schedule, availability, equipment, preferenc
     const injuryMentioned = !!ex.injury_note || finalAnswers.some(a=>/injur|sore|pain|hurt|tweak|limitation/i.test(a.a));
     const soft = ex.soft_notes || finalAnswers.map(a=>`${a.q}: ${a.a}`).join("; ");
     const dateTag = new Date().toLocaleDateString("en-US",{month:"short",day:"numeric"});
-    // Accumulate into the rolling context buffer (shared with in-chat "remember"
-    // notes) so a check-in no longer overwrites everything the athlete told Coach Joe.
+    // The check-in's summary is a fact with a shelf life in the one memory store
+    // (T68; src/memory.js checkinNoteFact: 12 weeks, the blob's rolling 12 notes).
     const note = `${isMonthly?"Monthly":"Weekly"} check-in ${dateTag}: ${soft}${ex.injury_note?` | injury: ${ex.injury_note}`:""}${newProgram?" | program updated":""}`;
     try{
-      const updated = await appendAthleteContext(athlete.id, note, {longTerm:injuryMentioned});
-      if(onContextSaved && updated!==null) onContextSaved(updated);
+      const row = await saveMemoryFact(athlete.id, checkinNoteFact(note));
+      if(onMemorySaved && row) onMemorySaved(row);
     }catch(_){}
     // Mark the digest read AND lock the check-in so it can't be re-run (once per
     // progress report). checkin_done is stored in content_json (no migration needed).
@@ -6622,7 +6629,12 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // Seeded from the warm-reopen snapshot (see `snapshot` above) so the Proof tab
   // and Joe's context aren't empty for the first second of a reopen.
   const [athleteGoals,setAthleteGoals] = useState(()=>snapshot?.goals||[]);
-  const [athleteContext,setAthleteContext] = useState(()=>snapshot?.context||null);
+  // T68: the notes every prompt is handed are the athlete's memory facts
+  // (memoryRows, athlete_memory), never a second store. The snapshot's context
+  // string covers the first second of a warm reopen, until the rows load.
+  const [memoryRows,setMemoryRows] = useState([]);
+  const [memoryLoaded,setMemoryLoaded] = useState(false);
+  const athleteContext = useMemo(()=> memoryLoaded ? (memoryNotesText(memoryRows)||null) : (snapshot?.context||null), [memoryRows,memoryLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
   const [proofDigest,setProofDigest] = useState(()=>snapshot?.digest||null);
   const [showProofChat,setShowProofChat] = useState(false);
   const [chatDigest,setChatDigest] = useState(null); // A5: a PAST edition opened from the archive (null = latest)
@@ -7196,7 +7208,6 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // memoryRows = this athlete's active facts (athlete_memory), injected into
   // every mastermind turn and mutated by the remember/forget tools. Loaded
   // lazily post-boot; the flag off = zero reads, zero behavior change.
-  const [memoryRows,setMemoryRows] = useState([]);
   useEffect(()=>{
     // T61: no MASTERMIND_ON gate — the Memory tab's Athlete Context view ships
     // on web too (Will 08-29), so the rows load for everyone. Web without the
@@ -7205,7 +7216,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     if(!historyLoaded) return;
     let dead = false;
     sbRead("athlete_memory",`?athlete_id=eq.${athlete.id}&status=eq.active&order=updated_at.desc&limit=60`)
-      .then(rows=>{ if(!dead && Array.isArray(rows)) setMemoryRows(activeFacts(rows)); })
+      .then(rows=>{ if(!dead && Array.isArray(rows)){ setMemoryRows(activeFacts(rows)); setMemoryLoaded(true); } })
       .catch(()=>{});
     return ()=>{ dead = true; };
   },[historyLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -7520,6 +7531,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
   // status "rec"/"rec_applied", payload in blueprint.rec). Native-gated.
   const [recPending,setRecPending] = useState(null);   // {draftId, rec} — the bar's rec
   const [recOpen,setRecOpen] = useState(false);
+  // T68: the boot restore below is async, and its bar mounts in the flow above the
+  // composer. The opener's Start Workout buttons used to render first, then the
+  // bar pushed them (a tap aimed at Start landed elsewhere, 2 of 6 on prod). The
+  // buttons now wait for the restore to settle, and the bar mounts in the same
+  // batch as they appear, with the list re-pinned to the bottom (see the layout
+  // effect after the restore).
+  const [recRestored,setRecRestored] = useState(!CHAT_FIRST_ON);
   const [recBusy,setRecBusy] = useState(false);
   // The bar's ✕ never acts silently (Will 09-01): it asks Save to Drafts or
   // Delete. Backdrop tap cancels and the rec stays live.
@@ -7690,6 +7708,12 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     }catch(_){ return false; }
   };
 
+  // The opener's buttons wait for the rec restore below (recRestored), so a
+  // read that hangs or a boot that never loads history must not leave them
+  // hidden: after 5 s they arm regardless. A late bar can shift them; a Start
+  // Workout button that never appears is worse.
+  useEffect(()=>{ const t = setTimeout(()=>setRecRestored(true), 5000); return ()=>clearTimeout(t); },[]);
+
   // Boot: restore the bar for the latest un-parked rec, and run any expired
   // timed reverts. One read covers both.
   useEffect(()=>{
@@ -7710,8 +7734,20 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           if(live) setRecPending({draftId:live.id, rec:live.blueprint.rec});
         }
       }catch(_){}
+      setRecRestored(true);   // batched with setRecPending above: one render
     })();
   },[historyLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
+  // A bar mounting shrinks the chat list; keep a reader who was at the bottom
+  // at the bottom, before paint, so nothing they can see slides.
+  // (A reply start un-pins the list, so "at the bottom" is measured, not read from
+  // chatPinnedRef: within one bar height + slack of the end after the shrink.)
+  const openerArmed = openerChoicePending && recRestored;
+  useLayoutEffect(()=>{
+    const el = chatListRef.current; if(!el) return;
+    // The Start buttons arming is the opener landing: bring them into view, as it
+    // did before they were held for the restore.
+    if(openerArmed || chatPinnedRef.current || el.scrollHeight - el.scrollTop - el.clientHeight < 100) scrollChatBottom();
+  },[recPending?.draftId, openerArmed]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── T58/3b: BUILDER MODE IN CHAT + the program sheet ────────────────────────
   // The Builder tab dissolves into the thread: opt-in interview (blueprint strip
@@ -7982,7 +8018,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           // coach set it after this athlete logged in.
           idApi("get-athlete",{athleteId:athlete.id,pin:athlete.pin}).catch(()=>null),
           sbRead("athlete_goals",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=10`).catch(()=>[]),
-          sbRead("athlete_context",`?athlete_id=eq.${athlete.id}&order=updated_at.desc&limit=5`).catch(()=>[]),
+          sbRead("athlete_memory",`?athlete_id=eq.${athlete.id}&status=eq.active&order=updated_at.desc&limit=60`).catch(()=>null),
           sbRead("proof_digests",`?athlete_id=eq.${athlete.id}&digest_type=in.(weekly,monthly)&order=generated_at.desc&limit=1`).catch(()=>[]),
           // Free tier: no session memory — skip loading workout history
           tier!=="free" ? sbRead("workouts",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=100&select=*`).catch(()=>[]) : Promise.resolve([]),
@@ -8018,7 +8054,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           setAthlete({...fa, tier, pin:athlete.pin});
         }
         if(Array.isArray(goals)&&goals.length>0) setAthleteGoals(goals);
-        if(Array.isArray(ctxRows)&&ctxRows.length>0) setAthleteContext(ctxRows.map(r=>r.content).join("\n\n"));
+        if(Array.isArray(ctxRows)){ setMemoryRows(activeFacts(ctxRows)); setMemoryLoaded(true); }
         if(Array.isArray(digestRows)&&digestRows.length>0) setProofDigest(digestRows[0]);
 
         // WEB PARITY (Will 08-29): athlete notifications are native-only now,
@@ -8081,7 +8117,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
               workoutHistory: histForDraft,
               messages: [],
               goals: (Array.isArray(goals)&&goals.length>0) ? goals : athleteGoals,
-              contextNotes: (Array.isArray(ctxRows)&&ctxRows.length>0) ? ctxRows.map(r=>r.content).join("\n\n") : athleteContext,
+              contextNotes: Array.isArray(ctxRows) ? (memoryNotesText(activeFacts(ctxRows))||null) : athleteContext,
             });
             // Fold in only if the athlete hasn't started typing in the meantime — a
             // conversation already underway must never be clobbered by the opener.
@@ -8719,6 +8755,20 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
     }
   };
 
+  // ── ONE owner of "a pending load just got its unit" (T65 chips, T68 the rest) ──
+  // Every way the athlete can settle a flagged load ends here: the kg/lbs chips
+  // (confirmUnitAnswer), a chat correction (applyCorrection) and a manual edit in
+  // My Log (EditWorkoutModal via onUnitsSettled). `bank` is the settled loads
+  // ({exercises, pr_attempts}, prAttempts.js confirmPendingUnits / settledLoads);
+  // `row` is the workouts row; `parsed_data` is its saved parsed_data. Runs the
+  // derived writes once, for those loads only. An empty bank writes nothing.
+  const bankSettledUnits = async (bank, row, parsed_data) => {
+    if(!bank || (!(bank.exercises||[]).length && !(bank.pr_attempts||[]).length)) return false;
+    if(unitConfirmPending && String(unitConfirmPending.rowId)===String(row.id)) setUnitConfirmPending(null);
+    await finalizeWorkout(bank, row.raw_message||"", row.bot_reply||"", athlete, false, false, {derivedOnly:true, rowId:row.id, rowParsed:parsed_data});
+    return true;
+  };
+
   // ── T65: the athlete answered "kg or lbs?" ──────────────────────────────────
   // Writes the confirmed unit onto the row (unit_source "athlete_confirmed", which
   // the resolver counts as evidence for that lift from then on), then runs the
@@ -8738,7 +8788,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       await sbUpdate("workouts", pend.rowId, {parsed_data});
       const names = [...new Set([...bank.exercises.map(e=>e.name), ...bank.pr_attempts.map(p=>p.exercise)])].join(", ");
       setMessages(prev=>[...prev,{role:"assistant",content:`Got it. ${names} logged in ${unit==="kg"?"kg":"lbs"}.`}]);
-      await finalizeWorkout(bank, pend.msg, pend.reply, athlete, false, false, {derivedOnly:true, rowId:pend.rowId, rowParsed:parsed_data});
+      await bankSettledUnits(bank, {id:pend.rowId, raw_message:pend.msg, bot_reply:pend.reply}, parsed_data);
     }catch(_){
       setUnitConfirmPending(pend);
       setMessages(prev=>[...prev,{role:"assistant",content:"Couldn't save that. Tap kg or lbs again."}]);
@@ -9013,13 +9063,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // answer. Bank it now, once, through the same derived-writes path.
       try{
         const before = typeof target.parsed_data==="string" ? JSON.parse(target.parsed_data) : (target.parsed_data||{});
-        const wasPending = new Set([...(before.exercises||[]), ...(before.pr_attempts||[])].filter(x=>x?.unit_suspect).map(x=>normalizeExName(x.name||x.exercise||"")));
-        const settled = (x)=>x && !x.unit_suspect && x.unit_source==="correction" && wasPending.has(normalizeExName(x.name||x.exercise||""));
-        const bank = {exercises:(pd.exercises||[]).filter(settled), pr_attempts:(pd.pr_attempts||[]).filter(settled)};
-        if(bank.exercises.length || bank.pr_attempts.length){
-          if(unitConfirmPending && String(unitConfirmPending.rowId)===String(target.id)) setUnitConfirmPending(null);
-          await finalizeWorkout(bank, target.raw_message||"", target.bot_reply||"", athlete, false, false, {derivedOnly:true, rowId:target.id, rowParsed:pd});
-        }
+        await bankSettledUnits(settledLoads(before, pd), target, pd);
       }catch(_){ /* banking is additive; the corrected row is already saved */ }
 
       // Max cleanup + (if needed) program scale-back, per corrected lift.
@@ -9609,6 +9653,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       };
       const tempExplicitP = tempPre?.writePlan ? writeTempProgram(tempPre.writePlan.text).catch(()=>null) : null;
       if(tempPre?.inPlay) masterOpts.tempProgramFact = tempProgramFact({athlete:updatedAthlete, recentPlanFound:tempPre.plan, savingNow:!!tempExplicitP});
+      if(tempPre?.scope && !fromQuickLog) masterOpts.changeScope = tempPre.scope; // T67: read by changeScopeFact before Joe speaks
       try {
         reply = await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext,applyDelta,masterOpts);
       } catch(_streamErr){ /* fall through to the one-shot call below */ }
@@ -9636,7 +9681,11 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // One-shot fallback: mastermind persona/memory ride along, tools don't
         // (the JSON path returns text only) — a dropped stream costs the turn's
         // actions, never the reply.
-        reply = gateText("chat", await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext,null,MASTERMIND_ON?{mastermind:true, memoryRows, pureLog:fromQuickLog, parsedLog:parsedForReply, tempProgramFact:masterOpts.tempProgramFact}:{parsedLog:parsedForReply, tempProgramFact:masterOpts.tempProgramFact}));
+        // T67: the same turn facts the streamed call got (sheet fact, pain turn,
+        // change scope, temp fact); only the tool callback is left off.
+        const oneShotOpts = {...masterOpts, onToolUse: undefined};
+        reply = gateText("chat", await getJoeBotReply(msg,updatedAthlete,newMsgs,workoutHistory,athleteGoals,athleteContext,null,oneShotOpts));
+        if(oneShotOpts.headline) masterOpts.headline = oneShotOpts.headline;
         setMessages(prev=>{ const u=[...prev]; const last=u[u.length-1]; if(last && last.role==="assistant") u[u.length-1]={role:"assistant",content:reply}; return u; });
       }
       // A held reply keeps the typing dot up until releaseReply shows the bubble
@@ -9661,6 +9710,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // brain's deliberate call beats a second brain's inference. The rest
       // (memory, session card, log sheet) execute fire-and-forget: additive,
       // reversible, and already spoken for in Joe's streamed reply.
+      // T68: set when Joe's staged rec owns this turn's program change (recs.js programWriteOwner)
+      let recOwnsProgram = false;
       if(MASTERMIND_ON && masterToolCalls.length){
         for(const tc of masterToolCalls){
           if(tc.name==="set_position" && tc.input && (tc.input.week!=null || tc.input.day!=null)){
@@ -9683,6 +9734,29 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         if(painTurn && masterToolCalls.some(tc=>tc.name==="propose_program_rec") && !keepPainRec(painTurn.turn, msg)){
           reportError("ai", new Error("propose_program_rec dropped: pain verdict not address_now"), {severity:"info", error_type:"pain_rec_dropped", component:"painLedger", meta:{verdicts:painTurn.turn.verdicts}});
           for(let i=masterToolCalls.length-1;i>=0;i--) if(masterToolCalls[i].name==="propose_program_rec") masterToolCalls.splice(i,1);
+        }
+        // T67: the same scope read Joe was handed (changeScopeFact) decides his
+        // rec: a change asked for today only is not a program change, unless
+        // they said it should outlive today (src/changeScope.js keepRecOnScope).
+        if(tempPre?.scope && masterToolCalls.some(tc=>tc.name==="propose_program_rec") && !keepRecOnScope(tempPre.scope, msg)){
+          reportError("ai", new Error("propose_program_rec dropped: change is for today only"), {severity:"info", error_type:"rec_dropped_today_only", component:"changeScope", meta:{signal:tempPre.scope.signal}});
+          for(let i=masterToolCalls.length-1;i>=0;i--) if(masterToolCalls[i].name==="propose_program_rec") masterToolCalls.splice(i,1);
+        }
+        // T68 (AI contract rule 3): one owner per program change. The parser's
+        // flags and Joe's rec can both fire on one message ("add curls to my
+        // plan" staged a rec AND appended). A rec that is real wins and the
+        // parser's write stands down; a rec that cannot stage is dropped and
+        // the parser's write runs alone.
+        if(!fromQuickLog){
+          const own = programWriteOwner({toolCalls: masterToolCalls, parserWants: !!(parsed.is_program_update || parsed.program_append || asksProgramEdit(msg)), programText: updatedAthlete.program_text||"", locked: !!updatedAthlete.program_locked});
+          if(own.owner==="tool"){
+            recOwnsProgram = true;
+            parsed.is_program_update = false; parsed.program_append = false;
+            reportError("ai", new Error("parser program write stood down: rec staged this turn"), {severity:"info", error_type:"program_write_tool_wins", component:"programWriteOwner"});
+          } else if(own.owner==="parser"){
+            reportError("ai", new Error("propose_program_rec dropped: rec could not stage, parser write runs"), {severity:"info", error_type:"program_write_parser_wins", component:"programWriteOwner"});
+            for(let i=masterToolCalls.length-1;i>=0;i--) if(masterToolCalls[i].name==="propose_program_rec") masterToolCalls.splice(i,1);
+          }
         }
         let rest = masterToolCalls.filter(tc=>tc.name!=="set_position" && tc.name!=="propose_preference"
           && !(fromQuickLog && (tc.name==="prefill_log_sheet" || tc.name==="pin_session_card" || tc.name==="show_start_buttons")));
@@ -9730,7 +9804,10 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
           return !!(t && painFollowUpPlan(t).draftRec);
         }catch(_){ return false; } })();
         const programWrite = !!(parsed.is_program_update || parsed.program_append || parsed.program_create_request || tempExplicitText || tempDecision.write);
-        const cg = replyGate("chat", reply, {toolCalls: MASTERMIND_ON ? masterToolCalls : [], appWrites:{program: programWrite, rec: painRec}});
+        // T67: the turn's computed facts, so the gate holds Joe to them (pain count,
+        // a load whose unit the app is asking about, rep words the log does not say)
+        const gateTurn = (()=>{ try{ return {painAreas: painTurn?.turn?.areas||[], unitPending: parsedForReply ? pendingUnitLoads(parsedForReply) : [], performed: parsedForReply ? logTurnExercises(parsedForReply, updatedAthlete.weight_unit) : [], planRest: masterOpts.headline?.planRest||[], asked: /\?/.test(msg)}; }catch(_){ return null; } })();
+        const cg = replyGate("chat", reply, {toolCalls: MASTERMIND_ON ? masterToolCalls : [], appWrites:{program: programWrite, rec: painRec}, ...(gateTurn?{turn:gateTurn}:{})});
         if(cg.text !== reply){
           const was = reply;
           reply = cg.text;
@@ -9821,12 +9898,13 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       // stamp). The explicit ask is deterministic, so it forces the flag; and
       // ANY program-intent message has its exercises scrubbed before the log
       // path — a prescription is never a performed session.
-      if(asksProgramEdit(msg) && !fromQuickLog
+      if(asksProgramEdit(msg) && !fromQuickLog && !recOwnsProgram
          && !parsed.is_program_update && !parsed.program_append && !parsed.program_create_request){
         parsed.program_append = true;
       }
       const wantsProgramWrite = parsed.is_program_update || parsed.program_append || parsed.program_create_request;
-      if(wantsProgramWrite && ((parsed.exercises?.length||0) > 0 || parsed.run_data || (parsed.pr_attempts?.length||0) > 0)){
+      // recOwnsProgram: the message was still a program ask, so its lifts are a prescription
+      if((wantsProgramWrite || recOwnsProgram) && ((parsed.exercises?.length||0) > 0 || parsed.run_data || (parsed.pr_attempts?.length||0) > 0)){
         parsed.exercises = []; parsed.run_data = null; parsed.pr_attempts = [];
       }
       // Snapshot to detect "a program landed on this message" below — the ask about
@@ -10372,9 +10450,14 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
         // T64 S6: a block-end statement already has its one home (the block,
         // above); it is never also saved here as an unscoped free-text note.
         if(cr.note && cr.note.trim().length>2 && !blockEndStated){
-          const dateTag = new Date().toLocaleDateString("en-US",{month:"short",day:"numeric"});
-          const updated = await appendAthleteContext(athlete.id,`${dateTag}: ${cr.note.trim()}`,{longTerm:!!cr.is_injury});
-          if(updated!==null){ setAthleteContext(updated); saved.push("note"); }
+          // T68: one owner (AI contract rule 3). When Joe saved a fact with his
+          // own tool this turn, that IS the note; the parser's copy stands down.
+          if(MASTERMIND_ON && masterToolCalls.some(tc=>tc.name==="remember_fact")){
+            saved.push("note");
+          } else {
+            const row = await saveMemoryFact(athlete.id, {content: cr.note.trim(), kind:"contextual", expires_at:null, source:"athlete_said"}, memoryRows);
+            if(row){ setMemoryRows(rows=>rows.some(r=>r.id===row.id)?rows:[row,...rows]); saved.push("note"); }
+          }
         }
         if(saved.length) followUp("✓ Got it, I'll remember that.");
       }
@@ -10903,7 +10986,7 @@ ${VOICE_ATHLETE}`;
                       Same answerOpenerChoice handlers; retired by a tap or by typing
                       (send() clears openerChoicePending). CA.accent/onAccent keep
                       both themes in their own colors. */}
-                  {m.role==="assistant"&&openerChoicePending&&!dockWorkout&&i===messages.length-1&&(
+                  {m.role==="assistant"&&openerChoicePending&&recRestored&&!dockWorkout&&i===messages.length-1&&(
                     <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:14,userSelect:"none",WebkitUserSelect:"none"}}>
                       <button onClick={()=>answerOpenerChoice("yes")}
                         style={{background:CA.accent,border:"none",color:CA.onAccent,borderRadius:10,padding:"13px 16px",cursor:"pointer",fontSize:15,fontWeight:800,letterSpacing:.3,width:"100%",fontFamily:"'Inter'"}}>
@@ -11343,7 +11426,11 @@ ${VOICE_ATHLETE}`;
           <div onClick={()=>setRecOpen(false)} role="button" tabIndex={0}
             onKeyDown={e=>{ if(e.key==="Enter") setRecOpen(false); }}
             style={{background:CA.navy3,color:CA.accent,borderBottom:`1px solid ${CA.border}`,padding:"12px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer",flexShrink:0}}>
-            <span style={{...DISP,fontSize:13,letterSpacing:0.6}}>PROGRAM REC — {recPending.rec.title}</span>
+            <span style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+              <button onClick={e=>{e.stopPropagation();setRecExitAsk(true);}} aria-label="Close the program rec" data-sheet-x onKeyDown={e=>e.stopPropagation()}
+                style={{background:"none",border:"none",color:"inherit",opacity:.7,fontSize:13,cursor:"pointer",padding:"0 2px",flexShrink:0,minWidth:32,height:32,margin:"-8px 0 -8px -8px"}}>✕</button>
+              <span style={{...DISP,fontSize:13,letterSpacing:0.6}}>PROGRAM REC — {recPending.rec.title}</span>
+            </span>
             <span aria-hidden style={{fontSize:12,opacity:.85}}>▼</span>
           </div>
           <div style={{flex:1,overflowY:"auto",padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
@@ -11442,7 +11529,11 @@ ${VOICE_ATHLETE}`;
           <div onClick={()=>setPgOpen(false)} role="button" tabIndex={0}
             onKeyDown={e=>{ if(e.key==="Enter") setPgOpen(false); }}
             style={{background:CA.navy3,color:CA.accent,borderBottom:`1px solid ${CA.border}`,padding:"12px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer",flexShrink:0}}>
-            <span style={{...DISP,fontSize:13,letterSpacing:0.6}}>{dockProgram.title} – Draft</span>
+            <span style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+              <button onClick={e=>{e.stopPropagation();dismissPg();}} aria-label="Take the program off the screen" data-sheet-x onKeyDown={e=>e.stopPropagation()}
+                style={{background:"none",border:"none",color:"inherit",opacity:.7,fontSize:13,cursor:"pointer",padding:"0 2px",flexShrink:0,minWidth:32,height:32,margin:"-8px 0 -8px -8px"}}>✕</button>
+              <span style={{...DISP,fontSize:13,letterSpacing:0.6}}>{dockProgram.title} – Draft</span>
+            </span>
             <span aria-hidden style={{fontSize:12,opacity:.85}}>▼</span>
           </div>
           <div style={{flex:1,overflowY:"auto",padding:"12px 14px"}}>
@@ -11491,7 +11582,11 @@ ${VOICE_ATHLETE}`;
           <div onClick={()=>setSheetOpen(false)} role="button" tabIndex={0}
             onKeyDown={e=>{ if(e.key==="Enter") setSheetOpen(false); }}
             style={{background:CA_BTN,color:CA.onAccent,padding:"12px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer",flexShrink:0}}>
-            <span style={{...DISP,fontSize:13,letterSpacing:0.6}}>{dockWorkout.title}</span>
+            <span style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+              <button onClick={e=>{e.stopPropagation();dismissDock();}} aria-label="Take it off the screen" data-sheet-x onKeyDown={e=>e.stopPropagation()}
+                style={{background:"none",border:"none",color:"inherit",opacity:.7,fontSize:13,cursor:"pointer",padding:"0 2px",flexShrink:0,minWidth:32,height:32,margin:"-8px 0 -8px -8px"}}>✕</button>
+              <span style={{...DISP,fontSize:13,letterSpacing:0.6}}>{dockWorkout.title}</span>
+            </span>
             <span aria-hidden style={{fontSize:12,opacity:.85}}>▼</span>
           </div>
           <div style={{flex:1,overflowY:"auto",padding:"12px 14px"}}>
@@ -11601,7 +11696,7 @@ ${VOICE_ATHLETE}`;
       )}
 
       {/* My Log Modal */}
-      {showLog&&<MyLogModal initialTab={myLogTab} workoutHistory={workoutHistory} athlete={athlete} onClose={()=>{setShowLog(false);setMyLogTab("workouts");}} proofDigest={proofDigest} onDigestRead={(d)=>setProofDigest(d)} onOpenProofChat={(past)=>{setShowLog(false);setChatDigest(past&&past.id?past:null);setShowProofChat(true);}} setWorkoutHistory={setWorkoutHistory} onSessionCountChanged={()=>syncSessionCountAfterChange(athlete,setAthlete)} onPainMarks={(m)=>setAthlete(prev=>({...prev,pain_marks:m}))}/>}
+      {showLog&&<MyLogModal initialTab={myLogTab} workoutHistory={workoutHistory} athlete={athlete} onClose={()=>{setShowLog(false);setMyLogTab("workouts");}} proofDigest={proofDigest} onDigestRead={(d)=>setProofDigest(d)} onOpenProofChat={(past)=>{setShowLog(false);setChatDigest(past&&past.id?past:null);setShowProofChat(true);}} setWorkoutHistory={setWorkoutHistory} onSessionCountChanged={()=>syncSessionCountAfterChange(athlete,setAthlete)} onPainMarks={(m)=>setAthlete(prev=>({...prev,pain_marks:m}))} onUnitsSettled={bankSettledUnits}/>}
 
       {/* Program View Modal */}
       {showProgram&&(
@@ -11705,7 +11800,7 @@ ${VOICE_ATHLETE}`;
                 )}
                 {CHAT_FIRST_ON&&memTab==="context"&&(
                   <AthleteContextPane athlete={athlete} goals={athleteGoals}
-                    rows={memoryRows} setRows={setMemoryRows} legacyContext={athleteContext}/>
+                    rows={memoryRows} setRows={setMemoryRows}/>
                 )}
               </div>
             )}
@@ -12008,7 +12103,7 @@ ${VOICE_ATHLETE}`;
           digest={chatDigest||proofDigest}
           workoutHistory={workoutHistory}
           onClose={()=>{setShowProofChat(false);setChatDigest(null);}}
-          onContextSaved={(ctx)=>setAthleteContext(ctx)}
+          onMemorySaved={(row)=>setMemoryRows(rows=>rows.some(r=>r.id===row.id)?rows:[row,...rows])}
           onDigestRead={(d)=>{ if(!chatDigest) setProofDigest(d); }}
           onPainMarks={(m)=>setAthlete(prev=>({...prev,pain_marks:m}))}
         />
@@ -12842,7 +12937,7 @@ function CountUp({end, dur=800, style}) {
   return <span style={style}>{n}</span>;
 }
 
-function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead, onOpenProofChat, setWorkoutHistory, onSessionCountChanged, initialTab, onPainMarks}) {
+function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead, onOpenProofChat, setWorkoutHistory, onSessionCountChanged, initialTab, onPainMarks, onUnitsSettled}) {
   // initialTab is the notification deep link's landing tab (T51); every other
   // caller omits it and still opens on the workouts list.
   const [tab,setTab] = useState(initialTab || "workouts");
@@ -13284,6 +13379,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
         <EditWorkoutModal
           session={editSession}
           onClose={()=>setEditSession(null)}
+          onUnitsSettled={onUnitsSettled}
           /* Sessions in this timeline can come from EITHER the recent working set
              or the paged-in older rows. The modal used to update only
              workoutHistory, so editing a paged-in session persisted fine but left
@@ -13343,7 +13439,7 @@ const syncSessionCountAfterChange = async (athlete, setAthlete) => {
   return n;
 };
 
-function EditWorkoutModal({session, onClose, onRowUpdated}) {
+function EditWorkoutModal({session, onClose, onRowUpdated, onUnitsSettled}) {
   const parseEntry = (e) => typeof e.parsed_data==="string" ? (()=>{try{return JSON.parse(e.parsed_data);}catch{return {};}})() : (e.parsed_data||{});
 
   const [rows,setRows] = useState(()=>{
@@ -13422,6 +13518,10 @@ function EditWorkoutModal({session, onClose, onRowUpdated}) {
         const newParsedData = {...pd, exercises:newExercises};
         await sbUpdate("workouts", entry.id, {parsed_data:newParsedData});
         onRowUpdated&&onRowUpdated(entry.id, newParsedData);
+        // T68: picking a unit by hand on a load the app was asking about IS the
+        // answer the chips give. Bank it through the same function (nothing
+        // derived is written for a load still unsettled). The row is already saved.
+        try{ onUnitsSettled&&await onUnitsSettled(settledLoads(pd, newParsedData), entry, newParsedData); }catch(_){ /* banking is additive */ }
       }
       onClose();
     } catch(e){
@@ -14764,7 +14864,7 @@ export async function applyMemoryActions(athleteId, actions, rows){
   return next;
 }
 
-export function AthleteContextPane({athlete, goals=[], rows=[], setRows, legacyContext=""}){
+export function AthleteContextPane({athlete, goals=[], rows=[], setRows}){
   const [ask,setAsk] = useState("");
   const [busy,setBusy] = useState(false);
   const [denied,setDenied] = useState(null);   // flag toast text (also reddens the box)
@@ -14779,7 +14879,6 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, legacyC
   const pinned = act.filter(r=>r.kind==="pinned");
   const rest = act.filter(r=>r.kind!=="pinned")
     .sort((a,b)=>Date.parse(b.updated_at||b.created_at||0)-Date.parse(a.updated_at||a.created_at||0));
-  const legacyLines = String(legacyContext||"").split("\n").map(l=>l.trim()).filter(Boolean);
   // Only ACTIVE goals render as "Goal" — superseded / stale-by-date rows belong
   // to history, not to what Joe is currently coaching toward (T62).
   const goalLines = activeGoals(goals||[]).map(g=>g&&g.goal_text).filter(Boolean).slice(0,3);
@@ -14800,7 +14899,7 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, legacyC
         return `- [${r.kind}] ${r.content}${exp}`;
       });
       const selectedBlock = target ? `\n\nSELECTED FACT (the athlete highlighted this one, the request is about it):\n- [${target.kind}] ${target.content}` : "";
-      const user = `TODAY: ${new Date().toISOString().slice(0,10)}\n\nCURRENT FACTS (${act.length} active):\n${factLines.join("\n")||"(none yet)"}\n\nOLDER NOTES (read-only history, for context):\n${legacyLines.join("\n")||"(none)"}${selectedBlock}\n\nATHLETE REQUEST:\n${req}`;
+      const user = `TODAY: ${new Date().toISOString().slice(0,10)}\n\nCURRENT FACTS (${act.length} active):\n${factLines.join("\n")||"(none yet)"}${selectedBlock}\n\nATHLETE REQUEST:\n${req}`;
       const raw = await askClaude(MEMORY_EDIT_SYS, user, 700, [], "claude-sonnet-5", "memory_edit");
       const plan = planMemoryOps(raw, rows, new Date(), {targetId: target?.id ?? null});
       if(plan.decision==="deny"){
@@ -14850,10 +14949,6 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, legacyC
               {r.expires_at&&<span style={{color:CA.muted}}> (until {String(r.expires_at).slice(0,10)})</span>}
             </div>
           );})}
-          {legacyLines.length>0&&(<>
-            <div style={secttl}>Older notes</div>
-            <div style={{...mono,color:CA.muted,fontSize:11}}>{legacyLines.join("\n")}</div>
-          </>)}
         </div>
         {joeReply&&(
           <div style={{display:"flex",gap:8,alignItems:"flex-start",marginTop:12}}>

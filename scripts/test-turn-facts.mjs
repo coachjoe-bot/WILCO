@@ -5,7 +5,7 @@
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { performedLine, performedLines, performedBlock, planSchemeFor, logHeadline, logFocusBlock, planDayFor, plannedLifts, isMainLift, sameLift, prLinesForReply, logTurnExercises } from "../src/turnFacts.js";
+import { performedLine, performedLines, performedBlock, planSchemeFor, logHeadline, logFocusBlock, planDayFor, plannedLifts, isMainLift, sameLift, prLinesForReply, logTurnExercises, logUnitsFact } from "../src/turnFacts.js";
 import { prCheckLines, bestE1RMForExercise, resolveLift, effectiveDate } from "../src/grit.js";
 import { toLbs } from "../src/units.js";
 
@@ -21,7 +21,8 @@ const eq = (a, b, n) => ok(a === b, `${n} (got ${JSON.stringify(a)}, want ${JSON
   eq(lines[0], "Behind the Neck Snatch Grip Push Press: 5 sets of 3, 60/80/90/100/100 kg, top set 100 kg x 3 (plan was 5x2)", "Sep 2 push press line");
   eq(lines[1], "Push Press: 5 sets of 3, 60/70/80/90/90 kg, top set 90 kg x 3 (plan was 5x2)", "push press is its own lift, not the BTN variant");
   ok(!/double/i.test(lines.join(" ")), "no 'double' anywhere in the facts");
-  ok(lines[2].startsWith("DB Lateral Raise: 3 sets of 8 at 18"), `lbs lift shown in the athlete's kg (got ${lines[2]})`);
+  // T68: he wrote "40lbs", so the fact says 40 lbs (it used to be converted to 18 kg)
+  ok(lines[2].startsWith("DB Lateral Raise: 3 sets of 8 at 40 lbs"), `a lift logged in lbs is stated in lbs for a kg athlete (got ${lines[2]})`);
   const blk = performedBlock(rp.parsed_exercises, { displayUnit: "kg", planText: rp.starting_state.plan_text });
   ok(blk.includes("FINAL") && blk.includes("never swap in the program's prescription"), "block states finality");
 }
@@ -38,6 +39,13 @@ eq(performedLine({ name: "Pull-Up", sets: 3, reps: 10, unit: "bodyweight" }), "P
 eq(performedLine({ name: "Pull-Up", unit: "bodyweight", set_details: [{ reps: 8 }, { reps: 8, weight: 25 }, { reps: 8, weight: 25 }] }), "Pull-Up: 3 sets: bodyweight x 8, +25 lbs x 8, +25 lbs x 8", "weighted bodyweight per set");
 eq(performedLine({ name: "Weighted Pull-Up", sets: 3, reps: 5, unit: "bodyweight", added_weight: 45 }), "Weighted Pull-Up: 3 sets of 5, bodyweight plus 45 lbs", "added weight");
 eq(performedLine({ name: "Weighted Sit-Up", unit: "bodyweight" }), null, "bodyweight with no reps is skipped");
+// T68: the unit of an added load rides on the row (added_unit); a row without it is lbs, as before
+eq(performedLine({ name: "Weighted Pull-Up", sets: 3, reps: 5, unit: "bodyweight", added_weight: 20, added_unit: "kg" }, { displayUnit: "kg" }), "Weighted Pull-Up: 3 sets of 5, bodyweight plus 20 kg", "kg athlete's BW+20 reads 20 kg, not 20 lbs");
+eq(performedLine({ name: "Weighted Pull-Up", sets: 3, reps: 5, unit: "bodyweight", added_weight: 20, added_unit: "kg" }, { displayUnit: "lbs" }), "Weighted Pull-Up: 3 sets of 5, bodyweight plus 20 kg", "the same row for an lbs reader: Joe is handed the unit it was logged in (T68), never a conversion");
+eq(performedLine({ name: "Weighted Pull-Up", sets: 3, reps: 5, unit: "bodyweight", added_weight: 45 }, { displayUnit: "lbs" }), "Weighted Pull-Up: 3 sets of 5, bodyweight plus 45 lbs", "a legacy row (no added_unit) keeps its meaning: lbs");
+eq(performedLine({ name: "Dip", sets: 3, reps: 8, unit: "bodyweight", assist_weight: 20, added_unit: "kg" }, { displayUnit: "kg" }), "Dip: 3 sets of 8, bodyweight, 20 kg assisted", "assist load in kg");
+eq(performedLine({ name: "Pull-Up", unit: "bodyweight", added_unit: "kg", set_details: [{ reps: 8 }, { reps: 8, weight: 25 }, { reps: 8, weight: 25 }] }, { displayUnit: "kg" }), "Pull-Up: 3 sets: bodyweight x 8, +25 kg x 8, +25 kg x 8", "per-set added loads in kg");
+eq(performedLine({ name: "Pull-Up", unit: "bodyweight", set_details: [{ reps: 8 }, { reps: 8, weight: 25 }] }), "Pull-Up: 2 sets: bodyweight x 8, +25 lbs x 8", "no display unit and no stamp: unchanged");
 // timed
 eq(performedLine({ name: "Plank", sets: 2, time_per_set_seconds: 60, unit: "bodyweight" }), "Plank: 2 sets of 60 s held", "timed work");
 // plan 5x2 vs logged 5x3 in a multi-line program; ambiguous plan says nothing
@@ -219,6 +227,56 @@ eq(head({ exercises: [kg("Back Squat", 3, 2, 155)], rows: HIST }).kind, "none", 
   const h = head({ exercises: exs, rows: HIST });
   eq(h.kind, "pr", "stated snatch PR is the headline"); ok(/102 kg/.test(h.line) && /100 kg/.test(h.line), `stated PR line (got ${h.line})`);
   eq(logTurnExercises({ exercises: [kg("Snatch", 1, 1, 90)], pr_attempts: [{ exercise: "Snatch", weight: 102, reps: 1, achieved: true }] }, "kg")[0].weight, 90, "real exercises win over pr_attempts");
+}
+
+// ── T67: planRest, today's planned lifts a log leaves out ─────────────────────
+{
+  const today = "Deadlift 3x5 @ 130 kg\nBarbell Row 3x8 @ 70 kg\nPull-ups 3x8";
+  const now = new Date("2026-09-29T17:00:00Z");
+  const zer = [{ name: "Zercher Squat", unit: "kg", sets: 3, reps: 5, weight: 100, set_details: [{ weight: 100, reps: 5 }, { weight: 100, reps: 5 }, { weight: 100, reps: 5 }] }];
+  const h = logHeadline({ exercises: zer, prLines: [], lastDone: new Map(), now, todayPlanText: today });
+  eq(JSON.stringify(h.planRest), JSON.stringify(["Deadlift", "Barbell Row", "Pull-ups"]), "an off-plan log names every planned lift it left out");
+  const block = logFocusBlock(h);
+  ok(/Also on today's plan and not in this log: Deadlift, Barbell Row, Pull-ups\./.test(block) && /does not mention them/.test(block), "the focus block says the reply leaves them out");
+  const dl = [{ name: "Deadlift", unit: "kg", sets: 3, reps: 5, weight: 130, set_details: [{ weight: 130, reps: 5 }] }];
+  eq(JSON.stringify(logHeadline({ exercises: dl, lastDone: new Map(), now, todayPlanText: today }).planRest), JSON.stringify(["Barbell Row", "Pull-ups"]), "a partial log names only what is left");
+  const earlier = new Map([[resolveLift("Barbell Row").id, { name: "Barbell Row", date: new Date(now.getTime() - 3600e3), ex: { name: "Barbell Row", unit: "kg", sets: 3, reps: 8, weight: 70 } }]]);
+  eq(JSON.stringify(logHeadline({ exercises: dl, lastDone: earlier, now, todayPlanText: today }).planRest), JSON.stringify(["Pull-ups"]), "a lift logged earlier this session is not left out");
+  eq(JSON.stringify(logHeadline({ exercises: zer, now }).planRest), JSON.stringify([]), "no plan text, nothing named");
+  ok(!/Also on today's plan/.test(logFocusBlock(logHeadline({ exercises: zer, now }))), "and the block says nothing about it");
+  // the designed skipped-lift question wins: planRest stays empty when alsoAsk is set
+  const prog = "Day 1 - Squat\nBack Squat 5x3 @ 80%\nFront Squat 3x3 @ 70%\nRomanian Deadlift 3x6";
+  const two = [{ name: "Back Squat", unit: "kg", sets: 5, reps: 3, weight: 142.5 }, { name: "Romanian Deadlift", unit: "kg", sets: 3, reps: 6, weight: 100 }];
+  const pd = planDayFor({ programText: prog, loggedNames: two.map((e) => e.name), resolverLabel: "Squat" });
+  const hq = logHeadline({ exercises: two, planDay: pd, now, todayPlanText: "Back Squat 5x3 @ 80%\nFront Squat 3x3 @ 70%\nRomanian Deadlift 3x6" });
+  ok(/Front Squat/.test(hq.alsoAsk || "") && hq.planRest.length === 0, "a session-shaped log keeps its ONE skipped-lift question and names nothing else");
+  // kg athletes: PR verdicts read kg-only lines (grit.js T67)
+  const best = { snatch: { name: "Snatch", e1rm: toLbs(100, "kg"), actual: true } };
+  const pr = prCheckLines([{ name: "Snatch", sets: 1, reps: 1, weight: 105, unit: "kg" }], best, "kg");
+  ok(/NEW PR/.test(pr[0]) && !/lbs/.test(pr[0]), `kg athlete's PR line carries kg only (got ${pr[0]})`);
+  const hp = logHeadline({ exercises: [{ name: "Snatch", sets: 1, reps: 1, weight: 105, unit: "kg" }], prLines: pr, now, sport: "Olympic Weightlifting", displayUnit: "kg" });
+  eq(hp.kind, "pr", "the headline still reads a kg-only PR line");
+}
+
+// ── T68: a lift speaks in the unit it was logged in ───────────────────────────
+{
+  const now = new Date("2026-09-29T17:00:00Z");
+  const bench = { name: "Bench Press", unit: "lbs", unit_source: "recency", sets: 3, reps: 5, weight: 225, set_details: [1, 2, 3].map(() => ({ weight: 225, reps: 5 })) };
+  const snatch = { name: "Snatch", unit: "kg", sets: 3, reps: 1, weight: 90, set_details: [1, 2, 3].map(() => ({ weight: 90, reps: 1 })) };
+  const best = { "bench press": { name: "Bench Press", e1rm: 250 }, snatch: { name: "Snatch", e1rm: toLbs(100, "kg"), actual: true } };
+  const pr = prCheckLines([bench, snatch], best, "kg");
+  ok(/Bench Press: .*225 lbs/.test(pr[0]) && !/kg/.test(pr[0]), `replay (prod pass 09-29): a kg athlete's lbs bench is judged and stated in lbs (got ${pr[0]})`);
+  ok(/Snatch: .*90 kg/.test(pr[1]) && !/lbs/.test(pr[1]), "the same log's kg lift stays in kg");
+  eq(performedLine(bench, { displayUnit: "kg" }), "Bench Press: 3 sets of 5 at 225 lbs", "PERFORMED says what they typed");
+  const last = new Map([[resolveLift("Bench Press").id, { name: "Bench Press", date: new Date(now.getTime() - 7 * 864e5), ex: { name: "Bench Press", unit: "kg", sets: 3, reps: 5, weight: 97.5 } }]]);
+  const h = logHeadline({ exercises: [bench], prLines: [], lastDone: last, displayUnit: "kg", now });
+  ok(/225 lbs x 5 today, up from 215 lbs x 5/.test(h.line), `a comparison is said in TODAY's unit for both numbers (got ${h.line})`);
+  const fact = logUnitsFact([bench, snatch], "kg");
+  ok(/Bench Press was logged in lbs/.test(fact) && !/Snatch/.test(fact) && /no conversion to kg/.test(fact), "LOG UNITS names only the lift logged in the other unit");
+  eq(logUnitsFact([snatch], "kg"), "", "every lift in the athlete's unit: no line");
+  eq(logUnitsFact([{ ...bench, unit_suspect: true }], "kg"), "", "a load the app is still asking about is never named");
+  ok(/Snatch was logged in kg/.test(logUnitsFact([snatch], "lbs")), "works the other way round for a lbs athlete");
+  eq(performedLine({ ...bench, unit: "lbs" }, { displayUnit: "lbs" }), "Bench Press: 3 sets of 5 at 225 lbs", "a lbs athlete's lbs lift: unchanged");
 }
 
 console.log(`\n${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ""}`);

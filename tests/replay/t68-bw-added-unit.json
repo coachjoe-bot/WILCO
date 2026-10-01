@@ -1,0 +1,57 @@
+{
+  "bug": "T68 bug 1: added load on a bodyweight lift carried no unit, so every reader assumed lbs. A kg athlete's 'Weighted pull-ups 3x5 BW+20' was stored as added_weight 20 with nothing beside it and read back as 20 LBS (turn facts, e1RM, benchmarks, My Log). The same resolver order every other load uses now decides the unit in code and stores it as added_unit / added_unit_source beside the number; every reader converts through units.js addedLoadUnit. Rows saved before have no field and keep meaning lbs.",
+  "note": "Synthetic athlete (no real account). The parser output is what the real model returns for a bodyweight lift: unit 'bodyweight', the number as typed.",
+  "athlete_bodyweight_lbs": 176,
+  "cases": [
+    {
+      "name": "kg athlete, 'BW+20' with nothing written (the reported bug)",
+      "display_unit": "kg",
+      "raw_message": "Weighted pull-ups 3x5 BW+20",
+      "history": [
+        { "id": "h1", "created_at": "2026-09-24T17:00:00Z", "raw_message": "Back squat 5x3 @ 140kg", "parsed_data": { "exercises": [ { "name": "Back Squat", "sets": 5, "reps": 3, "weight": 140, "unit": "kg", "unit_source": "written" } ] } }
+      ],
+      "now": "2026-09-29T17:00:00Z",
+      "parsed": { "exercises": [ { "name": "Weighted Pull-Up", "sets": 3, "reps": 5, "unit": "bodyweight", "weight": null, "added_weight": 20 } ] },
+      "expect_stored": { "unit": "bodyweight", "weight": null, "added_weight": 20, "added_unit": "kg", "added_unit_source": "display" },
+      "expect_readers": {
+        "performed_line_kg": "Weighted Pull-Up: 3 sets of 5, bodyweight plus 20 kg",
+        "performed_line_lbs": "Weighted Pull-Up: 3 sets of 5, bodyweight plus 20 kg",
+        "e1rm_lbs": 257
+      }
+    },
+    {
+      "name": "kg athlete writes the unit: 'BW+20lbs' is lbs",
+      "display_unit": "kg",
+      "raw_message": "Weighted pull-ups 3x5 BW+20lbs",
+      "parsed": { "exercises": [ { "name": "Weighted Pull-Up", "sets": 3, "reps": 5, "unit": "bodyweight", "weight": null, "added_weight": 20 } ] },
+      "expect_stored": { "unit": "bodyweight", "weight": null, "added_weight": 20, "added_unit": "lbs", "added_unit_source": "written" },
+      "expect_readers": {
+        "performed_line_kg": "Weighted Pull-Up: 3 sets of 5, bodyweight plus 20 lbs",
+        "performed_line_lbs": "Weighted Pull-Up: 3 sets of 5, bodyweight plus 20 lbs",
+        "e1rm_lbs": 229
+      }
+    },
+    {
+      "name": "lbs athlete, 'BW+20': nothing changes from today",
+      "display_unit": "lbs",
+      "raw_message": "Weighted pull-ups 3x5 BW+20",
+      "parsed": { "exercises": [ { "name": "Weighted Pull-Up", "sets": 3, "reps": 5, "unit": "bodyweight", "weight": null, "added_weight": 20 } ] },
+      "expect_stored": { "unit": "bodyweight", "weight": null, "added_weight": 20, "added_unit": "lbs", "added_unit_source": "display" },
+      "expect_readers": {
+        "performed_line_lbs": "Weighted Pull-Up: 3 sets of 5, bodyweight plus 20 lbs",
+        "e1rm_lbs": 229
+      }
+    },
+    {
+      "name": "a row saved BEFORE T68 (no added_unit) keeps its meaning: lbs",
+      "display_unit": "kg",
+      "stored": true,
+      "parsed": { "exercises": [ { "name": "Weighted Pull-Up", "sets": 3, "reps": 5, "unit": "bodyweight", "weight": null, "added_weight": 45 } ] },
+      "expect_stored": { "unit": "bodyweight", "weight": null, "added_weight": 45 },
+      "expect_readers": {
+        "performed_line_lbs": "Weighted Pull-Up: 3 sets of 5, bodyweight plus 45 lbs",
+        "e1rm_lbs": 258
+      }
+    }
+  ]
+}

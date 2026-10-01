@@ -595,3 +595,25 @@ export function looksLikePlanText(text) {
 export const tempConfirmLine = ({ locked = false } = {}) => locked
   ? "✈️ Got it, I've set you up with a temporary program for while you're away. Your coach's program is untouched and waiting; I've let them know you're on the road. Tell me when you're back."
   : "✈️ Got it, I've set a temporary program for while you're away. Tell me when you're back and I'll switch you to your regular programming.";
+
+// ─── T67: a today-only change is never a program rec (AI contract rule 4) ────
+// The card already says a change scoped to one session is never a temp program;
+// the same scope read (conversationScope, computed before Joe speaks) now also
+// decides his propose_program_rec on that turn. Real-model pass 09-29: "the
+// squat racks are all taken today, swap my first lift for something I can do
+// with dumbbells", no workout started, and Joe staged a PROGRAM REC 3 of 5.
+// The athlete's own words win both ways: a change they say should outlive today
+// ("from now on", "in my program", "every week") keeps the rec.
+const OUTLIVES_TODAY_RE = /\b(from now on|going forward|moving forward|for good|permanently|for the (?:rest of the )?(?:block|program|cycle)|every (?:week|time|session|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|each week|in (?:my|the) (?:program|plan|split)|(?:my|the) program|(?:my|the) new (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|day \d|session|workout)|template)\b/i;
+export const outlivesToday = (message) => OUTLIVES_TODAY_RE.test(String(message || ""));
+const todayOnlyNow = (scope) => !!(scope && scope.signal === "today_only" && scope.source === "current");
+// scope: tempTurnBefore().scope / conversationScope(). true = the rec stands.
+export function keepRecOnScope(scope, message) {
+  return !(todayOnlyNow(scope) && !outlivesToday(message));
+}
+// The fact Joe gets before he speaks on that turn (dynamic context). Not on a
+// log: a log saying "today" is a record, not a change request.
+export function changeScopeFact({ scope, message = "", isLogTurn = false } = {}) {
+  if (isLogTurn || !todayOnlyNow(scope) || outlivesToday(message)) return "";
+  return "CHANGE SCOPE (app fact, this turn): what they are asking to change covers today's session only. It is not a program change, so no program rec: give them today's swap in chat, and they put it on their log sheet when they start. Their saved program stays as it is.";
+}
