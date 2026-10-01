@@ -80,6 +80,7 @@ import { buildMastermindStatic } from "./ai/card.js";
 import { blueprintPct } from "./programBuilder.js";
 import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps, memoryNotesText, checkinNoteFact } from "./memory.js";
 import { activeGoals, goalsToSupersede, sameGoalText } from "./goals.js";
+import { MEMORY_SCAN_SYS, MEMORY_SCAN_MODEL, MEMORY_SCAN_FEATURE, scanUserMessage, readScanVerdict, SCAN_UNREACHABLE } from "./memoryScan.js";
 import { planDirectEdit, planDirectAdd, planDirectDelete, refusalLine, validateGoalText, validateInjuryText, planToolUpdate, isMemoryTool, isBodyweightFact, newMemoryOutcome, memoryOutcomeLine, toolRefusal } from "./memoryEdit.js";
 import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, programWriteOwner, recSummaryFallback, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
 import { performedBlock, logHeadline, logFocusBlock, planDayFor, prLinesForReply, logTurnExercises, logUnitsFact } from "./turnFacts.js";
@@ -14737,10 +14738,13 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
 // T69-A (Will 10-01, reverses his 09-01 ruling): "I want to be able to directly
 // edit the text. I don't want to have to talk to Coach Joe at the bottom about
 // it at all." The athlete taps a line and types, the Program tab's pattern
-// (field, accent border once changed, Save, "Saved."). There is no ask-Joe box
-// and no AI call here. Code is the only gate: src/memoryEdit.js runs
-// validateFact on every save and a refusal shows the reason in red, writing
-// nothing. Three stores, each through its one door:
+// (field, accent border once changed, Save, "Saved."). There is no ask-Joe box.
+// What they typed is saved exactly as typed after two checks: code first
+// (src/memoryEdit.js on validateFact, instant), then one Joe scan that allows
+// or rejects and rewrites nothing (src/memoryScan.js; Will 10-01: do not limit
+// the athlete, protect Joe's personality, borders and precautions). A refusal
+// from either shows its reason in red and writes nothing; no verdict means not
+// saved. Three stores, each through its one door:
 //   • a fact  -> athlete_memory, the same applyMemoryActions shapes below
 //   • a goal  -> athlete_goals through writeAthleteGoal (insert + supersede)
 //   • injuries -> athletes.injury_history (undated background; what hurts NOW
@@ -14822,13 +14826,29 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, onAthle
     }catch(_){ return rows; }
   };
 
+  // The Joe scan: allow or reject, the text is never rewritten. Returns null
+  // when it may save, or the line to show. No verdict = not saved (fail closed).
+  const scan = async (kind, text) => {
+    try{
+      const v = readScanVerdict(await askClaude(MEMORY_SCAN_SYS, scanUserMessage(kind, text), 160, [], MEMORY_SCAN_MODEL, MEMORY_SCAN_FEATURE));
+      if(!v.ok) return SCAN_UNREACHABLE;
+      return v.allow ? null : gateText("memory", v.reason);   // T64 S4: one output gate
+    }catch(_){ return SCAN_UNREACHABLE; }
+  };
+
   const save = async () => {
     if(!editing||busy||demo) return;
     setBusy(true); setRefused(null);
     try{
       if(editing.type==="fact" || editing.type==="add"){
+        const planFor = (r) => editing.type==="fact" ? planDirectEdit(r, editing.id, draft) : planDirectAdd(r, draft);
+        // Code first, on what is on screen: instant and free. Only text that
+        // passes and actually changes something is worth a scan.
+        const pre = planFor(rows);
+        const flagged = pre.ok && pre.actions.some(a=>a.data && a.data.content) ? await scan(editing.type, draft) : null;
+        if(flagged){ setRefused(flagged); setBusy(false); return; }
         const fresh = await freshRows();
-        const plan = editing.type==="fact" ? planDirectEdit(fresh, editing.id, draft) : planDirectAdd(fresh, draft);
+        const plan = planFor(fresh);
         if(!plan.ok){
           if(plan.reason==="gone"){ setRows(fresh); setEditing({type:"add"}); setRefused(`${plan.message} Save to keep what you typed as a new note.`); }
           else setRefused(plan.message);
@@ -14838,7 +14858,9 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, onAthle
         }
       } else if(editing.type==="goal"){
         const v = validateGoalText(draft);
+        const flagged = v.ok ? await scan("goal", v.text) : null;
         if(!v.ok) setRefused(v.message);
+        else if(flagged) setRefused(flagged);
         else {
           // The one goal door: insert, supersede the priors, parse stamp. It
           // returns null when the text just restates the goal on file.
@@ -14848,7 +14870,10 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, onAthle
         }
       } else if(editing.type==="injury"){
         const v = validateInjuryText(draft);
+        // Clearing the field, or saving it unchanged, needs no scan.
+        const flagged = v.ok && v.text && v.text!==injury ? await scan("injury", v.text) : null;
         if(!v.ok) setRefused(v.message);
+        else if(flagged) setRefused(flagged);
         else {
           if((v.text||"")!==injury){
             await sbUpdate("athletes",athlete.id,{injury_history:v.text});
@@ -14909,7 +14934,7 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, onAthle
           {!readOnlyNote&&(
             <button onClick={save} disabled={busy||!dirty}
               style={{...btn,background:busy||!dirty?CA.navy3:CA.accent,color:busy||!dirty?CA.muted:CA.onAccent,border:`1px solid ${busy||!dirty?CA.border:CA.accent}`,cursor:busy||!dirty?"not-allowed":"pointer"}}>
-              {busy&&!armDelete?"Saving...":"Save"}
+              {busy&&!armDelete?"Checking...":"Save"}
             </button>
           )}
           <button onClick={close} disabled={busy}

@@ -32,7 +32,8 @@ const CHECK = [
   ["src/programHistory.js", /const RECAP_SYS =[\s\S]*?VOICE_ATHLETE;/, "RECAP_SYS"],
   ["src/programHistory.js", /const ONGOING_RECAP_SYS =[\s\S]*?VOICE_ATHLETE;/, "ONGOING_RECAP_SYS"],
   ["src/programHistory.js", /const RECAP_SHORT_SYS =[\s\S]*?VOICE_ATHLETE;/, "short recap"],
-  // T69-A: MEMORY_EDIT_SYS is gone. The Memory tab is edited by the athlete directly; no model writes there.
+  // T69-A: MEMORY_EDIT_SYS became the Memory tab's scan prompt (allow or reject a direct edit).
+  ["src/memoryScan.js", /export const MEMORY_SCAN_SYS = `\$\{JOE_IDENTITY\}[\s\S]*?\$\{VOICE_ATHLETE\}/, "MEMORY_SCAN_SYS"],
   ["src/App.jsx", /reviewing still frames[\s\S]{0,1200}\$\{VOICE_ATHLETE\}/, "video form review"],
   ["src/programBuilder.js", /VOICE_COACH : VOICE_ATHLETE/, "builder interviewer"],
   ["src/programBuilder.js", /\$\{VOICE_FORMAT\} \$\{VOICE_CLEAN\}/, "builder drafter prose lines"],
@@ -57,7 +58,7 @@ const GATED = [
   ["src/App.jsx", /gateFields\("rec", v\.rec/, "program rec title/summary/why"],
   ["src/App.jsx", /gateText\("ql_note"/, "log-sheet focus note"],
   ["src/App.jsx", /renderGate\(gn\)/, "log-sheet focus note mid-stream"],
-  // T69-A: the memory ask-Joe reply is gone with its box (no model-written string on that pane).
+  ["src/App.jsx", /gateText\("memory", v\.reason\)/, "memory scan reject reason"],
   ["src/programHistory.js", /gateText\("recap"/, "recaps"],
   ["src/programBuilder.js", /gateText\("builder"/, "builder interviewer"],
   ["src/changeRequest.js", /gateText\("change_request"/, "change requests"],
