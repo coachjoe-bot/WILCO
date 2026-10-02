@@ -2838,6 +2838,7 @@ export function LineChart({data, color=CA.cyan, unit="", palette=CA}) {
   const gid = `g${color.replace("#","")}${Math.random().toString(36).slice(2,6)}`;
   const tipW = 44;
   const tipX = selected!=null ? Math.min(Math.max(px(selected), tipW/2), W-tipW/2) : 0;
+  const labelEvery = Math.max(1, Math.ceil((data.length-1)/6));
   return (
     <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",overflow:"visible"}} onClick={()=>setSelected(null)}>
       <defs><linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
@@ -2854,7 +2855,11 @@ export function LineChart({data, color=CA.cyan, unit="", palette=CA}) {
             onClick={(e)=>{e.stopPropagation(); setSelected(selected===i?null:i);}}
             onTouchStart={(e)=>{e.stopPropagation(); setSelected(selected===i?null:i);}}
           />
-          <text x={px(i)} y={H-3} textAnchor="middle" fill={selected===i?P.text:P.muted} fontSize={7} fontFamily="Inter">{d.label}</text>
+          {/* T70: a long range (weekly points, 1Y/ALL) used to print every label on
+              top of its neighbours. Keep at most ~6 evenly spaced labels, always
+              the first and last; the tapped point always shows its own. */}
+          {(selected===i||i===data.length-1||(i%labelEvery===0&&i<=data.length-1-labelEvery/2))&&
+            <text x={px(i)} y={H-3} textAnchor="middle" fill={selected===i?P.text:P.muted} fontSize={7} fontFamily="Inter">{d.label}</text>}
         </g>
       ))}
       <text x={pl-3} y={pt+6} textAnchor="end" fill={P.muted} fontSize={7}>{max}{unit}</text>
