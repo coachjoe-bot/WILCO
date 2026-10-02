@@ -105,7 +105,10 @@ if (process.argv[1] && process.argv[1].endsWith("t69-memory-scan-pass.mjs")) {
   const ask = async (c) => {
     for (let attempt = 0; attempt < 6; attempt++) {
       const t0 = Date.now();
-      const r = await fetch(`${BASE}/api/claude`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ auth, model: MODEL, max_tokens: 160, system: MEMORY_SCAN_SYS, messages: [{ role: "user", content: [{ type: "text", text: scanUserMessage(c.kind, c.text) }] }], feature: MEMORY_SCAN_FEATURE }) });
+      // A dropped connection (the laptop slept mid-run on 10-01) is retried, never fatal.
+      let r;
+      try { r = await fetch(`${BASE}/api/claude`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ auth, model: MODEL, max_tokens: 160, system: MEMORY_SCAN_SYS, messages: [{ role: "user", content: [{ type: "text", text: scanUserMessage(c.kind, c.text) }] }], feature: MEMORY_SCAN_FEATURE }) }); }
+      catch { await sleep(15000); continue; }
       if (r.status === 429) { await sleep(90000); continue; }
       let d = null; try { d = await r.json(); } catch { d = null; }
       const text = d && d.content && d.content[0] ? d.content[0].text : "";
