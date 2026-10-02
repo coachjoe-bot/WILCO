@@ -997,7 +997,6 @@ function CoachDashboard({coach,onLogout}) {
   const [filterRequests,setFilterRequests] = useState(false);
   const [filterInactive,setFilterInactive] = useState(false);
   const [sortBy,setSortBy] = useState("lastActive"); // "lastActive" | "name"
-  const [recalcStatus,setRecalcStatus] = useState(null); // null | "running" | "done" | "error" | "X/Y
   const [allDigests,setAllDigests] = useState([]);
   const [manualRMs,setManualRMs] = useState([]);        // manual_one_rms — Grit + adherence-load
   const [prescriptions,setPrescriptions] = useState([]); // program_prescriptions (parsed programs) — Overview adherence
@@ -1229,54 +1228,6 @@ function CoachDashboard({coach,onLogout}) {
       } catch(e){ /* empty is fine */ }
     } catch(e){console.error(e);}
     setLoading(false);
-  };
-
-  const recalcAllPRs = async () => {
-    setRecalcStatus("running");
-    try {
-      // Fetch every workout ever logged (need all history, not just what's loaded).
-      // Paged so this can't fire one unbounded query that OOMs/times out on a big team.
-      const allWorkouts = await sbReadPaged("workouts","created_at.asc");
-      if(!Array.isArray(allWorkouts)) throw new Error("Could not load workouts");
-      let done = 0;
-      for(const ath of athletes){
-        const athWorkouts = allWorkouts.filter(w=>w.athlete_id===ath.id);
-        // Find best estimated 1RM per exercise across all sessions
-        const best = {};
-        for(const w of athWorkouts){
-          // parsed_data may come back as a string in some cases — parse it if so
-          const pd = typeof w.parsed_data==="string" ? (() => { try{return JSON.parse(w.parsed_data);}catch{return {};} })() : (w.parsed_data||{});
-          for(const ex of (pd.exercises||[])){
-            if(!ex.name||ex.unit==="bodyweight") continue;
-            const e1rm = bestE1RMForExercise(ex);
-            if(!e1rm) continue;
-            const k = normalizeExName(ex.name);
-            if(!best[k]||e1rm>best[k].e1rm){
-              const topSet = getExerciseSets(ex).reduce((b,s)=>epley1RM(toLbs(s.weight,ex.unit),s.reps)>epley1RM(toLbs(b.weight,ex.unit),b.reps)?s:b, {weight:ex.weight??0, reps:ex.reps||1});
-              best[k] = {exercise:ex.name,weight:topSet.weight,reps:topSet.reps||1,e1rm,unit:exerciseUnit(ex)};
-            }
-          }
-        }
-        // Only wipe and re-insert if we actually found exercises (safety guard).
-        // One array insert per athlete — the per-PR loop paid a full gateway
-        // round-trip per row.
-        if(Object.keys(best).length>0){
-          await sbDelete("prs",`?athlete_id=eq.${ath.id}`);
-          await sbInsert("prs",Object.values(best).map(({exercise,weight,reps,e1rm,unit})=>(
-            {athlete_id:ath.id,exercise,weight,reps,estimated_1rm:e1rm,unit}
-          )));
-        }
-        done++;
-        setRecalcStatus(`${done} / ${athletes.length} athletes done`);
-      }
-      setRecalcStatus("done");
-      await loadAll();
-      setTimeout(()=>setRecalcStatus(null),4000);
-    } catch(e){
-      console.error(e);
-      setRecalcStatus("error");
-      setTimeout(()=>setRecalcStatus(null),4000);
-    }
   };
 
   // Bulk writes go out in bounded-parallel chunks instead of strictly serially —
@@ -2102,29 +2053,6 @@ function CoachDashboard({coach,onLogout}) {
                 <SchoolOnboardingForm onCreated={loadAll} me={coach}/>
 
 
-                {/* ── PR Recalculation ── */}
-                <div style={{marginBottom:16,background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16}}>
-                  <div style={{color:CA.accent,...DISP,fontSize:16,letterSpacing:2,marginBottom:6}}>DATA MAINTENANCE</div>
-                  <div style={{color:CA.muted2,fontSize:13,lineHeight:1.6,marginBottom:14}}>
-                    Recalculates every athlete's PRs from their full workout history using the Epley estimated 1RM formula.
-                    Run this once to correct records that were saved before the 1RM update. Takes a few seconds per athlete.
-                  </div>
-                  <div style={{display:"flex",alignItems:"center",gap:14}}>
-                    <button
-                      onClick={recalcAllPRs}
-                      disabled={!!recalcStatus}
-                      style={{background:recalcStatus?CA.navy3:CA_BTN,color:recalcStatus?CA.muted:"#fff",border:`1px solid ${recalcStatus?CA.border:CA.accent}`,boxShadow:recalcStatus?"none":`0 4px 16px ${CA_GLOW}`,borderRadius:10,padding:"10px 22px",cursor:recalcStatus?"not-allowed":"pointer",fontSize:13,fontWeight:700,...DISP,letterSpacing:1,transition:"all 0.2s"}}>
-                      {recalcStatus&&recalcStatus!=="done"&&recalcStatus!=="error"?"Recalculating...":"Recalculate All PRs"}
-                    </button>
-                    {recalcStatus&&(
-                      <div style={{fontSize:13,color:recalcStatus==="done"?CA.green:recalcStatus==="error"?CA.red:CA.muted2,fontWeight:recalcStatus==="done"||recalcStatus==="error"?600:400}}>
-                        {recalcStatus==="done"?"✓ Done, all PRs updated"
-                          :recalcStatus==="error"?"✗ Something went wrong, check console"
-                          :recalcStatus}
-                      </div>
-                    )}
-                  </div>
-                </div>
                 {/* ── SCHOOLS LIST ── */}
                 <SchoolsList schools={allSchools} coaches={allCoaches} onRefresh={loadAll} me={coach}/>
 
