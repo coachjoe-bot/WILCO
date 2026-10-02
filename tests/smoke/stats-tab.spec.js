@@ -5,7 +5,7 @@
 // NUMBERS block inside the monthly Proof. The row is mocked here exactly as the
 // server would write it: computed by the same function from synthetic logs.
 import { test, expect } from "@playwright/test";
-import { mockApi, makeAthlete, loginAsAthlete } from "./mocks.js";
+import { mockApi, makeAthlete, loginAsAthlete, makeCoach, loginAsCoach } from "./mocks.js";
 import { computeAthleteStats, statsInRange, tonnageComparison } from "../../src/stats.js";
 
 if (process.env.SHOTS) test.use({ viewport: { width: 430, height: 900 } });
@@ -161,4 +161,25 @@ test("Monthly Proof: BY THE NUMBERS block renders from content_json.numbers with
   await expect(page.getByText(/▼ 1 vs last month/)).toBeVisible();
   await expect(page.getByRole("button", { name: /share september 2026/i })).toBeVisible();
   await shot(page, "proof-monthly-numbers");
+});
+
+// Coach side gets team totals only (Will 10-02): one card under Team Health,
+// summed from the roster's athlete_stats rows, with the same range control.
+test("Coach dashboard: TEAM TOTALS card sums the roster's summaries", async ({ page }) => {
+  const coach = makeCoach();
+  const athlete = makeAthlete({ coach_id: coach.id, total_sessions_logged: 60 });
+  const rows = yearOfLogs(athlete.id);
+  const stats = statsRowFor(athlete, rows)[0].stats;
+  await mockApi(page, { athlete, coach, dataReads: { athlete_stats: statsRowFor(athlete, rows), workouts: [], prs: [] } });
+  await loginAsCoach(page, coach);
+  await expect(page.getByText("Team totals")).toBeVisible({ timeout: 15000 });
+  const card = page.getByText("Team totals").locator("xpath=ancestor::div[2]");
+  await expect(card.getByRole("tab", { name: "3M" })).toHaveAttribute("aria-selected", "true");
+  const m3 = statsInRange(stats, "3M");
+  await expect(page.getByText(fmt(m3.tonnage), { exact: false }).first()).toBeVisible();
+  await expect(page.getByText("Most trained", { exact: false })).toBeVisible();
+  await expect(page.getByRole("button", { name: /share team card/i })).toBeVisible();
+  await card.getByRole("tab", { name: "ALL" }).click();
+  await expect(page.getByText(fmt(statsInRange(stats, "ALL").tonnage), { exact: false }).first()).toBeVisible();
+  await shot(page, "coach-team-totals");
 });
