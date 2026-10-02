@@ -79,7 +79,7 @@ import { CREW_ENABLED, MASTERMIND_ENABLED, CHAT_FIRST_ENABLED } from "./flags.js
 import { buildMastermindStatic } from "./ai/card.js";
 import { blueprintPct } from "./programBuilder.js";
 import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps, memoryNotesText, checkinNoteFact } from "./memory.js";
-import { activeGoals, goalsToSupersede, sameGoalText } from "./goals.js";
+import { activeGoals, goalsToSupersede, sameGoalText, futureGoalDate } from "./goals.js";
 import { MEMORY_SCAN_SYS, MEMORY_SCAN_MODEL, MEMORY_SCAN_FEATURE, scanUserMessage, readScanVerdict, SCAN_UNREACHABLE } from "./memoryScan.js";
 import { planDirectEdit, planDirectAdd, planDirectDelete, refusalLine, validateGoalText, validateInjuryText, planToolUpdate, isMemoryTool, isBodyweightFact, newMemoryOutcome, memoryOutcomeLine, toolRefusal } from "./memoryEdit.js";
 import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, programWriteOwner, recSummaryFallback, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
@@ -556,18 +556,20 @@ export const parseAthleteGoal = async (goalText) => {
       `Pull the measurable parts out of an athlete's stated training goal. Return ONLY JSON, no markdown:
 {"targets":[{"lift":string,"target_lbs":number,"target_date":string|null}],"summary":string|null}
 
-"targets": one entry for EVERY specific barbell/dumbbell lift the athlete names a target WEIGHT for. Use plain lift names ("bench press", "back squat", "deadlift", "front squat", "overhead press", "clean", "snatch"). Convert kg to lbs (1kg = 2.205lbs) and round to the nearest 5. "target_date" is an ISO date (YYYY-MM-DD) only when a date or timeframe is actually stated, else null. Empty array when the goal names no lift-and-weight target.
+"targets": one entry for EVERY specific barbell/dumbbell lift the athlete names a target WEIGHT for. Use plain lift names ("bench press", "back squat", "deadlift", "front squat", "overhead press", "clean", "snatch"). Convert kg to lbs (1kg = 2.205lbs) and round to the nearest 5. "target_date" is an ISO date (YYYY-MM-DD) only when a date or timeframe is actually stated, else null; a date with no year means the NEXT time it comes after today. Empty array when the goal names no lift-and-weight target.
 "summary": at most FIVE WORDS describing what they are working toward, for goals with nothing measurable in them ("Leaner with a stronger core", "Make varsity"). Null when the targets array already covers the whole goal. Null when the text is not a goal at all (someone pasted a workout log or a training program).
 
 Never invent a number the athlete did not state. Bodyweight targets ("get to 245lbs") are NOT lift targets: leave them out of targets and reflect them in summary.`,
-      `Goal: "${goalText}"`, 700, [], "claude-haiku-4-5", "goal_parse"
+      `TODAY: ${new Date().toISOString().slice(0,10)}\nGoal: "${goalText}"`, 700, [], "claude-haiku-4-5", "goal_parse"
     );
     const parsed = JSON.parse(String(raw).replace(/```json|```/g, "").trim());
     const targets = (Array.isArray(parsed.targets) ? parsed.targets : [])
       .map((t) => ({
         lift: t && t.lift ? String(t.lift).slice(0, 60) : null,
         target_lbs: Number.isFinite(+(t && t.target_lbs)) && +t.target_lbs > 0 ? +t.target_lbs : null,
-        target_date: typeof (t && t.target_date) === "string" && !Number.isNaN(Date.parse(t.target_date)) ? t.target_date : null,
+        // T69-A: the year is code's to settle (src/goals.js futureGoalDate): a
+        // goal just stated never targets a date already behind us.
+        target_date: typeof (t && t.target_date) === "string" && !Number.isNaN(Date.parse(t.target_date)) ? futureGoalDate(t.target_date) : null,
       }))
       .filter((t) => t.lift && t.target_lbs)
       .slice(0, 8); // a goal naming more than eight lifts is a program, not a goal
@@ -9334,8 +9336,8 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       try {
         // Parse goal from athlete's response
         const goalJson = await askClaude(
-          `Extract training goal info from this athlete message. Return ONLY valid JSON:\n{"goal_text":string,"goal_type":"strength"|"sport_performance"|"weight_loss"|"endurance"|"body_composition"|"general"|"other","target_metric":string|null,"target_value":number|null,"target_date":string|null}\ngoal_type: pick the best match. target_date: ISO date string if mentioned, else null.`,
-          `Athlete: ${athlete.name}\nMessage: ${msg}`,200,[],"claude-haiku-4-5","goal_parse"
+          `Extract training goal info from this athlete message. Return ONLY valid JSON:\n{"goal_text":string,"goal_type":"strength"|"sport_performance"|"weight_loss"|"endurance"|"body_composition"|"general"|"other","target_metric":string|null,"target_value":number|null,"target_date":string|null}\ngoal_type: pick the best match. target_date: ISO date string if mentioned, else null; a date with no year means the next time it comes after today.`,
+          `TODAY: ${new Date().toISOString().slice(0,10)}\nAthlete: ${athlete.name}\nMessage: ${msg}`,200,[],"claude-haiku-4-5","goal_parse"
         );
         try {
           const parsed = JSON.parse(goalJson.replace(/```json|```/g,"").trim());
@@ -9345,7 +9347,7 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
             goal_type:parsed.goal_type||"general",
             target_metric:parsed.target_metric||null,
             target_value:parsed.target_value||null,
-            target_date:parsed.target_date||null
+            target_date:futureGoalDate(parsed.target_date)   // T69-A twin: the year is code's (src/goals.js)
           });
           setAthleteGoals([{goal_text:msg,goal_type:parsed.goal_type||"general",created_at:new Date().toISOString()}]);
         } catch(e){}

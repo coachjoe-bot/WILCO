@@ -3,7 +3,7 @@
 // accumulating, a dated goal retires 14 days past its target, and the proof
 // check-in probes exactly the context that is about to go stale — because the
 // check-in is the PRIMARY way athlete context stays current.
-import { activeGoals, goalsToSupersede, sameGoalText, GOAL_GRACE_DAYS } from "../src/goals.js";
+import { activeGoals, goalsToSupersede, sameGoalText, GOAL_GRACE_DAYS, futureGoalDate } from "../src/goals.js";
 import { buildQuestionBank, monthlyExtraQuestions } from "../api/_proof.js";
 
 let pass = 0, fail = 0;
@@ -90,6 +90,25 @@ let mq = monthlyExtraQuestions(brief({ memory: [freshFact, staleFact] }));
 ok(mq.some((x) => x.id === "memory_stale" && /campus rec center/.test(x.text)), "monthly re-confirms the oldest long-lived note");
 mq = monthlyExtraQuestions(brief({ memory: [freshFact] }));
 ok(!mq.some((x) => x.id === "memory_stale"), "young context is left alone monthly");
+
+// ── T69-A: a goal just stated never targets the past ─────────────────────────
+// Measured 10-02 with the real model: "bench 315 by December", written on
+// 2026-10-02, came back from the goal parser stamped target_date 2024-12-31 on
+// 5 of 5 runs (the parser was never told today's date). activeGoals then
+// retired the goal the athlete had just set, and it vanished from the Memory
+// tab and from Joe's context on the next load.
+{
+  const at = new Date("2026-10-02T16:00:00Z");
+  ok(futureGoalDate("2024-12-31", at) === "2026-12-31", "a year-less 'by December' that parsed into the past rolls to the next December");
+  ok(futureGoalDate("2026-12-15", at) === "2026-12-15", "a date already ahead is left alone");
+  ok(futureGoalDate("2025-10-10", at) === "2026-10-10", "rolls to this year when that is still ahead");
+  ok(futureGoalDate("2025-09-15", at) === "2027-09-15", "rolls past this year when this year's date is already behind");
+  ok(futureGoalDate("2026-10-02", at) === "2026-10-02", "today stays today");
+  ok(futureGoalDate("2027-06-01T00:00:00Z", at) === "2027-06-01", "a timestamp comes back as a plain date");
+  ok(futureGoalDate("not a date", at) === null && futureGoalDate(null, at) === null && futureGoalDate("", at) === null, "no date in, no date out");
+  const stamped = { id: "g9", goal_text: "bench 315 by December", superseded_at: null, target_date: futureGoalDate("2024-12-31", at) };
+  ok(activeGoals([stamped], at).length === 1 && activeGoals([{ ...stamped, target_date: "2024-12-31" }], at).length === 0, "with the rolled date the goal the athlete just set stays active (the raw parse retired it)");
+}
 
 console.log(`\ngoals: ${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

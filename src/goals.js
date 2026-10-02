@@ -45,3 +45,25 @@ export function sameGoalText(a, b) {
   const na = norm(a), nb = norm(b);
   return !!na && na === nb;
 }
+
+// T69-A (10-02): a goal that was JUST stated never targets the past. The goal
+// parser (parseAthleteGoal, a small model) resolves "by December" to a full
+// date, and it was never told what today is: on 2026-10-02 it stamped
+// 2024-12-31 on "bench 315 by December", 5 of 5 runs. activeGoals then retired
+// the goal the athlete had just set and it vanished from the Memory tab and
+// from Joe's context on the next load. The year is a fact, so code owns it: a
+// parsed date that is already behind is rolled to the next time that month and
+// day come. Returns a plain YYYY-MM-DD, or null when there is no usable date.
+export function futureGoalDate(dateStr, now = new Date()) {
+  const m = String(dateStr || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  const mo = +m[2] - 1, d = +m[3];
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  let y = +m[1];
+  if (Date.UTC(y, mo, d) < today) {
+    y = now.getUTCFullYear();
+    if (Date.UTC(y, mo, d) < today) y += 1;
+  }
+  const out = new Date(Date.UTC(y, mo, d));
+  return Number.isNaN(out.getTime()) ? null : out.toISOString().slice(0, 10);
+}
