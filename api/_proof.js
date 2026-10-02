@@ -438,7 +438,11 @@ Keep each to 1-3 punchy sentences. New information only.
 
 ${LOAD_TOLERANCE}`;
 
-  const monthFacts = brief.monthCompare ? `\n\nMONTH VS LAST MONTH (COMPUTED — authoritative, write "mom" from these):\n${JSON.stringify(brief.monthCompare)}` : "";
+  const monthFacts = (brief.monthCompare ? `\n\nMONTH VS LAST MONTH (COMPUTED — authoritative, write "mom" from these):\n${JSON.stringify(brief.monthCompare)}` : "")
+    // T70: the athlete sees these exact figures in a BY THE NUMBERS block above
+    // the prose (lb moved, sessions, PRs, reps, this 30 days vs the 30 before).
+    // Never recompute or round them differently; refer to them as given.
+    + (brief.monthNumbers ? `\n\nBY THE NUMBERS (COMPUTED, shown to the athlete as-is, lbs): ${JSON.stringify({ lb_moved: brief.monthNumbers.tonnage, lb_moved_last_month: brief.monthNumbers.tonnage_prev, sessions: brief.monthNumbers.sessions, sessions_last_month: brief.monthNumbers.sessions_prev, prs_hit: brief.monthNumbers.prs, reps: brief.monthNumbers.reps, favorite_by_sets: brief.monthNumbers.favorite, comparison: brief.monthNumbers.comparison?.text })}` : "");
   const user = `BRIEF (JSON):\n${JSON.stringify(brief)}${monthFacts}\n\nWEEKLY ALREADY COVERS (do not repeat): ${weekly.contentJson.sections.map((s) => s.label).join(", ")}`;
 
   const raw = await deps.askClaudeServer({ system, user, maxTokens: 900, feature: "proof_monthly", attribution: deps.attribution });

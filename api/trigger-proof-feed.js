@@ -56,6 +56,7 @@ import {
   buildLiftHistory, totalSetVolume,
 } from "./_proof.js";
 import { computeGritSnapshot } from "./_grit.js";
+import { monthNumbers } from "../src/stats.js";
 import { activeGoals } from "../src/goals.js";
 import { activeFacts } from "../src/memory.js";
 import { sendToAthlete, pushPayload, ensureVapid, sendTo } from "./_push.js";
@@ -414,7 +415,20 @@ async function runAthlete(athlete, batch, { dryRun = false } = {}) {
     if (parsed) b.brief.volume = compareProgramVsActual(parsed, b.thisWeekSessions, b.oneRMs);
   } catch (e) { console.error("[proof-feed] program parse failed:", e.message); }
 
+  // T70: the monthly BY THE NUMBERS block, computed in code from the athlete's
+  // stored summary (athlete_stats) BEFORE the model writes, so the prose and
+  // the block carry the same figures. Thin month (under 4 sessions) → no block.
+  let monthNums = null;
+  if (isMonthly) {
+    try {
+      const srow = (await sbSelect("athlete_stats", `?athlete_id=eq.${athlete.id}&select=stats`))[0];
+      monthNums = srow ? monthNumbers(srow.stats) : null;
+      if (monthNums) b.brief.monthNumbers = monthNums;
+    } catch (e) { console.error("[proof-feed] month numbers failed:", e.message); }
+  }
+
   const digest = isMonthly ? await generateMonthly(athlete, b.brief, deps) : await generateWeekly(athlete, b.brief, deps);
+  if (monthNums) digest.contentJson.numbers = monthNums;
 
   // WILCO Crew V1: the weekly/monthly Proof digest's crew blip — highlights only,
   // never a roll-call, and OMITTED entirely when there's nothing (never "your

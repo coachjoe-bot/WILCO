@@ -118,6 +118,10 @@ import { nativeBiometricAvailable, nativeBiometricVerify } from "./nativeBiometr
 // UI download only when the Builder subtab actually opens.
 const ProgramBuilderPane = lazy(() => import("./builder.jsx").then(m => ({ default: m.ProgramBuilderPane })));
 const ProgramEditPane = lazy(() => import("./builder.jsx").then(m => ({ default: m.ProgramEditPane })));
+// T70 Stats tab + the monthly numbers block: same lazy chunk convention, so the
+// summary math and the share-card canvas never ride in the boot bundle.
+const StatsTab = lazy(() => import("./statsTab.jsx").then(m => ({ default: m.StatsTab })));
+const StatsNumbersBlock = lazy(() => import("./statsTab.jsx").then(m => ({ default: m.StatsNumbersBlock })));
 // Chat-routing decisions (model escalation, "remember this", is-this-a-log, PR
 // propagation guards). Pure regexes/logic pulled out of send() so they have a
 // suite — see src/chatRouting.js and scripts/test-chat-routing.mjs.
@@ -150,6 +154,7 @@ import {
   sessionTonnage, sessionTopSet, goalTargets, liftSeriesPoints,
   implausibleJump, prCheckLines, knownMaxLines,
 } from "./grit.js";
+import { liftWeeklySeries, weeklyMiles, RANGES as STAT_RANGES } from "./stats.js";
 export {
   epley1RM, getExerciseSets, bestE1RMForExercise, effectiveDate, parseDbDate,
   isRealSession, groupIntoSessions,
@@ -2801,6 +2806,21 @@ function UpdatePill({onDismiss}) {
 // ─── LINE CHART ───────────────────────────────────────────────────────────────
 // All call sites pass color + palette={CA} explicitly for the night-gym grid/axis
 // colors; the defaults are just a safety net on the app palette.
+// T70: ONE range control for every graph and the Stats tab (1M · 3M · 1Y · ALL).
+// Stats opens on ALL, graphs on 3M (Will, 10-02). Same bones both themes.
+export function RangeControl({value, onChange, style}) {
+  return (
+    <div role="tablist" aria-label="Time range" style={{display:"flex",background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:9,padding:3,gap:2,...style}}>
+      {["1M","3M","1Y","ALL"].map(r=>(
+        <button key={r} role="tab" aria-selected={value===r} onClick={()=>{ if(value!==r){ haptic(8); onChange(r); } }}
+          style={{flex:1,background:value===r?CA.accent:"transparent",color:value===r?CA.onAccent:CA.muted,border:"none",borderRadius:6,padding:"6px 0",fontSize:11,fontWeight:700,letterSpacing:0.8,cursor:"pointer",fontFamily:"'Inter'",transition:"background 0.15s,color 0.15s"}}>{r}</button>
+      ))}
+    </div>
+  );
+}
+// The first calendar day a range covers (local), or null for ALL.
+export const rangeFromDate = (range) => { const span = STAT_RANGES[range]; if(span==null) return null; const d=new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate()-(span-1)); return d; };
+
 export function LineChart({data, color=CA.cyan, unit="", palette=CA}) {
   const P = palette;
   const [selected, setSelected] = useState(null);
@@ -3468,7 +3488,7 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
 // The opened edition: the digest read as a full page (rank hero, distinct gold PR
 // block, receded routine sections, red injury card, closing FOCUS directive) — shown
 // when the athlete opens the front page, before the check-in begins below it.
-function ProofLetter({intro, sections, flags, label, dateStr, crew}) {
+function ProofLetter({intro, sections, flags, label, dateStr, crew, numbers, athleteName}) {
   const secs = sections || [];
   const rankSec  = secs.find(s=>isRankLabel(s.label));
   const prSec    = secs.find(s=>isPRLabel(s.label));
@@ -3514,6 +3534,14 @@ function ProofLetter({intro, sections, flags, label, dateStr, crew}) {
           {hero.score!=null&&<div style={{fontSize:10,letterSpacing:2,color:CA.muted2,marginBottom:hero.tier?2:0}}>STRENGTH SCORE</div>}
           <div style={{fontSize:12.5,lineHeight:1.6,color:IS_DARK?"#c7d2e0":CA.muted2,marginTop:10,whiteSpace:"pre-wrap"}}>{rankSec.body}</div>
         </div>
+      )}
+
+      {/* ── T70: monthly BY THE NUMBERS — code-computed on the server from the
+          athlete_stats row (content_json.numbers); Joe only writes around it. */}
+      {numbers&&(
+        <Suspense fallback={null}>
+          <StatsNumbersBlock numbers={numbers} athleteName={athleteName} monthLabel={String(label||"").replace(/^MONTHLY RECAP:\s*/i,"")||undefined}/>
+        </Suspense>
       )}
 
       {/* ── Newspaper columns (Will's 2A pick, 08-11) — sections read as a real
@@ -4029,7 +4057,7 @@ Rules: facts are about the ATHLETE (schedule, availability, equipment, preferenc
             page, so the modal is just Coach Joe's conversation. */}
         {/* The opened page — the digest, formatted with hierarchy. Stays at the top as
             context once the check-in Q&A begins below it. */}
-        <ProofLetter intro={c.intro} sections={sections} flags={c.flags} label={label} crew={c.crew}
+        <ProofLetter intro={c.intro} sections={sections} flags={c.flags} label={label} crew={c.crew} numbers={c.numbers} athleteName={athlete?.name}
           dateStr={digest?.generated_at?new Date(digest.generated_at).toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"}).toUpperCase():null}/>
 
         {/* Monthly: embedded est-1RM progress charts (reused LineChart). Rendered as
@@ -13028,7 +13056,7 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
           already carrying four tabs and clipped the fifth off-screen, this one had
           two. overflowX + nowrap so a third can never be stranded the same way. */}
       <div style={{display:"flex",borderBottom:`1px solid ${CA.border}`,flexShrink:0,overflowX:"auto"}}>
-        {["workouts","proof",...(CREW_ENABLED&&athlete?.crew_allowed!==false?["crew"]:[])].map(t=>(
+        {["workouts","stats","proof",...(CREW_ENABLED&&athlete?.crew_allowed!==false?["crew"]:[])].map(t=>(
           <button key={t} onClick={()=>setTab(t)}
             style={{padding:"10px 20px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?CA.cyan:"transparent"}`,color:tab===t?CA.cyan:CA.muted,cursor:"pointer",fontSize:12,fontWeight:600,textTransform:"uppercase",letterSpacing:1,fontFamily:"'Inter'",transition:"color 0.15s",position:"relative",whiteSpace:"nowrap"}}>
             {t}
@@ -13237,6 +13265,14 @@ function MyLogModal({workoutHistory, athlete, onClose, proofDigest, onDigestRead
             </div>
           );
         })()}
+
+        {/* ── STATS TAB (T70) ── career numbers from the athlete_stats row;
+            refreshTick re-reads after a log lands so a fresh session shows. */}
+        {tab==="stats"&&(
+          <Suspense fallback={<div style={{padding:"8px 0"}}><Skeleton lines={[40,90,70,60]}/></div>}>
+            <StatsTab athlete={athlete} refreshTick={(workoutHistory||[]).length}/>
+          </Suspense>
+        )}
 
         {/* ── PROOF TAB ── */}
         {tab==="proof"&&(
@@ -14096,6 +14132,24 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   useEffect(()=>{ if(tab!=="benchmarks"||!rmLoaded){ setBenchGo(false); return; } const t=setTimeout(()=>setBenchGo(true),80); return ()=>clearTimeout(t); },[tab,rmLoaded]);
 
   const [prRows,setPrRows] = useState([]); // all-time prs rows — seed bests past the 100-workout history cap (A22)
+  // T70: graph time range. 1M/3M draw every logged instance from the loaded
+  // history; 1Y/ALL read the athlete_stats summary (one point per week) so the
+  // long view is honest past the 100-row history cap.
+  const [range,setRange] = useState("3M");
+  const [statsRow,setStatsRow] = useState(null);
+  useEffect(()=>{
+    let on=true;
+    sbRead("athlete_stats",`?athlete_id=eq.${athlete.id}&select=stats`).then(rows=>{ if(on&&Array.isArray(rows)&&rows[0]) setStatsRow(rows[0].stats||null); }).catch(()=>{});
+    return ()=>{ on=false; };
+  },[athlete.id,(workoutHistory||[]).length]);
+  const rangeFrom = rangeFromDate(range);
+  const longRange = range==="1Y"||range==="ALL";
+  // Chart points for one lift in the chosen range: {date, e1rm}[].
+  const entriesFor = (ex) => {
+    if(!longRange) return (ex.entries||[]).filter(e=>!rangeFrom||e.date>=rangeFrom);
+    if(statsRow) return liftWeeklySeries(statsRow, ex.key, {range}).map(p=>({date:new Date(p.week+"T12:00:00"), e1rm:p.y, weekly:true}));
+    return ex.entries||[];
+  };
   useEffect(()=>{
     sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`).then(rows=>{
       if(Array.isArray(rows)) setManualRMs(rows);
@@ -14565,16 +14619,22 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
         {/* ── STRENGTH TAB ── */}
         {tab==="strength"&&(
           <div>
-            <div style={{color:CA.cyan,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>STRENGTH PROGRESS</div>
-            {exercises.filter(ex=>ex.entries.length>0).length===0?(
-              <AwaitingSignal hint="Log a few weighted lifts and your strength curve builds itself: est. 1RM over time, per exercise."/>
-            ):exercises.filter(ex=>ex.entries.length>0).map((ex,i)=>(
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:12}}>
+              <div style={{color:CA.cyan,fontSize:11,letterSpacing:1,fontWeight:700}}>STRENGTH PROGRESS</div>
+              <RangeControl value={range} onChange={setRange} style={{width:200}}/>
+            </div>
+            {exercises.filter(ex=>entriesFor(ex).length>0).length===0?(
+              <>
+                <RangeControl value={range} onChange={setRange} style={{marginBottom:12}}/>
+                <AwaitingSignal hint={range==="ALL"?"Log a few weighted lifts and your strength curve builds itself: est. 1RM over time, per exercise.":`No weighted lifts in the ${range==="1M"?"last 30 days":range==="3M"?"last 3 months":"last year"}. Try ALL.`}/>
+              </>
+            ):exercises.filter(ex=>entriesFor(ex).length>0).map((ex,i)=>(
               <div key={i} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:14}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
                   <div>
                     <div style={{color:CA.text,fontWeight:700,fontSize:14}}>{ex.name}</div>
                     {/* one entry per logged instance (best set only), not per set — say so (A30) */}
-                    <div style={{color:CA.muted,fontSize:11,marginTop:2}}>logged {ex.entries.length} time{ex.entries.length!==1?"s":""}</div>
+                    <div style={{color:CA.muted,fontSize:11,marginTop:2}}>{longRange&&statsRow?`${entriesFor(ex).length} week${entriesFor(ex).length!==1?"s":""} · weekly best`:`logged ${entriesFor(ex).length} time${entriesFor(ex).length!==1?"s":""}`}</div>
                   </div>
                   <div style={{textAlign:"right"}}>
                     <div style={{color:CA.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>BEST EST. 1RM</div>
@@ -14584,8 +14644,8 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                     {ex.bwLoaded&&bwLoadLabel(ex.e1rm,bodyweight)&&<div style={{color:CA.muted,fontSize:10,marginTop:3}}>{bwLoadLabel(ex.e1rm,bodyweight)}</div>}
                   </div>
                 </div>
-                {ex.entries.length>=2?(
-                  <LineChart data={ex.entries.map(e=>({label:fmtDateShort(e.date),y:displayStat(e.e1rm)}))} color={CA.cyan} palette={CA} unit={unitLabel()}/>
+                {entriesFor(ex).length>=2?(
+                  <LineChart data={entriesFor(ex).map(e=>({label:fmtDateShort(e.date),y:displayStat(e.e1rm)}))} color={CA.cyan} palette={CA} unit={unitLabel()}/>
                 ):(
                   <div style={{background:CA.navy3,borderRadius:8,padding:"8px 12px",fontSize:12,color:CA.muted2}}>Log again to see a trend.</div>
                 )}
@@ -14602,10 +14662,15 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
           }).map(w=>{
             const pd=typeof w.parsed_data==="string"?JSON.parse(w.parsed_data):(w.parsed_data||{});
             return{date:effectiveDate(w),run:pd.run_data};
-          }).sort((a,b)=>a.date-b.date);
-          if(runs.length===0) return <AwaitingSignal hint="Tell Coach Joe about a run (distance, pace, heart rate) and your pace and mileage trends light up here."/>;
+          }).sort((a,b)=>a.date-b.date).filter(r=>!rangeFrom||r.date>=rangeFrom);
+          const rangeCtl = <RangeControl value={range} onChange={setRange} style={{width:200}}/>;
+          if(runs.length===0) return <><div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>{rangeCtl}</div><AwaitingSignal hint={range==="ALL"?"Tell Coach Joe about a run (distance, pace, heart rate) and your pace and mileage trends light up here.":"No runs in this window. Try ALL."}/></>;
           const paceToMin=(p)=>{if(!p)return null;const pts=p.split(":");if(pts.length<2)return null;const m=parseFloat(pts[0]),s=parseFloat(pts[1]);return isNaN(m)||isNaN(s)?null:Math.round((m+s/60)*100)/100;};
-          const distData=runs.filter(r=>r.run.distance_miles||r.run.distance_km).map(r=>({label:fmtDateShort(r.date),y:r.run.distance_miles||r.run.distance_km}));
+          // 1Y/ALL: miles per week from the athlete_stats summary (honest past the
+          // 100-row history cap); 1M/3M: every logged run, as before.
+          const distData=(longRange&&statsRow)
+            ? weeklyMiles(statsRow,range).map(p=>({label:fmtDateShort(new Date(p.week+"T12:00:00")),y:p.y}))
+            : runs.filter(r=>r.run.distance_miles||r.run.distance_km).map(r=>({label:fmtDateShort(r.date),y:r.run.distance_miles||r.run.distance_km}));
           const paceData=runs.filter(r=>r.run.pace_per_mile||r.run.pace_per_km).map(r=>({label:fmtDateShort(r.date),y:paceToMin(r.run.pace_per_mile||r.run.pace_per_km)})).filter(d=>d.y!==null);
           const hrData=runs.filter(r=>r.run.heart_rate_avg).map(r=>({label:fmtDateShort(r.date),y:r.run.heart_rate_avg}));
           // Every chart needs 2+ points. With runs logged but none of the three
@@ -14617,8 +14682,11 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
             return <AwaitingSignal hint={`${runs.length} run${runs.length===1?"":"s"} logged. Tell Coach Joe about one more and your pace, mileage and heart-rate trends chart themselves here.`}/>;
           return (
             <div>
-              <div style={{color:CA.blue,fontSize:11,letterSpacing:1,fontWeight:700,marginBottom:12}}>RUNNING PROGRESS</div>
-              {distData.length>=2&&<div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:CA.text,fontWeight:700,fontSize:14,marginBottom:12}}>Distance per run</div><LineChart data={distData} color={CA.blue} palette={CA} unit=" mi"/></div>}
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:12}}>
+                <div style={{color:CA.blue,fontSize:11,letterSpacing:1,fontWeight:700}}>RUNNING PROGRESS</div>
+                {rangeCtl}
+              </div>
+              {distData.length>=2&&<div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:CA.text,fontWeight:700,fontSize:14,marginBottom:12}}>{longRange&&statsRow?"Miles per week":"Distance per run"}</div><LineChart data={distData} color={CA.blue} palette={CA} unit=" mi"/></div>}
               {paceData.length>=2&&<div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:CA.text,fontWeight:700,fontSize:14,marginBottom:4}}>Pace (min/mi), lower is faster</div><LineChart data={paceData} color={CA.green} palette={CA} unit=""/></div>}
               {hrData.length>=2&&<div style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:14}}><div style={{color:CA.text,fontWeight:700,fontSize:14,marginBottom:12}}>Avg heart rate (bpm)</div><LineChart data={hrData} color={CA.red} palette={CA} unit=" bpm"/></div>}
               {/* every chart needs 2+ points; that case is handled above by the

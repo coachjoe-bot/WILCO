@@ -8,7 +8,7 @@
 // hero's loop, sessions follow the 3-hour grouping, ranges are exact to the day,
 // streaks follow Sunday-start weeks, comparisons pick a readable object.
 
-import { computeAthleteStats, statsInRange, liftWeeklySeries, tonnageComparison, weekKey, shiftDay, dayKey, STATS_VERSION } from "../src/stats.js";
+import { computeAthleteStats, statsInRange, liftWeeklySeries, tonnageComparison, weekKey, shiftDay, dayKey, STATS_VERSION, monthNumbers, weeklyMiles } from "../src/stats.js";
 import { sessionTonnage, groupIntoSessions, computeGritSnapshot } from "../src/grit.js";
 
 let pass = 0, fail = 0;
@@ -216,6 +216,33 @@ const EX = (name, sets, reps, weight, unit = "lbs", more = {}) => ({ name, sets,
   eq(tonnageComparison(9000).text, "15 grizzly bears", "9k lb → bears");
   eq(tonnageComparison(4000).text, "6.7 grizzly bears", "under 10 → one decimal");
   eq(tonnageComparison(1284900, { unit: "kg" }).objectWeight, 11340, "kg object weight");
+}
+
+// ── monthly numbers + weekly miles ───────────────────────────────────────────
+{
+  const mk = (d, w) => W(`${d}T16:00:00Z`, [EX("Bench Press", 3, 5, w)]);
+  const rows = [
+    mk("2026-08-05", 185), mk("2026-08-12", 185), mk("2026-08-19", 190), mk("2026-08-26", 190),   // previous 30 days (Aug 4 .. Sep 2)
+    mk("2026-09-08", 195), mk("2026-09-15", 200), mk("2026-09-22", 205), mk("2026-09-29", 210),   // this 30 days (Sep 3 .. Oct 2)
+    W("2026-09-20T16:00:00Z", [], { parsed_data: { exercises: [], run_data: { distance_miles: 4 } } }),
+    W("2026-09-21T16:00:00Z", [], { parsed_data: { exercises: [], run_data: { distance_km: 8.04672 } } }),
+  ];
+  const s = computeAthleteStats(rows, { tz: TZ, now: NOW });
+  const m = monthNumbers(s, { now: NOW });
+  eq(m.sessions, 6, "this month: 4 lifts + 2 runs");
+  eq(m.sessions_prev, 4, "last month: 4");
+  eq(m.tonnage, 15 * (195 + 200 + 205 + 210), "this month tonnage");
+  eq(m.tonnage_prev, 15 * (185 + 185 + 190 + 190), "last month tonnage");
+  eq(m.prs, 4, "four rising benches = four PRs this month");
+  eq(m.favorite, "Bench Press", "favorite");
+  eq(m.best_lift.e1rm, Math.round(210 * (1 + 5 / 30)), "best lift this month");
+  eq(m.comparison.text, "20 grizzly bears", "comparison attached");
+  eq(monthNumbers(computeAthleteStats(rows.slice(0, 3), { tz: TZ, now: NOW }), { now: NOW }), null, "thin month → no block");
+  eq(monthNumbers(null), null, "no stats → null");
+  const wm = weeklyMiles(s, "ALL", { now: NOW });
+  eq(wm.length, 1, "two runs in one week → one point");
+  eq(wm[0].y, 9, "miles summed, km converted");
+  eq(weeklyMiles(s, "1M", { now: "2026-11-15T12:00:00Z" }).length, 0, "out of range → none");
 }
 
 // ── empty / malformed input ───────────────────────────────────────────────────

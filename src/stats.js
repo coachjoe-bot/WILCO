@@ -223,10 +223,13 @@ export function statsInRange(stats, range = "ALL", opts = {}) {
   const tz = stats?.tz || opts.tz || null;
   const nowKey = dayKey(opts.now ? new Date(opts.now) : new Date(), tz);
   const from = span == null ? null : shiftDay(nowKey, -(span - 1));
-  const inWin = (k) => !from || k >= from;
+  // Bounded on both ends: a window asked for with an earlier `now` (the monthly
+  // block's "the 30 days before") must stop at that day, and a future-dated row
+  // never leaks into today's totals.
+  const inWin = (k) => (!from || k >= from) && k <= nowKey;
   const out = { range, from, to: nowKey, sessions: 0, sets: 0, reps: 0, tonnage: 0, prs: 0, duration_s: 0, runs: 0, miles: 0, training_days: 0, biggest_session: null, lifts: [], best_lift: null, favorite: null };
   if (!stats) return out;
-  if (!from) {
+  if (!from && !(stats.lifetime.last_day > nowKey)) {
     Object.assign(out, {
       sessions: stats.lifetime.sessions, sets: stats.lifetime.sets, reps: stats.lifetime.reps, tonnage: stats.lifetime.tonnage,
       prs: stats.lifetime.prs, duration_s: stats.lifetime.duration_s, runs: stats.lifetime.runs, miles: stats.lifetime.miles,
@@ -270,13 +273,54 @@ export function liftWeeklySeries(stats, liftId, { range = "ALL", now, metric = "
   const idx = metric === "heaviest" ? 5 : metric === "tonnage" ? 3 : 4;
   const byWeek = new Map();
   for (const t of l.days) {
-    if (from && t[0] < from) continue;
+    if ((from && t[0] < from) || t[0] > nowKey) continue;
     if (!(t[idx] > 0)) continue;
     const wk = weekKey(t[0]);
     const cur = byWeek.get(wk);
     byWeek.set(wk, metric === "tonnage" ? (cur || 0) + t[idx] : Math.max(cur || 0, t[idx]));
   }
   return [...byWeek.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([w, y]) => ({ week: w, y }));
+}
+
+// The monthly Proof's BY THE NUMBERS block: this 30 days against the 30 before,
+// from the stored summary. Computed on the server before the digest is written
+// so Joe's prose and the block can never disagree. null when the month is thin
+// (fewer than 4 sessions: no block, no share card, Will 10-02).
+export const MONTH_NUMBERS_MIN_SESSIONS = 4;
+export function monthNumbers(stats, { now } = {}) {
+  if (!stats) return null;
+  const nowMs = now ? new Date(now).getTime() : Date.now();
+  const cur = statsInRange(stats, "1M", { now: nowMs });
+  if (cur.sessions < MONTH_NUMBERS_MIN_SESSIONS) return null;
+  const prev = statsInRange(stats, "1M", { now: nowMs - 30 * 864e5 });
+  return {
+    from: cur.from, to: cur.to,
+    tonnage: cur.tonnage, tonnage_prev: prev.tonnage,
+    sessions: cur.sessions, sessions_prev: prev.sessions,
+    sets: cur.sets, sets_prev: prev.sets,
+    reps: cur.reps, reps_prev: prev.reps,
+    prs: cur.prs, prs_prev: prev.prs,
+    favorite: cur.favorite && !/unknown/i.test(cur.favorite.name) ? cur.favorite.name : null,
+    best_lift: cur.best_lift ? { name: cur.best_lift.name, e1rm: cur.best_lift.e1rm } : null,
+    biggest_session: cur.biggest_session,
+    comparison: tonnageComparison(cur.tonnage),
+  };
+}
+
+// Weekly miles for the Running tab's 1Y/ALL distance chart (days carry miles
+// per training day; pace and heart rate stay on the loaded rows).
+export function weeklyMiles(stats, range = "ALL", { now } = {}) {
+  const span = RANGES[range] === undefined ? null : RANGES[range];
+  const nowKey = dayKey(now ? new Date(now) : new Date(), stats?.tz || null);
+  const from = span == null ? null : shiftDay(nowKey, -(span - 1));
+  const byWeek = new Map();
+  for (const d of stats?.days || []) {
+    if (!(d.miles > 0)) continue;
+    if ((from && d.d < from) || d.d > nowKey) continue;
+    const wk = weekKey(d.d);
+    byWeek.set(wk, (byWeek.get(wk) || 0) + d.miles);
+  }
+  return [...byWeek.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([w, y]) => ({ week: w, y: Math.round(y * 10) / 10 }));
 }
 
 // ── comparisons ──────────────────────────────────────────────────────────────
