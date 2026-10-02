@@ -63,6 +63,10 @@
     {
       "path": "/api/reconcile-billing",
       "schedule": "15 7 * * *"
+    },
+    {
+      "path": "/api/stats-rebuild",
+      "schedule": "45 8 * * *"
     }
   ]
 }

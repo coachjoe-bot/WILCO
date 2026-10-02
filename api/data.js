@@ -23,6 +23,7 @@
 import { applyCors, httpErr, str, sbWrite, sbSelect, authCaller, tryTokenAuth, logError, authThrottle, clientIp } from "./_supa.js";
 import { toLbs as toLbsShared } from "./_units.js";
 import { CREW_ENABLED } from "./_flags.js";
+import { waitUntil } from "@vercel/functions";
 import { crewPeerIds, resolveCrewOrg, crewAllowedFor, composeGoalGlance, goalTargets, bestE1rmLbsForLift, orderedPair, withinWindow, withinTierPct, compareStateFor, CREW_CAP, REACTION_EMOJI, CREW_CODE_ALPHABET } from "./_crew.js";
 
 const enc = encodeURIComponent;
@@ -131,6 +132,10 @@ const READ_OWN_COL = {
   // T58 mastermind memory (athlete reads own; coach reads roster's, same trust
   // as athlete_context — memory is athlete-visible by design).
   athlete_memory: "athlete_id",
+  // T70: the athlete's computed career summary (athlete reads own; coach reads the
+  // roster's for the team-totals card). Server-written only (api/_stats.js), so it
+  // is deliberately NOT in WRITABLE.
+  athlete_stats: "athlete_id",
 };
 
 // Tables read/written by COACH callers scoped to their OWN coach_id (not their
@@ -618,7 +623,9 @@ export default async function handler(req, res) {
       let coachAlert = null;
       try { coachAlert = await prepCoachAlert(caller, table, body.data); }
       catch (e) { console.error("[data] coach alert prep failed:", e.message); }
+      const statsIds = await statsTargetsBefore(caller, table, body);
       const json = await sbWrite({ method: "POST", table, body: body.data });
+      scheduleStatsRefresh(statsIds);
       if (coachAlert) {
         try { await notifyCoachLazy(coachAlert.coachId, coachAlert.prefKey, coachAlert.msg); }
         catch (e) { console.error("[data] coach alert send failed:", e.message); }
@@ -632,7 +639,9 @@ export default async function handler(req, res) {
       const base = typeof body.params === "string" && body.params
         ? body.params
         : `?id=eq.${enc(str(body.id, { max: 64, name: "id" }))}`;
+      const statsIds = await statsTargetsBefore(caller, table, body);
       const json = await sbWrite({ method: "PATCH", table, query: base + ownFilter, body: body.data });
+      scheduleStatsRefresh(statsIds);
 
       // ── Coach programming-update notification hook (notification policy v2) ──
       // ONLY a COACH-authored write to an athlete's program_text/temp_program_text
@@ -683,6 +692,7 @@ export default async function handler(req, res) {
       if (caller.role === "coach" && !coachIsMaster && !(table === "program_prescriptions" && conflict === ATHLETE_OWN_COL[table])) {
         throw httpErr(403, "Upsert not allowed for this account");
       }
+      const statsIds = await statsTargetsBefore(caller, table, body);
       const json = await sbWrite({
         method: "POST",
         table,
@@ -690,6 +700,7 @@ export default async function handler(req, res) {
         body: body.data,
         prefer: "resolution=merge-duplicates,return=representation",
       });
+      scheduleStatsRefresh(statsIds);
       return res.status(200).json(stripPins(json));
     }
 
@@ -699,7 +710,9 @@ export default async function handler(req, res) {
         ? body.params
         : (body.id ? `?id=eq.${enc(str(body.id, { max: 64, name: "id" }))}` : "");
       if (!base) throw httpErr(400, "delete requires params or id");
+      const statsIds = await statsTargetsBefore(caller, table, body);
       await sbWrite({ method: "DELETE", table, query: base + ownFilter, prefer: "return=minimal" });
+      scheduleStatsRefresh(statsIds);
       return res.status(200).json({ ok: true });
     }
 
@@ -707,6 +720,34 @@ export default async function handler(req, res) {
   } catch (e) {
     return handleErr(e, res, caller, body);
   }
+}
+
+// ── T70 stats refresh hook ───────────────────────────────────────────────────
+// After ANY write to workouts (athlete log, Joe's correction, coach edit, delete)
+// the owning athlete's athlete_stats row is recomputed in the background
+// (api/_stats.js). Best-effort and off the response path: a failure here can
+// never fail the write, and the nightly rebuild catches anything missed.
+// For update/delete the athlete is read BEFORE the write (a deleted row can't be
+// asked afterwards); for an athlete caller it is simply the caller.
+async function statsTargetsBefore(caller, table, body) {
+  if (table !== "workouts") return null;
+  try {
+    if (caller.role === "athlete") return [caller.id];
+    if (body.op === "insert" || body.op === "upsert") {
+      const rows = Array.isArray(body.data) ? body.data : [body.data];
+      return rows.map((r) => r && r.athlete_id).filter(Boolean);
+    }
+    const base = typeof body.params === "string" && body.params ? body.params : (body.id ? `?id=eq.${enc(String(body.id))}` : "");
+    if (!base) return null;
+    const rows = await sbSelect("workouts", `${base}&select=athlete_id&limit=1000`);
+    return rows.map((r) => r.athlete_id);
+  } catch (e) { console.error("[data] stats target lookup failed:", e.message); return null; }
+}
+function scheduleStatsRefresh(ids) {
+  if (!ids || !ids.length) return;
+  try {
+    waitUntil(import("./_stats.js").then(({ refreshMany }) => refreshMany(ids)).catch((e) => console.error("[data] stats refresh failed:", e.message)));
+  } catch (e) { console.error("[data] stats refresh schedule failed:", e.message); }
 }
 
 // ── Coach alert fanouts (notification policy v2.1, Will-approved 2026-07-22) ──
