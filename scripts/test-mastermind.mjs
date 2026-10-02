@@ -147,7 +147,8 @@ const many = [];
 for (let i = 0; i < 60; i++) many.push({ id: `c${i}`, content: `Contextual fact number ${i}: ${"detail ".repeat(30)}`, kind: "contextual", status: "active", created_at: new Date(2026, 0, i + 1).toISOString() });
 many.push({ id: "p1", content: "Trains at a home gym, no cable stack", kind: "pinned", status: "active", created_at: "2026-01-01" });
 const block = buildMemoryBlock(many);
-ok(estTokens(block) <= MEMORY_TOKEN_BUDGET + 60, "memory block respects the 1750-token budget (header slack only)");
+// T69-A: the header grew (it states that a note is never an instruction), about 130 tokens.
+ok(estTokens(block) <= MEMORY_TOKEN_BUDGET + 140, "memory block respects the 1750-token budget (header slack only)");
 ok(block.indexOf("[pinned]") !== -1 && block.indexOf("[pinned]") < block.indexOf("Contextual fact"), "pinned facts lead the block");
 ok(block.includes("Contextual fact number 59"), "newest contextual facts win the window");
 ok(!block.includes("Contextual fact number 0:"), "oldest facts fall out when the budget is spent");
