@@ -207,31 +207,12 @@ export const validPainMarks = (v) => {
       : x === null || (typeof x === "string" && x.length <= 40 && Number.isFinite(Date.parse(x))))));
 };
 
-// T69-C: athletes.review_stamps shape guard. {field: {confirmed_at, ask_count}} for
-// the three signup fields the weekly check-in re-confirms (src/memoryReview.js
-// SIGNUP_FIELDS). Twin of the migration 20261003_t69c_context_sections.
-const REVIEW_STAMP_FIELDS = new Set(["training_days_per_week", "equipment", "injury_history"]);
-export const validReviewStamps = (v) => {
-  if (v === null) return true;
-  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
-  const keys = Object.keys(v);
-  if (keys.length > 3 || JSON.stringify(v).length > 600) return false;
-  return keys.every((k) => REVIEW_STAMP_FIELDS.has(k) && v[k] && typeof v[k] === "object" && !Array.isArray(v[k])
-    && Object.entries(v[k]).every(([f, x]) => (
-      f === "ask_count" ? Number.isInteger(x) && x >= 0 && x <= 9
-      : f === "confirmed_at" ? x === null || (typeof x === "string" && x.length <= 40 && Number.isFinite(Date.parse(x)))
-      : false)));
-};
-
 const ATHLETE_COL_ALLOW = {
   // T58 mastermind memory: the model writes these through tool handlers, so pin
   // the vocabulary server-side — content bounded, kind/status enums, expires_at
   // must parse. (athlete_id is forced by ATHLETE_OWN_COL ownership above.)
   athlete_memory: {
-    // T69-C: section (the tab's section), confirmed_at + ask_count (the review
-    // stamps) and area_key (a work-around note's pain area). DB twin: migration
-    // 20261003_t69c_context_sections (CHECK on section, ask_count).
-    cols: new Set(["content", "kind", "expires_at", "source", "status", "updated_at", "section", "confirmed_at", "ask_count", "area_key"]),
+    cols: new Set(["content", "kind", "expires_at", "source", "status", "updated_at"]),
     values: {
       // T61 (Will 08-29): 2000 is the abuse bound, not a product cap — the
       // injected block is token-budgeted in src/memory.js. DB CHECK twin:
@@ -245,10 +226,6 @@ const ATHLETE_COL_ALLOW = {
       source: (v) => ["athlete_said", "inferred", "athlete_typed"].includes(v),
       status: (v) => ["active", "deleted"].includes(v),
       expires_at: (v) => v == null || Number.isFinite(Date.parse(v)),
-      section: (v) => v == null || ["schedule", "body", "preferences", "this_week"].includes(v),
-      confirmed_at: (v) => v == null || (typeof v === "string" && v.length <= 40 && Number.isFinite(Date.parse(v))),
-      ask_count: (v) => v == null || (Number.isInteger(v) && v >= 0 && v <= 9),
-      area_key: (v) => v == null || (typeof v === "string" && v.length > 0 && v.length <= 40),
     },
   },
   athletes: {
@@ -280,8 +257,6 @@ const ATHLETE_COL_ALLOW = {
       // T64 S2: the pain ledger's marks ({areaKey: {cleared_at, dismissed_at,
       // offered_at, asked_at, noted_at, declined_change_count}}). Value-guarded.
       "pain_marks",
-      // T69-C: the check-in's confirmation stamps on the three signup fields.
-      "review_stamps",
     ]),
     // Value guards: an athlete may only ever DOWNGRADE their own tier to "free"
     // (paid tiers are granted server-side by Stripe), never self-grant pro/elite.
@@ -289,7 +264,6 @@ const ATHLETE_COL_ALLOW = {
       tier: (v) => v === "free",
       email: (v) => typeof v === "string" && /^\S+@\S+\.\S+$/.test(v.trim()) && v.trim().length <= 200,
       pain_marks: (v) => validPainMarks(v),
-      review_stamps: (v) => validReviewStamps(v),
     },
   },
   // A filed request is AI-extracted from free-text chat — pin down what the athlete
@@ -437,6 +411,17 @@ export default async function handler(req, res) {
     // (they flip status based on which side you are, or toggle a row). See
     // api/_crew.js for the shared peer-resolution helper and api/push.js for
     // the action-dispatch pattern this mirrors.
+    // ── T70: on-demand refresh of the caller's OWN athlete_stats row ─────────
+    // The Stats tab calls this when the row is missing or its session count is
+    // behind the header's (a direct-SQL reseed, a failed background refresh).
+    // Athlete-only, own id only, synchronous so the tab can draw the result.
+    if (body.op === "stats") {
+      if (caller.role !== "athlete") throw httpErr(403, "This account can't refresh stats");
+      const { refreshAthleteStats } = await import("./_stats.js");
+      const stats = await refreshAthleteStats(caller.id);
+      return res.status(200).json(stats ? [{ athlete_id: caller.id, stats, computed_at: new Date().toISOString() }] : []);
+    }
+
     if (body.op === "crew") {
       // Crew is PARKED (Will, 08-20). Refusing here — not just hiding the tab —
       // means stale cached bundles can't act on crew either. Data stays intact;
