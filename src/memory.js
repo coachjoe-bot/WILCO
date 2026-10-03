@@ -17,6 +17,7 @@
 // accumulates (target: athlete AI cost averaging <= $2/mo). MEMORY_MAX_LEN
 // stays only as an abuse bound; the DB CHECK and the gateway pin match it.
 import { statesBlockEnd } from "./programHistory.js";
+import { needsDate, NEEDS_DATE } from "./noteDates.js";
 
 export const MEMORY_MAX_LEN = 2000;
 export const MEMORY_TOKEN_BUDGET = 1750; // hard ceiling on the injected block
@@ -84,7 +85,7 @@ export function ledgerRejects(text) {
   return null;
 }
 
-export function validateFact({ content, kind, expires_at } = {}) {
+export function validateFact({ content, kind, expires_at, now } = {}) {
   const text = cleanText(content).replace(/\s+/g, " ").trim();
   if (!text) return { ok: false, reason: "empty" };
   if (text.length > MEMORY_MAX_LEN) return { ok: false, reason: "too_long" };
@@ -94,6 +95,10 @@ export function validateFact({ content, kind, expires_at } = {}) {
   if (ledger) return { ok: false, reason: ledger, toolResult: LEDGER_OWNS_PAIN };
   const blockEnd = blockEndRejects(text);
   if (blockEnd) return { ok: false, reason: blockEnd, toolResult: BLOCK_OWNS_DATES };
+  // T69-C: "tomorrow", "next week", "this block" go stale by themselves and
+  // nothing reviewed them (Will's 08-09 goal row lived seven weeks). A relative
+  // time word needs an expiry, or the athlete's/Joe's save is refused.
+  if (needsDate(text, expires_at, now || new Date())) return { ok: false, reason: "needs_date", toolResult: NEEDS_DATE };
   if (kind === "situational") {
     const t = Date.parse(expires_at || "");
     if (!Number.isFinite(t)) return { ok: false, reason: "situational_needs_expiry" };
