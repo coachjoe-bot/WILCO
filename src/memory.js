@@ -18,11 +18,13 @@
 // stays only as an abuse bound; the DB CHECK and the gateway pin match it.
 import { statesBlockEnd } from "./programHistory.js";
 import { needsDate, NEEDS_DATE, countdownLine } from "./noteDates.js";
-import { visibleRows, SECTION_LABEL } from "./memorySections.js";
+import { visibleRows, SECTION_LABEL, resolveSection, isNoteSection } from "./memorySections.js";
+import { expiryFromText } from "./noteDates.js";
 
 export const MEMORY_MAX_LEN = 2000;
 export const MEMORY_TOKEN_BUDGET = 1750; // hard ceiling on the injected block
 export const MEMORY_ROW_CAP = 60;        // absolute active-row ceiling per athlete (hygiene)
+export const UNANSWERED_TO_REMOVE = 2;   // asked twice, replied without answering: the note goes (T69-C)
 
 // ~4 chars/token is a safe English estimate; rounding up keeps the budget honest.
 export const estTokens = (s) => Math.ceil(String(s || "").length / 4);
@@ -168,11 +170,29 @@ export function planMemoryOps(raw, rows, now = new Date(), opts = {}) {
   const live = activeFacts(rows, now);
   let activeCount = live.length;
   const claimed = new Set(); // rows already targeted this plan
-  for (const op of Array.isArray(r.ops) ? r.ops.slice(0, 8) : []) {
+  const byId = (id) => (id == null ? null : live.find((x) => String(x.id) === String(id)) || null);
+  const stamped = (extra = {}) => ({ confirmed_at: new Date(now).toISOString(), ask_count: 0, ...extra });
+  for (const op of Array.isArray(r.ops) ? r.ops.slice(0, 14) : []) {
     if (!op || typeof op !== "object") continue;
+    // T69-C: the review's outcomes address a note by id (never by matching text).
+    // keep = the athlete confirmed it (the clock restarts, the counter resets);
+    // unanswered = it was asked and they replied without answering (counter + 1,
+    // and the second silent ask removes it).
+    if (op.op === "keep" || op.op === "unanswered") {
+      const row = byId(op.id);
+      if (!row || claimed.has(row.id)) continue;
+      claimed.add(row.id);
+      if (op.op === "keep") { actions.push({ type: "update", id: row.id, data: stamped() }); continue; }
+      const n = (Number(row.ask_count) || 0) + 1;
+      if (n >= UNANSWERED_TO_REMOVE) { actions.push({ type: "update", id: row.id, data: { status: "deleted" } }); activeCount--; }
+      else actions.push({ type: "update", id: row.id, data: { ask_count: n } });
+      continue;
+    }
     if (op.op === "add") {
       const kind = ["pinned", "contextual", "situational"].includes(op.kind) ? op.kind : "contextual";
-      const v = validateFact({ content: op.content, kind, expires_at: op.expires_at });
+      // T69-C: a note that names a calendar date expires on it, without asking.
+      const addExp = op.expires_at || (kind !== "pinned" ? expiryFromText(op.content, now) : null);
+      const v = validateFact({ content: op.content, kind, expires_at: addExp, now });
       if (!v.ok) continue;
       if (findDuplicate(rows, v.content)) continue;
       if (activeCount >= MEMORY_ROW_CAP) {
@@ -184,7 +204,8 @@ export function planMemoryOps(raw, rows, now = new Date(), opts = {}) {
         actions.push({ type: "update", id: victim.id, data: { status: "deleted" } });
         activeCount--;
       }
-      actions.push({ type: "insert", data: { content: v.content, kind, expires_at: op.expires_at || null, source: "athlete_said" } });
+      const section = isNoteSection(op.section) ? op.section : resolveSection({ content: v.content, kind, expires_at: addExp }, now);
+      actions.push({ type: "insert", data: { content: v.content, kind, expires_at: addExp || null, source: "athlete_said", ...stamped({ section }) } });
       activeCount++;
     } else if (op.op === "edit") {
       let row;
@@ -192,16 +213,19 @@ export function planMemoryOps(raw, rows, now = new Date(), opts = {}) {
         // Targeted turn: the selection IS the match. One edit max.
         if (claimed.has(targetRow.id)) continue;
         row = targetRow;
+      } else if (op.id != null) {
+        row = byId(op.id);
+        if (!row || claimed.has(row.id)) continue;
       } else {
         const m = matchFacts(rows, op.match, now);
         if (!m.ok || m.rows.length !== 1 || claimed.has(m.rows[0].id)) continue;
         row = m.rows[0];
       }
       const kind = ["pinned", "contextual", "situational"].includes(op.kind) ? op.kind : row.kind;
-      const v = validateFact({ content: op.content, kind, expires_at: op.expires_at !== undefined ? op.expires_at : row.expires_at });
+      const v = validateFact({ content: op.content, kind, expires_at: op.expires_at !== undefined ? op.expires_at : row.expires_at, now });
       if (!v.ok) continue;
       claimed.add(row.id);
-      const data = { content: v.content, kind };
+      const data = { content: v.content, kind, ...stamped() };
       if (op.expires_at !== undefined) data.expires_at = op.expires_at || null;
       if (kind === "pinned") data.expires_at = null; // pinned never silently expires
       actions.push({ type: "update", id: row.id, data });
@@ -211,6 +235,14 @@ export function planMemoryOps(raw, rows, now = new Date(), opts = {}) {
         if (claimed.has(targetRow.id)) continue;
         claimed.add(targetRow.id);
         actions.push({ type: "update", id: targetRow.id, data: { status: "deleted" } });
+        activeCount--;
+        continue;
+      }
+      if (op.id != null) {
+        const row = byId(op.id);
+        if (!row || claimed.has(row.id)) continue;
+        claimed.add(row.id);
+        actions.push({ type: "update", id: row.id, data: { status: "deleted" } });
         activeCount--;
         continue;
       }
