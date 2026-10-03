@@ -341,7 +341,7 @@ export function extractSessions(rows, { tz } = {}) {
 
 // The load in use when it hurt: the `during` lift in that day's session (or the
 // previous day's, for a chat note sent after midnight about last night's work).
-function painLoads(areaEvents, sessions) {
+export function painLoads(areaEvents, sessions) {
   const out = []; // {id, norm, kg, bodyweight}
   for (const e of areaEvents) {
     if (e.type !== "mention" || !e.during) continue;
@@ -360,7 +360,7 @@ function painLoads(areaEvents, sessions) {
 }
 
 // Did this session train the area hard enough to count as recovery evidence?
-function sessionTrainsArea(session, area, loads, sessions) {
+export function sessionTrainsArea(session, area, loads, sessions) {
   const fam = AREA_FAMILIES[area];
   const latestLoad = (id) => { for (let i = loads.length - 1; i >= 0; i--) if (loads[i].id === id && loads[i].kg > 0) return loads[i]; return null; };
   const anyLoaded = loads.some((l) => l.kg > 0);
@@ -501,6 +501,23 @@ function computeRecord(area, allEvents, sessions, { today, tz, mark = {}, protec
   else if (mentions14d >= 2 || (lastSeverity >= SEV_CHANGED && daysSince < ACTIVE_SEV3_DAYS) || daysSince < OPEN_DAYS) state = "active";
   else state = "open"; // mentioned a while back, nothing since, nothing logged on it that shows it settled
 
+  // T69-C: WHEN the area read cleared, for surfaces that must know whether
+  // something happened before or after it (a work-around note is asked about
+  // once, after the area clears). A mark or "feels fine" report is its own
+  // date; by evidence it is the earlier of four quiet weeks and the sixth clean
+  // session. Additive: no threshold above changes.
+  let clearedOn = null;
+  if (state === "cleared") {
+    if (clearedAfter) clearedOn = clearedAfter.day || dayKey(new Date(clearedAfter.at), tz);
+    else {
+      const byTime = addDays(last.day, CLEARED_DAYS);
+      const cleanDays = sessions.filter((s) => s.day > last.day && s.day <= today && !mentionDays.has(s.day) && sessionTrainsArea(s, area, loads, sessions)).map((s) => s.day).sort();
+      const bySessions = cleanDays.length >= CLEARED_CLEAN ? cleanDays[CLEARED_CLEAN - 1] : null;
+      clearedOn = bySessions && bySessions < byTime ? bySessions : byTime;
+      if (clearedOn > today) clearedOn = today;
+    }
+  }
+
   // rising load on the lift that hurt: the latest mention's load against the
   // last session in this episode that trained the same lift
   let loadRising = false;
@@ -554,7 +571,7 @@ function computeRecord(area, allEvents, sessions, { today, tz, mark = {}, protec
     gapBefore: ep.gapBefore, reopenedBy: ep.reopenedBy,
     lastDuring: last.during || null, stoppedSession: !!last.stoppedSession,
     speak, policy, fresh: last.day === today, checkIn,
-    loadRising, legacyEpisode, clearedBy: state === "cleared" ? (clearedAfter ? clearedAfter.source : "evidence") : null,
+    loadRising, legacyEpisode, clearedBy: state === "cleared" ? (clearedAfter ? clearedAfter.source : "evidence") : null, clearedOn,
     // the degree trajectory in time order, for the plain line (no counts)
     trajectory: ms.map((m) => ({ day: m.day, word: degreeWord(m), severity: m.severity })),
     today,

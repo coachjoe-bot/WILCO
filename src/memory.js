@@ -21,6 +21,7 @@ import { statesBlockEnd } from "./programHistory.js";
 export const MEMORY_MAX_LEN = 2000;
 export const MEMORY_TOKEN_BUDGET = 1750; // hard ceiling on the injected block
 export const MEMORY_ROW_CAP = 60;        // absolute active-row ceiling per athlete (hygiene)
+export const UNANSWERED_TO_REMOVE = 2;   // asked twice, replied without answering: the note goes (T69-C)
 
 // ~4 chars/token is a safe English estimate; rounding up keeps the budget honest.
 export const estTokens = (s) => Math.ceil(String(s || "").length / 4);
