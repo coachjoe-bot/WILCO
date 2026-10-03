@@ -14,6 +14,12 @@
       "port": 5193
     },
     {
+      "name": "wilco-t69-context",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vite", "--port", "5195", "--strictPort"],
+      "port": 5195
+    },
+    {
       "name": "wilco-dev-api",
       "runtimeExecutable": "node",
       "runtimeArgs": ["--env-file=.env", "scripts/dev-server.mjs"],

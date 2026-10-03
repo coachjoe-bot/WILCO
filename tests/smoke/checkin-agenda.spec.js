@@ -315,3 +315,33 @@ test("check-in: the extractor failing moves nothing (no stamp, no count, no remo
   await expect.poll(() => dataCalls.some((c) => c.body?.op === "update" && c.body?.table === "proof_digests"), { timeout: 10000 }).toBe(true);
   expect(dataCalls.some((c) => c.body?.table === "athlete_memory" && c.body?.op === "update")).toBe(false);
 });
+
+// Pictures for Will (SHOTS=<dir>): the question about a saved note, with the line
+// under it that names the note's section and why it is asked, both themes.
+for (const theme of ["light", "dark"]) {
+  test(`pictures: a check-in question about a saved note and its reason line (${theme})`, async ({ page }) => {
+    test.skip(!process.env.SHOTS, "pictures only");
+    await page.setViewportSize({ width: 430, height: 900 });
+    if (theme === "dark") await page.addInitScript(() => { try { localStorage.setItem("wilco_theme", "dark"); } catch (_) {} });
+    const athlete = makeAthlete({ total_sessions_logged: 3, training_days_per_week: 6, equipment: null, injury_history: "Rehabbing inflamed knees, weak core and low back", created_at: old(160) });
+    const digest = digestWith(athlete, BANK3);
+    await mockApi(page, { athlete, dataReads: { ...reviewRows(athlete, NOTE(athlete)), proof_digests: [digest] } });
+    const calls = [];
+    await openCheckin(page, athlete, digest, [
+      JSON.stringify({ reply: "", covered: ["weight", "injury"], next: "goal" }),
+      JSON.stringify({ reply: "Good.", covered: ["goal"], next: "review_note_n1", ask: "I have a note that says \"Trains at the 6am class\". Still true?" }),
+      JSON.stringify({ reply: "Updated, 7am it is.", covered: ["review_note_n1"], next: "review_signup_injury_history", ask: "From signup I still have \"Rehabbing inflamed knees, weak core and low back\". Is that still true?" }),
+    ], calls);
+    await say(page, "185, no pain");
+    await say(page, "same goal");
+    await expect(page.getByText(/I have a note that says/)).toBeVisible({ timeout: 10000 });
+    await expect(page.getByTestId("checkin-tag").last()).toContainText("Schedule");
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: `${process.env.SHOTS}/checkin-note-question-${theme}.png` });
+    await say(page, "it moved to 7am");
+    await expect(page.getByText("Updated, 7am it is.")).toBeVisible({ timeout: 10000 });
+    await expect(page.getByTestId("checkin-tag").last()).toContainText("Body");
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: `${process.env.SHOTS}/checkin-signup-question-${theme}.png` });
+  });
+}

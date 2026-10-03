@@ -166,7 +166,8 @@ async function runCheckin(scn) {
   await settle(20000);
   const shown = (await joeBubbles()).map((b) => `${b.user ? "ATHLETE" : "JOE"}: ${b.text}`);
   await page.getByRole("button", { name: /Close/ }).first().click().catch(() => {});
-  return { said, asked: [...asked], ended, shown };
+  const dbg = await page.evaluate(() => window.__reviewDbg || null).catch(() => null);
+  return { said, asked: [...asked], ended, shown, dbg };
 }
 
 const stampedAfter = (row, start) => row && row.confirmed_at && row.confirmed_at > start;
@@ -289,7 +290,7 @@ for (const name of order) {
         checks.push(["the check-in ended", r.ended]);
         rec.checks = checks;
         rec.detail = { writes, said: r.said, asked: r.asked, shown: r.shown, rows: (rows2 || rows).map((x) => ({ id: x.id.slice(0, 6), c: x.content.slice(0, 60), st: x.status, ac: x.ask_count, cf: x.confirmed_at, sec: x.section })), extract: extractBodies.map((e) => e.out.slice(0, 700)) };
-        if (r2) rec.detail.second = { said: r2.said, asked: r2.asked };
+        rec.detail.dbg = r.dbg; if (r2) rec.detail.second = { said: r2.said, asked: r2.asked, dbg: r2.dbg };
       }
     } catch (e) { rec.error = String(e && e.message || e).slice(0, 300); }
     if (!rec.error) break;
