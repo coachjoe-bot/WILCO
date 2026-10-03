@@ -216,10 +216,14 @@ export function computeAthleteStats(workouts, opts = {}) {
 // is exactly the last 30 days and never a rounded week. Returns the same keys
 // the lifetime block has, plus the per-lift list for the window (sets-desc, so
 // [0] is the favorite) and the best lift by e1RM.
-export const RANGES = { "1M": 30, "3M": 91, "1Y": 365, "ALL": null };
+// Will's four (10-02): 1W · 1M · 3M · 1Y on the control. "ALL" stays as the
+// internal lifetime window (the Career card reads stats.lifetime directly).
+export const RANGES = { "1W": 7, "1M": 30, "3M": 91, "1Y": 365, "ALL": null };
+export const RANGE_KEYS = ["1W", "1M", "3M", "1Y"];
 
+// `range` is a RANGES key or a plain number of days (the Proof windows use 7 and 28).
 export function statsInRange(stats, range = "ALL", opts = {}) {
-  const span = RANGES[range] === undefined ? null : RANGES[range];
+  const span = typeof range === "number" ? range : (RANGES[range] === undefined ? null : RANGES[range]);
   const tz = stats?.tz || opts.tz || null;
   const nowKey = dayKey(opts.now ? new Date(opts.now) : new Date(), tz);
   const from = span == null ? null : shiftDay(nowKey, -(span - 1));
@@ -267,7 +271,7 @@ export function statsInRange(stats, range = "ALL", opts = {}) {
 export function liftWeeklySeries(stats, liftId, { range = "ALL", now, metric = "e1rm" } = {}) {
   const l = (stats?.lifts || []).find((x) => x.id === liftId);
   if (!l) return [];
-  const span = RANGES[range] === undefined ? null : RANGES[range];
+  const span = typeof range === "number" ? range : (RANGES[range] === undefined ? null : RANGES[range]);
   const nowKey = dayKey(now ? new Date(now) : new Date(), stats.tz || null);
   const from = span == null ? null : shiftDay(nowKey, -(span - 1));
   const idx = metric === "heaviest" ? 5 : metric === "tonnage" ? 3 : 4;
@@ -282,35 +286,93 @@ export function liftWeeklySeries(stats, liftId, { range = "ALL", now, metric = "
   return [...byWeek.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([w, y]) => ({ week: w, y }));
 }
 
-// The monthly Proof's BY THE NUMBERS block: this 30 days against the 30 before,
+// The Proof feed's BY THE NUMBERS block: this window against the one before,
 // from the stored summary. Computed on the server before the digest is written
-// so Joe's prose and the block can never disagree. null when the month is thin
-// (fewer than 4 sessions: no block, no share card, Will 10-02).
+// so Joe's prose and the block can never disagree. The weekly edition compares
+// the last 7 days to the 7 before (the brief's own window); the monthly compares
+// 28 to 28 (the brief's monthCompare window). A thin window returns null: no
+// block of zeros (weekly needs 2 sessions, monthly 4; Will 10-02).
+export const WEEK_NUMBERS_MIN_SESSIONS = 2;
 export const MONTH_NUMBERS_MIN_SESSIONS = 4;
-export function monthNumbers(stats, { now } = {}) {
+export function periodNumbers(stats, { days = 7, minSessions = 2, now } = {}) {
   if (!stats) return null;
   const nowMs = now ? new Date(now).getTime() : Date.now();
-  const cur = statsInRange(stats, "1M", { now: nowMs });
-  if (cur.sessions < MONTH_NUMBERS_MIN_SESSIONS) return null;
-  const prev = statsInRange(stats, "1M", { now: nowMs - 30 * 864e5 });
+  const cur = statsInRange(stats, days, { now: nowMs });
+  if (cur.sessions < minSessions) return null;
+  const prev = statsInRange(stats, days, { now: nowMs - days * 864e5 });
   return {
-    from: cur.from, to: cur.to,
+    days, from: cur.from, to: cur.to,
     tonnage: cur.tonnage, tonnage_prev: prev.tonnage,
     sessions: cur.sessions, sessions_prev: prev.sessions,
     sets: cur.sets, sets_prev: prev.sets,
     reps: cur.reps, reps_prev: prev.reps,
     prs: cur.prs, prs_prev: prev.prs,
     favorite: cur.favorite && !/unknown/i.test(cur.favorite.name) ? cur.favorite.name : null,
-    best_lift: cur.best_lift ? { name: cur.best_lift.name, e1rm: cur.best_lift.e1rm } : null,
+    favorite_sets: cur.favorite ? cur.favorite.sets : 0,
+    best_lift: cur.best_lift ? { name: cur.best_lift.name, e1rm: cur.best_lift.e1rm, heaviest: cur.best_lift.heaviest } : null,
     biggest_session: cur.biggest_session,
     comparison: tonnageComparison(cur.tonnage),
   };
+}
+export const weekNumbers = (stats, o = {}) => periodNumbers(stats, { days: 7, minSessions: WEEK_NUMBERS_MIN_SESSIONS, ...o });
+export const monthNumbers = (stats, o = {}) => periodNumbers(stats, { days: 28, minSessions: MONTH_NUMBERS_MIN_SESSIONS, ...o });
+
+// One plain sentence for the surfaces that print sections as text (the email,
+// the chat transcript, the front-page teaser). In the athlete's own unit.
+const pct = (cur, prev) => (prev > 0 ? Math.round(((cur - prev) / prev) * 100) : null);
+const fmtInt = (n) => (Number(n) || 0).toLocaleString("en-US");
+export function numbersBody(n, { unit = "lbs", period = "week" } = {}) {
+  if (!n) return "";
+  const u = unit === "kg" ? "kg" : "lb";
+  const ton = unit === "kg" ? Math.round(n.tonnage / LBS_PER_KG) : n.tonnage;
+  const prevWord = period === "month" ? "last month" : "last week";
+  const parts = [`${fmtInt(ton)} ${u} moved over ${n.sessions} session${n.sessions === 1 ? "" : "s"}: ${fmtInt(n.sets)} sets, ${fmtInt(n.reps)} reps, ${n.prs} PR${n.prs === 1 ? "" : "s"}.`];
+  const p = pct(n.tonnage, n.tonnage_prev);
+  if (p != null) parts.push(p === 0 ? `Even with ${prevWord}.` : `${p > 0 ? "Up" : "Down"} ${Math.abs(p)}% on ${prevWord}.`);
+  if (n.comparison) parts.push(`That is ${n.comparison.text}.`);
+  if (n.favorite) parts.push(`Most sets: ${n.favorite}.`);
+  return parts.join(" ");
+}
+
+// The section as it rides in content_json.sections: label + body like every
+// other section (so the email, the chat transcript and the front page need no
+// new code) plus the figures the opened letter draws as a block.
+export function numbersSection(n, { unit = "lbs", period = "week" } = {}) {
+  if (!n) return null;
+  return {
+    label: period === "month" ? "BY THE NUMBERS · THIS MONTH" : "BY THE NUMBERS · THIS WEEK",
+    body: numbersBody(n, { unit, period }),
+    flag: null,
+    numbers: { ...n, period, unit: unit === "kg" ? "kg" : "lbs" },
+  };
+}
+export const isNumbersSection = (s) => !!(s && s.numbers && typeof s.numbers === "object");
+// Insert right after the GRIT RANK section (the letter's hero), else first.
+const isRankLabel = (l) => /\b(grit|rank)\b/i.test(l || "");
+export function withNumbersSection(contentJson, section) {
+  if (!section) return contentJson;
+  const c = contentJson || {};
+  const sections = (Array.isArray(c.sections) ? c.sections : []).filter((s) => !isNumbersSection(s));
+  const rankIdx = sections.findIndex((s) => isRankLabel(s && s.label));
+  const at = rankIdx >= 0 ? rankIdx + 1 : 0;
+  return { ...c, sections: [...sections.slice(0, at), section, ...sections.slice(at)] };
+}
+
+// Daily points for one lift (the 1W / 1M / 3M graphs): the day's best e1RM.
+export function liftDailySeries(stats, liftId, { range = "3M", now, metric = "e1rm" } = {}) {
+  const l = (stats?.lifts || []).find((x) => x.id === liftId);
+  if (!l) return [];
+  const span = typeof range === "number" ? range : (RANGES[range] === undefined ? null : RANGES[range]);
+  const nowKey = dayKey(now ? new Date(now) : new Date(), stats.tz || null);
+  const from = span == null ? null : shiftDay(nowKey, -(span - 1));
+  const idx = metric === "heaviest" ? 5 : metric === "tonnage" ? 3 : 4;
+  return l.days.filter((t) => (!from || t[0] >= from) && t[0] <= nowKey && t[idx] > 0).map((t) => ({ day: t[0], y: t[idx] }));
 }
 
 // Weekly miles for the Running tab's 1Y/ALL distance chart (days carry miles
 // per training day; pace and heart rate stay on the loaded rows).
 export function weeklyMiles(stats, range = "ALL", { now } = {}) {
-  const span = RANGES[range] === undefined ? null : RANGES[range];
+  const span = typeof range === "number" ? range : (RANGES[range] === undefined ? null : RANGES[range]);
   const nowKey = dayKey(now ? new Date(now) : new Date(), stats?.tz || null);
   const from = span == null ? null : shiftDay(nowKey, -(span - 1));
   const byWeek = new Map();

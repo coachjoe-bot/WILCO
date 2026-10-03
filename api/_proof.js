@@ -349,6 +349,8 @@ You are writing this week's Proof Feed digest. Return ONLY JSON with these keys 
   • If weekAhead.weekKnown is FALSE, you do NOT know which week of the program they're on, do not name a week number and do not claim the block is over. Talk about the sessions coming up generically and ask which week they're on.
 - focus_next_week: REQUIRED, never null. End on exactly ONE concrete, specific directive for next week, ideally a progression tied to their program or goal (a lift + a number: weight, sets/reps, or %), or, if they logged fewer sessions than their program calls for (compare sessions.thisWeek to sessions.programDaysPerWeek), a session-count / adherence target. Aspire UP toward the goal, do NOT make the whole focus about managing an injury; an active injury can shape HOW they train next week but the headline directive should still move them forward. Never a vague "keep it up."
 
+BY THE NUMBERS: when the brief carries "numbers", the athlete sees those exact figures (weight moved, sessions, sets, reps, PRs, most-set lift, this window vs the one before) in a block above your prose. Refer to them as given, in the athlete's unit; never recompute, round differently, or contradict them.
+
 ${LOAD_TOLERANCE}
 
 Adapt to WHATEVER program the athlete runs, do not assume a long, multi-week periodized block. Many athletes run a single week, a 4-week block, or even a one-day plan. Only talk about "the block" / block context when the brief actually shows a multi-week structure; for short or simple programs, keep it about the lifts that moved, consistency vs the days they intended to train, and the stated goal. The weekly check-in cadence is the same regardless of program length.`;
@@ -436,13 +438,11 @@ This is the MONTHLY layer that rides on top of the athlete's weekly digest (alre
 - goal_pacing: pace toward targets across the whole month/block.
 Keep each to 1-3 punchy sentences. New information only.
 
+BY THE NUMBERS: when the brief carries "numbers", the athlete sees those exact figures (weight moved, sessions, sets, reps, PRs, most-set lift, this window vs the one before) in a block above your prose. Refer to them as given, in the athlete's unit; never recompute, round differently, or contradict them.
+
 ${LOAD_TOLERANCE}`;
 
-  const monthFacts = (brief.monthCompare ? `\n\nMONTH VS LAST MONTH (COMPUTED — authoritative, write "mom" from these):\n${JSON.stringify(brief.monthCompare)}` : "")
-    // T70: the athlete sees these exact figures in a BY THE NUMBERS block above
-    // the prose (lb moved, sessions, PRs, reps, this 30 days vs the 30 before).
-    // Never recompute or round them differently; refer to them as given.
-    + (brief.monthNumbers ? `\n\nBY THE NUMBERS (COMPUTED, shown to the athlete as-is, lbs): ${JSON.stringify({ lb_moved: brief.monthNumbers.tonnage, lb_moved_last_month: brief.monthNumbers.tonnage_prev, sessions: brief.monthNumbers.sessions, sessions_last_month: brief.monthNumbers.sessions_prev, prs_hit: brief.monthNumbers.prs, reps: brief.monthNumbers.reps, favorite_by_sets: brief.monthNumbers.favorite, comparison: brief.monthNumbers.comparison?.text })}` : "");
+  const monthFacts = brief.monthCompare ? `\n\nMONTH VS LAST MONTH (COMPUTED — authoritative, write "mom" from these):\n${JSON.stringify(brief.monthCompare)}` : "";
   const user = `BRIEF (JSON):\n${JSON.stringify(brief)}${monthFacts}\n\nWEEKLY ALREADY COVERS (do not repeat): ${weekly.contentJson.sections.map((s) => s.label).join(", ")}`;
 
   const raw = await deps.askClaudeServer({ system, user, maxTokens: 900, feature: "proof_monthly", attribution: deps.attribution });

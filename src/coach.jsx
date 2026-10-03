@@ -24,7 +24,6 @@ import {
   buildLiftHistory, detectPlateaus,
 } from "./proofcore.js";
 import { computeGritSnapshot, TIER_NAMES, TIER_COLORS, getBenchKey, resolveLift } from "./grit.js";
-import { TeamStatsCard } from "./statsTab.jsx"; // T70: team totals (coach side gets totals only)
 import { exerciseUnit, exerciseLoadUnit, addedLoadUnit } from "./units.js";
 // Shared team-analytics math (C2): the server endpoint (api/coach-analytics) computes
 // the roster aggregations with THIS module; the client imports weekBounds from it so
@@ -2383,8 +2382,6 @@ function CoachOverview({athletes,workouts,prs,manualRMs,prescriptions,onOpenAthl
         onOpenAthlete={onOpenAthlete} onPrefillProgram={onPrefillProgram} onResolveRequest={onResolveRequest} onContextWritten={onContextWritten}/>
 
       {secLabel("Team Health")}
-      {/* T70: team totals from the roster's athlete_stats rows (gateway-scoped). */}
-      <TeamStatsCard athletes={athletes} teamName={school?.name||coach?.name||"The team"}/>
       <div style={{display:"grid",gridTemplateColumns:isMobile?"1fr":"repeat(6,minmax(0,1fr))",gap:14}}>
 
         {/* Program adherence + heatmap — widest tile */}

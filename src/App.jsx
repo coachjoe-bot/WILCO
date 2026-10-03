@@ -121,7 +121,7 @@ const ProgramEditPane = lazy(() => import("./builder.jsx").then(m => ({ default:
 // T70 Stats tab + the monthly numbers block: same lazy chunk convention, so the
 // summary math and the share-card canvas never ride in the boot bundle.
 const StatsTab = lazy(() => import("./statsTab.jsx").then(m => ({ default: m.StatsTab })));
-const StatsNumbersBlock = lazy(() => import("./statsTab.jsx").then(m => ({ default: m.StatsNumbersBlock })));
+const ProofNumbersBlock = lazy(() => import("./statsTab.jsx").then(m => ({ default: m.ProofNumbersBlock })));
 // Chat-routing decisions (model escalation, "remember this", is-this-a-log, PR
 // propagation guards). Pure regexes/logic pulled out of send() so they have a
 // suite — see src/chatRouting.js and scripts/test-chat-routing.mjs.
@@ -154,7 +154,7 @@ import {
   sessionTonnage, sessionTopSet, goalTargets, liftSeriesPoints,
   implausibleJump, prCheckLines, knownMaxLines,
 } from "./grit.js";
-import { liftWeeklySeries, weeklyMiles, RANGES as STAT_RANGES } from "./stats.js";
+import { liftWeeklySeries, liftDailySeries, weeklyMiles, isNumbersSection, RANGES as STAT_RANGES, RANGE_KEYS as STAT_RANGE_KEYS } from "./stats.js";
 export {
   epley1RM, getExerciseSets, bestE1RMForExercise, effectiveDate, parseDbDate,
   isRealSession, groupIntoSessions,
@@ -2806,12 +2806,12 @@ function UpdatePill({onDismiss}) {
 // ─── LINE CHART ───────────────────────────────────────────────────────────────
 // All call sites pass color + palette={CA} explicitly for the night-gym grid/axis
 // colors; the defaults are just a safety net on the app palette.
-// T70: ONE range control for every graph and the Stats tab (1M · 3M · 1Y · ALL).
-// Stats opens on ALL, graphs on 3M (Will, 10-02). Same bones both themes.
+// T70: ONE range control for every graph and the Stats tab (1W · 1M · 3M · 1Y).
+// Stats opens on 1Y, graphs on 3M (Will, 10-02). Same bones both themes.
 export function RangeControl({value, onChange, style}) {
   return (
     <div role="tablist" aria-label="Time range" style={{display:"flex",background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:9,padding:3,gap:2,...style}}>
-      {["1M","3M","1Y","ALL"].map(r=>(
+      {STAT_RANGE_KEYS.map(r=>(
         <button key={r} role="tab" aria-selected={value===r} onClick={()=>{ if(value!==r){ haptic(8); onChange(r); } }}
           style={{flex:1,background:value===r?CA.accent:"transparent",color:value===r?CA.onAccent:CA.muted,border:"none",borderRadius:6,padding:"6px 0",fontSize:11,fontWeight:700,letterSpacing:0.8,cursor:"pointer",fontFamily:"'Inter'",transition:"background 0.15s,color 0.15s"}}>{r}</button>
       ))}
@@ -3370,7 +3370,8 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
   const prSec     = secs.find(s=>isPRLabel(s.label));
   const injurySec = secs.find(s=>isInjuryLabel(s.label));
   const focusSec  = secs.find(s=>isFocusLabel(s.label));
-  const special   = new Set([rankSec,prSec,injurySec,focusSec].filter(Boolean));
+  const numbersSec= secs.find(isNumbersSection);     // T70: the figures are the opened letter's, not a teaser
+  const special   = new Set([rankSec,prSec,injurySec,focusSec,numbersSec].filter(Boolean));
   const rest      = secs.filter(s=>!special.has(s));
   const teaserA   = prSec || rest[0];               // lead story teaser column
   const hero = rankSec ? parseRankHero(rankSec.body, c.flags) : null;
@@ -3493,13 +3494,16 @@ function ProofEnvelope({digest, athleteName, onOpen}) {
 // The opened edition: the digest read as a full page (rank hero, distinct gold PR
 // block, receded routine sections, red injury card, closing FOCUS directive) — shown
 // when the athlete opens the front page, before the check-in begins below it.
-function ProofLetter({intro, sections, flags, label, dateStr, crew, numbers, athleteName}) {
+function ProofLetter({intro, sections, flags, label, dateStr, crew}) {
   const secs = sections || [];
   const rankSec  = secs.find(s=>isRankLabel(s.label));
   const prSec    = secs.find(s=>isPRLabel(s.label));
   const injurySec= secs.find(s=>isInjuryLabel(s.label));
   const focusSec = secs.find(s=>isFocusLabel(s.label));
-  const special = new Set([rankSec,prSec,injurySec,focusSec].filter(Boolean));
+  // T70: BY THE NUMBERS rides in sections[] like everything else (label + body
+  // for the email / transcript / front page) and carries `numbers` for the grid.
+  const numbersSec = secs.find(isNumbersSection);
+  const special = new Set([rankSec,prSec,injurySec,focusSec,numbersSec].filter(Boolean));
   const routine = secs.filter(s=>!special.has(s));   // everything else, in original order
   const hero = rankSec ? parseRankHero(rankSec.body, flags) : null;
   const trend = injurySec ? injuryTrend(injurySec.body) : null;
@@ -3541,11 +3545,11 @@ function ProofLetter({intro, sections, flags, label, dateStr, crew, numbers, ath
         </div>
       )}
 
-      {/* ── T70: monthly BY THE NUMBERS — code-computed on the server from the
-          athlete_stats row (content_json.numbers); Joe only writes around it. */}
-      {numbers&&(
+      {/* ── T70: BY THE NUMBERS, a section of every edition, computed in code on
+          the server from the athlete_stats row; Joe only writes around it. */}
+      {numbersSec&&(
         <Suspense fallback={null}>
-          <StatsNumbersBlock numbers={numbers} athleteName={athleteName} monthLabel={String(label||"").replace(/^MONTHLY RECAP:\s*/i,"")||undefined}/>
+          <ProofNumbersBlock section={numbersSec}/>
         </Suspense>
       )}
 
@@ -4062,7 +4066,7 @@ Rules: facts are about the ATHLETE (schedule, availability, equipment, preferenc
             page, so the modal is just Coach Joe's conversation. */}
         {/* The opened page — the digest, formatted with hierarchy. Stays at the top as
             context once the check-in Q&A begins below it. */}
-        <ProofLetter intro={c.intro} sections={sections} flags={c.flags} label={label} crew={c.crew} numbers={c.numbers} athleteName={athlete?.name}
+        <ProofLetter intro={c.intro} sections={sections} flags={c.flags} label={label} crew={c.crew}
           dateStr={digest?.generated_at?new Date(digest.generated_at).toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"}).toUpperCase():null}/>
 
         {/* Monthly: embedded est-1RM progress charts (reused LineChart). Rendered as
@@ -14137,9 +14141,10 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
   useEffect(()=>{ if(tab!=="benchmarks"||!rmLoaded){ setBenchGo(false); return; } const t=setTimeout(()=>setBenchGo(true),80); return ()=>clearTimeout(t); },[tab,rmLoaded]);
 
   const [prRows,setPrRows] = useState([]); // all-time prs rows — seed bests past the 100-workout history cap (A22)
-  // T70: graph time range. 1M/3M draw every logged instance from the loaded
-  // history; 1Y/ALL read the athlete_stats summary (one point per week) so the
-  // long view is honest past the 100-row history cap.
+  // T70: graph time range (1W · 1M · 3M · 1Y). Every range reads the
+  // athlete_stats summary when it exists (one point per day; 1Y one per week) so
+  // the view is honest past the 100-row history cap; the loaded rows are the
+  // fallback until the summary lands.
   const [range,setRange] = useState("3M");
   const [statsRow,setStatsRow] = useState(null);
   useEffect(()=>{
@@ -14148,12 +14153,14 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
     return ()=>{ on=false; };
   },[athlete.id,(workoutHistory||[]).length]);
   const rangeFrom = rangeFromDate(range);
-  const longRange = range==="1Y"||range==="ALL";
+  const longRange = range==="1Y";
   // Chart points for one lift in the chosen range: {date, e1rm}[].
   const entriesFor = (ex) => {
-    if(!longRange) return (ex.entries||[]).filter(e=>!rangeFrom||e.date>=rangeFrom);
-    if(statsRow) return liftWeeklySeries(statsRow, ex.key, {range}).map(p=>({date:new Date(p.week+"T12:00:00"), e1rm:p.y, weekly:true}));
-    return ex.entries||[];
+    if(statsRow){
+      if(longRange) return liftWeeklySeries(statsRow, ex.key, {range}).map(p=>({date:new Date(p.week+"T12:00:00"), e1rm:p.y, weekly:true}));
+      return liftDailySeries(statsRow, ex.key, {range}).map(p=>({date:new Date(p.day+"T12:00:00"), e1rm:p.y}));
+    }
+    return (ex.entries||[]).filter(e=>!rangeFrom||e.date>=rangeFrom);
   };
   useEffect(()=>{
     sbRead("manual_one_rms",`?athlete_id=eq.${athlete.id}`).then(rows=>{
@@ -14631,7 +14638,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
             {exercises.filter(ex=>entriesFor(ex).length>0).length===0?(
               <>
                 <RangeControl value={range} onChange={setRange} style={{marginBottom:12}}/>
-                <AwaitingSignal hint={range==="ALL"?"Log a few weighted lifts and your strength curve builds itself: est. 1RM over time, per exercise.":`No weighted lifts in the ${range==="1M"?"last 30 days":range==="3M"?"last 3 months":"last year"}. Try ALL.`}/>
+                <AwaitingSignal hint={range==="1Y"?"Log a few weighted lifts and your strength curve builds itself: est. 1RM over time, per exercise.":`No weighted lifts in the ${range==="1W"?"last 7 days":range==="1M"?"last 30 days":"last 3 months"}. Try 1Y.`}/>
               </>
             ):exercises.filter(ex=>entriesFor(ex).length>0).map((ex,i)=>(
               <div key={i} style={{background:CA.navy2,border:`1px solid ${CA.border}`,borderRadius:12,padding:16,marginBottom:14}}>
@@ -14639,7 +14646,7 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
                   <div>
                     <div style={{color:CA.text,fontWeight:700,fontSize:14}}>{ex.name}</div>
                     {/* one entry per logged instance (best set only), not per set — say so (A30) */}
-                    <div style={{color:CA.muted,fontSize:11,marginTop:2}}>{longRange&&statsRow?`${entriesFor(ex).length} week${entriesFor(ex).length!==1?"s":""} · weekly best`:`logged ${entriesFor(ex).length} time${entriesFor(ex).length!==1?"s":""}`}</div>
+                    <div style={{color:CA.muted,fontSize:11,marginTop:2}}>{longRange&&statsRow?`${entriesFor(ex).length} week${entriesFor(ex).length!==1?"s":""} · weekly best`:`${entriesFor(ex).length} day${entriesFor(ex).length!==1?"s":""} logged`}</div>
                   </div>
                   <div style={{textAlign:"right"}}>
                     <div style={{color:CA.muted,fontSize:10,letterSpacing:1,marginBottom:2}}>BEST EST. 1RM</div>
@@ -14669,10 +14676,10 @@ function ProgressModal({athlete, workoutHistory, onClose}) {
             return{date:effectiveDate(w),run:pd.run_data};
           }).sort((a,b)=>a.date-b.date).filter(r=>!rangeFrom||r.date>=rangeFrom);
           const rangeCtl = <RangeControl value={range} onChange={setRange} style={{width:200}}/>;
-          if(runs.length===0) return <><div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>{rangeCtl}</div><AwaitingSignal hint={range==="ALL"?"Tell Coach Joe about a run (distance, pace, heart rate) and your pace and mileage trends light up here.":"No runs in this window. Try ALL."}/></>;
+          if(runs.length===0) return <><div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>{rangeCtl}</div><AwaitingSignal hint={range==="1Y"?"Tell Coach Joe about a run (distance, pace, heart rate) and your pace and mileage trends light up here.":"No runs in this window. Try 1Y."}/></>;
           const paceToMin=(p)=>{if(!p)return null;const pts=p.split(":");if(pts.length<2)return null;const m=parseFloat(pts[0]),s=parseFloat(pts[1]);return isNaN(m)||isNaN(s)?null:Math.round((m+s/60)*100)/100;};
-          // 1Y/ALL: miles per week from the athlete_stats summary (honest past the
-          // 100-row history cap); 1M/3M: every logged run, as before.
+          // 1Y: miles per week from the athlete_stats summary (honest past the
+          // 100-row history cap); 1W/1M/3M: every logged run, as before.
           const distData=(longRange&&statsRow)
             ? weeklyMiles(statsRow,range).map(p=>({label:fmtDateShort(new Date(p.week+"T12:00:00")),y:p.y}))
             : runs.filter(r=>r.run.distance_miles||r.run.distance_km).map(r=>({label:fmtDateShort(r.date),y:r.run.distance_miles||r.run.distance_km}));

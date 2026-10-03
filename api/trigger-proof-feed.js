@@ -56,7 +56,7 @@ import {
   buildLiftHistory, totalSetVolume,
 } from "./_proof.js";
 import { computeGritSnapshot } from "./_grit.js";
-import { monthNumbers } from "../src/stats.js";
+import { monthNumbers, weekNumbers, numbersSection, withNumbersSection } from "../src/stats.js";
 import { activeGoals } from "../src/goals.js";
 import { activeFacts } from "../src/memory.js";
 import { sendToAthlete, pushPayload, ensureVapid, sendTo } from "./_push.js";
@@ -415,20 +415,26 @@ async function runAthlete(athlete, batch, { dryRun = false } = {}) {
     if (parsed) b.brief.volume = compareProgramVsActual(parsed, b.thisWeekSessions, b.oneRMs);
   } catch (e) { console.error("[proof-feed] program parse failed:", e.message); }
 
-  // T70: the monthly BY THE NUMBERS block, computed in code from the athlete's
-  // stored summary (athlete_stats) BEFORE the model writes, so the prose and
-  // the block carry the same figures. Thin month (under 4 sessions) → no block.
-  let monthNums = null;
-  if (isMonthly) {
-    try {
-      const srow = (await sbSelect("athlete_stats", `?athlete_id=eq.${athlete.id}&select=stats`))[0];
-      monthNums = srow ? monthNumbers(srow.stats) : null;
-      if (monthNums) b.brief.monthNumbers = monthNums;
-    } catch (e) { console.error("[proof-feed] month numbers failed:", e.message); }
-  }
+  // T70: BY THE NUMBERS, a section of EVERY edition (Will 10-02): computed in
+  // code from the athlete's stored summary (athlete_stats) BEFORE the model
+  // writes, carried in the brief so the prose cites the same figures, then
+  // inserted into content_json.sections right after GRIT RANK. The weekly
+  // compares the last 7 days to the 7 before; the monthly 28 to 28, the same
+  // windows the brief already uses. A thin window gets no section at all.
+  let numbersSec = null;
+  try {
+    const srow = (await sbSelect("athlete_stats", `?athlete_id=eq.${athlete.id}&select=stats`))[0];
+    const nums = srow ? (isMonthly ? monthNumbers(srow.stats) : weekNumbers(srow.stats)) : null;
+    if (nums) {
+      b.brief.numbers = nums;
+      numbersSec = numbersSection(nums, { unit: athlete.weight_unit === "kg" ? "kg" : "lbs", period: isMonthly ? "month" : "week" });
+      // One session count per edition: the block's, so "mom" never says 14 where the block says 13.
+      if (isMonthly && b.brief.monthCompare) b.brief.monthCompare.sessions = { thisMonth: nums.sessions, lastMonth: nums.sessions_prev };
+    }
+  } catch (e) { console.error("[proof-feed] numbers failed:", e.message); }
 
   const digest = isMonthly ? await generateMonthly(athlete, b.brief, deps) : await generateWeekly(athlete, b.brief, deps);
-  if (monthNums) digest.contentJson.numbers = monthNums;
+  if (numbersSec) digest.contentJson = withNumbersSection(digest.contentJson, numbersSec);
 
   // WILCO Crew V1: the weekly/monthly Proof digest's crew blip — highlights only,
   // never a roll-call, and OMITTED entirely when there's nothing (never "your

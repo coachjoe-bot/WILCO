@@ -8,7 +8,7 @@
 // hero's loop, sessions follow the 3-hour grouping, ranges are exact to the day,
 // streaks follow Sunday-start weeks, comparisons pick a readable object.
 
-import { computeAthleteStats, statsInRange, liftWeeklySeries, tonnageComparison, weekKey, shiftDay, dayKey, STATS_VERSION, monthNumbers, weeklyMiles } from "../src/stats.js";
+import { computeAthleteStats, statsInRange, liftWeeklySeries, liftDailySeries, tonnageComparison, weekKey, shiftDay, dayKey, STATS_VERSION, monthNumbers, weekNumbers, weeklyMiles, numbersBody, numbersSection, withNumbersSection, isNumbersSection, RANGE_KEYS } from "../src/stats.js";
 import { sessionTonnage, groupIntoSessions, computeGritSnapshot } from "../src/grit.js";
 
 let pass = 0, fail = 0;
@@ -230,9 +230,10 @@ const EX = (name, sets, reps, weight, unit = "lbs", more = {}) => ({ name, sets,
   const s = computeAthleteStats(rows, { tz: TZ, now: NOW });
   const m = monthNumbers(s, { now: NOW });
   eq(m.sessions, 6, "this month: 4 lifts + 2 runs");
-  eq(m.sessions_prev, 4, "last month: 4");
+  eq(m.sessions_prev, 3, "the 28 days before: 3 (Aug 5 falls outside)");
   eq(m.tonnage, 15 * (195 + 200 + 205 + 210), "this month tonnage");
-  eq(m.tonnage_prev, 15 * (185 + 185 + 190 + 190), "last month tonnage");
+  eq(m.tonnage_prev, 15 * (185 + 190 + 190), "prior window tonnage");
+  eq(m.days, 28, "monthly window is the brief's 28 days");
   eq(m.prs, 4, "four rising benches = four PRs this month");
   eq(m.favorite, "Bench Press", "favorite");
   eq(m.best_lift.e1rm, Math.round(210 * (1 + 5 / 30)), "best lift this month");
@@ -243,6 +244,50 @@ const EX = (name, sets, reps, weight, unit = "lbs", more = {}) => ({ name, sets,
   eq(wm.length, 1, "two runs in one week → one point");
   eq(wm[0].y, 9, "miles summed, km converted");
   eq(weeklyMiles(s, "1M", { now: "2026-11-15T12:00:00Z" }).length, 0, "out of range → none");
+}
+
+// ── weekly numbers, the section, the 1W range, daily series ──────────────────
+{
+  const mk = (d, w) => W(`${d}T16:00:00Z`, [EX("Bench Press", 3, 5, w)]);
+  const rows = [mk("2026-09-21", 200), mk("2026-09-23", 205), mk("2026-09-28", 210), mk("2026-09-30", 215), mk("2026-10-01", 220)];
+  const s = computeAthleteStats(rows, { tz: TZ, now: NOW });
+  const w = weekNumbers(s, { now: NOW });                      // Sep 26 .. Oct 2 vs Sep 19 .. Sep 25
+  eq(w.days, 7, "weekly window is 7 days");
+  eq(w.sessions, 3, "this week: 3");
+  eq(w.sessions_prev, 2, "last week: 2");
+  eq(w.tonnage, 15 * (210 + 215 + 220), "this week tonnage");
+  eq(w.prs, 3, "three rising benches this week");
+  eq(w.favorite, "Bench Press", "favorite this week");
+  eq(w.favorite_sets, 9, "favorite sets");
+  eq(weekNumbers(computeAthleteStats(rows.slice(0, 3), { tz: TZ, now: NOW }), { now: NOW }), null, "one session this week → no block");
+  const r1w = statsInRange(s, "1W", { now: NOW });
+  eq(r1w.sessions, 3, "1W range = last 7 days");
+  eq(RANGE_KEYS.join(","), "1W,1M,3M,1Y", "the four ranges on the control");
+  // body text in both units
+  const body = numbersBody(w, { unit: "lbs", period: "week" });
+  ok(/9,675 lb moved over 3 sessions: 9 sets, 45 reps, 3 PRs\./.test(body), `body text: ${body}`);
+  ok(/Up 59% on last week\./.test(body), `body delta: ${body}`);
+  ok(/Most sets: Bench Press\./.test(body), "body favorite");
+  ok(/kg moved/.test(numbersBody(w, { unit: "kg", period: "month" })) && /last month/.test(numbersBody(w, { unit: "kg", period: "month" })), "kg + month wording");
+  // the section and its placement
+  const sec = numbersSection(w, { unit: "lbs", period: "week" });
+  eq(sec.label, "BY THE NUMBERS · THIS WEEK", "weekly label");
+  eq(isNumbersSection(sec), true, "carries numbers");
+  eq(sec.numbers.unit, "lbs", "unit stamped on the section");
+  const cj = { intro: "hi", sections: [{ label: "GRIT RANK", body: "x" }, { label: "WEEK VS WEEK", body: "y" }, { label: "FOCUS NEXT WEEK", body: "z" }] };
+  const out = withNumbersSection(cj, sec);
+  eq(out.sections.map((x) => x.label).join("|"), "GRIT RANK|BY THE NUMBERS · THIS WEEK|WEEK VS WEEK|FOCUS NEXT WEEK", "inserted right after GRIT RANK");
+  eq(cj.sections.length, 3, "input untouched");
+  eq(withNumbersSection({ sections: [{ label: "WEEK VS WEEK", body: "y" }] }, sec).sections[0].label, sec.label, "no rank → first");
+  eq(withNumbersSection(out, sec).sections.filter(isNumbersSection).length, 1, "re-inserting replaces, never doubles");
+  eq(withNumbersSection(cj, null), cj, "no section → unchanged");
+  eq(numbersSection(null), null, "no numbers → no section");
+  // daily series for the short ranges
+  const bench = s.lifts[0];
+  const d = liftDailySeries(s, bench.id, { range: "1W", now: NOW });
+  eq(d.length, 3, "1W daily points");
+  eq(d[2].y, Math.round(220 * (1 + 5 / 30)), "day's best e1RM");
+  eq(liftDailySeries(s, bench.id, { range: "3M", now: NOW }).length, 5, "3M daily points");
 }
 
 // ── empty / malformed input ───────────────────────────────────────────────────
