@@ -298,7 +298,7 @@ console.log("review items in the agenda:");
   ok(t.find((x) => x.rid === idN).asked && !t.find((x) => x.rid === idN).covered, "asked but the athlete ended before replying: asked, not covered");
   ok(t.find((x) => x.rid === "review_note_wk").covered, "the ride is covered when its pain item is");
   const blk = reviewExtractBlock(ag, st);
-  ok(blk.includes(idN) && blk.includes("review_note_wk") && !blk.includes("review_goal_g1") && /Trains at the 6am class/.test(blk), "the extractor sees only what was asked, with the note's words");
+  ok(blk.includes(idN) && blk.includes("review_note_wk") && !blk.includes("review_goal_g1") && /Trains at the 6am class/.test(blk), "the extractor sees what was asked or answered, with the note's words");
   ok(reviewExtractBlock(ag, initialAgendaState(ag)) === "" && reviewExtractBlock([], null) === "", "empty when no note was asked yet");
   ok(agendaTurnPrompt({ agenda: ag, message: "x" }).system.includes("never bring up an exam, a trip"), "Joe is told to ask only about training in a check-in");
 }

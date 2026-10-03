@@ -41,8 +41,9 @@ export const GOAL_LIFT_IDLE_DAYS = 28;      // a goal lift not trained in 4 week
 export const GOAL_DATE_NEAR_DAYS = 21;
 // The day the review starts for rows that have no stamp. Everything older is
 // "legacy": it is spread over the 8 weeks after this day. Fixed at build time
-// (it is the week this ships), never "now", so the spread does not move.
-export const REVIEW_ROLLOUT = "2026-10-05";
+// (the day this ships; set it to the merge day), never "now", so the spread
+// does not move.
+export const REVIEW_ROLLOUT = "2026-10-03";
 export const SIGNUP_FIELDS = ["training_days_per_week", "equipment", "injury_history"];
 export const EQUIPMENT_OPTIONS = ["Full gym", "Barbells & racks", "Dumbbells only", "Bodyweight only", "Home gym (mixed)"];
 
@@ -341,11 +342,14 @@ export function planReviewOutcomes({ targets = [], verdicts = {}, notes = [], go
   const stamps = { ...(athlete.review_stamps || {}) };
   let stampsChanged = false;
   for (const t of targets) {
-    if (!t || !t.asked) continue;                                   // never put to the athlete: no count
+    if (!t) continue;
     const v = verdicts[t.rid] || null;
-    const answered = !!t.covered;
-    if (!answered) continue;                                        // the check-in ended before they replied: no count
+    if (!t.covered) continue;                                       // the check-in ended before they replied: no count
     const verdict = v ? v.verdict : "unclear";
+    // An answer they volunteered before the question came up (covered, never
+    // asked) counts when it is explicit. "They did not answer" needs a question
+    // that was actually put to them: a check-in that never reached it counts for nothing.
+    if (verdict === "unclear" && !t.asked) continue;
     if (t.type === "note" || t.type === "workaround") {
       const row = activeFacts(notes, now).find((r) => String(r.id) === String(t.ref));
       if (!row) continue;                                           // changed or gone since: leave it

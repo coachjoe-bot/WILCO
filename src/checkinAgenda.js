@@ -73,6 +73,7 @@ export function buildAgenda(questions, { painRecords = null, review = null, work
   // one list of "which old notes do we ask about" (Will 10-02).
   const reviewItems = review && Array.isArray(review.items) ? review.items : null;
   const goalReview = reviewItems ? reviewItems.find((i) => i.merge === "goal") || null : null;
+  const currentGoalId = review && review.current ? review.current.id : null;
   for (const q of bank) {
     if (!q || !q.id || !q.text || seen.has(q.id)) continue;
     if (reviewItems && (q.kind === "memory" || String(q.id).startsWith("review_") || q.id === "memory" || q.id === "memory_stale")) continue;
@@ -83,6 +84,10 @@ export function buildAgenda(questions, { painRecords = null, review = null, work
       // goal item, and its wording stands in when the digest's was the plain one
       item.review = { rid: goalReview.rid, type: "goal", ref: goalReview.ref, note: goalReview.note, section: "goal", reason: goalReview.reason, tag: goalReview.tag };
       if (goalReview.text && /^Still chasing\b/.test(item.text)) item.text = goalReview.text;
+    } else if (reviewItems && item.id === "goal" && currentGoalId) {
+      // the goal is not due for a REASON, but the weekly goal question is still
+      // a check: any answer to it stamps the goal's own clock (no tag line shown)
+      item.review = { rid: `review_goal_${currentGoalId}`, type: "goal", ref: currentGoalId, note: item.meta && item.meta.goal || "", section: "goal", reason: "window", tag: null };
     }
     if (recs) {
       // the ledger drives pain now: the old catch-all "niggles" question folds into it
@@ -353,7 +358,8 @@ export function digestNoteFrom(sections = []) {
 // after it (covered); src/memoryReview.js planReviewOutcomes turns that plus
 // the extractor's verdicts into writes. A question the check-in never reached
 // is not asked, and one asked right before the athlete ended it is not
-// covered: neither counts against a note.
+// covered: neither counts against a note. An explicit answer given before the
+// question came up (covered, never asked) still counts.
 export function reviewTargets(agenda = [], state = null) {
   const out = [];
   const asked = (state && state.asked) || {};
@@ -376,7 +382,7 @@ export function tagFor(item) {
 // The extractor's view of the review items. It returns one verdict per id; code
 // decides what each verdict does.
 export function reviewExtractBlock(agenda = [], state = null) {
-  const targets = reviewTargets(agenda, state).filter((t) => t.asked);
+  const targets = reviewTargets(agenda, state).filter((t) => t.asked || t.covered);
   if (!targets.length) return "";
   const byItem = new Map(agenda.map((i) => [i.id, i]));
   const lines = targets.map((t) => {

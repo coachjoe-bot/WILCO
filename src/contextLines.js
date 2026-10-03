@@ -104,6 +104,7 @@ export function painTabLines({ records = [], rows = [], notes = [], unit = "lbs"
 }
 
 // ── maxes and limiters (Body) ────────────────────────────────────────────────
+const MAX_LIFTS = new Set(["back squat", "front squat", "bench press", "deadlift", "overhead press", "snatch", "clean and jerk", "power clean", "power snatch", "clean", "push press", "squat"]);
 // The same sources chat's KNOWN 1RMs block reads (App.jsx getJoeReply): best
 // e1RM per canonical lift from history, then the athlete's actual 1RMs
 // (manual_one_rms) replace the estimate. Each is said in the unit THAT lift was
@@ -122,8 +123,9 @@ export function maxesTab({ rows = [], manualRMs = [], bodyweightLbs = 0, unit = 
     byEx[lift.id] = { id: lift.id, name: lift.name || m.exercise, e1rm: toLbs(Number(m.weight) || 0, m.unit), unit: m.unit === "kg" ? "kg" : "lbs", actual: true };
   }
   const all = Object.values(byEx).filter((x) => x.e1rm > 0).sort((a, b) => b.e1rm - a.e1rm);
-  const big = all.filter((x) => liftTier(x.id) === 0);
-  const chosen = (big.length >= 2 ? big : all).slice(0, limit);
+  // the lifts an athlete quotes (a pull or a complex is not a "max")
+  const big = all.filter((x) => MAX_LIFTS.has(x.id));
+  const chosen = (big.length >= 2 ? big : all.filter((x) => liftTier(x.id) === 0 && !/pull|complex|\+/.test(x.id))).slice(0, limit);
   return {
     items: chosen.map((x) => ({ name: x.name, display: showMax(x.e1rm, x.unit), actual: x.actual })),
     line: chosen.map((x) => `${cap(x.name.toLowerCase())} ${showMax(x.e1rm, x.unit)}`).join(", "),
@@ -154,7 +156,7 @@ export function prefsLines(prefs) {
   }
   return out;
 }
-export function unitsByLift(rows = [], { unit = "lbs", perLift = 5 } = {}) {
+export function unitsByLift(rows = [], { unit = "lbs", perLift = 3 } = {}) {
   const latest = new Map();
   for (const w of [...(rows || [])].sort((a, b) => effectiveDate(b) - effectiveDate(a))) {
     for (const ex of pd(w).exercises || []) {
@@ -165,7 +167,9 @@ export function unitsByLift(rows = [], { unit = "lbs", perLift = 5 } = {}) {
     }
   }
   const kg = [], lbs = [];
-  for (const x of latest.values()) (x.unit === "kg" ? kg : lbs).push(x.name);
+  // quotable lifts first (a complex or a pull is noise in a sentence)
+  const ranked = [...latest.entries()].filter(([id, x]) => !/\+|complex/i.test(x.name)).sort((a, b) => (MAX_LIFTS.has(b[0]) ? 1 : 0) - (MAX_LIFTS.has(a[0]) ? 1 : 0));
+  for (const [, x] of ranked) (x.unit === "kg" ? kg : lbs).push(x.name);
   if (!kg.length && !lbs.length) return "";
   const nm = (a) => a.slice(0, perLift).map((s) => s.toLowerCase()).join(", ");
   if (!kg.length || !lbs.length) return `You log in ${kg.length ? "kg" : "lbs"}.`;

@@ -78,14 +78,18 @@ import { effectiveTier, trialActive } from "./tiers.js";
 import { CREW_ENABLED, MASTERMIND_ENABLED, CHAT_FIRST_ENABLED } from "./flags.js";
 import { buildMastermindStatic } from "./ai/card.js";
 import { blueprintPct } from "./programBuilder.js";
-import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps, memoryNotesText, checkinNoteFact } from "./memory.js";
+import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps, memoryNotesText } from "./memory.js";
 import { activeGoals, goalsToSupersede, sameGoalText, futureGoalDate } from "./goals.js";
 import { MEMORY_SCAN_SYS, MEMORY_SCAN_MODEL, MEMORY_SCAN_FEATURE, scanUserMessage, readScanVerdict, SCAN_UNREACHABLE } from "./memoryScan.js";
 import { planDirectEdit, planDirectAdd, planDirectDelete, refusalLine, validateGoalText, validateInjuryText, planToolUpdate, planToolRemember, isMemoryTool, isBodyweightFact, newMemoryOutcome, memoryOutcomeLine, toolRefusal } from "./memoryEdit.js";
 import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, programWriteOwner, recSummaryFallback, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
 import { performedBlock, logHeadline, logFocusBlock, planDayFor, prLinesForReply, logTurnExercises, logUnitsFact } from "./turnFacts.js";
 import { ledgerTurn, ledgerBlock, normArea, painFollowUpPlan, applyStamps, recStagedLine, withMark, normalizeMarks, flagClearedFor, keepPainRec, painStatus, currentPainAreas, currentPainLines, painNoteGuard, areaLabel } from "./painLedger.js";
-import { buildAgenda, agendaTurnPrompt, parseAgendaTurn, advanceAgenda, initialAgendaState, isEndIntent, painStampsFrom, closingLine, digestNoteFrom } from "./checkinAgenda.js";
+import { buildAgenda, agendaTurnPrompt, parseAgendaTurn, advanceAgenda, initialAgendaState, isEndIntent, painStampsFrom, closingLine, digestNoteFrom, reviewTargets, tagFor, reviewExtractBlock } from "./checkinAgenda.js";
+import { reviewQueue, sessionDays, planReviewOutcomes, readVerdicts, logsDisagree, validateSignupValue, EQUIPMENT_OPTIONS } from "./memoryReview.js";
+import { thisWeekFact, groupBySection, recoveryStrip, recentlyRemoved } from "./memorySections.js";
+import { countdownLine, noteSpan, isDatedEvent } from "./noteDates.js";
+import { painTabLines, maxesTab, limiterLines, prefsLines, unitsByLift, goalProgressLines, thisWeekTab, thisWeekLines, checkedLabel, shortDay } from "./contextLines.js";
 import { programPurpose, purposeLine } from "./programPurpose.js";
 import { classifyFollowUp, arbitrateFollowUp } from "./replyGuards.js";
 import { replyGate, gateText, renderGate, gateFields } from "./replyGate.js";
@@ -1832,7 +1836,10 @@ const saveMemoryFact = async (athleteId, fact, rows=[]) => {
   const dup = findDuplicate(rows, v.content);
   if(dup) return dup;
   try{
-    const ins = await sbInsert("athlete_memory",{athlete_id:athleteId, content:v.content, kind:fact.kind, expires_at:fact.expires_at||null, source:fact.source||"inferred"});
+    // T69-C: a note carries its section and its checked-today stamp when the
+    // writer has them (the check-in's This-week row does).
+    const ins = await sbInsert("athlete_memory",{athlete_id:athleteId, content:v.content, kind:fact.kind, expires_at:fact.expires_at||null, source:fact.source||"inferred",
+      ...(fact.section?{section:fact.section, confirmed_at:fact.confirmed_at||new Date().toISOString(), ask_count:0}:{})});
     const row = Array.isArray(ins)?ins[0]:ins;
     return (row && row.id) ? row : null;
   }catch(_){ return null; }
@@ -3646,7 +3653,7 @@ function reportsActivePain(text){
   return PAIN_WORDS.test(t) && BODY_AREAS.test(t);
 }
 
-function ProofChatModal({athlete, digest, onClose, onMemorySaved, onDigestRead, onPainMarks, workoutHistory, kbInset=0}) {
+function ProofChatModal({athlete, digest, onClose, onMemorySaved, onDigestRead, onPainMarks, onContextChanged, workoutHistory, kbInset=0}) {
   const alreadyDone = !!(digest?.content_json?.checkin_done);
   const [phase, setPhase] = useState(alreadyDone ? "done" : "report"); // report | dialogue | coach-offer | acting | done
   const [messages, setMessages] = useState([]);
@@ -3664,6 +3671,7 @@ function ProofChatModal({athlete, digest, onClose, onMemorySaved, onDigestRead, 
   const followedUpRef = useRef(new Set()); // question ids that already got their one follow-up
   const offeredCoachRef = useRef(false);   // only ONE "send coach a request" offer per check-in session
   const coachRequestSentRef = useRef(false);
+  const contextPatchRef = useRef(null);      // T69-C: athlete columns the review wrote, handed back to the app
   const finishingRef = useRef(false);        // finish() runs once (end, close, or covered agenda) // a coach request was actually FILED this session — finish() must not also auto-propose a direct injury edit for the same pain
 
   const c = digest?.content_json || {};
@@ -3684,14 +3692,40 @@ function ProofChatModal({athlete, digest, onClose, onMemorySaved, onDigestRead, 
   // items filtered and worded by the pain ledger computed NOW (the letter may be
   // days old: a dismissed area is never asked, an easing one gets "has it
   // cleared?"). A legacy digest with no bank gets the old default questions.
-  const agenda = useMemo(()=>{
-    let painRecords = null;
+  const painRecords = useMemo(()=>{
     try{
       const protects = [...new Set([...programPurpose(athlete?.program_text||"").protects, ...programPurpose(athlete?.temp_program_text||"").protects])];
-      painRecords = painStatus({rows: workoutHistory||[], marks: (athlete?.pain_marks && typeof athlete.pain_marks==="object") ? athlete.pain_marks : {}, legacyResolved: Array.isArray(athlete?.resolved_pain) ? athlete.resolved_pain : [], protects, now: new Date()});
-    }catch(_){ painRecords = null; }
-    return buildAgenda(Array.isArray(c.questions) ? c.questions : null, {painRecords});
+      return painStatus({rows: workoutHistory||[], marks: (athlete?.pain_marks && typeof athlete.pain_marks==="object") ? athlete.pain_marks : {}, legacyResolved: Array.isArray(athlete?.resolved_pain) ? athlete.resolved_pain : [], protects, now: new Date(), tz: athlete?.proof_timezone||undefined});
+    }catch(_){ return null; }
   },[]); // eslint-disable-line
+  // T69-C: which old notes the check-in asks about (src/memoryReview.js),
+  // computed NOW from the notes as they are today, the way the pain records
+  // are. Loaded once when the letter opens; if it has not landed (or failed)
+  // by the time the athlete starts, the digest's own questions stand.
+  const [reviewInputs,setReviewInputs] = useState(null);
+  const startedRef = useRef(false);
+  useEffect(()=>{
+    if(alreadyDone) return;
+    let dead = false;
+    (async()=>{
+      try{
+        const since = new Date(Date.now()-28*864e5).toISOString();
+        const [mem,gs,wk] = await Promise.all([
+          sbRead("athlete_memory",`?athlete_id=eq.${athlete.id}&status=eq.active&order=updated_at.desc&limit=60`),
+          sbRead("athlete_goals",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=12`),
+          sbRead("workouts",`?athlete_id=eq.${athlete.id}&created_at=gte.${encodeURIComponent(since)}&order=created_at.desc&limit=600&select=id,created_at,parsed_data`),
+        ]);
+        if(dead||startedRef.current||!Array.isArray(mem)||!Array.isArray(gs)||!Array.isArray(wk)) return;
+        const notes = activeFacts(mem);
+        const review = reviewQueue({notes, goals:gs, athlete, sessions:sessionDays(wk,{tz:athlete.proof_timezone||undefined}), pain:painRecords, now:new Date()});
+        const workarounds = {};
+        for(const n of notes) if(n.area_key && !workarounds[n.area_key]) workarounds[n.area_key] = n;
+        setReviewInputs({review, workarounds});
+      }catch(_){ /* the digest's own list stands */ }
+    })();
+    return ()=>{ dead = true; };
+  },[]); // eslint-disable-line
+  const agenda = useMemo(()=>buildAgenda(Array.isArray(c.questions) ? c.questions : null, {painRecords, review:reviewInputs?.review||null, workarounds:reviewInputs?.workarounds||null}),[reviewInputs]); // eslint-disable-line
 
   useEffect(()=>{
     // messages[0] holds the raw digest text (kept for AI context); it is not shown as a
@@ -3709,9 +3743,10 @@ function ProofChatModal({athlete, digest, onClose, onMemorySaved, onDigestRead, 
 
   const startDialogue = () => {
     if(!agenda.length) return;
+    startedRef.current = true;                 // the agenda is fixed from here (T69-C: a late review load never reshuffles it)
     setPhase("dialogue");
     setAgState(initialAgendaState(agenda));
-    setMessages(prev=>[...prev,{role:"assistant",content:agenda[0].text}]);
+    setMessages(prev=>[...prev,{role:"assistant",content:agenda[0].text,tag:tagFor(agenda[0])}]);
   };
 
   // Taxonomy-exact series (src/grit.js). The old inline version matched by
@@ -3750,7 +3785,13 @@ function ProofChatModal({athlete, digest, onClose, onMemorySaved, onDigestRead, 
     const step = advanceAgenda(agenda, agState, {message:msg, parsed, endIntent:ending});
     setAgState(step.state);
     const reply = gateText("checkin", step.reply||"");
-    if(reply) setMessages(prev=>[...prev,{role:"assistant",content:reply}]);
+    // T69-C (Will 10-02): under a question about a saved note, the line that
+    // names the note and why it is asked ("Schedule, your logs disagree with
+    // the note") stays visible. It rides the message that carries the question,
+    // and only on the turn the item was newly put to the athlete.
+    const askedNow = step.state.pending && (step.state.asked[step.state.pending]||0) > (agState.asked[step.state.pending]||0)
+      ? tagFor(agenda.find(i=>i.id===step.state.pending)) : null;
+    if(reply) setMessages(prev=>[...prev,{role:"assistant",content:reply,tag:(!step.ask&&!offerCoach)?askedNow:null}]);
     if(step.finished){ await finish(step.state.answers, {early: step.reason==="athlete_ended", state: step.state}); return; }
     if(offerCoach){
       offeredCoachRef.current = true;
@@ -3761,10 +3802,10 @@ function ProofChatModal({athlete, digest, onClose, onMemorySaved, onDigestRead, 
       return;
     }
     // The model left nothing to answer: code asks the next open item plainly.
-    if(step.ask) setMessages(prev=>[...prev,{role:"assistant",content:step.ask.text}]);
+    if(step.ask) setMessages(prev=>[...prev,{role:"assistant",content:step.ask.text,tag:askedNow}]);
     else if(!reply){
       const it = agenda.find(i=>i.id===step.state.pending) || agenda.find(i=>!step.state.covered.includes(i.id));
-      if(it) setMessages(prev=>[...prev,{role:"assistant",content:it.text}]);
+      if(it) setMessages(prev=>[...prev,{role:"assistant",content:it.text,tag:tagFor(it)}]);
     }
   };
 
@@ -3775,7 +3816,7 @@ function ProofChatModal({athlete, digest, onClose, onMemorySaved, onDigestRead, 
     const next = agenda.find(i=>!st.covered.includes(i.id));
     if(!next){ await finish(st.answers, {state: st}); return; }
     setAgState({...st, pending: next.id, asked: {...st.asked, [next.id]: (st.asked[next.id]||0)+1}});
-    setMessages(prev=>[...prev,{role:"assistant",content:next.text}]);
+    setMessages(prev=>[...prev,{role:"assistant",content:next.text,tag:tagFor(next)}]);
     setPhase("dialogue");
   };
 
@@ -3843,26 +3884,59 @@ function ProofChatModal({athlete, digest, onClose, onMemorySaved, onDigestRead, 
     const factLines = memRows.map(r=>`- [${r.kind}] ${r.content}${r.expires_at?` (expires ${String(r.expires_at).slice(0,10)})`:""}`);
     let ex = {};
     try{
+      const stForReview = opts.state || agState;
+      const reviewBlock = reviewExtractBlock(agenda, stForReview);
       const raw = await askClaude(
-        `Extract structured updates from an athlete's check-in answers. Return ONLY JSON, no markdown: {"weight_lbs":number|null,"set_height_finalized":boolean,"stop_asking_weight":boolean,"goal_update":string|null,"injury_note":string|null,"apply_injury_change":boolean,"soft_notes":string,"memory_ops":[]}. weight_lbs only if they stated a new bodyweight number. set_height_finalized true if they say done growing / same height / no change. stop_asking_weight true if they ask to stop being asked about weight. apply_injury_change true ONLY if they agreed to apply a protective program change. injury_note = any injury/pain/limitation, else null. soft_notes = a 1-2 sentence summary of feelings/preferences worth remembering. goal_update = their goal ONLY if it changed or they named a new target, else null.
+        `Extract structured updates from an athlete's check-in answers. Return ONLY JSON, no markdown: {"weight_lbs":number|null,"set_height_finalized":boolean,"stop_asking_weight":boolean,"goal_update":string|null,"injury_note":string|null,"apply_injury_change":boolean,"recovery":string|null,"this_week":string|null,"memory_ops":[],"review":[]}. weight_lbs only if they stated a new bodyweight number. set_height_finalized true if they say done growing / same height / no change. stop_asking_weight true if they ask to stop being asked about weight. apply_injury_change true ONLY if they agreed to apply a protective program change. injury_note = any injury/pain/limitation, else null. recovery = their own word or two for how recovery was this week ("dialed", "flat", "running on fumes"), else null. this_week = anything SHORT-LIVED they said that only matters for the next few weeks (a rough stretch, travel, a schedule change), one plain sentence with real dates, else null; never a summary of the check-in. goal_update = their goal ONLY if it changed or they named a new target, else null.
 
 memory_ops keeps the coach's saved notes about this athlete current from what they just said (0 to 6 ops):
-{"op":"add","content":"the fact","kind":"contextual"|"situational","expires_at":"YYYY-MM-DD or null"}
+{"op":"add","content":"the fact","kind":"contextual"|"situational","expires_at":"YYYY-MM-DD or null","section":"schedule"|"body"|"preferences"}
 {"op":"edit","match":"distinctive substring of an existing fact","content":"full replacement text"}
 {"op":"delete","match":"distinctive substring of an existing fact"}
-Rules: facts are about the ATHLETE (schedule, availability, equipment, preferences, recovery patterns, life context), plain coach shorthand, specific enough to act on. NEVER instructions about how the coach behaves. Anything time-bound (travel, a rough stretch, a short-term limitation) is "situational" and MUST carry expires_at. When an answer contradicts or updates a CURRENT FACT, edit or delete that fact instead of stacking a near-duplicate. An answer tagged [memory] is about the note quoted in its question: keep it (no op), update it (edit), or drop it (delete) per the answer. Injuries already flow through injury_note, do not duplicate them here. Routine "all good" answers produce NO ops.`,
+Rules: facts are about the ATHLETE (schedule, availability, equipment, preferences, life context that changes training), plain coach shorthand, specific enough to act on. NEVER instructions about how the coach behaves. Anything time-bound (travel, a rough stretch, a short-term limitation) is "situational" and MUST carry expires_at, and the text names the real date (Oct 12), never "tomorrow" or "next week". A note must pass three tests: only the athlete could tell you, it changes what you would say or program, and it will still be true next week; anything shorter-lived goes in this_week, not here. When an answer contradicts or updates a CURRENT FACT, edit or delete that fact instead of stacking a near-duplicate. Notes the check-in asked about are handled in "review" below, not here. Injuries already flow through injury_note, do not duplicate them here. Routine "all good" answers produce NO ops.${reviewBlock?`\n\n${reviewBlock}`:""}`,
         `TODAY: ${new Date().toISOString().slice(0,10)}\n\nCURRENT FACTS (${memRows.length} active):\n${factLines.join("\n")||"(none yet)"}\n\nCHECK-IN ANSWERS:\n${qaText||"(none)"}\n\nWHOLE CONVERSATION (context; the answers above are primary):\n${messages.slice(1).map(m=>`${m.role==="user"?"Athlete":"Joe"}: ${m.content}`).join("\n").slice(-4000)}`,
-        900, [], "claude-sonnet-5", "proof_answer_extract"
+        1100, [], "claude-sonnet-5", "proof_answer_extract"
       );
       ex = JSON.parse(String(raw).replace(/```json|```/g,"").trim()) || {};
     }catch(_){ ex = {}; }
-    // Memory writes ride the exact machinery the ask-Joe box uses.
+    // T69-C: what the athlete's answers do to the notes the check-in asked
+    // about. Code reads the check-in state (was the question put to them, did
+    // they reply after it) and the extractor's verdict per id, and decides:
+    // keep stamps confirmed_at, a change rewrites in place, "not anymore" removes,
+    // a reply that did not answer counts once and the second removes the note.
+    // A check-in that never reached a question, or ended right after it, counts
+    // for nothing; if the extractor itself failed, nothing moves.
+    let reviewPlan = {noteOps:[], goalOps:[], athleteWrites:{}, newGoalText:null};
+    let freshGoals = [];
     try{
-      if(Array.isArray(ex.memory_ops)&&ex.memory_ops.length){
-        const plan = planMemoryOps({decision:"apply", reply:"", ops:ex.memory_ops}, memRows);
+      freshGoals = await sbRead("athlete_goals",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=12`);
+      if(!Array.isArray(freshGoals)) freshGoals = [];
+      reviewPlan = planReviewOutcomes({targets:reviewTargets(agenda, opts.state||agState), verdicts:readVerdicts(ex.review), notes:memRows, goals:freshGoals, athlete, now:new Date(), extractorOk:Array.isArray(ex.review)});
+    }catch(_){}
+    // Memory writes ride the exact machinery the ask-Joe box uses. Review ops
+    // first: a row they settled is claimed before a free-text op can touch it.
+    try{
+      const ops = [...reviewPlan.noteOps, ...(Array.isArray(ex.memory_ops)?ex.memory_ops:[])];
+      if(ops.length){
+        const plan = planMemoryOps({decision:"apply", reply:"", ops}, memRows);
         if(plan.decision==="apply"&&plan.actions?.length) await applyMemoryActions(athlete.id, plan.actions, memRows);
       }
     }catch(_){}
+    // goals (one door: stamp, retire, or write the new one through writeAthleteGoal)
+    let athletePatch = null;
+    try{
+      for(const g of reviewPlan.goalOps) await sbUpdate("athlete_goals", g.id, g.data);
+      if(reviewPlan.newGoalText) await writeAthleteGoal(athlete.id, reviewPlan.newGoalText, freshGoals, {confirmed_at:new Date().toISOString(), ask_count:0});
+    }catch(_){}
+    // the three signup fields: their own columns, plus the stamps (one jsonb)
+    try{
+      const w = reviewPlan.athleteWrites;
+      if(w && Object.keys(w).length){
+        await sbUpdate("athletes", athlete.id, w);
+        athletePatch = w;
+      }
+    }catch(_){}
+    contextPatchRef.current = athletePatch;
 
     // Hard facts -> structured tables (each guarded; new columns no-op pre-migration)
     try{ if(ex.weight_lbs && ex.weight_lbs>50 && ex.weight_lbs<600) await sbUpdate("athletes",athlete.id,{weight_lbs:Math.round(ex.weight_lbs)}); }catch(_){}
@@ -3994,15 +4068,27 @@ Rules: facts are about the ATHLETE (schedule, availability, equipment, preferenc
   };
 
   const persistAndClose = async (finalAnswers, ex, newProgram) => {
-    const injuryMentioned = !!ex.injury_note || finalAnswers.some(a=>/injur|sore|pain|hurt|tweak|limitation/i.test(a.a));
-    const soft = ex.soft_notes || finalAnswers.map(a=>`${a.q}: ${a.a}`).join("; ");
-    const dateTag = new Date().toLocaleDateString("en-US",{month:"short",day:"numeric"});
-    // The check-in's summary is a fact with a shelf life in the one memory store
-    // (T68; src/memory.js checkinNoteFact: 12 weeks, the blob's rolling 12 notes).
-    const note = `${isMonthly?"Monthly":"Weekly"} check-in ${dateTag}: ${soft}${ex.injury_note?` | injury: ${ex.injury_note}`:""}${newProgram?" | program updated":""}`;
+    // T69-C (Will 10-01): check-in summaries stop. Each check-in leaves ONE
+    // This-week row (28 days): that week's recovery answer and anything
+    // short-lived they said. The recovery strip on the tab is the last four.
+    // The old "Weekly check-in ..." rows stay in the table, hidden from the tab
+    // and out of Joe's block (src/memorySections.js).
     try{
-      const row = await saveMemoryFact(athlete.id, checkinNoteFact(note));
-      if(onMemorySaved && row) onMemorySaved(row);
+      const tw = thisWeekFact({recovery:ex.recovery, note:ex.this_week});
+      if(tw){
+        const row = await saveMemoryFact(athlete.id, tw);
+        if(onMemorySaved && row) onMemorySaved(row);
+      }
+    }catch(_){}
+    // hand the app what changed: notes, goals, the signup columns
+    try{
+      if(onContextChanged){
+        const [m,g] = await Promise.all([
+          sbRead("athlete_memory",`?athlete_id=eq.${athlete.id}&status=eq.active&order=updated_at.desc&limit=60`),
+          sbRead("athlete_goals",`?athlete_id=eq.${athlete.id}&order=created_at.desc&limit=12`),
+        ]);
+        onContextChanged({memoryRows:Array.isArray(m)?activeFacts(m):null, goals:Array.isArray(g)?g:null, athletePatch:contextPatchRef.current});
+      }
     }catch(_){}
     // Mark the digest read AND lock the check-in so it can't be re-run (once per
     // progress report). checkin_done is stored in content_json (no migration needed).
@@ -4057,10 +4143,17 @@ Rules: facts are about the ATHLETE (schedule, availability, equipment, preferenc
         {/* Check-in Q&A. messages[0] is the raw digest text (shown as the page above),
             so render from index 1 onward. */}
         {messages.slice(1).map((m,i)=>(
-          <div key={i} className="proof-drop" style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
+          <div key={i} className="proof-drop" style={{display:"flex",flexDirection:"column",alignItems:m.role==="user"?"flex-end":"flex-start",gap:5}}>
             <div style={{maxWidth:"86%",background:m.role==="user"?CA_BUBBLE:CA.navy2,color:m.role==="user"?"#fff":CA.text,borderRadius:14,padding:"11px 14px",fontSize:14,lineHeight:1.6,whiteSpace:"pre-wrap",border:m.role==="user"?"none":`1px solid ${CA.border}`,borderBottomLeftRadius:m.role==="user"?14:4,borderBottomRightRadius:m.role==="user"?4:14}}>
               {m.role==="user" ? m.content : renderGate(m.content)}
             </div>
+            {/* T69-C (Will 10-02): the note this question is about and why it is asked */}
+            {m.tag&&(
+              <div data-testid="checkin-tag" style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",margin:"0 0 2px 4px",fontSize:10.5,color:CA.muted}}>
+                <span style={{fontSize:9,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:CA.accent,border:`1px solid ${CA.accent}`,borderRadius:999,padding:"1px 7px"}}>{m.tag.section}</span>
+                <span>{m.tag.label}</span>
+              </div>
+            )}
           </div>
         ))}
 
@@ -11717,6 +11810,8 @@ ${VOICE_ATHLETE}`;
                 )}
                 {CHAT_FIRST_ON&&memTab==="context"&&(
                   <AthleteContextPane athlete={athlete} goals={athleteGoals}
+                    workoutHistory={workoutHistory}
+                    onAskJoe={(t)=>{ setShowProgram(false); setInput(t); }}
                     rows={memoryRows} setRows={setMemoryRows}
                     onAthletePatch={(patch)=>setAthlete(prev=>({...prev,...patch}))}
                     onGoalSaved={(row)=>setAthleteGoals(prev=>[row, ...(prev||[]).map(g=>({...g, superseded_at: g.superseded_at||new Date().toISOString()}))])}/>
@@ -12025,6 +12120,11 @@ ${VOICE_ATHLETE}`;
           onMemorySaved={(row)=>setMemoryRows(rows=>rows.some(r=>r.id===row.id)?rows:[row,...rows])}
           onDigestRead={(d)=>{ if(!chatDigest) setProofDigest(d); }}
           onPainMarks={(m)=>setAthlete(prev=>({...prev,pain_marks:m}))}
+          onContextChanged={({memoryRows:mr, goals:gr, athletePatch})=>{
+            if(Array.isArray(mr)) setMemoryRows(mr);
+            if(Array.isArray(gr)) setAthleteGoals(gr);
+            if(athletePatch) setAthlete(prev=>({...prev,...athletePatch}));
+          }}
         />
       )}
 
@@ -14773,33 +14873,101 @@ export async function applyMemoryActions(athleteId, actions, rows){
 }
 
 // demo = the first-run tour's sample data: read-only, nothing is ever written.
-export function AthleteContextPane({athlete, goals=[], rows=[], setRows, onAthletePatch, onGoalSaved, demo=false}){
-  // One line is open at a time: {type:"fact",id} | {type:"add"} |
-  // {type:"goal",id} | {type:"injury"}.
+//
+// T69-C (Will 10-01 and 10-02, "this section is going to be very important for
+// the app"): six sections, in this order: Bio, Goal, Schedule, Body,
+// Preferences, This week. Most of the tab is NOT stored. It is worked out each
+// time it opens from the place every fact already lives (src/contextLines.js):
+// pain from the pain ledger, maxes and limiters from the logs, this week's
+// numbers from the proof brief's own functions. Only what the athlete told us is
+// a note, and each note shows when it was last checked and, when it is due, why
+// (src/memoryReview.js is the one queue the check-in also walks). One text
+// colour on the tab; every line is written for the athlete to read.
+export function AthleteContextPane({athlete, goals=[], rows=[], setRows, onAthletePatch, onGoalSaved, onAskJoe, workoutHistory=[], demo=false}){
+  // One line is open at a time: {type:"fact",id} | {type:"add",section} |
+  // {type:"goal",id} | {type:"injury"} | {type:"signup",field}.
   const [editing,setEditing] = useState(null);
   const [draft,setDraft] = useState("");
   const [busy,setBusy] = useState(false);
   const [refused,setRefused] = useState(null);   // the red "Not saved" reason
   const [savedMsg,setSavedMsg] = useState("");
   const [armDelete,setArmDelete] = useState(false);
+  const [explain,setExplain] = useState(null);   // the key of a live line whose source is showing
+  const [painAct,setPainAct] = useState(null);   // the area whose actions are open
+  const [openPast,setOpenPast] = useState(false);
+  const [openRemoved,setOpenRemoved] = useState(false);
+  const [sigDraft,setSigDraft] = useState(null);  // training days (number) or equipment (array) while editing
+  const [live,setLive] = useState(null);          // what the tab reads fresh each time it opens
+  const unit = athlete.weight_unit==="kg" ? "kg" : "lbs";
+  const tz = athlete.proof_timezone||undefined;
+  const now = new Date();
+
+  // Read once when the tab opens: the sessions of the last 28 days (workoutHistory is
+  // the newest 100 rows, chat messages included, and would undercount), the athlete's
+  // actual 1RMs and prefs, this week's PRs, the block's name, and the notes removed in
+  // the last 30 days. A failed read just leaves that part out.
+  useEffect(()=>{
+    if(demo) return;
+    let dead = false;
+    (async()=>{
+      const since28 = new Date(Date.now()-28*864e5).toISOString();
+      const since30 = new Date(Date.now()-30*864e5).toISOString();
+      const [wk,prs,ctx,hist,del] = await Promise.all([
+        sbRead("workouts",`?athlete_id=eq.${athlete.id}&created_at=gte.${encodeURIComponent(since28)}&order=created_at.desc&limit=600&select=id,created_at,parsed_data`).catch(()=>null),
+        sbRead("prs",`?athlete_id=eq.${athlete.id}&limit=200`).catch(()=>null),
+        getJoeCtx(athlete.id, athlete.temp_program_text||athlete.program_text||"").catch(()=>null),
+        sbRead("program_history",`?athlete_id=eq.${athlete.id}&select=block_name,applied_at&order=applied_at.desc&limit=1`).catch(()=>null),
+        sbRead("athlete_memory",`?athlete_id=eq.${athlete.id}&status=eq.deleted&updated_at=gte.${encodeURIComponent(since30)}&order=updated_at.desc&limit=40`).catch(()=>null),
+      ]);
+      if(dead) return;
+      setLive({
+        week: Array.isArray(wk)?wk:null, prs: Array.isArray(prs)?prs:[], manualRMs: ctx?.manualRMs||[], prefs: ctx?.prefs||null,
+        startedOn: ctx?.programStartedOn||null, blockName: (Array.isArray(hist)&&hist[0]?.block_name)||"", removed: Array.isArray(del)?recentlyRemoved(del):[],
+      });
+    })();
+    return ()=>{ dead = true; };
+  },[athlete.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const act = activeFacts(rows);
-  const pinned = act.filter(r=>r.kind==="pinned");
-  const rest = act.filter(r=>r.kind!=="pinned")
-    .sort((a,b)=>Date.parse(b.updated_at||b.created_at||0)-Date.parse(a.updated_at||a.created_at||0));
-  // Only ACTIVE goals render as "Goal" — superseded / stale-by-date rows belong
-  // to history, not to what Joe is currently coaching toward (T62).
-  const liveGoals = activeGoals(goals||[]).filter(g=>g&&g.goal_text).slice(0,3);
+  const groups = groupBySection(act, now);
+  const allGoals = Array.isArray(goals)?goals:[];
+  const liveGoals = activeGoals(allGoals).filter(g=>g&&g.goal_text).sort((a,b)=>Date.parse(b.created_at||0)-Date.parse(a.created_at||0));
+  const goal = liveGoals[0]||null;
+  const pastGoals = allGoals.filter(g=>g&&g.goal_text&&(!goal||g.id!==goal.id)).sort((a,b)=>Date.parse(b.created_at||0)-Date.parse(a.created_at||0));
   const injury = (athlete.injury_history||"").trim();
-  const h = athlete.height_inches;
-  const profileBits = [
-    [athlete.age?`${athlete.age}`:null, athlete.gender||null, h?`${Math.floor(h/12)}'${h%12}"`:null, athlete.weight_lbs?`${athlete.weight_lbs} lbs`:null].filter(Boolean).join(" · "),
-    [athlete.sport||null, athlete.position_or_event||null, athlete.training_days_per_week?`trains ${athlete.training_days_per_week} days/week`:null,
-     Array.isArray(athlete.equipment)&&athlete.equipment.length?athlete.equipment.join(", "):null].filter(Boolean).join(" · "),
-  ].filter(Boolean);
 
-  const open = (ed, text) => { if(demo||busy) return; setEditing(ed); setDraft(text||""); setRefused(null); setArmDelete(false); setSavedMsg(""); };
-  const close = () => { setEditing(null); setDraft(""); setRefused(null); setArmDelete(false); };
+  // The pain ledger's own records, recomputed on open (src/painLedger.js).
+  const painRecords = useMemo(()=>{
+    try{
+      const protects = [...new Set([...programPurpose(athlete.program_text||"").protects, ...programPurpose(athlete.temp_program_text||"").protects])];
+      return painStatus({rows: workoutHistory||[], marks: (athlete.pain_marks&&typeof athlete.pain_marks==="object")?athlete.pain_marks:{}, legacyResolved: Array.isArray(athlete.resolved_pain)?athlete.resolved_pain:[], protects, now: new Date(), tz});
+    }catch(_){ return []; }
+  },[workoutHistory, athlete.pain_marks]); // eslint-disable-line react-hooks/exhaustive-deps
+  const painLines = useMemo(()=>painTabLines({records:painRecords, rows:workoutHistory||[], notes:act, unit, tz}),[painRecords, rows]); // eslint-disable-line react-hooks/exhaustive-deps
+  const maxes = useMemo(()=>maxesTab({rows:workoutHistory||[], manualRMs:live?.manualRMs||[], bodyweightLbs:athlete.weight_lbs||0, unit}),[workoutHistory, live]); // eslint-disable-line react-hooks/exhaustive-deps
+  const limiters = useMemo(()=>limiterLines({rows:workoutHistory||[], manualRMs:live?.manualRMs||[], bodyweightLbs:athlete.weight_lbs||0, gender:athlete.gender, age:athlete.age}),[workoutHistory, live]); // eslint-disable-line react-hooks/exhaustive-deps
+  const sessions = useMemo(()=>live&&live.week?sessionDays(live.week,{tz}):[],[live]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Which stored lines come up at the next check-in, and why (the same queue the
+  // check-in walks, so the chip on the tab and the question never disagree).
+  const queue = useMemo(()=>{
+    try{ return reviewQueue({notes:act, goals:allGoals, athlete, sessions, pain:painRecords, now:new Date()}); }catch(_){ return {items:[]}; }
+  },[rows, goals, athlete.review_stamps, athlete.training_days_per_week, athlete.equipment, athlete.injury_history, sessions, painRecords]); // eslint-disable-line react-hooks/exhaustive-deps
+  const dueOf = (type,ref) => (queue.items||[]).find(i=>i.type===type&&String(i.ref)===String(ref))||null;
+  const logsLine = (() => { const d = logsDisagree({declared:athlete.training_days_per_week, sessions, now:new Date(), createdAt:athlete.created_at}); return d.disagree&&d.weeks?`Your last three weeks were ${d.weeks[0]}, ${d.weeks[1]} and ${d.weeks[2]} sessions.`:""; })();
+
+  const tw = useMemo(()=>{
+    if(!live||!live.week) return null;
+    let position = null;
+    try{ position = currentPosition({programText:athlete.temp_program_text||athlete.program_text||"", startedOn:live.startedOn||null, override:athlete.program_position_override||null, sessions:groupIntoSessions(live.week.filter(isRealSession)).map(s=>effectiveDate(s.entries[s.entries.length-1])), now:new Date()}); }catch(_){ position = null; }
+    const t = thisWeekTab({rows:live.week, athlete, prs:live.prs, position, programText:athlete.temp_program_text||athlete.program_text||"", now:new Date()});
+    return {lines:thisWeekLines(t,{position, blockName:live.blockName, unit})};
+  },[live]); // eslint-disable-line react-hooks/exhaustive-deps
+  const strip = recoveryStrip(act, now);
+  const recentCheckin = [...act].filter(r=>r.section==="this_week"&&/^Check-in /.test(r.content)).sort((a,b)=>Date.parse(b.created_at||0)-Date.parse(a.created_at||0))[0]||null;
+  const weekNote = recentCheckin ? String(recentCheckin.content).replace(/^Check-in [A-Z][a-z]{2} \d{1,2}\.\s*(Recovery: [^.]+\.\s*)?/,"").trim() : "";
+
+  const open = (ed, text) => { if(demo||busy) return; setEditing(ed); setDraft(text||""); setRefused(null); setArmDelete(false); setSavedMsg(""); setPainAct(null); setSigDraft(null); };
+  const close = () => { setEditing(null); setDraft(""); setRefused(null); setArmDelete(false); setSigDraft(null); };
   const flashSaved = () => { setSavedMsg("Saved."); setTimeout(()=>setSavedMsg(""),3000); };
 
   // The fact being edited left the list under the open field (it expired, Joe
@@ -14824,14 +14992,23 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, onAthle
     }catch(_){ return rows; }
   };
 
-  // The Joe scan: allow or reject, the text is never rewritten. Returns null
-  // when it may save, or the line to show. No verdict = not saved (fail closed).
+  // The Joe scan: allow or reject, the text is never rewritten. Returns
+  // {flag, section}: flag is null when it may save, or the line to show; section
+  // is where Joe would file a note that has no section yet (the same single call,
+  // T69-C). No verdict = not saved (fail closed).
   const scan = async (kind, text) => {
     try{
       const v = readScanVerdict(await askClaude(MEMORY_SCAN_SYS, scanUserMessage(kind, text), 160, [], MEMORY_SCAN_MODEL, MEMORY_SCAN_FEATURE));
-      if(!v.ok) return SCAN_UNREACHABLE;
-      return v.allow ? null : gateText("memory", v.reason);   // T64 S4: one output gate
-    }catch(_){ return SCAN_UNREACHABLE; }
+      if(!v.ok) return {flag:SCAN_UNREACHABLE, section:null};
+      return v.allow ? {flag:null, section:v.section||null} : {flag:gateText("memory", v.reason), section:null};   // T64 S4: one output gate
+    }catch(_){ return {flag:SCAN_UNREACHABLE, section:null}; }
+  };
+
+  // The signup fields keep their stamps in one small jsonb column.
+  const stampSignup = async (field, extra={}) => {
+    const stamps = {...(athlete.review_stamps&&typeof athlete.review_stamps==="object"?athlete.review_stamps:{}), [field]:{confirmed_at:new Date().toISOString(), ask_count:0}};
+    await sbUpdate("athletes",athlete.id,{...extra, review_stamps:stamps});
+    if(onAthletePatch) onAthletePatch({...extra, review_stamps:stamps});
   };
 
   const save = async () => {
@@ -14839,14 +15016,14 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, onAthle
     setBusy(true); setRefused(null);
     try{
       if(editing.type==="fact" || editing.type==="add"){
-        const planFor = (r) => editing.type==="fact" ? planDirectEdit(r, editing.id, draft) : planDirectAdd(r, draft);
+        const planFor = (r, section) => editing.type==="fact" ? planDirectEdit(r, editing.id, draft) : planDirectAdd(r, draft, new Date(), {section: editing.section||section||undefined, areaKey: editing.areaKey||undefined});
         // Code first, on what is on screen: instant and free. Only text that
         // passes and actually changes something is worth a scan.
         const pre = planFor(rows);
-        const flagged = pre.ok && pre.actions.some(a=>a.data && a.data.content) ? await scan(editing.type, draft) : null;
-        if(flagged){ setRefused(flagged); setBusy(false); return; }
+        const sc = pre.ok && pre.actions.some(a=>a.data && a.data.content) ? await scan(editing.type==="add"&&!editing.section&&!editing.areaKey?"file":editing.type, draft) : {flag:null, section:null};
+        if(sc.flag){ setRefused(sc.flag); setBusy(false); return; }
         const fresh = await freshRows();
-        const plan = planFor(fresh);
+        const plan = planFor(fresh, sc.section);
         if(!plan.ok){
           if(plan.reason==="gone"){ setRows(fresh); setEditing({type:"add"}); setRefused(`${plan.message} Save to keep what you typed as a new note.`); }
           else setRefused(plan.message);
@@ -14856,30 +15033,34 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, onAthle
         }
       } else if(editing.type==="goal"){
         const v = validateGoalText(draft);
-        const flagged = v.ok ? await scan("goal", v.text) : null;
+        const sc = v.ok ? await scan("goal", v.text) : {flag:null};
         if(!v.ok) setRefused(v.message);
-        else if(flagged) setRefused(flagged);
+        else if(sc.flag) setRefused(sc.flag);
         else {
           // The one goal door: insert, supersede the priors, parse stamp. It
           // returns null when the text just restates the goal on file.
-          const row = await writeAthleteGoal(athlete.id, v.text, goals);
+          const row = await writeAthleteGoal(athlete.id, v.text, goals, {confirmed_at:new Date().toISOString(), ask_count:0});
           if(row && onGoalSaved) onGoalSaved(row);
           close(); if(row) flashSaved();
         }
       } else if(editing.type==="injury"){
         const v = validateInjuryText(draft);
         // Clearing the field, or saving it unchanged, needs no scan.
-        const flagged = v.ok && v.text && v.text!==injury ? await scan("injury", v.text) : null;
+        const sc = v.ok && v.text && v.text!==injury ? await scan("injury", v.text) : {flag:null};
         if(!v.ok) setRefused(v.message);
-        else if(flagged) setRefused(flagged);
+        else if(sc.flag) setRefused(sc.flag);
         else {
           if((v.text||"")!==injury){
-            await sbUpdate("athletes",athlete.id,{injury_history:v.text});
-            if(onAthletePatch) onAthletePatch({injury_history:v.text});
+            await stampSignup("injury_history",{injury_history:v.text});
             flashSaved();
           }
           close();
         }
+      } else if(editing.type==="signup"){
+        const f = editing.field;
+        const val = validateSignupValue(f, sigDraft);
+        if(!val.ok) setRefused(f==="training_days_per_week"?"Pick how many days a week you train.":"Pick at least one.");
+        else { await stampSignup(f,{[f]:val.value}); close(); flashSaved(); }
       }
     }catch(_){ setRefused("Couldn't save. Try again."); }
     setBusy(false);
@@ -14894,27 +15075,70 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, onAthle
       const plan = planDirectDelete(fresh, editing.id);
       setRows(plan.actions.length ? await applyMemoryActions(athlete.id, plan.actions, fresh) : fresh);
       close();
+      try{ const d = await sbRead("athlete_memory",`?athlete_id=eq.${athlete.id}&status=eq.deleted&updated_at=gte.${encodeURIComponent(new Date(Date.now()-30*864e5).toISOString())}&order=updated_at.desc&limit=40`); if(Array.isArray(d)) setLive(l=>l?{...l,removed:recentlyRemoved(d)}:l); }catch(_){}
     }catch(_){ setRefused("Couldn't delete. Try again."); }
     setBusy(false);
   };
 
-  const secttl = {fontFamily:"'Inter'",fontSize:9.5,fontWeight:700,letterSpacing:2,color:CA.accent,textTransform:"uppercase",margin:"14px 0 3px"};
-  const mono = {fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:12,lineHeight:1.75,color:CA.text,whiteSpace:"pre-wrap",wordBreak:"break-word"};
-  const tapRow = {...mono,cursor:demo?"default":"pointer",borderRadius:6,padding:"1px 6px 1px 7px",margin:"0 -6px 0 -10px"};
+  // Restore goes through the same validator as any save: a note that would be
+  // refused today (a pain tally, say) stays removed and says why.
+  const restore = async (r) => {
+    if(busy||demo) return;
+    setBusy(true);
+    try{
+      const v = validateFact({content:r.content, kind:r.kind, expires_at:r.expires_at});
+      if(!v.ok){ setRefused(refusalLine(v.reason)); }
+      else{
+        const stamp = new Date().toISOString();
+        await sbUpdate("athlete_memory", r.id, {status:"active", confirmed_at:stamp, ask_count:0, updated_at:stamp});
+        setRows([{...r,status:"active",confirmed_at:stamp,ask_count:0,updated_at:stamp}, ...rows]);
+        setLive(l=>l?{...l,removed:l.removed.filter(x=>x.id!==r.id)}:l);
+        flashSaved();
+      }
+    }catch(_){ setRefused("Couldn't restore that one."); }
+    setBusy(false);
+  };
+
+  // "It's cleared" writes the same cleared_at mark the check-in writes
+  // (applyStamps); anything else opens chat with the area named so the report
+  // goes through the parser and the ledger like every other mention. There is no
+  // free-text edit of a pain line.
+  const markCleared = async (area) => {
+    if(busy||demo) return;
+    setBusy(true);
+    try{
+      const marks = applyStamps((athlete.pain_marks&&typeof athlete.pain_marks==="object")?athlete.pain_marks:{}, [{area, field:"cleared_at"}]);
+      await sbUpdate("athletes", athlete.id, {pain_marks:marks});
+      if(onAthletePatch) onAthletePatch({pain_marks:marks});
+      setPainAct(null); flashSaved();
+    }catch(_){ setRefused("Couldn't save that. Try again."); }
+    setBusy(false);
+  };
+
+  // ── styles: ONE text colour on the tab (Will 10-02) ─────────────────────────
+  const secttl = {fontFamily:"'Inter'",fontSize:9.5,fontWeight:700,letterSpacing:2,color:CA.accent,textTransform:"uppercase",margin:"16px 0 4px",display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:8};
+  const mono = {fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",fontSize:12,lineHeight:1.65,color:CA.text,whiteSpace:"pre-wrap",wordBreak:"break-word"};
+  const tapRow = {...mono,flex:1,minWidth:0,cursor:demo?"default":"pointer",borderRadius:6,padding:"1px 6px 1px 7px",margin:"0 -6px 0 -10px"};
   const btn = {borderRadius:9,padding:"8px 14px",fontSize:12,fontWeight:700,fontFamily:"'Inter'",cursor:"pointer"};
+  const chipStyle = (kind) => {
+    const c = kind==="live"?CA.green : kind==="due"?CA.amber : kind==="bio"?CA.muted : CA.accent;
+    return {flex:"none",marginTop:3,fontFamily:"'Inter'",fontSize:9,fontWeight:700,letterSpacing:0.8,textTransform:"uppercase",color:c,border:`1px solid ${c}`,borderRadius:999,padding:"1px 8px",whiteSpace:"nowrap",lineHeight:1.5};
+  };
+  const chip = (kind, text) => <span style={chipStyle(kind)}>{text}</span>;
+  const hair = {height:0,borderTop:`1px solid ${CA.border}`,margin:"2px 0"};
 
   // The one editor every line shares: the Program tab's field (accent border
   // once the text changed, Save off until it has), plus Delete for a saved
   // fact and Cancel. A refusal turns the field red and says why.
-  const editor = ({label, original, placeholder, canDelete=false, readOnlyNote=null}) => {
-    const dirty = draft!==(original||"");
+  const editor = ({label, original, placeholder, canDelete=false, readOnlyNote=null, custom=null, canSave=null}) => {
+    const dirty = canSave!=null ? canSave : draft!==(original||"");
     const lines = Math.min(12, Math.max(2, Math.ceil(draft.length/36) + (draft.match(/\n/g)||[]).length));
     return (
       <div style={{margin:"4px -4px 6px -8px"}}>
-        {readOnlyNote ? (
-          <div style={{...mono,color:CA.amber,border:`1px solid ${CA.line2}`,borderRadius:10,padding:"8px 10px"}}>
+        {custom ? custom : readOnlyNote ? (
+          <div style={{...mono,border:`1px solid ${CA.line2}`,borderRadius:10,padding:"8px 10px"}}>
             {original}
-            <div style={{color:CA.muted,fontFamily:"'Inter'",fontSize:11,lineHeight:1.5,marginTop:6}}>{readOnlyNote}</div>
+            <div style={{fontFamily:"'Inter'",fontSize:11,lineHeight:1.5,marginTop:6}}>{readOnlyNote}</div>
           </div>
         ) : (
           <textarea aria-label={label} autoFocus value={draft} rows={lines} placeholder={placeholder||""}
@@ -14948,62 +15172,273 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, onAthle
       </div>
     );
   };
-  const addRow = (label, onClick) => (
-    <button onClick={onClick} disabled={demo}
-      style={{...mono,display:"block",width:"100%",textAlign:"left",background:"none",border:"none",color:CA.muted,cursor:demo?"default":"pointer",padding:"1px 0",margin:0}}>
+  const addRow = (label, onClick, key) => (
+    <button key={key} onClick={onClick} disabled={demo} data-add={key}
+      style={{...mono,display:"block",width:"100%",textAlign:"left",background:"none",border:"none",color:CA.accent,fontWeight:600,cursor:demo?"default":"pointer",padding:"2px 0",margin:0}}>
       + {label}
     </button>
   );
   const isEd = (type,id) => editing&&editing.type===type&&(id===undefined||editing.id===id);
+  const isAdd = (section) => editing&&editing.type==="add"&&(editing.section||null)===(section||null)&&!editing.areaKey;
+
+  // One line: text (tap to edit), a chip, and a sub line. `sub` and a due reason
+  // read in the same colour as the line itself.
+  const noteLine = (r, {dated=false}={}) => {
+    if(isEd("fact", r.id)) return (
+      <div key={r.id}>{editor({label:"Edit note", original:r.content, canDelete:true,
+        readOnlyNote: isWatchNote(r.content) ? "The app wrote this one to keep an eye on something. You can delete it, but it can't be rewritten." : null})}</div>
+    );
+    const due = dueOf(r.area_key&&queue.items.find(i=>i.type==="workaround"&&i.ref===r.id)?"workaround":"note", r.id);
+    const cd = dated ? countdownLine(r.content, now) : null;
+    const checked = checkedLabel(r);
+    return (
+      <div key={r.id} style={{display:"flex",flexDirection:"column"}}>
+        <div style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+          <div role="button" tabIndex={0} data-note={r.id} style={tapRow} onClick={()=>open({type:"fact",id:r.id}, r.content)}>
+            {r.content}{cd?`, ${cd}`:""}{r.kind==="pinned"?" (pinned)":""}
+          </div>
+          {due ? chip("due","Due") : r.section==="this_week"&&r.expires_at ? chip("note",`Until ${shortDay(r.expires_at)}`) : checked ? chip("note",checked) : null}
+        </div>
+        {due&&<div style={{...mono,paddingLeft:7,fontSize:11.5}}>It comes up at your next check-in: {due.tag.label}.</div>}
+      </div>
+    );
+  };
+  // A live line: worked out, never edited. Tapping says where it comes from.
+  const liveLine = (key, text, source, {sub=null}={}) => (
+    <div key={key} style={{display:"flex",flexDirection:"column"}}>
+      <div style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+        <div role="button" tabIndex={0} style={tapRow} onClick={()=>setExplain(explain===key?null:key)}>{text}</div>
+        {chip("live","Live")}
+      </div>
+      {sub&&<div style={{...mono,paddingLeft:7}}>{sub}</div>}
+      {explain===key&&<div style={{...mono,paddingLeft:7,fontSize:11.5}}>{source}</div>}
+    </div>
+  );
+  const sectionNotes = (sec, {dated=false}={}) => {
+    const list = groups[sec]||[];
+    const events = dated ? list.filter(r=>isDatedEvent(r,now)) : [];
+    const plain = dated ? list.filter(r=>!isDatedEvent(r,now)) : list;
+    return {plain, events};
+  };
+
+  const sched = sectionNotes("schedule",{dated:true});
+  const body = sectionNotes("body");
+  const prefs = sectionNotes("preferences");
+  const weekRows = (groups.this_week||[]).filter(r=>!/^Check-in /.test(r.content));
+  const eventsSorted = [...sched.events].sort((a,b)=>((noteSpan(a.content,now)||{}).start||Infinity)-((noteSpan(b.content,now)||{}).start||Infinity));
+
+  const signedOn = athlete.created_at ? shortDay(athlete.created_at) : "";
+  const signupChip = (field, due) => {
+    if(due) return chip("due","Due");
+    const st = athlete.review_stamps&&athlete.review_stamps[field];
+    return chip("note", st&&st.confirmed_at ? `Checked ${shortDay(st.confirmed_at)}` : `From signup${signedOn?`, ${signedOn}`:""}`);
+  };
+  const signupBlock = (field, text) => {
+    if(isEd("signup", field)) return (
+      <div key={field}>{editor({label:field==="training_days_per_week"?"Edit training days":"Edit equipment", original:"", canSave:sigDraft!=null&&(field==="training_days_per_week"?Number(sigDraft)!==Number(athlete.training_days_per_week):JSON.stringify([...(sigDraft||[])].sort())!==JSON.stringify([...(athlete.equipment||[])].sort())),
+        custom: field==="training_days_per_week" ? (
+          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+            {[1,2,3,4,5,6,7].map(d=>(
+              <button key={d} aria-label={`${d} days`} onClick={()=>setSigDraft(d)}
+                style={{...btn,minWidth:40,padding:"8px 0",background:Number(sigDraft)===d?CA.accent:"transparent",color:Number(sigDraft)===d?CA.onAccent:CA.text,border:`1px solid ${Number(sigDraft)===d?CA.accent:CA.border}`}}>{d}</button>
+            ))}
+          </div>
+        ) : (
+          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+            {EQUIPMENT_OPTIONS.map(o=>{ const on = (sigDraft||[]).includes(o); return (
+              <button key={o} onClick={()=>setSigDraft(on?(sigDraft||[]).filter(x=>x!==o):[...(sigDraft||[]),o])}
+                style={{...btn,background:on?CA.accent:"transparent",color:on?CA.onAccent:CA.text,border:`1px solid ${on?CA.accent:CA.border}`}}>{o}</button>
+            );})}
+          </div>
+        )})}</div>
+    );
+    const due = dueOf("signup", field);
+    return (
+      <div key={field} style={{display:"flex",flexDirection:"column"}}>
+        <div style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+          <div role="button" tabIndex={0} data-signup={field} style={tapRow} onClick={()=>{ open({type:"signup",id:field,field}, ""); setSigDraft(field==="equipment"?[...(athlete.equipment||[])]:Number(athlete.training_days_per_week)); }}>{text}</div>
+          {signupChip(field, !!due)}
+        </div>
+        {due&&<div style={{...mono,paddingLeft:7,fontSize:11.5}}>{field==="training_days_per_week"&&logsLine?`From your signup${signedOn?` on ${signedOn}`:""}. ${logsLine} `:""}It comes up at your next check-in: {due.tag.label}.</div>}
+      </div>
+    );
+  };
+
+  const bw = athlete.weight_lbs ? (unit==="kg" ? `${Math.round(athlete.weight_lbs/2.20462*10)/10} kg` : `${athlete.weight_lbs} lbs`) : null;
+  const h = athlete.height_inches;
+  const bioLines = [
+    [athlete.name, athlete.age?`${athlete.age}`:null, athlete.gender||null, h?`${Math.floor(h/12)}'${h%12}"`:null].filter(Boolean).join(" · "),
+    [athlete.sport||null, (athlete.position_or_event&&!String(athlete.sport||"").toLowerCase().includes(String(athlete.position_or_event).toLowerCase().slice(0,8)))?athlete.position_or_event:null, `works in ${unit}`].filter(Boolean).join(" · "),
+    athlete.coach_id ? `Coach linked · program ${athlete.program_locked?"locked":"unlocked"}` : null,
+  ].filter(Boolean);
+  const goalDue = goal ? dueOf("goal", goal.id) : null;
+  const olderDue = (queue.items||[]).find(i=>i.type==="goal"&&i.older)||null;
+  const goalLines = goal ? goalProgressLines(goal, maxes.items, {unit}) : [];
+  const hasAnything = act.length>0 || liveGoals.length>0 || injury;
 
   return (
     <div style={{flex:1,minHeight:0,display:"flex",flexDirection:"column",position:"relative"}}>
       <div style={{flex:1,minHeight:0,overflowY:"auto",padding:"12px 18px 24px"}}>
-        <div style={{color:CA.muted,fontSize:11.5,lineHeight:1.5,marginBottom:2}}>
-          What Joe knows about you. He reads this before every reply. Tap any line to change it, or just tell him in chat.
+        <div style={{color:CA.text,fontSize:11.5,lineHeight:1.5,marginBottom:2}}>
+          What Joe knows about you. He reads this before every reply. Tap any note to change it, or just tell him in chat.
         </div>
-        <div style={{border:`1px solid ${CA.border}`,borderRadius:12,background:CA.navy3,padding:"12px 14px",marginTop:10}}>
-          <div style={{...secttl,marginTop:0}}>Profile</div>
-          <div style={mono}>{athlete.name}{profileBits[0]?` · ${profileBits[0]}`:""}{profileBits[1]?`\n${profileBits[1]}`:""}</div>
-          <div style={{color:CA.muted,fontSize:10.5,lineHeight:1.5,marginTop:2}}>Profile details are changed in Settings.</div>
+        <div data-testid="context-card" style={{border:`1px solid ${CA.border}`,borderRadius:12,background:CA.navy3,padding:"12px 14px",marginTop:10}}>
 
-          <div style={secttl}>Goal</div>
-          {liveGoals.map((g,i)=> isEd("goal", g.id??i)
-            ? <div key={g.id??i}>{editor({label:"Edit goal", original:g.goal_text})}</div>
-            : <div key={g.id??i} role="button" tabIndex={0} style={tapRow} onClick={()=>open({type:"goal",id:g.id??i}, g.goal_text)}>{g.goal_text}</div>
+          {/* ── BIO ─────────────────────────────────────────────── */}
+          <div style={{...secttl,marginTop:0}}><span>Bio</span><span style={{fontWeight:500,letterSpacing:0.2,textTransform:"none",fontSize:10}}>edit in Settings</span></div>
+          {bioLines.map((l,i)=>(
+            <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start"}}><div style={{...mono,flex:1}}>{l}</div>{i===0&&chip("bio","Bio")}</div>
+          ))}
+
+          {/* ── GOAL ────────────────────────────────────────────── */}
+          <div style={secttl}><span>Goal</span><span style={{fontWeight:500,letterSpacing:0.2,textTransform:"none",fontSize:10}}>one at a time</span></div>
+          {goal ? (isEd("goal", goal.id)
+            ? <div>{editor({label:"Edit goal", original:goal.goal_text})}</div>
+            : (
+              <div style={{display:"flex",flexDirection:"column"}}>
+                <div style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+                  <div role="button" tabIndex={0} data-goal={goal.id} style={tapRow} onClick={()=>open({type:"goal",id:goal.id}, goal.goal_text)}>{goal.goal_text}</div>
+                  {goalDue ? chip("due","Due") : chip("note", goal.confirmed_at?`Checked ${shortDay(goal.confirmed_at)}`:goal.target_date?`By ${shortDay(goal.target_date)}`:`Set ${shortDay(goal.created_at)}`)}
+                </div>
+                <div style={{...mono,paddingLeft:7,fontSize:11.5}}>
+                  {`You set this ${shortDay(goal.created_at)}.`}{goalDue?` It comes up at your next check-in: ${goalDue.tag.label}.`:""}
+                </div>
+                {goalLines.map((l,i)=><div key={i} style={{...mono,paddingLeft:7}}>{l}</div>)}
+              </div>
+            ))
+            : isEd("goal","new")
+              ? editor({label:"Edit goal", original:"", placeholder:"What are you training for? A number and a date help."})
+              : addRow("Add a goal", ()=>open({type:"goal",id:"new"}, ""), "goal")}
+          {olderDue&&<div style={{...mono,paddingLeft:7,fontSize:11.5}}>An older goal is still on file. It comes up at your next check-in.</div>}
+          {pastGoals.length>0&&(
+            <div>
+              <button onClick={()=>setOpenPast(!openPast)} style={{...mono,background:"none",border:"none",color:CA.text,cursor:"pointer",padding:"2px 0",textAlign:"left",width:"100%"}}>
+                Past goals ({pastGoals.length}) {openPast?"▾":"›"}
+              </button>
+              {openPast&&pastGoals.map((g,i)=>(
+                <div key={g.id||i} style={{...mono,paddingLeft:12,fontSize:11.5}}>
+                  {shortDay(g.created_at)}: {g.goal_text}
+                </div>
+              ))}
+            </div>
           )}
-          {liveGoals.length===0&&(isEd("goal","new")
-            ? editor({label:"Edit goal", original:"", placeholder:"What are you training for? A number and a date help."})
-            : addRow("Add a goal", ()=>open({type:"goal",id:"new"}, "")))}
 
-          <div style={secttl}>Injuries &amp; health</div>
+          {/* ── SCHEDULE ────────────────────────────────────────── */}
+          <div style={secttl}><span>Schedule</span></div>
+          {athlete.training_days_per_week ? signupBlock("training_days_per_week", `Trains ${athlete.training_days_per_week} days a week`) : null}
+          {Array.isArray(athlete.equipment)&&athlete.equipment.length>0 ? signupBlock("equipment", athlete.equipment.join(", ")) : null}
+          {sched.plain.map(r=>noteLine(r))}
+          {eventsSorted.length>0&&(<>
+            <div style={{...mono,paddingLeft:7}}>Coming up:</div>
+            {eventsSorted.map(r=>noteLine(r,{dated:true}))}
+          </>)}
+          {isAdd("schedule") ? editor({label:"New note", original:"", placeholder:"When and where you train, a meet, a trip, an exam. Put the date in."}) : addRow("Add a note", ()=>open({type:"add",section:"schedule"}, ""), "schedule")}
+
+          {/* ── BODY ────────────────────────────────────────────── */}
+          <div style={secttl}><span>Body</span></div>
+          {bw&&(
+            <div style={{display:"flex",gap:8,alignItems:"flex-start"}}><div style={{...mono,flex:1}}>{bw}</div>{chip("note","Asked weekly")}</div>
+          )}
+          <div style={{...mono,paddingLeft:0}}>Pain, updated every week</div>
+          {painLines.length===0&&<div style={{...mono}}>Nothing open. If something hurts, tell Joe and it shows up here.</div>}
+          {painLines.map(pl=>(
+            <div key={pl.area} style={{display:"flex",flexDirection:"column",marginBottom:3}}>
+              <div style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+                <div role="button" tabIndex={0} data-pain={pl.area} style={tapRow} onClick={()=>{ if(demo) return; setPainAct(painAct===pl.area?null:pl.area); setEditing(null); }}>{pl.head}</div>
+                {chip("live",pl.chip)}
+              </div>
+              {pl.sub&&<div style={{...mono,paddingLeft:7}}>{pl.sub}</div>}
+              {painAct===pl.area&&(
+                <div style={{display:"flex",gap:7,margin:"4px 0 2px 7px",flexWrap:"wrap"}}>
+                  {!pl.cleared&&<button onClick={()=>markCleared(pl.area)} disabled={busy} style={{...btn,background:CA.accent,color:CA.onAccent,border:`1px solid ${CA.accent}`}}>It's cleared</button>}
+                  <button onClick={()=>{ setPainAct(null); if(onAskJoe) onAskJoe(`My ${pl.label.toLowerCase()}: `); }} style={{...btn,background:"none",color:CA.text,border:`1px solid ${CA.border}`,fontWeight:600}}>Tell Joe about it</button>
+                  <button onClick={()=>setPainAct(null)} style={{...btn,background:"none",color:CA.muted,border:`1px solid ${CA.border}`,fontWeight:600}}>Close</button>
+                </div>
+              )}
+              {pl.workaround
+                ? noteLine(pl.workaround)
+                : !pl.cleared&&(editing&&editing.type==="add"&&editing.areaKey===pl.area
+                    ? editor({label:"New note", original:"", placeholder:"What you do instead, like incline DB press in place of bench."})
+                    : addRow("What you do instead", ()=>open({type:"add",section:"body",areaKey:pl.area}, ""), `work-${pl.area}`))}
+            </div>
+          ))}
+          {maxes.line&&liveLine("maxes", maxes.line, "Your best lifts from your logs and any max you have told Joe, each in the unit you logged it in.")}
+          {limiters.map((l,i)=>liveLine(`lim${i}`, l, "Worked out from your best lifts against typical strength ratios."))}
           {isEd("injury")
             ? editor({label:"Edit injuries and health", original:injury, placeholder:"Old injuries, surgeries, anything Joe should plan around."})
             : injury
-              ? <div role="button" tabIndex={0} style={tapRow} onClick={()=>open({type:"injury"}, injury)}>{injury}</div>
-              : addRow("Add injury notes", ()=>open({type:"injury"}, ""))}
+              ? (()=>{
+                  const due = dueOf("signup","injury_history");
+                  return (
+                    <div style={{display:"flex",flexDirection:"column"}}>
+                      <div style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+                        <div role="button" tabIndex={0} data-signup="injury_history" style={tapRow} onClick={()=>open({type:"injury"}, injury)}>Background: {injury}</div>
+                        {signupChip("injury_history", !!due)}
+                      </div>
+                      {due&&<div style={{...mono,paddingLeft:7,fontSize:11.5}}>It comes up at your next check-in: {due.tag.label}.</div>}
+                    </div>
+                  );
+                })()
+              : addRow("Add injury background", ()=>open({type:"injury"}, ""), "injury")}
+          {body.plain.map(r=>noteLine(r))}
+          {isAdd("body") ? editor({label:"New note", original:"", placeholder:"Long-standing background Joe should plan around."}) : addRow("Add a note", ()=>open({type:"add",section:"body"}, ""), "body")}
 
-          <div style={secttl}>What Joe's keeping in mind</div>
-          {act.length===0&&!isEd("add")&&<div style={{...mono,color:CA.muted}}>Nothing saved yet. Add a note, or just talk to Joe. He keeps notes as you go.</div>}
-          {[...pinned,...rest].map(r=>{
-            const watch = isWatchNote(r.content);
-            if(isEd("fact", r.id)) return (
-              <div key={r.id}>{editor({label:"Edit note", original:r.content, canDelete:true,
-                readOnlyNote: watch ? "The app wrote this one to keep an eye on something. You can delete it, but it can't be rewritten." : null})}</div>
-            );
-            return (
-            <div key={r.id} role="button" tabIndex={0}
-              onClick={()=>open({type:"fact",id:r.id}, r.content)}
-              style={{...tapRow,color:watch?CA.amber:mono.color}}>
-              {"•"} {r.content}
-              {r.kind==="pinned"&&<span style={{color:CA.muted}}> [pinned]</span>}
-              {r.expires_at&&<span style={{color:CA.muted}}> (until {String(r.expires_at).slice(0,10)})</span>}
+          {/* ── PREFERENCES ─────────────────────────────────────── */}
+          <div style={secttl}><span>Preferences</span></div>
+          {(()=>{
+            const u = unitsByLift(workoutHistory||[],{unit});
+            const typed = prefsLines(live?.prefs||null);
+            return (<>
+              {u&&liveLine("units", u, "Each lift speaks in the unit you logged it in.")}
+              {typed.map((l,i)=>liveLine(`pref${i}`, l, "A training preference you confirmed with Joe."))}
+            </>);
+          })()}
+          {prefs.plain.length===0&&!isAdd("preferences")&&<div style={{...mono}}>Nothing saved yet. How you like to train and be coached goes here, in your own words.</div>}
+          {prefs.plain.map(r=>noteLine(r))}
+          {isAdd("preferences") ? editor({label:"New note", original:"", placeholder:"How you like to train and be coached, in your own words."}) : addRow("Add a note", ()=>open({type:"add",section:"preferences"}, ""), "preferences")}
+
+          {/* ── THIS WEEK ───────────────────────────────────────── */}
+          <div style={secttl}><span>This week</span><span style={{fontWeight:500,letterSpacing:0.2,textTransform:"none",fontSize:10}}>rebuilt every check-in</span></div>
+          {tw ? tw.lines.map((l,i)=>liveLine(`tw${i}`, l, "Worked out from your logs and your program, the same numbers as your weekly letter.")) : !demo&&<div style={{...mono}}>Loading this week...</div>}
+          {weekNote&&(
+            <div style={{display:"flex",gap:8,alignItems:"flex-start"}}><div style={{...mono,flex:1}}>{weekNote}</div>{chip("note",`Said ${shortDay(recentCheckin.created_at)}`)}</div>
+          )}
+          {weekRows.map(r=>noteLine(r))}
+          {strip.length>0&&(
+            <div style={{display:"flex",gap:4,flexWrap:"wrap",margin:"4px 0 2px"}}>
+              {strip.map(s=>(
+                <span key={s.day} style={{fontFamily:"ui-monospace,Menlo,monospace",fontSize:10,borderRadius:6,padding:"2px 6px",color:CA.text,border:`1px solid ${s.now?CA.accent:CA.border}`,fontWeight:s.now?700:400}}>{s.label}, {s.word}</span>
+              ))}
             </div>
-          );})}
-          {isEd("add")
-            ? editor({label:"New note", original:"", placeholder:"Something Joe should know about you."})
-            : addRow("Add a note", ()=>open({type:"add"}, ""))}
+          )}
+
+          {/* ── ONE ADD FOR THE WHOLE TAB ───────────────────────── */}
+          <div style={hair}/>
+          {isAdd(null)
+            ? editor({label:"New note", original:"", placeholder:"Anything Joe should know. He files it under the right section."})
+            : (
+              <button onClick={()=>open({type:"add"}, "")} disabled={demo} data-add="any"
+                style={{...btn,display:"block",width:"100%",marginTop:8,background:"none",border:`1px dashed ${CA.line2}`,color:CA.accent,cursor:demo?"default":"pointer"}}>
+                + Add a note (Joe files it under the right section)
+              </button>
+            )}
+          {!hasAnything&&<div style={{...mono,marginTop:8}}>Nothing saved yet. Add a note, or just talk to Joe. He keeps notes as you go.</div>}
         </div>
+
+        {/* Recently removed: 30 days, with Restore */}
+        {live&&live.removed&&live.removed.length>0&&(
+          <div style={{marginTop:12}}>
+            <button onClick={()=>setOpenRemoved(!openRemoved)} style={{...mono,background:"none",border:"none",color:CA.text,cursor:"pointer",padding:0}}>
+              Recently removed ({live.removed.length}) {openRemoved?"▾":"›"}
+            </button>
+            {openRemoved&&live.removed.map(r=>(
+              <div key={r.id} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"4px 0"}}>
+                <div style={{...mono,flex:1}}>{r.content}</div>
+                <button onClick={()=>restore(r)} disabled={busy} style={{...btn,padding:"4px 10px",background:"none",color:CA.accent,border:`1px solid ${CA.accent}`}}>Restore</button>
+              </div>
+            ))}
+          </div>
+        )}
         {savedMsg&&<div style={{color:CA.green,fontSize:12,fontWeight:600,textAlign:"center",marginTop:10}}>{savedMsg}</div>}
       </div>
     </div>
