@@ -81,7 +81,7 @@ import { blueprintPct } from "./programBuilder.js";
 import { validateFact, findDuplicate, matchFacts, buildMemoryBlock, activeFacts, planMemoryOps, memoryNotesText, checkinNoteFact } from "./memory.js";
 import { activeGoals, goalsToSupersede, sameGoalText, futureGoalDate } from "./goals.js";
 import { MEMORY_SCAN_SYS, MEMORY_SCAN_MODEL, MEMORY_SCAN_FEATURE, scanUserMessage, readScanVerdict, SCAN_UNREACHABLE } from "./memoryScan.js";
-import { planDirectEdit, planDirectAdd, planDirectDelete, refusalLine, validateGoalText, validateInjuryText, planToolUpdate, isMemoryTool, isBodyweightFact, newMemoryOutcome, memoryOutcomeLine, toolRefusal } from "./memoryEdit.js";
+import { planDirectEdit, planDirectAdd, planDirectDelete, refusalLine, validateGoalText, validateInjuryText, planToolUpdate, planToolRemember, isMemoryTool, isBodyweightFact, newMemoryOutcome, memoryOutcomeLine, toolRefusal } from "./memoryEdit.js";
 import { locateSwaps, applySwaps, revertSwaps, recExpiry, recExpired, durationLabel, validateRecPayload, programWriteOwner, recSummaryFallback, buildWatchNote, watchHit, isSevereReport, topicTokens, isWatchNote } from "./recs.js";
 import { performedBlock, logHeadline, logFocusBlock, planDayFor, prLinesForReply, logTurnExercises, logUnitsFact } from "./turnFacts.js";
 import { ledgerTurn, ledgerBlock, normArea, painFollowUpPlan, applyStamps, recStagedLine, withMark, normalizeMarks, flagClearedFor, keepPainRec, painStatus, currentPainAreas, currentPainLines, painNoteGuard, areaLabel } from "./painLedger.js";
@@ -2238,7 +2238,7 @@ ${athlete.weight_unit==="kg"?"This athlete works in KG. State every weight you s
     const pureLogBlock = opts.pureLog ? `\n\nTHIS MESSAGE IS A FINISHED WORKOUT LOG the athlete just sent from the log sheet. The app is already parsing and saving it; the text IS what they did. ${logFocus ? "React to completed work as the LOG REPLY FOCUS block below says." : "React to completed work: acknowledge it and coach what stands out."} Where it differs from the program or from the sheet you drafted, that is an audible they chose${logFocus ? ", never an error" : " — worth a coaching observation, never an error"}, never a reason to sound like you doubt the log. Do not call prefill_log_sheet or pin_session_card; the session is over and the sheet already came down. If one detail that matters is genuinely missing (a weight, sets), ask ONE specific question that names the exercise, right here in chat.` : "";
     const sysObjM = {cached:buildMastermindStatic(), dynamic:sys+goalsContext+memBlock+pureLogBlock+logFocus+(opts.sheetFact||"")};
     const userMsgM = `${hist}\n\n${athlete.name}: ${message}`;
-    if(onDelta) return askClaudeStream(sysObjM, userMsgM, {maxTokens:900, model:"claude-sonnet-5", feature:"mastermind_chat", onDelta, toolset:"mastermind_athlete_v2", onToolUse:opts.onToolUse});
+    if(onDelta) return askClaudeStream(sysObjM, userMsgM, {maxTokens:900, model:"claude-sonnet-5", feature:"mastermind_chat", onDelta, toolset:"mastermind_athlete_v3", onToolUse:opts.onToolUse});
     return askClaude(sysObjM, userMsgM, 900, [], "claude-sonnet-5", "mastermind_chat");
   }
 
@@ -7090,26 +7090,20 @@ function AthleteView({athlete: initialAthlete, onLogout}) {
       try{
         if(tc.name==="remember_fact"){
           if(turn.weightStated && isBodyweightFact(inp.content)) continue;
-          const v = validateFact(inp);
-          // T64 S2: pain tallies and program-change claims belong to the pain
-          // ledger / a staged rec, never to memory. The tool loop is
-          // single-pass (no result round trip), so the refusal is logged and
-          // the athlete reads it in the app's own line.
-          if(!v.ok){
-            out.refused.push(toolRefusal(v.reason));
-            if(v.toolResult) reportError("ai", new Error(`remember_fact refused: ${v.reason}`), {severity:"info", error_type:"memory_ledger_refusal", component:"executeMemoryTools"});
+          // T69-C: one planner for the save (src/memoryEdit.js planToolRemember):
+          // validateFact as always (T64 S2: pain tallies and program-change
+          // claims belong to the ledger / a staged rec), PLUS the date rule
+          // ("tomorrow" with no date is refused), the expiry a calendar date
+          // implies, the section, and the checked-today stamp. The tool loop is
+          // single-pass, so a refusal is logged and the athlete reads it in the
+          // app's own line.
+          const plan = planToolRemember(rowsNow, inp);
+          if(!plan.ok){
+            out.refused.push(toolRefusal(plan.reason));
+            if(["pain_tally","program_claim","block_end_date"].includes(plan.reason)) reportError("ai", new Error(`remember_fact refused: ${plan.reason}`), {severity:"info", error_type:"memory_ledger_refusal", component:"executeMemoryTools"});
             continue;
           }
-          const dup = findDuplicate(rowsNow, v.content);
-          const stamp = new Date().toISOString();
-          if(dup){
-            await sbUpdate("athlete_memory", dup.id, {kind:inp.kind, expires_at:inp.expires_at||null, updated_at:stamp});
-            setRowsNow(rowsNow.map(r=>r.id===dup.id?{...r, kind:inp.kind, expires_at:inp.expires_at||null, updated_at:stamp}:r));
-          } else {
-            const ins = await sbInsert("athlete_memory",{athlete_id:ath.id, content:v.content, kind:inp.kind, expires_at:inp.expires_at||null, source:"athlete_said"});
-            const row = Array.isArray(ins)?ins[0]:ins;
-            if(row && row.id) setRowsNow([row, ...rowsNow]);
-          }
+          setRowsNow(await applyMemoryActions(ath.id, plan.actions, rowsNow));
           out.saved++;
         } else if(tc.name==="forget_fact"){
           const m = matchFacts(rowsNow, inp.match);

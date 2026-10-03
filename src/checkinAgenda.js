@@ -59,17 +59,31 @@ const areaKeyOf = (meta) => {
 // questions: content_json.questions (or null for a legacy digest with none).
 // painRecords: painStatus() output computed fresh at check-in time, or null
 // when unavailable (the digest's own pain questions then stand as written).
-export function buildAgenda(questions, { painRecords = null } = {}) {
+export function buildAgenda(questions, { painRecords = null, review = null, workarounds = null } = {}) {
   const bank = Array.isArray(questions) ? questions : LEGACY_DEFAULT_QUESTIONS;
   if (!bank.length) return [];                    // a digest with zero questions has no check-in
   const seen = new Set();
   const items = [];
   const recs = Array.isArray(painRecords) ? painRecords : null;
   const recFor = (key) => (recs && key ? recs.find((r) => r.area === key) : null);
+  // T69-C: with a review list computed NOW (src/memoryReview.js, from the
+  // athlete's notes as they are at check-in time), the digest's own memory
+  // questions step aside: they were written when the letter was, can be days
+  // old, and may name a note that has since changed or gone. The review is the
+  // one list of "which old notes do we ask about" (Will 10-02).
+  const reviewItems = review && Array.isArray(review.items) ? review.items : null;
+  const goalReview = reviewItems ? reviewItems.find((i) => i.merge === "goal") || null : null;
   for (const q of bank) {
     if (!q || !q.id || !q.text || seen.has(q.id)) continue;
+    if (reviewItems && (q.kind === "memory" || String(q.id).startsWith("review_") || q.id === "memory" || q.id === "memory_stale")) continue;
     seen.add(q.id);
     const item = { id: String(q.id), kind: q.kind || "context", text: String(q.text), meta: q.meta || null };
+    if (reviewItems && item.id === "goal" && goalReview) {
+      // one goal question: the review's reason and tag ride the digest's own
+      // goal item, and its wording stands in when the digest's was the plain one
+      item.review = { rid: goalReview.rid, type: "goal", ref: goalReview.ref, note: goalReview.note, section: "goal", reason: goalReview.reason, tag: goalReview.tag };
+      if (goalReview.text && /^Still chasing\b/.test(item.text)) item.text = goalReview.text;
+    }
     if (recs) {
       // the ledger drives pain now: the old catch-all "niggles" question folds into it
       if (item.id === "niggles") continue;
@@ -112,6 +126,34 @@ export function buildAgenda(questions, { painRecords = null } = {}) {
       items.push({ id: items.some((i) => i.id === "injury") ? "injury_generic" : "injury", kind: "injury", text: GENERIC_PAIN_TEXT, meta: null, pain: { area: null, label: null, tone: "status", askChange: false, summary: "" } });
     }
   }
+  // T69-C: the athlete's work-around note rides the ledger's own pain question
+  // for that area, in the same message, so pain is raised no more often than the
+  // ledger allows. It never gets a question of its own while the area is open.
+  if (workarounds) {
+    for (const item of items) {
+      const key = item.pain && item.pain.area;
+      const note = key ? workarounds[key] : null;
+      if (!note || item.kind !== "injury") continue;
+      const clip = String(note.content || "").replace(/\s+/g, " ").trim().slice(0, 110);
+      item.text = `${item.text} You had been working around it: "${clip}". Still doing that?`;
+      item.rides = { rid: `review_note_${note.id}`, type: "note", ref: note.id, note: String(note.content || ""), section: "body", tag: { section: "Body", label: "your work-around, asked with the pain question" } };
+    }
+  }
+  // The rest of the review list: one agenda item per note, asked in plain words
+  // that quote it, placed before the recovery question so notes come up as part
+  // of the conversation, never as a questionnaire at the end.
+  if (reviewItems) {
+    const extra = [];
+    for (const r of reviewItems) {
+      if (r.merge === "goal") continue;
+      if (seen.has(r.rid) || !r.text) continue;
+      seen.add(r.rid);
+      extra.push({ id: r.rid, kind: "memory", text: r.text, meta: { fact: r.note, review: { rid: r.rid, type: r.type, ref: r.ref, section: r.section, reason: r.reason } },
+        review: { rid: r.rid, type: r.type, ref: r.ref, note: r.note, section: r.section, reason: r.reason, older: !!r.older, tag: r.tag } });
+    }
+    const at = items.findIndex((i) => i.id === "recovery");
+    if (at >= 0) items.splice(at, 0, ...extra); else items.push(...extra);
+  }
   return items;
 }
 
@@ -123,6 +165,7 @@ Each turn:
 3. If an item is still open and the moment is right, put ONE of them in "ask", in your own natural words, and its id in "next". Never ask a covered item. If they asked you something that needs room, you may hold it ("ask": null, "next": null).
 "reply" is only your response to what they said: it never contains a question. The one question of the turn is "ask". Never ask questions of your own beyond the agenda (no "what's eating your time?"); what they told you is enough.
 4. Never restate or summarize their earlier answers back to them, never recap the check-in, never mention an agenda, items or ids.
+An item marked [memory] asks whether a saved note is still true. Quote the note itself in plain words, the way the item does, and ask only that. You only ask about training: never bring up an exam, a trip or any other life event yourself.
 Bodyweight answers are logged, never judged (no nutrition context exists). Pain follows the PAIN lines exactly: ask the way they say, and never offer a program change unless an open item asks about one.
 Return ONLY JSON, no markdown: {"reply": string (may be empty), "ask": string or null, "covered": [ids], "next": id or null, "done": boolean}. "done" is true only when they are clearly ending the check-in.`;
 
@@ -300,4 +343,47 @@ export function digestNoteFrom(sections = []) {
     .slice(0, 6)
     .map((s) => `${s.label}: ${String(s.body || "").replace(/\s+/g, " ").slice(0, 180)}`)
     .join(" | ");
+}
+
+// ── 8. review items: what the answer touches (T69-C) ─────────────────────────
+// Every agenda item that carries a saved note (a review item, the digest's goal
+// item merged with the review, or a pain item the athlete's work-around rides
+// on) becomes one TARGET. Code reads the check-in state to say whether the
+// question was actually put to the athlete (asked) and whether they replied
+// after it (covered); src/memoryReview.js planReviewOutcomes turns that plus
+// the extractor's verdicts into writes. A question the check-in never reached
+// is not asked, and one asked right before the athlete ended it is not
+// covered: neither counts against a note.
+export function reviewTargets(agenda = [], state = null) {
+  const out = [];
+  const asked = (state && state.asked) || {};
+  const covered = new Set((state && state.covered) || []);
+  for (const it of agenda) {
+    const r = it.review || it.rides;
+    if (!r) continue;
+    out.push({ rid: r.rid, type: r.type, ref: r.ref, older: !!r.older, itemId: it.id, asked: (asked[it.id] || 0) > 0, covered: covered.has(it.id) });
+  }
+  return out;
+}
+
+// The line under a question that names the note and why it is asked ("Schedule ·
+// logs disagree with the note"), or null for an item that is not about a note.
+export function tagFor(item) {
+  const r = item && (item.review || item.rides);
+  return r && r.tag ? r.tag : null;
+}
+
+// The extractor's view of the review items. It returns one verdict per id; code
+// decides what each verdict does.
+export function reviewExtractBlock(agenda = [], state = null) {
+  const targets = reviewTargets(agenda, state).filter((t) => t.asked);
+  if (!targets.length) return "";
+  const byItem = new Map(agenda.map((i) => [i.id, i]));
+  const lines = targets.map((t) => {
+    const it = byItem.get(t.itemId);
+    const r = it && (it.review || it.rides);
+    const note = (r && r.note) || "";
+    return `- ${t.rid} [${t.type}${t.older ? ", an older goal" : ""}]${note ? ` "${String(note).slice(0, 160)}"` : ""}, asked as: "${String((it && it.text) || "").slice(0, 200)}"`;
+  });
+  return `REVIEW ITEMS (saved notes the check-in asked about; return ONE entry per id in "review"):\n${lines.join("\n")}\nreview entry: {"id":"<the id>","verdict":"keep"|"edit"|"remove"|"unclear","content":"the new full text when edit","value":number or list when the item is about training days or equipment}. keep = they said it is still true. edit = it changed: give the new complete text, with a real date (like Oct 12) instead of words like tomorrow or next week; for training days give value as the number; for equipment give value as a list drawn from Full gym, Barbells & racks, Dumbbells only, Bodyweight only, Home gym (mixed); for a goal give the new goal in content. remove = it is not true any more, or it is done. unclear = they did not answer THAT item (they talked about something else, or said nothing usable). Only an explicit answer to that item is keep, edit or remove.`;
 }

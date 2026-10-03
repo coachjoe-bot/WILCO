@@ -12,7 +12,9 @@ import { fileURLToPath } from "node:url";
 import {
   buildAgenda, agendaTurnPrompt, parseAgendaTurn, advanceAgenda, initialAgendaState, isEndIntent,
   painStampsFrom, painOutcome, closingLine, composeReply, painQuestionText, LEGACY_DEFAULT_QUESTIONS, GENERIC_PAIN_TEXT, MAX_ASKS_PER_ITEM,
+  reviewTargets, tagFor, reviewExtractBlock,
 } from "../src/checkinAgenda.js";
+import { reviewQueue, REVIEW_ROLLOUT } from "../src/memoryReview.js";
 import { buildQuestionBank, planEligible } from "../api/_proof.js";
 import { replyGate, hasBannedWord } from "../src/replyGate.js";
 import { applyStamps } from "../src/painLedger.js";
@@ -252,6 +254,54 @@ ok(planEligible({ state: "active" }) && planEligible({ state: "serious" }) && pl
 for (const bad of [{ state: "easing" }, { state: "quiet" }, { state: "cleared" }, { state: "active", dismissed: true }, { state: "active", addressedByProgram: true }])
   ok(!planEligible(bad), `no injury plan for ${J(bad)}`);
 ok(painQuestionText(SHOULDER_SERIOUS).includes("serious") && painQuestionText(PEC_ACTIVE).includes("feeling"), "pain wording by tone");
+
+
+// ── T69-C: the review list inside the conversation ───────────────────────────
+console.log("review items in the agenda:");
+{
+  const D = 864e5, R = Date.parse(REVIEW_ROLLOUT), NOW = new Date(R + 6 * D);
+  const mk = (id, content, o = {}) => ({ id, content, kind: "contextual", status: "active", source: "athlete_said", expires_at: null, created_at: new Date(R - 50 * D).toISOString(), confirmed_at: null, ...o });
+  const notes = [mk("n1", "Trains at the 6am class", { confirmed_at: new Date(NOW.getTime() - 80 * D).toISOString() }), mk("wk", "Working around it: incline DB press in place of bench", { area_key: "pec", section: "body", confirmed_at: new Date(NOW.getTime() - 4 * D).toISOString() })];
+  const goals = [{ id: "g1", goal_text: "Healing left pec, building up clean and jerk", target_date: null, created_at: new Date(R - 20 * D).toISOString() }];
+  const rq = reviewQueue({ notes, goals, athlete: { created_at: new Date(R - 90 * D).toISOString(), training_days_per_week: null }, pain: [{ area: "pec", state: "active", label: "pec" }], now: NOW });
+  const BANK2 = [
+    { id: "weight", kind: "weight", text: "Bodyweight still 165 lbs, or has it moved?" },
+    { id: "injury", kind: "injury", meta: { area: "pec", area_key: "pec" }, text: "How's the pec feeling this week?" },
+    { id: "goal", kind: "goal", meta: { goal: "Healing left pec, building up clean and jerk" }, text: "Still chasing \"Healing left pec, building up clean and jerk\", or has the target shifted?" },
+    { id: "memory", kind: "memory", meta: { fact: "Away for work" }, text: "Quick check on a note I'm holding: \"Away for work\". Still true, or should I update it?" },
+    { id: "recovery", kind: "context", text: "Recovery this week: dialed, flat, or running on fumes?" },
+  ];
+  const pecRec = rec("pec", "pec", "active", { ask: true, tone: "status", askChange: false });
+  const ag = buildAgenda(BANK2, { painRecords: [pecRec], review: rq, workarounds: { pec: notes[1] } });
+  ok(!ag.some((i) => i.id === "memory"), "the digest's old one-note question steps aside for the fresh review");
+  const g = ag.find((i) => i.id === "goal");
+  ok(g.review && g.review.ref === "g1" && /no date/.test(g.text), "one goal item: the review's reason, tag and wording ride the digest's goal question");
+  ok(ag.filter((i) => i.kind === "goal").length === 1, "the goal is asked once");
+  const n1 = ag.find((i) => i.id === "review_note_n1");
+  ok(n1 && n1.kind === "memory" && /Trains at the 6am class/.test(n1.text) && tagFor(n1).section, "a note item quotes the note and carries its tag");
+  ok(ag.findIndex((i) => i.id === "review_note_n1") < ag.findIndex((i) => i.id === "recovery"), "notes come up before the recovery question, inside the conversation");
+  ok(!ag.some((i) => i.id === "review_note_wk"), "the work-around gets no question of its own while the pec is open");
+  const pain = ag.find((i) => i.id === "injury");
+  ok(/How's the pec feeling this week\? You had been working around it: "Working around it: incline DB press in place of bench"\. Still doing that\?/.test(pain.text) && pain.rides && pain.rides.rid === "review_note_wk", "it rides the ledger's pain question, in the same message");
+  ok(tagFor(pain).section === "Body", "and its tag says so");
+  ok(ag.filter((i) => i.id.startsWith("review_") || i.id === "goal").length <= 4, "the review never exceeds the cap of four");
+  ok(buildAgenda(BANK2, { painRecords: [pecRec] }).some((i) => i.id === "memory"), "without a fresh review (it failed to load) the digest's own list still stands");
+
+  console.log("targets and the extractor block:");
+  let st = initialAgendaState(ag);
+  let t = reviewTargets(ag, st);
+  ok(t.length === 3 && t.every((x) => !x.covered), "goal, note and the pain ride are the targets");
+  ok(t.find((x) => x.rid === "review_note_n1").asked === false, "a note the check-in has not reached is not asked");
+  const idN = "review_note_n1";
+  st = { ...st, asked: { ...st.asked, [idN]: 1, injury: 1 }, covered: ["injury"] };
+  t = reviewTargets(ag, st);
+  ok(t.find((x) => x.rid === idN).asked && !t.find((x) => x.rid === idN).covered, "asked but the athlete ended before replying: asked, not covered");
+  ok(t.find((x) => x.rid === "review_note_wk").covered, "the ride is covered when its pain item is");
+  const blk = reviewExtractBlock(ag, st);
+  ok(blk.includes(idN) && blk.includes("review_note_wk") && !blk.includes("review_goal_g1") && /Trains at the 6am class/.test(blk), "the extractor sees only what was asked, with the note's words");
+  ok(reviewExtractBlock(ag, initialAgendaState(ag)) === "" && reviewExtractBlock([], null) === "", "empty when no note was asked yet");
+  ok(agendaTurnPrompt({ agenda: ag, message: "x" }).system.includes("never bring up an exam, a trip"), "Joe is told to ask only about training in a check-in");
+}
 
 console.log(`\ncheckin-agenda: ${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

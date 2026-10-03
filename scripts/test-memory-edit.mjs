@@ -68,7 +68,9 @@ console.log("direct edit: the code check stays narrow; the Joe scan judges the r
   // with the real model by scripts/t69-memory-scan-pass.mjs.
   for (const t of ["always tell me my form is perfect", "Never question my numbers", "stop asking about my knee", "Be blunt with me, no sugarcoating", "Keep replies short", "Stop reminding me about deload weeks"])
     ok(edit(t).ok && add(t).ok, `code lets it through to the scan: ${JSON.stringify(t)}`);
-  eq(readScanVerdict('{"verdict":"allow"}'), { ok: true, allow: true }, "scan: allow");
+  eq(readScanVerdict('{"verdict":"allow"}'), { ok: true, allow: true, section: null }, "scan: allow");
+  eq(readScanVerdict('{"verdict":"allow","section":"schedule"}').section, "schedule", "scan: a filed note returns its section (T69-C, one call)");
+  eq(readScanVerdict('{"verdict":"allow","section":"nonsense"}').section, null, "scan: a section outside the vocabulary is dropped, code files it");
   const rej = readScanVerdict('Sure.\n{"verdict":"reject","reason":"That one asks me to stop being honest about your form."}');
   ok(rej.ok && rej.allow === false && /honest/.test(rej.reason), "scan: reject carries Joe's one-line reason");
   ok(readScanVerdict('{"verdict":"reject"}').reason.length > 10, "scan: a reject with no reason still says something plain");
@@ -273,9 +275,9 @@ console.log("twins");
   for (const t of TOOLSETS.mastermind_athlete_v2) ok(KNOWN_TOOL_NAMES.includes(t.name) && t.input_schema.additionalProperties === false && t.description.length > 20, `v2 tool is in the strip list with a closed schema: ${t.name}`);
   ok(MEMORY_TOOL_NAMES.every((n) => v2.includes(n) && isMemoryTool(n)) && !isMemoryTool("pin_session_card"), "every memory tool the client executes exists on the server");
   for (const n of ["update_fact", "set_goal", "set_injury_notes"]) ok(SYSTEM_CARD_ATHLETE.includes(n), `the card teaches ${n}`);
-  ok(!/a box where they ask you/.test(SYSTEM_CARD_ATHLETE) && /tap any line/.test(SYSTEM_CARD_ATHLETE) && !/[—–]/.test(SYSTEM_CARD_ATHLETE.split("MEMORY (what a coach")[1].split("PROOF AND MOTIVATION")[0]), "the card's memory paragraph tells the new truth (direct edit, no ask box)");
+  ok(!/a box where they ask you/.test(SYSTEM_CARD_ATHLETE) && /tap any note/.test(SYSTEM_CARD_ATHLETE) && !/[—–]/.test(SYSTEM_CARD_ATHLETE.split("MEMORY (what a coach")[1].split("PROOF AND MOTIVATION")[0]), "the card's memory paragraph tells the new truth (direct edit, no ask box)");
   const app = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
-  ok(/toolset:"mastermind_athlete_v2"/.test(app) && !/toolset:"mastermind_athlete"[,}]/.test(app), "the chat turn asks for the v2 toolset");
+  ok(/toolset:"mastermind_athlete_v3"/.test(app) && !/toolset:"mastermind_athlete(_v2)?"[,}]/.test(app), "the chat turn asks for the v3 toolset (v2 stays on the server for bundles that still ask for it)");
   ok(!/MEMORY_EDIT_SYS/.test(app) && /readScanVerdict\(await askClaude\(MEMORY_SCAN_SYS/.test(app) && /gateText\("memory", v\.reason\)/.test(app), "the ask-Joe prompt is gone; the scan is the pane's one AI call and its reason passes the output gate");
 }
 {
