@@ -411,6 +411,17 @@ export default async function handler(req, res) {
     // (they flip status based on which side you are, or toggle a row). See
     // api/_crew.js for the shared peer-resolution helper and api/push.js for
     // the action-dispatch pattern this mirrors.
+    // ── T70: on-demand refresh of the caller's OWN athlete_stats row ─────────
+    // The Stats tab calls this when the row is missing or its session count is
+    // behind the header's (a direct-SQL reseed, a failed background refresh).
+    // Athlete-only, own id only, synchronous so the tab can draw the result.
+    if (body.op === "stats") {
+      if (caller.role !== "athlete") throw httpErr(403, "This account can't refresh stats");
+      const { refreshAthleteStats } = await import("./_stats.js");
+      const stats = await refreshAthleteStats(caller.id);
+      return res.status(200).json(stats ? [{ athlete_id: caller.id, stats, computed_at: new Date().toISOString() }] : []);
+    }
+
     if (body.op === "crew") {
       // Crew is PARKED (Will, 08-20). Refusing here — not just hiding the tab —
       // means stale cached bundles can't act on crew either. Data stays intact;

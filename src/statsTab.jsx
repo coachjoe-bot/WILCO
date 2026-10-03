@@ -15,7 +15,7 @@
 // lazy(), so importing CA / DISP / sbRead back from App.jsx is safe here.
 
 import { useState, useEffect, useMemo } from "react";
-import { CA, DISP, IS_DARK, sbRead, Skeleton, RangeControl } from "./App.jsx";
+import { CA, DISP, IS_DARK, sbRead, sbStatsRefresh, Skeleton, RangeControl } from "./App.jsx";
 import { statsInRange, tonnageComparison, statsUnlocked, STATS_UNLOCK_SESSIONS } from "./stats.js";
 import { displayStat, unitLabel, getDisplayUnit, LBS_PER_KG } from "./units.js";
 
@@ -34,17 +34,28 @@ export const NUM_COLOR = IS_DARK ? CA.cyan : CA.green;
 const num = { color: NUM_COLOR, fontWeight: 700, fontVariantNumeric: "tabular-nums" };
 
 // Read the athlete's summary row. null while loading, {} when the row does not
-// exist yet (a brand-new athlete, or the refresh is still in flight).
-export function useAthleteStats(athleteId, tick = 0) {
+// exist yet. Self-heal: when the row is missing, or its session count is behind
+// the header's (athletes.total_sessions_logged, the same grouping), ask the
+// server to recompute once. Covers a direct-SQL write (the QA reseed), a failed
+// background refresh, and the first open after the table shipped.
+export function useAthleteStats(athlete, tick = 0) {
   const [row, setRow] = useState(null);
+  const athleteId = athlete?.id;
+  const headerSessions = Number(athlete?.total_sessions_logged) || 0;
   useEffect(() => {
     let on = true;
     setRow(null);
-    sbRead("athlete_stats", `?athlete_id=eq.${athleteId}&select=stats,computed_at`)
-      .then((rows) => { if (on) setRow(Array.isArray(rows) && rows[0] ? rows[0] : {}); })
-      .catch(() => { if (on) setRow({}); });
+    (async () => {
+      let r = {};
+      try { const rows = await sbRead("athlete_stats", `?athlete_id=eq.${athleteId}&select=stats,computed_at`); r = Array.isArray(rows) && rows[0] ? rows[0] : {}; } catch (_) {}
+      const have = Number(r?.stats?.lifetime?.sessions) || 0;
+      if (headerSessions > 0 && have !== headerSessions) {
+        try { const fresh = await sbStatsRefresh(); if (Array.isArray(fresh) && fresh[0]) r = fresh[0]; } catch (_) {}
+      }
+      if (on) setRow(r);
+    })();
     return () => { on = false; };
-  }, [athleteId, tick]);
+  }, [athleteId, headerSessions, tick]);
   return row;
 }
 
@@ -67,7 +78,7 @@ const Fact = ({ k, v }) => (
 
 // ── the Stats tab ────────────────────────────────────────────────────────────
 export function StatsTab({ athlete, refreshTick = 0 }) {
-  const row = useAthleteStats(athlete.id, refreshTick);
+  const row = useAthleteStats(athlete, refreshTick);
   const stats = row && row.stats ? row.stats : null;
   const [range, setRange] = useState("1Y");
   const unit = getDisplayUnit();

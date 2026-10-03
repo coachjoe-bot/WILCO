@@ -508,6 +508,9 @@ export const sbRead = async (table,params="") => {
   }
   return dataApi("read",table,{params});
 };
+// T70: ask the server to recompute and return the caller's athlete_stats row
+// (same shape as a read of that table). Used only as the Stats tab's self-heal.
+export const sbStatsRefresh = async () => dataApi("stats","athlete_stats",{});
 // Insert-or-update on a conflict column (e.g. "athlete_id").
 export const sbUpsert = async (table,data,conflict) => {
   bustJoeCtxCache(table);

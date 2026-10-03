@@ -45,7 +45,7 @@ const openStats = async (page) => {
 
 for (const theme of ["light", "dark"]) {
   test(`Stats tab: this past year, best lift, favorite, career card, no rank, no share (${theme})`, async ({ page }) => {
-    const athlete = makeAthlete({ total_sessions_logged: 120 });
+    const athlete = makeAthlete({ total_sessions_logged: 122 });
     const rows = yearOfLogs(athlete.id);
     const stats = statsRowFor(athlete, rows)[0].stats;
     await mockApi(page, { athlete, dataReads: { workouts: rows.slice(-40), athlete_stats: statsRowFor(athlete, rows), prs: [], manual_one_rms: [] } });
@@ -116,7 +116,7 @@ test("Stats tab: no summary row yet shows the first-session state", async ({ pag
 });
 
 test("Progress graphs: one range control, 3M by default, 1Y reads the weekly summary", async ({ page }) => {
-  const athlete = makeAthlete({ total_sessions_logged: 120 });
+  const athlete = makeAthlete({ total_sessions_logged: 122 });
   const rows = yearOfLogs(athlete.id);
   await mockApi(page, { athlete, dataReads: { workouts: rows.slice(-40), athlete_stats: statsRowFor(athlete, rows), prs: [], manual_one_rms: [] } });
   await loginAsAthlete(page, athlete);
@@ -162,7 +162,7 @@ const baseSections = [
 
 for (const type of ["weekly", "monthly"]) {
   test(`Proof ${type} edition: BY THE NUMBERS section renders as the grid after the rank hero`, async ({ page }) => {
-    const athlete = makeAthlete({ total_sessions_logged: 120 });
+    const athlete = makeAthlete({ total_sessions_logged: 122 });
     const rows = yearOfLogs(athlete.id);
     const stats = statsRowFor(athlete, rows)[0].stats;
     const nums = type === "monthly" ? monthNumbers(stats) : weekNumbers(stats);
