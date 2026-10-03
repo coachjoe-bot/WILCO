@@ -548,3 +548,52 @@ test("T69 race: Joe forgets a fact while its field is open on the tab; nothing i
   await expect(page.getByText("Trains at 7am on weekdays", { exact: false })).toBeVisible();
   expect(pageErrors).toEqual([]);
 });
+
+// ─── T69-C: what Joe is handed, and the date rule through chat ───────────────
+test("T69-C chat: Joe's request body carries the sectioned block, the countdown, and none of the old check-in summaries", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const soon = new Date(Date.now() + 44 * 86400000);
+  const label = soon.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+  const rows = [
+    ...MEMORY_ROWS(athlete.id),
+    { id: "t1", athlete_id: athlete.id, content: `Meet ${label}, 73 kg class`, kind: "situational", status: "active", source: "athlete_said", expires_at: new Date(soon.getTime() + 2 * 86400000).toISOString(), section: "schedule", created_at: "2026-09-20T12:00:00Z", updated_at: "2026-09-20T12:00:00Z" },
+    { id: "t2", athlete_id: athlete.id, content: "Weekly check-in Sep 21: Bodyweight stable at 165 lbs. Short on time.", kind: "situational", status: "active", source: "inferred", expires_at: new Date(Date.now() + 60 * 86400000).toISOString(), created_at: "2026-09-29T12:00:00Z", updated_at: "2026-09-29T12:00:00Z" },
+  ];
+  await mockApi(page, { athlete, dataReads: { athlete_memory: rows } });
+  const bodies = await mockChat(page, "Noted.", []);
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  await say(page, "how does my week look");
+  await expect.poll(() => bodies.length).toBeGreaterThan(0);
+  const sys = JSON.stringify(bodies.at(-1).system || "");
+  expect(sys).toContain("Schedule:");
+  expect(sys).toContain("Preferences:");
+  expect(sys).toMatch(/Meet [A-Z][a-z]{2} \d{1,2}, 73 kg class \(4[3-5] days out\)/);   // computed by code, never by Joe
+  expect(sys).not.toContain("Weekly check-in Sep 21");
+  expect(sys).toContain("computed by the app");
+});
+
+test("T69-C chat: a note that says 'tomorrow' with no date is refused and the app says so (the 08-09 goal row)", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const { calls } = await mockApi(page, { athlete, dataReads: { athlete_memory: MEMORY_ROWS(athlete.id) } });
+  await mockChat(page, "Noted.", [{ name: "remember_fact", input: { content: "Maxing out bench tomorrow, will set a new target after", kind: "contextual" } }]);
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  await say(page, "remember I'm maxing out bench tomorrow");
+  await expect(page.getByText(/^Not saved\. Use the actual date/)).toBeVisible({ timeout: 15000 });
+  expect(memInserts(calls).length).toBe(0);
+  await expect(page.getByText(/^✓ /)).toHaveCount(0);
+});
+
+test("T69-C chat: remember_fact with a section and a real date saves under that section with its expiry and a checked-today stamp", async ({ page }) => {
+  const athlete = makeAthlete({ program_text: PROGRAM });
+  const { calls } = await mockApi(page, { athlete, dataReads: { athlete_memory: MEMORY_ROWS(athlete.id) } });
+  const d = new Date(Date.now() + 20 * 86400000);
+  const label = d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+  await mockChat(page, "Good luck.", [{ name: "remember_fact", input: { content: `Meet ${label}, 73 kg class`, kind: "situational", expires_at: new Date(d.getTime() + 86400000).toISOString(), section: "schedule" } }]);
+  await loginAsAthlete(page, athlete, "/?chatfirst=1&mastermind=1");
+  await say(page, `I have a meet on ${label}`);
+  await expect(page.getByText("✓ Saved to memory.", { exact: true })).toBeVisible({ timeout: 15000 });
+  const ins = memInserts(calls);
+  expect(ins.length).toBe(1);
+  expect(ins[0].body.data).toMatchObject({ section: "schedule", kind: "situational", source: "athlete_said", ask_count: 0 });
+  expect(ins[0].body.data.confirmed_at).toBeTruthy();
+});

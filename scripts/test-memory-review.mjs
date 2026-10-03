@@ -235,6 +235,24 @@ console.log("signup fields (their own door):");
 }
 
 
+console.log("the check-in's free-text adds go through the same rules:");
+{
+  const rows = [];
+  const plan = planMemoryOps({ decision: "apply", ops: [
+    { op: "add", content: "Away for a work trip Oct 12 to 15", kind: "contextual", section: "schedule" },
+    { op: "add", content: "Away next week for work", kind: "situational" },
+    { op: "add", content: "Prefers training fasted", kind: "contextual", section: "preferences" },
+    { op: "add", content: "Rehabbing a torn labrum", kind: "contextual" },
+  ] }, rows, NOW);
+  const ins = plan.actions.filter((a) => a.type === "insert").map((a) => a.data);
+  ok(ins.length === 3, "'next week' with no expiry is dropped, the rest are written");
+  const trip = ins.find((d) => /work trip/.test(d.content));
+  ok(trip.expires_at && Date.parse(trip.expires_at) > Date.parse("2026-10-15") && trip.section === "schedule", "a dated add expires on its last date, in its section");
+  ok(ins.find((d) => /fasted/.test(d.content)).section === "preferences", "the section the extractor named is kept");
+  ok(ins.find((d) => /labrum/.test(d.content)).section === "body", "no section named: code reads the words (Body)");
+  ok(ins.every((d) => d.confirmed_at === NOW.toISOString() && d.ask_count === 0 && d.source === "athlete_said"), "every add counts as checked today");
+}
+
 console.log("the digest's question bank (server, dark until the flag flips):");
 {
   const qb = (memoryReview, over = {}) => buildQuestionBank({ identity: { bodyweight: 165 }, injuries: { active: [], recurring: [] }, volume: null, weekAhead: null, goals: [{ goal: "Healing left pec, building up clean and jerk", target_date: null }], memory: [], memoryReview, ...over }, { ask_weight: true, height_finalized: true }, { now: NOW.getTime() });

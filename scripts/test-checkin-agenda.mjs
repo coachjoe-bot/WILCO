@@ -303,5 +303,18 @@ console.log("review items in the agenda:");
   ok(agendaTurnPrompt({ agenda: ag, message: "x" }).system.includes("never bring up an exam, a trip"), "Joe is told to ask only about training in a check-in");
 }
 
+console.log("a digest-built review question (no fresh read) still stamps its note:");
+{
+  const bank = [
+    { id: "weight", kind: "weight", text: "Bodyweight?" },
+    { id: "review_note_n9", kind: "memory", meta: { fact: "Trains at the 6am class", review: { rid: "review_note_n9", type: "note", ref: "n9", section: "Schedule", reason: "window", tag: { section: "Schedule", label: "last checked Jul 15" } } }, text: "I have a note that says \"Trains at the 6am class\". Is that still true?" },
+  ];
+  const ag = buildAgenda(bank, { painRecords: null });
+  const it = ag.find((i) => i.id === "review_note_n9");
+  ok(it && it.review && it.review.ref === "n9" && tagFor(it).label === "last checked Jul 15", "the digest's own review item carries its note and tag");
+  const st = { ...initialAgendaState(ag), asked: { weight: 1, review_note_n9: 1 }, covered: ["review_note_n9"] };
+  ok(reviewTargets(ag, st).some((t) => t.rid === "review_note_n9" && t.covered && t.asked), "so its answer reaches the stamp");
+}
+
 console.log(`\ncheckin-agenda: ${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

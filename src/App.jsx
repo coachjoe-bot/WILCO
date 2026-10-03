@@ -3704,10 +3704,14 @@ function ProofChatModal({athlete, digest, onClose, onMemorySaved, onDigestRead, 
   // by the time the athlete starts, the digest's own questions stand.
   const [reviewInputs,setReviewInputs] = useState(null);
   const startedRef = useRef(false);
+  const reviewPromiseRef = useRef(null);     // START waits (briefly) for this
+  const reviewDoneRef = useRef(false);
+  const agendaRef = useRef([]);
+  const startingRef = useRef(false);
   useEffect(()=>{
     if(alreadyDone) return;
     let dead = false;
-    (async()=>{
+    reviewPromiseRef.current = (async()=>{
       try{
         const since = new Date(Date.now()-28*864e5).toISOString();
         const [mem,gs,wk] = await Promise.all([
@@ -3722,10 +3726,12 @@ function ProofChatModal({athlete, digest, onClose, onMemorySaved, onDigestRead, 
         for(const n of notes) if(n.area_key && !workarounds[n.area_key]) workarounds[n.area_key] = n;
         setReviewInputs({review, workarounds});
       }catch(_){ /* the digest's own list stands */ }
+      reviewDoneRef.current = true;
     })();
     return ()=>{ dead = true; };
   },[]); // eslint-disable-line
   const agenda = useMemo(()=>buildAgenda(Array.isArray(c.questions) ? c.questions : null, {painRecords, review:reviewInputs?.review||null, workarounds:reviewInputs?.workarounds||null}),[reviewInputs]); // eslint-disable-line
+  agendaRef.current = agenda;
 
   useEffect(()=>{
     // messages[0] holds the raw digest text (kept for AI context); it is not shown as a
@@ -3741,12 +3747,22 @@ function ProofChatModal({athlete, digest, onClose, onMemorySaved, onDigestRead, 
     if(phase==="dialogue"||phase==="acting") bottomRef.current?.scrollIntoView({behavior:"smooth"});
   },[messages,loading,programPending,phase]);
 
-  const startDialogue = () => {
-    if(!agenda.length) return;
-    startedRef.current = true;                 // the agenda is fixed from here (T69-C: a late review load never reshuffles it)
+  const startDialogue = async () => {
+    if(startedRef.current||startingRef.current) return;
+    startingRef.current = true;
+    // T69-C: the review list is read when the letter opens. An athlete who taps
+    // START at once waits up to 3.5 s for it (never longer) so the notes that are
+    // due come up this week; after that the digest's own questions stand.
+    if(reviewPromiseRef.current && !reviewDoneRef.current){
+      await Promise.race([reviewPromiseRef.current, new Promise(r=>setTimeout(r,6000))]);
+      await new Promise(r=>setTimeout(r,80));      // let the agenda re-derive
+    }
+    const ag = agendaRef.current;
+    if(!ag.length) return;
+    startedRef.current = true;                 // the agenda is fixed from here (a late review load never reshuffles it)
     setPhase("dialogue");
-    setAgState(initialAgendaState(agenda));
-    setMessages(prev=>[...prev,{role:"assistant",content:agenda[0].text,tag:tagFor(agenda[0])}]);
+    setAgState(initialAgendaState(ag));
+    setMessages(prev=>[...prev,{role:"assistant",content:ag[0].text,tag:tagFor(ag[0])}]);
   };
 
   // Taxonomy-exact series (src/grit.js). The old inline version matched by
@@ -15264,7 +15280,7 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, onAthle
     );
   };
 
-  const bw = athlete.weight_lbs ? (unit==="kg" ? `${Math.round(athlete.weight_lbs/2.20462*10)/10} kg` : `${athlete.weight_lbs} lbs`) : null;
+  const bw = athlete.weight_lbs ? (unit==="kg" ? `${Math.round(toDisplay(athlete.weight_lbs,"lbs","kg")*10)/10} kg` : `${athlete.weight_lbs} lbs`) : null;
   const h = athlete.height_inches;
   const bioLines = [
     [athlete.name, athlete.age?`${athlete.age}`:null, athlete.gender||null, h?`${Math.floor(h/12)}'${h%12}"`:null].filter(Boolean).join(" · "),
@@ -15414,6 +15430,7 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, onAthle
 
           {/* ── ONE ADD FOR THE WHOLE TAB ───────────────────────── */}
           <div style={hair}/>
+          {!hasAnything&&<div style={{...mono,marginTop:6}}>Nothing saved yet. Add a note, or just talk to Joe. He keeps notes as you go.</div>}
           {isAdd(null)
             ? editor({label:"New note", original:"", placeholder:"Anything Joe should know. He files it under the right section."})
             : (
@@ -15422,7 +15439,6 @@ export function AthleteContextPane({athlete, goals=[], rows=[], setRows, onAthle
                 + Add a note (Joe files it under the right section)
               </button>
             )}
-          {!hasAnything&&<div style={{...mono,marginTop:8}}>Nothing saved yet. Add a note, or just talk to Joe. He keeps notes as you go.</div>}
         </div>
 
         {/* Recently removed: 30 days, with Restore */}

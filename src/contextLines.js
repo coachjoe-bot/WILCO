@@ -238,7 +238,7 @@ function groupIntoSessionsLocal(rows) {
 export function thisWeekLines(tw, { position = null, blockName = "", unit = "lbs" } = {}) {
   const lines = [];
   if (position && position.dayTemplate && position.dayTemplate.length) {
-    const where = position.hasWeeks && position.weekKnown ? `Week ${position.week}${position.weekCount ? ` of ${position.weekCount}` : ""}` : `Day ${position.day}${position.label ? `: ${position.label}` : ""}`;
+    const where = position.hasWeeks && position.weekKnown ? `Week ${position.week}${position.weekCount ? ` of ${position.weekCount}` : ""}` : (position.label && /^day\s*\d/i.test(position.label) ? position.label : `Day ${position.day}${position.label ? `: ${position.label}` : ""}`);
     lines.push(`${blockName ? `${blockName}, ` : ""}${where}`);
   }
   const ofPlan = tw.plannedDays ? ` of ${tw.plannedDays}` : "";

@@ -90,6 +90,10 @@ ok(tl.some((l) => /^Not logged yet: /.test(l)) && tl.some((l) => /^PR: bench pre
 ok(tl.every((l) => !/—|–/.test(l)), "no em dashes");
 ok(thisWeekTab({ rows: [], athlete: {}, now: NOW }).sessions === 0, "a brand-new athlete: zeros, no crash");
 
+console.log("the block and day, without repeating itself:");
+ok(thisWeekLines({ sessions: 1, lastSessions: 0, plannedDays: null, sets: 3, lastSets: 0, notLogged: [], prs: [] }, { position: { dayTemplate: ["Day 2 - Bench"], hasWeeks: false, weekKnown: false, day: 2, label: "Day 2 - Bench" } })[0] === "Day 2 - Bench", "a label that already says 'Day 2' is not prefixed again");
+ok(thisWeekLines({ sessions: 1, lastSessions: 0, plannedDays: null, sets: 3, lastSets: 0, notLogged: [], prs: [] }, { position: { dayTemplate: ["Push"], hasWeeks: false, weekKnown: false, day: 1, label: "Push" } })[0] === "Day 1: Push", "a plain label is");
+
 console.log("stamps:");
 ok(checkedLabel({ confirmed_at: "2026-10-04T12:00:00Z" }) === "Checked Oct 4", "checked date");
 ok(checkedLabel({ created_at: "2026-09-02T12:00:00Z" }) === "Saved Sep 2", "never checked: when it was saved");

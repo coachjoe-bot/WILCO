@@ -79,6 +79,12 @@ export function buildAgenda(questions, { painRecords = null, review = null, work
     if (reviewItems && (q.kind === "memory" || String(q.id).startsWith("review_") || q.id === "memory" || q.id === "memory_stale")) continue;
     seen.add(q.id);
     const item = { id: String(q.id), kind: q.kind || "context", text: String(q.text), meta: q.meta || null };
+    // The digest's own review question (the fresh read failed or has not landed):
+    // it still carries its note, so its answer still stamps it.
+    if (!reviewItems && item.meta && item.meta.review && item.meta.review.rid) {
+      const mr = item.meta.review;
+      item.review = { rid: mr.rid, type: mr.type, ref: mr.ref, note: (item.meta.fact || item.meta.goal || ""), section: mr.section, reason: mr.reason, older: false, tag: mr.tag || null };
+    }
     if (reviewItems && item.id === "goal" && goalReview) {
       // one goal question: the review's reason and tag ride the digest's own
       // goal item, and its wording stands in when the digest's was the plain one

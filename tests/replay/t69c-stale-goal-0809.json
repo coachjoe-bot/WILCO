@@ -1,0 +1,283 @@
+{
+ "_about": "Read-only snapshot (10-02) of Will's real goal rows and memory rows on prod, for T69-C. The 08-09 goal ('Bench 315 goal pushed back past mid-August; will set new bench target after maxing out tomorrow ...') had no target date, was never superseded (supersede-on-write shipped 09-29), and so stayed a live goal for seven weeks; the 09-27 weekly letter quoted it. On main nothing ever asked about it. T69-C: the review asks about it at the next check-in, and a new note with 'tomorrow' cannot be saved without a date.",
+ "athlete": {
+  "created_at": "2026-05-05T18:31:25.821726+00:00",
+  "training_days_per_week": 6,
+  "equipment": [
+   "Full gym"
+  ],
+  "injury_history": "Rehabbing from inflamed knees and strengthening weak core/low back",
+  "weight_unit": "kg"
+ },
+ "goals": [
+  {
+   "id": "07ce8568-f10e-4622-9692-a6660a0b447a",
+   "goal_text": "My goals are reflected by my programming. I want to bench 315 by the end of this summer (mid August) and regain squat strength (I\u2019ve had to take a break because of over working them due to weightlifting competitions) and build my lower back and core strength and bring my pull strength up to the same level of my back squat strength or more (185kg-200kg)",
+   "target_date": "2024-08-15",
+   "superseded_at": null,
+   "created_at": "2026-05-31T18:43:07.200017",
+   "parsed_lift": "bench press",
+   "target_lbs": 315,
+   "parsed_targets": [
+    {
+     "lift": "bench press",
+     "target_lbs": 315,
+     "target_date": "2024-08-15"
+    },
+    {
+     "lift": "back squat",
+     "target_lbs": 407,
+     "target_date": null
+    },
+    {
+     "lift": "pull strength",
+     "target_lbs": 407,
+     "target_date": null
+    }
+   ]
+  },
+  {
+   "id": "c92a2e94-4487-49bc-89cd-3876e9078aff",
+   "goal_text": "Bench 315 goal pushed back past mid-August; will set new bench target after maxing out tomorrow. Squat and deadlift goals remain the same. Next block heavy on maxes; planning to split volume across two weeks to manage CNS strain.",
+   "target_date": null,
+   "superseded_at": null,
+   "created_at": "2026-08-09T19:32:43.079014",
+   "parsed_lift": "bench press",
+   "target_lbs": 315,
+   "parsed_targets": [
+    {
+     "lift": "bench press",
+     "target_lbs": 315,
+     "target_date": null
+    }
+   ]
+  },
+  {
+   "id": "e5ccf56d-11d7-4857-8b89-26fe0a1ca7fa",
+   "goal_text": "Shift focus to healing left pec and strengthening front squat, posterior chain, and overhead barbell strength this block",
+   "target_date": null,
+   "superseded_at": null,
+   "created_at": "2026-08-17T14:38:24.073504",
+   "parsed_lift": null,
+   "target_lbs": null,
+   "parsed_targets": []
+  },
+  {
+   "id": "deb1ea6e-60c6-4298-b699-0f5f5a8170b7",
+   "goal_text": "Healing left pec, building up clean and jerk and posterior chain and front squat",
+   "target_date": null,
+   "superseded_at": null,
+   "created_at": "2026-09-06T19:00:25.997038",
+   "parsed_lift": null,
+   "target_lbs": null,
+   "parsed_targets": []
+  }
+ ],
+ "memory": [
+  {
+   "id": "161de68b-b845-4159-9073-948b20fecd58",
+   "content": "On Aug 25 front squat session, Will stopped climbing (70/100/120kg) due to knee irritation, one week after flagging knee soreness from squat volume on Aug 22.",
+   "kind": "situational",
+   "status": "deleted",
+   "source": "athlete_said",
+   "expires_at": "2026-09-08T00:00:00+00:00",
+   "created_at": "2026-08-25T12:38:28.621097+00:00",
+   "updated_at": "2026-09-01T12:39:26.91+00:00"
+  },
+  {
+   "id": "961da6ed-9167-49b1-8a77-f9aac195a822",
+   "content": "Knees have flagged on squat volume twice in two weeks: Back Squat Aug 22 and Front Squat Aug 25. One-week train-around plan in effect: lighter/knee-friendly squat variants, escalate to professional if still barking after Sep 1.",
+   "kind": "situational",
+   "status": "deleted",
+   "source": "athlete_said",
+   "expires_at": "2026-09-08T00:00:00+00:00",
+   "created_at": "2026-08-25T12:39:14.46751+00:00",
+   "updated_at": "2026-09-01T12:39:26.42+00:00"
+  },
+  {
+   "id": "11b5ca11-ab95-4c7d-b896-5c626964ed2a",
+   "content": "On Aug 28, Will swapped Back Squat 4x4@137.5kg for a snatch climb to protect his knees. Front squat/back squat still the flagged knee-irritation lifts under the train-around plan.",
+   "kind": "situational",
+   "status": "deleted",
+   "source": "athlete_said",
+   "expires_at": "2026-09-08T00:00:00+00:00",
+   "created_at": "2026-08-28T19:14:58.48394+00:00",
+   "updated_at": "2026-09-01T12:39:27.064+00:00"
+  },
+  {
+   "id": "7bac0f40-de8f-4db4-bc9d-c3617e4645ba",
+   "content": "Watching: squat (pain) reported 2026-09-01 - a repeat within 2 weeks earns a program rec",
+   "kind": "situational",
+   "status": "active",
+   "source": "inferred",
+   "expires_at": "2026-09-15T12:39:26.424+00:00",
+   "created_at": "2026-09-01T12:39:26.706293+00:00",
+   "updated_at": "2026-09-01T12:39:26.706293+00:00"
+  },
+  {
+   "id": "f1876cb4-6440-4b81-8822-66085e75b877",
+   "content": "Knees have flagged on squat volume three times: Back Squat Aug 22, Front Squat Aug 25, Front Squat Sep 1 (stopped at 120kg). Escalating past train-around, front squat pulled from program this block.",
+   "kind": "contextual",
+   "status": "deleted",
+   "source": "athlete_said",
+   "expires_at": null,
+   "created_at": "2026-09-01T12:39:27.349355+00:00",
+   "updated_at": "2026-09-29T09:18:27.38691+00:00"
+  },
+  {
+   "id": "bd57013d-d160-4980-ac61-de92ea1e003c",
+   "content": "Front Squat, Snatch Pull and other main lift loads logged Sep 1 were in kg, not lbs as auto-labeled (Front Squat 2x1 @ 100/120kg, Snatch Pull 4x2 @ 110/120/120/120kg). Back Extensions stayed lbs (90lbs).",
+   "kind": "contextual",
+   "status": "active",
+   "source": "athlete_said",
+   "expires_at": null,
+   "created_at": "2026-09-01T19:56:34.236288+00:00",
+   "updated_at": "2026-09-01T19:56:34.236288+00:00"
+  },
+  {
+   "id": "0735fa2c-ac39-448a-806e-92a964dace68",
+   "content": "Watching: I don\u2019t have my weightlifting shoes with (equipment) reported 2026-09-02 - a repeat within 2 weeks earns a program rec",
+   "kind": "situational",
+   "status": "active",
+   "source": "inferred",
+   "expires_at": "2026-09-16T20:32:17.103+00:00",
+   "created_at": "2026-09-02T20:32:17.389653+00:00",
+   "updated_at": "2026-09-02T20:32:17.389653+00:00"
+  },
+  {
+   "id": "4b49bceb-c67a-4284-be54-a060afb38913",
+   "content": "Reported knees felt fine on heavy back squat singles up to a miss at 180kg on Sep 4 (final Block 1 session), despite three earlier knee flags this block.",
+   "kind": "contextual",
+   "status": "deleted",
+   "source": "athlete_said",
+   "expires_at": null,
+   "created_at": "2026-09-04T19:54:46.814158+00:00",
+   "updated_at": "2026-09-29T09:18:27.38691+00:00"
+  },
+  {
+   "id": "d6660262-5c39-4b64-887e-7c87bab838f4",
+   "content": "Left pec pain flagged repeatedly (Aug 25, Aug 31, Sep 6 check-ins) yet athlete hit incline DB bench 70lb top set for new est. PR on Sep 9 with no pain mentioned; worth checking pec status directly next contact.",
+   "kind": "contextual",
+   "status": "active",
+   "source": "athlete_said",
+   "expires_at": null,
+   "created_at": "2026-09-09T22:05:32.124612+00:00",
+   "updated_at": "2026-09-09T22:05:32.124612+00:00"
+  },
+  {
+   "id": "99c151a1-c90d-4d4d-b76a-3f8f74a49be2",
+   "content": "Watching: hip abductor/adductor and Spanish squat iso skipped on Week 1 Wed recovery day (Sep 10) due to machines being occupied \u2014 knee/low-back recovery work missed, not an injury flag. Repeat within 2 weeks worth addressing.",
+   "kind": "situational",
+   "status": "active",
+   "source": "athlete_said",
+   "expires_at": "2026-09-24T00:00:00+00:00",
+   "created_at": "2026-09-10T12:23:07.421165+00:00",
+   "updated_at": "2026-09-10T12:23:07.421165+00:00"
+  },
+  {
+   "id": "646f33c1-8238-42a6-b229-8a79a4802f72",
+   "content": "Watching: Day 3 \u2013 Hip/Low Back/Knee Recovery Hip M (equipment) reported 2026-09-10 - a repeat within 2 weeks earns a program rec",
+   "kind": "situational",
+   "status": "active",
+   "source": "inferred",
+   "expires_at": "2026-09-24T12:23:07.285+00:00",
+   "created_at": "2026-09-10T12:23:07.636438+00:00",
+   "updated_at": "2026-09-10T12:23:07.636438+00:00"
+  },
+  {
+   "id": "77a3e890-07d7-421c-96df-261aebe05428",
+   "content": "Ran Week 2 Day 1 (Upper) out of order on Sep 17 instead of Day 4 (Complex+Snatch Pull) due to sore legs.",
+   "kind": "situational",
+   "status": "active",
+   "source": "athlete_said",
+   "expires_at": "2026-09-24T00:00:00+00:00",
+   "created_at": "2026-09-17T11:38:44.042754+00:00",
+   "updated_at": "2026-09-17T11:38:44.042754+00:00"
+  },
+  {
+   "id": "4ccd24ad-aa08-4bc7-bb0e-c0727945986b",
+   "content": "Left pec: hit new est. PR on incline DB bench (75 lb top set) Sep 17 with no pain mentioned, third straight session pec issue hasn't limited loading.",
+   "kind": "contextual",
+   "status": "active",
+   "source": "athlete_said",
+   "expires_at": null,
+   "created_at": "2026-09-17T12:21:23.914763+00:00",
+   "updated_at": "2026-09-17T12:21:23.914763+00:00"
+  },
+  {
+   "id": "fbafc29e-9c02-4355-90b8-1724e421b922",
+   "content": "Watching: bench press (pain) reported 2026-09-21 - a repeat within 2 weeks earns a program rec",
+   "kind": "situational",
+   "status": "active",
+   "source": "inferred",
+   "expires_at": "2026-10-05T20:18:15.922+00:00",
+   "created_at": "2026-09-21T20:18:16.182968+00:00",
+   "updated_at": "2026-09-21T20:18:16.182968+00:00"
+  },
+  {
+   "id": "280ff041-e161-4f0b-9292-78424b49ad24",
+   "content": "Weekly check-in Aug 31: Athlete prefers to keep program as-is despite pec concern. Recovery solid this week; will prioritize split jerks. | injury: Left pec lingering; managing with incline DB press for blood flow instea",
+   "kind": "situational",
+   "status": "active",
+   "source": "inferred",
+   "expires_at": "2026-11-23T12:00:00+00:00",
+   "created_at": "2026-09-29T20:53:38.975815+00:00",
+   "updated_at": "2026-09-29T20:53:38.975815+00:00"
+  },
+  {
+   "id": "f83b7eb9-786f-4a0a-86e6-6aefdf2facf7",
+   "content": "Monthly check-in Sep 6: Recovery flat this week and short on time/gas during sessions. Athlete declined protective program change for left pec despite lingering issue. | injury: Left pec lingering, getting rid of it slow",
+   "kind": "situational",
+   "status": "active",
+   "source": "inferred",
+   "expires_at": "2026-11-29T12:00:00+00:00",
+   "created_at": "2026-09-29T20:53:38.975815+00:00",
+   "updated_at": "2026-09-29T20:53:38.975815+00:00"
+  },
+  {
+   "id": "a93f792b-b1c9-42da-b150-fc99e50645f0",
+   "content": "Weekly check-in Sep 14: Was sick all week, which explains lower volume on pull-ups and incline DB bench. Knees cleared and ready to continue with protective program as written.",
+   "kind": "situational",
+   "status": "active",
+   "source": "inferred",
+   "expires_at": "2026-12-07T12:00:00+00:00",
+   "created_at": "2026-09-29T20:53:38.975815+00:00",
+   "updated_at": "2026-09-29T20:53:38.975815+00:00"
+  },
+  {
+   "id": "8428449f-51b4-4879-b6cc-d29abb3032f1",
+   "content": "Weekly check-in Sep 21: Bodyweight stable at 165 lbs. Short on time during recent session but recovery has been dialed overall.",
+   "kind": "situational",
+   "status": "active",
+   "source": "inferred",
+   "expires_at": "2026-12-14T12:00:00+00:00",
+   "created_at": "2026-09-29T20:53:38.975815+00:00",
+   "updated_at": "2026-09-29T20:53:38.975815+00:00"
+  },
+  {
+   "id": "fe11c02c-fd64-43e2-b3ac-a3281426b85a",
+   "content": "Weekly check-in Sep 28: Recovery dialed but admits to being lazy with volume on pull-ups and incline DB bench. Declined protective program change despite lingering pec issue. | injury: Left pec lingering",
+   "kind": "situational",
+   "status": "active",
+   "source": "inferred",
+   "expires_at": "2026-12-21T12:00:00+00:00",
+   "created_at": "2026-09-29T20:53:38.975815+00:00",
+   "updated_at": "2026-09-29T20:53:38.975815+00:00"
+  },
+  {
+   "id": "0750e8e4-6531-45cc-9c27-870a57987542",
+   "content": "Weekly check-in Aug 25: Bodyweight still 164 lbs, or has it moved?: It\u2019s closer to 165 now; That left pec and knees: cleared, lingering, or still sharp?: Left pec still has pain, I did I modified chest workout yesterday",
+   "kind": "situational",
+   "status": "active",
+   "source": "inferred",
+   "expires_at": "2026-11-17T12:00:00+00:00",
+   "created_at": "2026-09-29T20:53:38.975815+00:00",
+   "updated_at": "2026-09-29T20:53:38.975815+00:00"
+  }
+ ],
+ "letter_0927": {
+  "label": "WEEKLY DIGEST: September 27, 2026",
+  "sectionLabel": "GOAL PROGRESS",
+  "body": "Bench 315 by mid-August: no bench press logged this window, can't measure progress, and that target's already been pushed to fall per your own notes. Snatch/clean & jerk building goal: total sits at 248kg per your maxes sheet, complex and snatch pull work this week held at prescribed intensity, on track. Pull strength vs back squat (185-200kg target): no deadlift or clean pull logged this week, need that data next time to compare."
+ }
+}
