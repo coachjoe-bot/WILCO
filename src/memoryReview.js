@@ -30,8 +30,8 @@ export { UNANSWERED_TO_REMOVE };
 import { isWatchNote, isLegacyCheckinNote, resolveSection, SECTION_LABEL } from "./memorySections.js";
 import { isDatedEvent, noteSpan } from "./noteDates.js";
 import { activeGoals } from "./goals.js";
-import { goalTargets, resolveLift } from "./grit.js";
-import { areaLabel } from "./painLedger.js";
+import { goalTargets, resolveLift, isRealSession } from "./grit.js";
+import { areaLabel, rowDay } from "./painLedger.js";
 
 export const REVIEW_MIN_DAYS = 21;          // 3 weeks: the earliest a checked note comes up again
 export const REVIEW_MAX_DAYS = 56;          // 8 weeks: the latest
@@ -70,7 +70,24 @@ export function schedule({ id, stamp, created, rollout = REVIEW_ROLLOUT }) {
   return { dueAt: c + windowDays(id) * DAY, eligibleAt: c + REVIEW_MIN_DAYS * DAY, legacy: false };
 }
 
-// ── what the logs say ────────────────────────────────────────────────────────
+// ── what the logs say ────
+// Real sessions as {day, lifts:[canonical lift ids]}, one per training day. The
+// caller supplies rows that cover the last 28 days (the server's batch window,
+// or the client's dedicated read): never the newest-100 history, which counts
+// chat messages and would undercount a chatty athlete.
+export function sessionDays(rows, { tz } = {}) {
+  const byDay = new Map();
+  for (const w of rows || []) {
+    if (!isRealSession(w)) continue;
+    const day = rowDay(w, tz);
+    if (!day) continue;
+    const pdata = typeof w.parsed_data === "string" ? (() => { try { return JSON.parse(w.parsed_data); } catch { return {}; } })() : (w.parsed_data || {});
+    const set = byDay.get(day) || new Set();
+    for (const ex of pdata.exercises || []) if (ex && ex.name) set.add(resolveLift(ex.name).id);
+    byDay.set(day, set);
+  }
+  return [...byDay.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([day, set]) => ({ day, lifts: [...set] }));
+}
 // sessions: [{day:"YYYY-MM-DD", lifts:[liftId,...]}], real sessions only, one
 // per training day, covering at least the last 28 days.
 const dayMs = (k) => Date.parse(`${k}T12:00:00Z`);

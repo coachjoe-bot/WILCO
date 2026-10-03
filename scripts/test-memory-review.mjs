@@ -9,6 +9,11 @@ import {
   REVIEW_MIN_DAYS, REVIEW_MAX_DAYS, MAX_REVIEW_PER_CHECKIN, REVIEW_ROLLOUT,
 } from "../src/memoryReview.js";
 import { planMemoryOps, activeFacts } from "../src/memory.js";
+import { buildQuestionBank, monthlyExtraQuestions, MEMORY_REVIEW_LIVE } from "../api/_proof.js";
+import { TOOLSETS } from "../api/_tools.js";
+import { NOTE_SECTIONS } from "../src/memorySections.js";
+import { validReviewStamps } from "../api/data.js";
+import { readFileSync } from "node:fs";
 
 let pass = 0, fail = 0;
 const ok = (cond, label) => { if (cond) pass++; else { fail++; console.log(`  ✗ ${label}`); } };
@@ -225,6 +230,45 @@ console.log("signup fields (their own door):");
   ok(validateSignupValue("training_days_per_week", "9").ok === false && validateSignupValue("training_days_per_week", 4).value === 4, "training days must be 1 to 7");
   ok(validateSignupValue("equipment", ["full gym", "home gym (mixed)", "yacht"]).value.join() === "Full gym,Home gym (mixed)", "equipment is the closed list of five");
   ok(!validateSignupValue("equipment", ["yacht"]).ok, "nothing recognised, nothing written");
+}
+
+
+console.log("the digest's question bank (server, dark until the flag flips):");
+{
+  const qb = (memoryReview, over = {}) => buildQuestionBank({ identity: { bodyweight: 165 }, injuries: { active: [], recurring: [] }, volume: null, weekAhead: null, goals: [{ goal: "Healing left pec, building up clean and jerk", target_date: null }], memory: [], memoryReview, ...over }, { ask_weight: true, height_finalized: true }, { now: NOW.getTime() });
+  const a = athlete({ training_days_per_week: 6, equipment: ["Full gym"], injury_history: "Rehabbing inflamed knees" });
+  const gs = [goal("Healing left pec, building up clean and jerk", { id: "gcur", created_at: at(ROLLOUT - 27 * DAY) }), goal("Bench 315 goal pushed back past mid-August", { id: "gold", created_at: at(ROLLOUT - 55 * DAY) })];
+  const rq = reviewQueue({ goals: gs, athlete: a, sessions: [session(2), session(12)], now: NOW });
+  const bank = qb({ items: rq.items });
+  const goalQs = bank.filter((q) => q.kind === "goal");
+  ok(goalQs.length === 1 && goalQs[0].id === "goal", "one goal question, ever: the review's goal rides item 5");
+  ok(/no date/.test(goalQs[0].text) && goalQs[0].meta.review && goalQs[0].meta.review.reason === "goal_no_date", "item 5 reads the review's wording and carries its tag");
+  const mem = bank.filter((q) => q.kind === "memory");
+  ok(mem.length === rq.items.length - 1 && mem.every((q) => q.meta.review && q.meta.review.tag), "every other review item is a memory question with its reason line");
+  ok(mem.some((q) => /older goal/.test(q.text)), "the older live goal is asked");
+  ok(bank.filter((q) => q.kind === "weight").length === 1, "bodyweight is still asked every week, outside the review");
+  ok(mem.length + 1 <= MAX_REVIEW_PER_CHECKIN, "memory questions never exceed the cap");
+  const oldBank = qb(undefined, { memory: [{ fact: "Away for work", kind: "situational", expires_at: new Date(NOW.getTime() + 3 * DAY).toISOString(), ageDays: 3 }] });
+  ok(oldBank.some((q) => q.id === "memory"), "without a review list the old one-expiring-note question stands (old clients, flag off)");
+  ok(!qb({ items: [] }).some((q) => q.id === "memory"), "with a review list the old question is retired");
+  const mo = monthlyExtraQuestions({ volume: null, memoryReview: { items: [] }, memory: [{ fact: "Old note", kind: "contextual", ageDays: 90 }] });
+  ok(!mo.some((q) => q.id === "memory_stale"), "the monthly 'oldest note' question reads the review: it does not ask a second way");
+  ok(MEMORY_REVIEW_LIVE === false, "the server flag ships dark");
+}
+
+console.log("twins (the gateway, the DB CHECK, the toolsets):");
+{
+  const gw = readFileSync(new URL("../api/data.js", import.meta.url), "utf8");
+  const mig = readFileSync(new URL("../supabase/migrations/20261003_t69c_context_sections.sql", import.meta.url), "utf8");
+  for (const c of ["section", "confirmed_at", "ask_count", "area_key"]) ok(gw.includes(`"${c}"`) && mig.includes(c), `athlete_memory.${c} is in the gateway allowlist and the migration`);
+  for (const sec of NOTE_SECTIONS) ok(gw.includes(`"${sec}"`) && mig.includes(`'${sec}'`), `section '${sec}' is in the gateway guard AND the DB CHECK`);
+  ok(/review_stamps/.test(gw) && /review_stamps/.test(mig) && /athlete_goals[\s\S]*confirmed_at/.test(mig), "review_stamps and the goal stamps are in the migration; review_stamps is in the gateway");
+  ok(validReviewStamps({ equipment: { confirmed_at: "2026-10-04T12:00:00Z", ask_count: 1 } }) && validReviewStamps(null), "valid review stamps pass the gateway guard");
+  ok(!validReviewStamps({ pin: { confirmed_at: null } }) && !validReviewStamps({ equipment: { confirmed_at: "x" } }) && !validReviewStamps({ equipment: { ask_count: 99 } }) && !validReviewStamps([]), "unknown fields, bad dates and a runaway counter are refused");
+  const v2 = TOOLSETS.mastermind_athlete_v2.find((t) => t.name === "remember_fact"), v3 = TOOLSETS.mastermind_athlete_v3.find((t) => t.name === "remember_fact");
+  ok(!v2.input_schema.properties.section && v3.input_schema.properties.section.enum.join() === NOTE_SECTIONS.join(), "section is on the v3 toolset only: v2 (in use) is untouched");
+  ok(TOOLSETS.mastermind_athlete_v3.length === TOOLSETS.mastermind_athlete_v2.length, "v3 adds no tool, it extends one");
+  ok(/never 'next week'/.test(v3.description) && /expires_at/.test(v3.description), "the tool description teaches the date rule");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

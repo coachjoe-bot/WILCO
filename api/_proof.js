@@ -101,6 +101,14 @@ export function painQuestionTextFor(r) {
   return `How's the ${label} feeling this week?`;
 }
 
+// ─── T69-C: THE REVIEW LIST (src/memoryReview.js) ─────────────────────────────
+// Will 10-01/10-02: the check-in asks about old notes (3 to 8 weeks, at most four
+// a week, jumpers first). trigger-proof-feed attaches brief.memoryReview; the
+// question bank turns it into agenda items. Dark until this flips, in the same
+// commit as the client that can stamp an answer: an old cached client would
+// ask the same note again every week because it cannot stamp confirmed_at.
+export const MEMORY_REVIEW_LIVE = false;
+
 // ─── CONDITIONAL QUESTION BANK (§8) ───────────────────────────────────────────
 // Built in CODE (deterministic, never open-ended, hard stop). Ranked; `deeper:true`
 // items are hidden behind "Go deeper". `kind` tells the client how to persist the
@@ -206,6 +214,9 @@ export function buildQuestionBank(brief, athlete, opts = {}) {
   // names it — the answer is what supersedes a lapsed goal instead of letting it
   // linger to the 14-day read-side cutoff. This check-in loop is the PRIMARY way
   // athlete context stays current (Will, 09-01).
+  const review = brief.memoryReview && Array.isArray(brief.memoryReview.items) ? brief.memoryReview.items : null;
+  const gReview = review ? review.find((i) => i.merge === "goal") || null : null;
+  const reviewMeta = (i) => ({ rid: i.rid, type: i.type, ref: i.ref, reason: i.reason, section: i.section, tag: i.tag });
   const g0 = brief.goals[0] || null;
   const goal = g0?.goal;
   const gDate = g0?.target_date ? Date.parse(g0.target_date) : NaN;
@@ -215,18 +226,30 @@ export function buildQuestionBank(brief, athlete, opts = {}) {
     // date lands a day early in every US timezone.
     const when = new Date(gDate).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
     q.push({
-      id: "goal", kind: "goal", deeper: false, meta: { goal, target_date: g0.target_date },
+      id: "goal", kind: "goal", deeper: false, meta: { goal, target_date: g0.target_date, ...(gReview ? { review: reviewMeta(gReview) } : {}) },
       text: daysToTarget < 0
         ? `"${goal}" was dated ${when}. Did you get it, is the date moving, or is there a new target?`
         : `"${goal}" is dated ${when}, ${daysToTarget <= 1 ? "right on top of us" : `${daysToTarget} days out`}. On track, moving the date, or changing the target?`,
     });
   } else {
-    q.push({ id: "goal", kind: "goal", deeper: false, meta: { goal: goal || null }, text: goal ? `Still chasing "${goal}", or has the target shifted?` : `What's the main thing you're chasing right now?` });
+    // T69-C: a goal with no date (or one whose lift has gone untrained) reads
+    // the review's wording, so the check-in never asks about the same goal twice.
+    const gText = goal && gReview && gReview.text ? gReview.text : null;
+    q.push({ id: "goal", kind: "goal", deeper: false, meta: { goal: goal || null, ...(gReview ? { review: reviewMeta(gReview) } : {}) }, text: gText || (goal ? `Still chasing "${goal}", or has the target shifted?` : `What's the main thing you're chasing right now?`) });
   }
   // 5b. memory refresh (T62) — ONE note nearing its expiry gets a direct check,
   // so time-sensitive context gets refreshed by the athlete instead of silently
   // dropping off. Watching notes are excluded: the rec pattern gate owns those.
-  const expiring = (brief.memory || [])
+  // T69-C: with the review list on the brief, ITS notes are the memory questions
+  // (the old one-expiring-note question retires: a dated note drops on its date
+  // without asking, Will 10-01). The goal item above already took the goal.
+  if (review) {
+    for (const i of review) {
+      if (i.merge === "goal") continue;
+      q.push({ id: i.rid, kind: "memory", deeper: false, meta: { fact: i.note, review: reviewMeta(i) }, text: i.text });
+    }
+  }
+  const expiring = review ? null : (brief.memory || [])
     .filter((m) => m.kind === "situational" && m.expires_at && !/^Watching:/.test(m.fact))
     .map((m) => ({ ...m, days: Math.round((Date.parse(m.expires_at) - now) / 864e5) }))
     .filter((m) => Number.isFinite(m.days) && m.days <= 10)
@@ -260,7 +283,7 @@ export function monthlyExtraQuestions(brief) {
   // T62: long-lived context gets re-confirmed monthly — the oldest note past 60
   // days. Same [memory] channel as the weekly expiry check; the extractor keeps,
   // edits, or drops the note off the answer.
-  const stale = (brief.memory || [])
+  const stale = brief.memoryReview ? null : (brief.memory || [])
     .filter((m) => m.kind !== "situational" && m.ageDays >= 60 && !/^Watching:/.test(m.fact))
     .sort((a, b) => b.ageDays - a.ageDays)[0];
   if (stale) {

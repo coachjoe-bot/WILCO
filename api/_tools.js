@@ -186,6 +186,20 @@ TOOLSETS.mastermind_athlete_v2 = [
   ...MEMORY_TOOLS_V2,
 ];
 
+// ── T69-C (Will 10-02): notes know their section, and dated notes carry dates ─
+// remember_fact gains an optional `section` (where the note files on the
+// athlete's Context tab), and its description teaches the date rule: a note
+// that says "tomorrow" or "next week" goes stale by itself, so write the real
+// date and set expires_at (code refuses the save otherwise; Will's 08-09 goal
+// row lived seven weeks because nothing did). In its OWN toolset name so v2,
+// which bundles in the field today ask for, is untouched (T69-A lesson, AI
+// contract rule 12). The client moves to v3 when it ships; every call is still
+// validated in code (src/memoryEdit.js planToolRemember).
+const REMEMBER_FACT_V3 = REMEMBER_FACT_V2 + " section files it on their Athlete Context tab: schedule (when and where they train, equipment, meets, trips, life that changes training), body (long-standing background, never pain counts), preferences (how they like to train and be coached), this_week (short-lived, this week only). A note that names a day or a time word MUST carry the real date: write 'Meet Nov 14', never 'next week' or 'tomorrow', and set expires_at to the day it stops mattering. Life events (a meet, a trip, an exam) you only write down with their date; you never ask about them, you ask about training.";
+TOOLSETS.mastermind_athlete_v3 = TOOLSETS.mastermind_athlete_v2.map((t) => (t.name === "remember_fact"
+  ? { ...t, description: REMEMBER_FACT_V3, input_schema: { ...t.input_schema, properties: { ...t.input_schema.properties, section: { type: "string", enum: ["schedule", "body", "preferences", "this_week"] } } } }
+  : t));
+
 // Actions the client must ALWAYS chip-gate no matter what the model set —
 // destroying unrecoverable athlete data, or messaging another human in the
 // athlete's name. Kept here (server) as the single source; the client imports

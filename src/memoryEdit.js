@@ -17,6 +17,8 @@
 //     unpinned fact gives way.
 // Pure: returns the same action list applyMemoryActions already executes.
 import { validateFact, findDuplicate, activeFacts, matchFacts, behaviorRejects, cleanText, MEMORY_ROW_CAP } from "./memory.js";
+import { expiryFromText, NEEDS_DATE } from "./noteDates.js";
+import { isNoteSection, resolveSection } from "./memorySections.js";
 
 // What the athlete typed with their own hands, as opposed to a fact Joe wrote
 // from something they said (athlete_said) or the app inferred (inferred).
@@ -40,6 +42,7 @@ const REFUSAL_LINES = {
   reserved: "Notes starting with \"Watching:\" are written by the app. Reword it.",
   watch_note: "The app wrote this one to keep an eye on something. You can delete it, but it can't be rewritten.",
   full: "Memory is full of pinned notes. Delete one first.",
+  needs_date: "Use the actual date (like Oct 12) instead of words like tomorrow or next week, so the note can drop off by itself when the day passes.",
 };
 export const refusalLine = (reason) => REFUSAL_LINES[reason] || "Couldn't save that one. Try again.";
 
@@ -56,13 +59,23 @@ export function planDirectEdit(rows, id, text, now = new Date()) {
   if (!v.ok) return v.reason === "empty" ? { ...refuse("empty"), message: "A note can't be blank. Use Delete to remove it." } : refuse(v.reason);
   if (v.content === squash(row.content)) return { ok: true, unchanged: true, actions: [] };
   if (findDuplicate(live.filter((r) => r.id !== row.id), v.content)) return refuse("duplicate");
-  return { ok: true, actions: [{ type: "update", id: row.id, data: { content: v.content, source: TYPED_SOURCE } }] };
+  // T69-C: changing a note is checking it. The 3 to 8 week clock restarts.
+  return { ok: true, actions: [{ type: "update", id: row.id, data: { content: v.content, source: TYPED_SOURCE, ...stampNow(now) } }] };
 }
 
-// "Add a note": a contextual fact, no expiry.
-export function planDirectAdd(rows, text, now = new Date()) {
+// T69-C: a note the athlete just wrote or changed counts as checked today.
+const stampNow = (now) => ({ confirmed_at: new Date(now).toISOString(), ask_count: 0 });
+
+// "Add a note": a contextual fact. A note that names a calendar date expires on
+// it without asking (src/noteDates.js); one that says "tomorrow" or "next week"
+// with no date is refused, so it can never go stale unreviewed (Will's 08-09
+// goal row). opts.section files it under a tab section; with none, code files
+// it by its words (the tab's bottom "+ Add a note" asks Joe's scan instead).
+export function planDirectAdd(rows, text, now = new Date(), opts = {}) {
   if (WATCH_RE.test(text)) return refuse("reserved");
-  const v = validateFact({ content: text, kind: "contextual", expires_at: null });
+  const exp = expiryFromText(text, now);
+  const kind = exp ? "situational" : "contextual";
+  const v = validateFact({ content: text, kind, expires_at: exp, now });
   if (!v.ok) return refuse(v.reason);
   const live = activeFacts(rows, now);
   if (findDuplicate(live, v.content)) return refuse("duplicate");
@@ -73,7 +86,10 @@ export function planDirectAdd(rows, text, now = new Date()) {
     if (!victim) return refuse("full");
     actions.push({ type: "update", id: victim.id, data: { status: "deleted" } });
   }
-  actions.push({ type: "insert", data: { content: v.content, kind: "contextual", expires_at: null, source: TYPED_SOURCE } });
+  const section = isNoteSection(opts.section) ? opts.section : resolveSection({ content: v.content, kind, expires_at: exp }, now);
+  const data = { content: v.content, kind, expires_at: exp, source: TYPED_SOURCE, section, ...stampNow(now) };
+  if (opts.areaKey) data.area_key = String(opts.areaKey).slice(0, 40);
+  actions.push({ type: "insert", data });
   return { ok: true, actions };
 }
 
@@ -142,18 +158,36 @@ export function planToolUpdate(rows, match, content, now = new Date()) {
   const hits = m.ok ? m.rows.filter((r) => !WATCH_RE.test(r.content)) : [];
   if (WATCH_RE.test(content)) return refuse("reserved");
   if (hits.length !== 1) {
-    const v = validateFact({ content, kind: "contextual", expires_at: null });
+    const exp = expiryFromText(content, now);
+    const v = validateFact({ content, kind: exp ? "situational" : "contextual", expires_at: exp, now });
     if (!v.ok) return refuse(v.reason);
     if (findDuplicate(live, v.content)) return { ok: true, unchanged: true, actions: [] };
-    return { ok: true, added: true, actions: [{ type: "insert", data: { content: v.content, kind: "contextual", expires_at: null, source: "athlete_said" } }] };
+    return { ok: true, added: true, actions: [{ type: "insert", data: { content: v.content, kind: exp ? "situational" : "contextual", expires_at: exp, source: "athlete_said", section: resolveSection({ content: v.content, expires_at: exp, kind: exp ? "situational" : "contextual" }, now), ...stampNow(now) } }] };
   }
   const row = hits[0];
-  const v = validateFact({ content, kind: row.kind, expires_at: row.expires_at });
+  const v = validateFact({ content, kind: row.kind, expires_at: row.expires_at, now });
   if (!v.ok) return refuse(v.reason);
   if (v.content === squash(row.content)) return { ok: true, unchanged: true, actions: [] };
   // Another fact already says the new thing: the stale one just goes.
   if (findDuplicate(live.filter((r) => r.id !== row.id), v.content)) return { ok: true, actions: [{ type: "update", id: row.id, data: { status: "deleted" } }] };
-  return { ok: true, actions: [{ type: "update", id: row.id, data: { content: v.content, source: "athlete_said" } }] };
+  return { ok: true, actions: [{ type: "update", id: row.id, data: { content: v.content, source: "athlete_said", ...stampNow(now) } }] };
+}
+
+// remember_fact (T69-C): the same save Joe always made, now sectioned, stamped
+// and date-safe. A note with a calendar date expires on it; "tomorrow" with no
+// expires_at is refused (the card tells Joe to write the date; the app's own
+// "Not saved" line tells the athlete when he did not). Returns the actions
+// applyMemoryActions runs.
+export function planToolRemember(rows, inp = {}, now = new Date()) {
+  const kind = inp.kind;
+  const exp = inp.expires_at || (kind !== "pinned" ? expiryFromText(inp.content, now) : null);
+  const v = validateFact({ content: inp.content, kind, expires_at: exp, now });
+  if (!v.ok) return refuse(v.reason);
+  const live = activeFacts(rows, now);
+  const dup = findDuplicate(live, v.content);
+  if (dup) return { ok: true, actions: [{ type: "update", id: dup.id, data: { kind, expires_at: exp || null, ...stampNow(now) } }], saved: true };
+  const section = isNoteSection(inp.section) ? inp.section : resolveSection({ content: v.content, kind, expires_at: exp }, now);
+  return { ok: true, saved: true, actions: [{ type: "insert", data: { content: v.content, kind, expires_at: exp || null, source: "athlete_said", section, ...stampNow(now) } }] };
 }
 
 // Bodyweight has one home, athletes.weight_lbs (AI contract rule 2). On main a

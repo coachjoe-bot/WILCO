@@ -3,7 +3,7 @@
 // suite is the abuse pass for that code: hostile and awkward inputs through the
 // direct-edit path, each with the outcome it must have.
 //   node scripts/test-memory-edit.mjs
-import { planDirectEdit, planDirectAdd, planDirectDelete, refusalLine, validateGoalText, validateInjuryText, TYPED_SOURCE, GOAL_MAX_LEN, INJURY_MAX_LEN, planToolUpdate, isBodyweightFact, isMemoryTool, MEMORY_TOOL_NAMES, newMemoryOutcome, memoryOutcomeLine, toolRefusal } from "../src/memoryEdit.js";
+import { planDirectEdit, planDirectAdd, planDirectDelete, refusalLine, validateGoalText, validateInjuryText, TYPED_SOURCE, GOAL_MAX_LEN, INJURY_MAX_LEN, planToolUpdate, planToolRemember, isBodyweightFact, isMemoryTool, MEMORY_TOOL_NAMES, newMemoryOutcome, memoryOutcomeLine, toolRefusal } from "../src/memoryEdit.js";
 import { TOOLSETS } from "../api/_tools.js";
 import { MEMORY_SCAN_SYS, MEMORY_SCAN_MODEL, MEMORY_SCAN_FEATURE, scanUserMessage, readScanVerdict } from "../src/memoryScan.js";
 import { CASES as SCAN_CASES } from "./t69-memory-scan-pass.mjs";
@@ -30,7 +30,7 @@ console.log("direct edit: the happy path");
 {
   const p = edit("Trains at 7am on weekdays now");
   ok(p.ok && p.actions.length === 1 && p.actions[0].type === "update" && p.actions[0].id === "c1", "an edit is ONE update on the same row (the id survives)");
-  eq(p.actions[0].data, { content: "Trains at 7am on weekdays now", source: TYPED_SOURCE }, "an edit writes the text and marks it athlete-typed, nothing else");
+  eq(p.actions[0].data, { content: "Trains at 7am on weekdays now", source: TYPED_SOURCE, confirmed_at: NOW.toISOString(), ask_count: 0 }, "an edit writes the text, marks it athlete-typed, and stamps it checked today (T69-C), nothing else");
   const s = edit("Traveling for work until the 8th, hotel gym with dumbbells to 50", "s1");
   ok(s.ok && !("kind" in s.actions[0].data) && !("expires_at" in s.actions[0].data), "a situational fact keeps its kind and its expiry through an edit");
   const pin = edit("Prefers kg on barbell lifts, lbs on dumbbells", "p1");
@@ -39,7 +39,7 @@ console.log("direct edit: the happy path");
   ok(same.ok && same.unchanged && same.actions.length === 0, "unchanged text (whitespace aside) writes nothing");
   const a = add("Garage gym on weekends, no cable machine");
   ok(a.ok && a.actions.length === 1 && a.actions[0].type === "insert", "add a note is one insert");
-  eq(a.actions[0].data, { content: "Garage gym on weekends, no cable machine", kind: "contextual", expires_at: null, source: TYPED_SOURCE }, "an added note is contextual, no expiry, athlete-typed");
+  eq(a.actions[0].data, { content: "Garage gym on weekends, no cable machine", kind: "contextual", expires_at: null, source: TYPED_SOURCE, section: "schedule", confirmed_at: NOW.toISOString(), ask_count: 0 }, "an added note is contextual, no expiry, athlete-typed, filed by its words and stamped (T69-C)");
 }
 
 console.log("direct edit: instructions aimed at Joe are refused");
@@ -180,7 +180,7 @@ console.log("what Joe is handed");
 console.log("chat: Joe's update_fact");
 {
   const u = planToolUpdate(rows(), "6am on weekdays", "Trains at 7am on weekdays", NOW);
-  eq(u.actions, [{ type: "update", id: "c1", data: { content: "Trains at 7am on weekdays", source: "athlete_said" } }], "one fact changed in place: same row, kind and expiry untouched");
+  eq(u.actions, [{ type: "update", id: "c1", data: { content: "Trains at 7am on weekdays", source: "athlete_said", confirmed_at: NOW.toISOString(), ask_count: 0 } }], "one fact changed in place: same row, kind and expiry untouched, stamped checked (T69-C)");
   const miss = planToolUpdate(rows(), "nothing like this", "Trains at 7am on weekdays", NOW);
   ok(miss.ok && miss.added && miss.actions.length === 1 && miss.actions[0].type === "insert", "no matching fact: the new text is saved as its own fact, nothing is guessed at");
   const amb = planToolUpdate([...rows(), { id: "c2", content: "Trains at 6am on weekdays in summer too", kind: "contextual", status: "active", created_at: "2026-09-02T12:00:00Z" }], "6am on weekdays", "Trains at 7am", NOW);
@@ -237,6 +237,32 @@ console.log("replay: the 10-01 chat measurement (tests/replay/t69-memory-from-ch
   // refuse: code backstop
   const r = validateFact(T.refuse.ifJoeEverCalled.input);
   ok(!r.ok && r.reason === "behavior_instruction" && /^Not saved\./.test(memoryOutcomeLine({ ...newMemoryOutcome(), refused: [toolRefusal(r.reason)] })), "refuse: if Joe ever called the tool with it, code refuses and the app says Not saved");
+}
+
+console.log("T69-C: dated notes, sections and stamps");
+{
+  const base = [];
+  // "tomorrow" with no date cannot be saved, by any door (the 08-09 replay)
+  const r1 = planDirectAdd(base, "Maxing out bench tomorrow, will set the new target after", NOW);
+  ok(!r1.ok && r1.reason === "needs_date" && /actual date/.test(r1.message) && !/[—–]/.test(r1.message), "typed: 'tomorrow' with no date is refused and the athlete is told why");
+  const r2 = planToolRemember(base, { content: "Maxing out bench tomorrow", kind: "contextual" }, NOW);
+  ok(!r2.ok && r2.reason === "needs_date", "Joe's remember_fact: the same refusal");
+  const r3 = planToolRemember(base, { content: "Maxing out bench on Oct 2", kind: "situational", expires_at: "2026-10-03T12:00:00Z" }, NOW);
+  ok(r3.ok && r3.actions[0].data.expires_at === "2026-10-03T12:00:00Z" && r3.actions[0].data.section, "with the date written and an expiry it saves");
+  // a calendar date becomes the expiry without anyone asking
+  const d = planDirectAdd(base, "Meet Nov 14, 73 kg class", NOW);
+  ok(d.ok && d.actions[0].data.kind === "situational" && d.actions[0].data.expires_at === "2026-11-15T12:00:00.000Z" && d.actions[0].data.section === "schedule", "typed: 'Meet Nov 14' expires the day after and files under Schedule");
+  const d2 = planToolRemember(base, { content: "Exam week Oct 26 to 30", kind: "contextual" }, NOW);
+  ok(d2.ok && d2.actions[0].data.expires_at === "2026-10-31T12:00:00.000Z", "Joe's remember_fact: a dated note gets its expiry from its text");
+  ok(planToolRemember(base, { content: "Prefers kg", kind: "pinned" }, NOW).actions[0].data.expires_at === null, "a pinned note never expires");
+  // sections and stamps
+  const sec = planDirectAdd(base, "Keep it blunt", NOW, { section: "preferences" });
+  ok(sec.actions[0].data.section === "preferences" && sec.actions[0].data.confirmed_at === NOW.toISOString() && sec.actions[0].data.ask_count === 0, "a note added in a section carries it and counts as checked today");
+  ok(planDirectAdd(base, "Keep it blunt", NOW, { section: "nonsense" }).actions[0].data.section === "preferences", "an unknown section falls back to code's reading of the words");
+  const wk = planDirectAdd(base, "Working around it: incline DB press in place of bench", NOW, { section: "body", areaKey: "pec" });
+  ok(wk.actions[0].data.area_key === "pec" && wk.actions[0].data.section === "body", "the work-around note is tied to its pain area");
+  const rm = planToolRemember([{ id: "k", content: "Prefers kg", kind: "contextual", status: "active", created_at: "2026-09-01T00:00:00Z" }], { content: "Prefers kg", kind: "contextual" }, NOW);
+  ok(rm.actions.length === 1 && rm.actions[0].type === "update" && rm.actions[0].data.confirmed_at, "re-remembering an existing note restamps it, no twin");
 }
 
 console.log("twins");

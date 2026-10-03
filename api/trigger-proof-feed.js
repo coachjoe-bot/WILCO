@@ -54,10 +54,12 @@ import {
   parseProgramIfNeeded, compareProgramVsActual, computeRankMovement, painTrend,
   generateWeekly, generateMonthly, generateCoach, blendAdherenceScore, trueImprovementPRs,
   buildLiftHistory, totalSetVolume,
+  MEMORY_REVIEW_LIVE,
 } from "./_proof.js";
 import { computeGritSnapshot } from "./_grit.js";
 import { activeGoals } from "../src/goals.js";
 import { activeFacts } from "../src/memory.js";
+import { reviewQueue, sessionDays } from "../src/memoryReview.js";
 import { sendToAthlete, pushPayload, ensureVapid, sendTo } from "./_push.js";
 import { mapPooled } from "./_pool.js";
 import { buildCrewBlip } from "./_crew.js";
@@ -256,7 +258,8 @@ const briefFor = (athlete, batch, windowType, fullWorkouts, fullManual, previous
   // T62: only ACTIVE goals reach the digest and its questions — superseded and
   // stale-by-date rows are history, and a check-in probing a dead goal is
   // exactly the contradiction loop this wave removes.
-  const goals = activeGoals((batch.goals || []).filter((g) => g.athlete_id === athlete.id));
+  const allGoalRows = (batch.goals || []).filter((g) => g.athlete_id === athlete.id);
+  const goals = activeGoals(allGoalRows);
   const memory = activeFacts((batch.memory || []).filter((m) => m.athlete_id === athlete.id));
   const prs = (batch.prs || []).filter((p) => p.athlete_id === athlete.id);
   const manual = (batch.manual || []).filter((m) => m.athlete_id === athlete.id);
@@ -307,9 +310,28 @@ const briefFor = (athlete, batch, windowType, fullWorkouts, fullManual, previous
     });
     brief.pain = recs.map((r) => ({
       area: r.area, label: r.label, state: r.state, trend: r.trend, summary: r.summary,
-      addressedByProgram: !!r.addressedByProgram, dismissed: !!r.dismissed, checkIn: r.checkIn,
+      addressedByProgram: !!r.addressedByProgram, dismissed: !!r.dismissed, checkIn: r.checkIn, clearedOn: r.clearedOn || null,
     }));
   } catch (e) { console.error("[proof-feed] pain ledger failed:", e.message); }
+
+  // T69-C: which old notes the check-in asks about (src/memoryReview.js). The
+  // queue needs the notes with their stamps, ALL the goal rows (an older live
+  // goal is a question), the three signup fields, and the last 28 days of real
+  // sessions (this batch window; the newest-100 history would undercount a
+  // chatty athlete). Dark until MEMORY_REVIEW_LIVE flips with the client that
+  // can stamp an answer; the pain records ride along for the work-around rule.
+  if (MEMORY_REVIEW_LIVE) {
+    try {
+      const rq = reviewQueue({
+        notes: memory, goals: allGoalRows,
+        athlete: { created_at: athlete.created_at, training_days_per_week: athlete.training_days_per_week, equipment: athlete.equipment, injury_history: athlete.injury_history, review_stamps: athlete.review_stamps },
+        sessions: sessionDays(w28, { tz: athlete.proof_timezone || undefined }),
+        pain: (brief.pain || []).map((r) => ({ area: r.area, state: r.state, label: r.label, clearedOn: r.clearedOn || null })),
+        now: new Date(),
+      });
+      brief.memoryReview = { items: rq.items, overflow: rq.overflow };
+    } catch (e) { console.error("[proof-feed] memory review failed:", e.message); }
+  }
 
   // Month-vs-month facts, computed in CODE from the unwindowed history (monthly
   // digests only). The month layer used to be PROMPTED for "this month vs last
@@ -587,7 +609,7 @@ async function fetchBatch(ids) {
     sbSelect("program_prescriptions", `?athlete_id=in.(${idList})&select=*`).catch(() => []),
     // T62 memory engine: the brief carries the coach's saved notes so the
     // question bank can probe what's expiring or stale (tolerant like above).
-    sbSelect("athlete_memory", `?athlete_id=in.(${idList})&status=eq.active&select=athlete_id,content,kind,expires_at,updated_at,created_at&order=updated_at.desc`).catch(() => []),
+    sbSelect("athlete_memory", `?athlete_id=in.(${idList})&status=eq.active&select=id,athlete_id,content,kind,expires_at,updated_at,created_at,source,section,confirmed_at,ask_count,area_key&order=updated_at.desc`).catch(() => []),
   ]);
   return { workouts, goals, prs, manual, prescriptions, memory };
 }
